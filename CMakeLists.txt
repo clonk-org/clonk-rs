@@ -265,7 +265,7 @@ if (USE_CONSOLE)
 else ()
 	add_executable(clonk WIN32 MACOSX_BUNDLE ${CLONK_SOURCES})
 endif ()
-target_link_libraries(clonk standard)
+target_link_libraries(clonk PRIVATE standard)
 target_compile_definitions(clonk PRIVATE C4ENGINE)
 
 if (USE_SDL_MIXER AND WIN32)
@@ -347,7 +347,7 @@ endif ()
 
 # Link CURL
 find_package(CURL REQUIRED)
-target_link_libraries(clonk CURL::libcurl)
+target_link_libraries(clonk PRIVATE CURL::libcurl)
 
 # Link fmt
 find_package(fmt REQUIRED)
@@ -357,7 +357,7 @@ list(APPEND PCH_EXTRA <fmt/format.h> <fmt/printf.h>)
 # Link Freetype
 if (NOT USE_CONSOLE)
 	find_package(Freetype REQUIRED)
-	target_link_libraries(clonk Freetype::Freetype)
+	target_link_libraries(clonk PRIVATE Freetype::Freetype)
 	set(HAVE_FREETYPE 1)
 endif ()
 
@@ -367,21 +367,26 @@ if (WITH_DEVELOPER_MODE)
 	find_package(PkgConfig REQUIRED)
 	pkg_check_modules(GTK3 REQUIRED gtk+-3.0>=3.24)
 	target_include_directories(clonk PRIVATE ${GTK3_INCLUDE_DIRS})
-	target_link_libraries(clonk ${GTK3_LIBRARIES})
+	target_link_libraries(clonk PRIVATE ${GTK3_LIBRARIES})
 	target_compile_definitions(clonk PRIVATE GTK_DISABLE_SINGLE_INCLUDES GDK_DISABLE_DEPRECATED GSEAL_ENABLE)
 endif ()
 
 # Link iconv
 if (NOT WIN32)
-	find_package(Iconv REQUIRED)
-	target_link_libraries(clonk Iconv::Iconv)
-	set(HAVE_ICONV 1)
+    find_package(Iconv REQUIRED)
+    if (APPLE)
+        # On macOS, explicitly link against libiconv
+        target_link_libraries(clonk PRIVATE -liconv)
+    else()
+        target_link_libraries(clonk PRIVATE Iconv::Iconv)
+    endif()
+    set(HAVE_ICONV 1)
 endif ()
 
 # Link libjpeg
 if (NOT USE_WIC)
 	find_package(JPEG REQUIRED)
-	target_link_libraries(clonk JPEG::JPEG)
+	target_link_libraries(clonk PRIVATE JPEG::JPEG)
 endif ()
 
 # Link OpenGL and GLEW
@@ -391,13 +396,13 @@ if (NOT USE_CONSOLE)
 		message(FATAL_ERROR "Cannot find GLU library")
 	endif ()
 	find_package(GLEW REQUIRED)
-	target_link_libraries(clonk OpenGL::GL OpenGL::GLU GLEW::GLEW)
+	target_link_libraries(clonk PRIVATE OpenGL::GL OpenGL::GLU GLEW::GLEW)
 endif ()
 
 # Link libpng
 if (NOT USE_WIC)
 	find_package(PNG REQUIRED)
-	target_link_libraries(clonk PNG::PNG)
+	target_link_libraries(clonk PRIVATE PNG::PNG)
 endif ()
 
 # Link SDL2
@@ -406,13 +411,13 @@ if (USE_SDL_MAINLOOP OR USE_SDL_MIXER)
 	if (SDL2_FOUND AND USE_SDL_MAINLOOP)
 		set(USE_SDL_FOR_GAMEPAD ON)
 	endif ()
-	target_link_libraries(clonk SDL2::SDL2)
+	target_link_libraries(clonk PRIVATE SDL2::SDL2)
 endif ()
 
 # Link SDL2_mixer
 if (USE_SDL_MIXER)
 	find_package(SDL2_mixer REQUIRED)
-	target_link_libraries(clonk SDL2_mixer::SDL2_mixer)
+	target_link_libraries(clonk PRIVATE SDL2_mixer::SDL2_mixer)
 endif ()
 
 # Link spdlog
@@ -434,38 +439,38 @@ target_link_libraries(standard spdlog::spdlog)
 
 # Link Windows Imaging Component
 if (USE_WIC)
-	target_link_libraries(clonk windowscodecs)
+	target_link_libraries(clonk PRIVATE windowscodecs)
 endif ()
 
 # Link thread library
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads)
 if (THREADS_FOUND)
-	target_link_libraries(clonk Threads::Threads)
+	target_link_libraries(clonk PRIVATE Threads::Threads)
 endif ()
 
 # Link libnotify
 if (USE_LIBNOTIFY)
 	find_package(PkgConfig REQUIRED)
 	pkg_check_modules(libnotify REQUIRED IMPORTED_TARGET libnotify)
-	target_link_libraries(clonk PkgConfig::libnotify)
+	target_link_libraries(clonk PRIVATE PkgConfig::libnotify)
 endif ()
 
 # Link miniupnpc
 if (USE_MINIUPNPC)
 	find_package(miniupnpc CONFIG REQUIRED)
-	target_link_libraries(clonk miniupnpc::miniupnpc)
+	target_link_libraries(clonk PRIVATE miniupnpc::miniupnpc)
 endif ()
 
 # Link Windows libraries
 if (WIN32)
-	target_link_libraries(clonk dbghelp dwmapi iphlpapi winmm ws2_32)
+	target_link_libraries(clonk PRIVATE dbghelp dwmapi iphlpapi winmm ws2_32)
 
 	if (USE_SDL_MIXER)
-		target_link_libraries(clonk imm32.lib setupapi.lib version.lib)
+		target_link_libraries(clonk PRIVATE imm32.lib setupapi.lib version.lib)
 	endif ()
 
-	target_link_libraries(clonk comctl32)
+	target_link_libraries(clonk PRIVATE comctl32)
 	target_link_options(clonk PRIVATE "/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'")
 endif ()
 
@@ -492,7 +497,7 @@ if (WIN32)
 endif ()
 
 if (APPLE)
-	target_link_libraries(clonk "-framework AppKit")
+	target_link_libraries(clonk PRIVATE "-framework AppKit")
 endif ()
 
 # Link X11
@@ -507,7 +512,7 @@ if (USE_X11)
 	if (NOT X11_Xxf86vm_FOUND)
 		message(FATAL_ERROR "XF86VidMode not found.")
 	endif ()
-	target_link_libraries(clonk X11::X11 X11::Xpm X11::Xxf86vm)
+	target_link_libraries(clonk PRIVATE X11::X11 X11::Xpm X11::Xxf86vm)
 endif ()
 
 # Link zlib
