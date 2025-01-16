@@ -1,0 +1,106 @@
+# Build directories
+build/
+bin/
+out/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+*.cmake
+!cmake/*.cmake
+!autobuild/*.cmake
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Debug files and backups
+*.dSYM/
+*.su
+*.idb
+*.pdb
+*.bak
+*.orig
+*.rej
+*.patch
+core
+core.*
+
+# Generated dependencies
+*.d
+.deps/
+.libs/
+
+# Generated documentation
+docs/generated/
+
+# Game specific files that should be ignored if generated
+*.c4p
+*.c4d
+*.c4f
+*.c4s
+*.c4m
+Clonk.log
+
+# Game data files and directories
+*.c4p
+*.c4d
+*.c4f
+*.c4s
+*.c4m
+*.c4g
+
+# But track specific source files and assets in planet/
+!planet/Graphics.c4g/
+!planet/System.c4g/
+planet/Graphics.c4g/*
+planet/System.c4g/*
+
+# Graphics assets to track
+!planet/Graphics.c4g/*.png
+!planet/Graphics.c4g/*.jpg
+!planet/Graphics.c4g/COPYING
+!planet/Graphics.c4g/Version.txt
+!planet/Graphics.c4g/C4.PAL
+
+# System files to track
+!planet/System.c4g/*.c
+!planet/System.c4g/*.txt
+!planet/System.c4g/*.ttf
+!planet/System.c4g/COPYING
