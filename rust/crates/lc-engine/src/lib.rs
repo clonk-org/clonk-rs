@@ -1,14 +1,22 @@
+pub mod ffi;
+mod landscape;
+mod record;
+
+pub use landscape::{CollisionResolution, Landscape, LandscapeError};
+pub use record::{Playback, PlaybackError, Recorder, Recording};
+
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::ops::AddAssign;
 
 use lc_script::{Engine as ScriptEngine, ScriptError, Value};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub type DefinitionId = String;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ObjectId(u64);
 
 impl ObjectId {
@@ -27,7 +35,7 @@ impl fmt::Display for ObjectId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vector2 {
     pub x: i32,
     pub y: i32,
@@ -168,7 +176,7 @@ impl SpawnConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectSnapshot {
     pub id: ObjectId,
     pub definition_id: DefinitionId,
@@ -177,7 +185,7 @@ pub struct ObjectSnapshot {
     pub energy: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimulationSnapshot {
     pub frame: u64,
     pub objects: Vec<ObjectSnapshot>,
@@ -301,6 +309,7 @@ pub struct Engine {
     next_object_id: u64,
     rng: SmallRng,
     frame: u64,
+    landscape: Option<Landscape>,
 }
 
 impl Engine {
@@ -315,11 +324,24 @@ impl Engine {
             next_object_id: 1,
             rng: SmallRng::seed_from_u64(seed),
             frame: 0,
+            landscape: None,
         }
     }
 
     pub fn frame(&self) -> u64 {
         self.frame
+    }
+
+    pub fn set_landscape(&mut self, landscape: Landscape) {
+        self.landscape = Some(landscape);
+    }
+
+    pub fn clear_landscape(&mut self) {
+        self.landscape = None;
+    }
+
+    pub fn landscape(&self) -> Option<&Landscape> {
+        self.landscape.as_ref()
     }
 
     pub fn register_definition(&mut self, definition: Definition) -> Result<(), EngineError> {
@@ -347,6 +369,8 @@ impl Engine {
                 object.state.position += object.state.velocity;
             }
 
+            self.apply_landscape_at_index(idx);
+
             let object_id = self.objects[idx].id;
             let definition_id = self.objects[idx].definition_id.clone();
             let state_snapshot = self.objects[idx].state.clone();
@@ -367,6 +391,7 @@ impl Engine {
                     object.mark_destroyed();
                 }
             }
+            self.apply_landscape_at_index(idx);
             spawn_requests.extend(command.spawns.into_iter());
         }
 
@@ -382,6 +407,35 @@ impl Engine {
             frame: self.frame,
             objects,
         }
+    }
+
+    fn apply_landscape(&self, state: &mut ObjectState) {
+        if let Some(landscape) = &self.landscape {
+            let resolution = landscape.resolve_collision(state.position, state.velocity);
+            if resolution.collided {
+                state.position = resolution.position;
+                state.velocity = resolution.velocity;
+            }
+        }
+    }
+
+    fn apply_landscape_at_index(&mut self, idx: usize) {
+        let resolution = match self.landscape.as_ref() {
+            Some(landscape) => {
+                let (position, velocity) = {
+                    let object = &self.objects[idx];
+                    (object.state.position, object.state.velocity)
+                };
+                landscape.resolve_collision(position, velocity)
+            }
+            None => return,
+        };
+        if !resolution.collided {
+            return;
+        }
+        let object = &mut self.objects[idx];
+        object.state.position = resolution.position;
+        object.state.velocity = resolution.velocity;
     }
 
     fn next_random_i32(&mut self) -> i32 {
@@ -440,6 +494,7 @@ impl Engine {
             additional_spawns = command.spawns;
         }
 
+        self.apply_landscape(&mut object.state);
         self.objects.push(object);
         Ok((id, additional_spawns))
     }
@@ -788,5 +843,73 @@ mod tests {
             assert_eq!(obj_a.position, obj_b.position);
             assert_eq!(obj_a.velocity, obj_b.velocity);
         }
+    }
+
+    #[test]
+    fn clamps_objects_to_landscape_surface() {
+        let script = r#"
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(Definition::from_script("Static", "Static", script).unwrap())
+            .expect("definition registers");
+        engine.set_landscape(Landscape::flat(16, 5));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Static")
+                    .with_position(Vector2::new(4, 12))
+                    .with_velocity(Vector2::new(0, 3)),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.position, Vector2::new(4, 5));
+        assert_eq!(object.velocity, Vector2::new(0, 0));
+    }
+
+    #[test]
+    fn recorder_playback_roundtrip_matches_engine() {
+        let mut engine_a = Engine::with_seed(99);
+        engine_a
+            .register_definition(build_definition())
+            .expect("definition registers");
+        engine_a.set_landscape(Landscape::flat(32, 0));
+
+        let spawn = SpawnConfig::new("Test")
+            .with_position(Vector2::new(0, 0))
+            .with_velocity(Vector2::new(1, 0));
+        engine_a
+            .spawn_object(spawn.clone())
+            .expect("spawn succeeds");
+
+        let mut recorder = Recorder::new();
+        for _ in 0..5 {
+            let snapshot = engine_a.tick().expect("tick succeeds");
+            recorder.record(&snapshot);
+        }
+        let recording = recorder.into_recording();
+        let serialized = recording.to_string().expect("serializes");
+
+        let mut playback = Playback::from_str(&serialized).expect("playback loads");
+
+        let mut engine_b = Engine::with_seed(99);
+        engine_b
+            .register_definition(build_definition())
+            .expect("definition registers");
+        engine_b.set_landscape(Landscape::flat(32, 0));
+        engine_b.spawn_object(spawn).expect("spawn succeeds");
+
+        for _ in 0..5 {
+            let snapshot = engine_b.tick().expect("tick succeeds");
+            playback
+                .validate_snapshot(&snapshot)
+                .expect("snapshots match");
+        }
+        playback.finish().expect("playback completed");
     }
 }

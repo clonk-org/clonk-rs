@@ -38,6 +38,7 @@
 #include <C4Stat.h>
 #include <C4PlayerInfo.h>
 #include <C4LoaderScreen.h>
+#include "rust/RustEngineBridge.h"
 #include <C4Network2Dialogs.h>
 #include <C4Console.h>
 #include <C4Network2Stats.h>
@@ -647,6 +648,8 @@ void C4Game::Clear()
 
 	fPreinited = false;
 	Application.LogSystem.EnableDebugLog(false);
+
+	RustEngineBridge::Shutdown();
 }
 
 bool C4Game::GameOverCheck()
@@ -843,6 +846,8 @@ bool C4Game::Execute() // Returns true if the game is over
 
 	Landscape.DoRelights();
 #endif
+
+	RustEngineBridge::OnFrame(*this);
 
 	return true;
 }
