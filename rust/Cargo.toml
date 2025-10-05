@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/lc-core",
-    "crates/lc-resources"
+    "crates/lc-resources",
+    "crates/lc-script",
 ]
 resolver = "2"

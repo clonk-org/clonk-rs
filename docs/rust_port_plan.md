@@ -54,6 +54,9 @@ Each crate exposes FFI-safe boundaries to ease testing and permit staged migrati
    - [x] Exposed `lc_group_*` C ABI for opening groups, enumerating entries, and reading files so legacy C++ can validate Rust outputs.
    - [x] Tied the Rust `lc_group_*` FFI into the legacy loader via the optional `USE_RUST_GROUP_VALIDATION` flag, running metadata parity checks against every on-disk group open.
 3. **Scripting VM** – port AUL parser/executor; validate against existing script test suite and game scenarios.
+   - [x] Introduced `lc-script` crate with lexer, parser, and interpreter for function calls, conditionals, loops, recursion, and string/int arithmetic plus unit coverage.
+   - [x] Added ergonomic Rust `Engine` API and initial C FFI bindings to allow legacy runtime validation calls.
+   - [ ] Expand language support (arrays, proplists, effect callbacks, debugger hooks) and integrate parity harness against canonical AUL scenarios.
 4. **Engine loop & objects** – migrate game simulation in slices (definitions, object control, landscape handling), comparing frame-by-frame outputs against the C++ build using deterministic seeds.
 5. **Rendering & audio** – implement wrapper surfaces and audio mixers; rely on original assets to cross-check rendering results (image snapshots via integration tests).
 6. **Networking** – port control streams and lobby after engine parity to avoid divergence; use integration tests between Rust/C++ builds to confirm protocol compatibility.
