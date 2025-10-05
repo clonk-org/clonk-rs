@@ -37,6 +37,32 @@ endif ()
 
 project("LegacyClonk" LANGUAGES CXX ${LANGUAGE_OBJCXX})
 
+
+# Rust integration
+option(USE_RUST_CONFIG "Use Rust-based configuration loader" OFF)
+if(USE_RUST_CONFIG)
+    find_package(Threads REQUIRED)
+    add_definitions(-DUSE_RUST_CONFIG)
+    add_library(lc_core STATIC IMPORTED GLOBAL)
+    set_target_properties(lc_core PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_core.a"
+    )
+    add_library(lc_core_cdylib SHARED IMPORTED GLOBAL)
+    set_target_properties(lc_core_cdylib PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_core.dylib"
+    )
+    add_library(lc_core_static STATIC IMPORTED GLOBAL)
+    set_target_properties(lc_core_static PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_core.a"
+    )
+    add_custom_target(rust_build ALL
+        COMMAND cargo build --manifest-path ${CMAKE_SOURCE_DIR}/rust/Cargo.toml --lib
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/rust
+        COMMENT "Building Rust lc_core"
+    )
+    set(RUST_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/rust/include")
+endif()
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -176,6 +202,10 @@ endfunction()
 
 append_filelist(CLONK_SOURCES Engine)
 
+if (USE_RUST_CONFIG)
+	list(APPEND CLONK_SOURCES src/rust/RustConfigBridge.cpp)
+endif ()
+
 set(LICENSES
 	"COPYING@LegacyClonk@ISC"
 	"TRADEMARK@Clonk Trademark")
@@ -267,6 +297,12 @@ else ()
 endif ()
 target_link_libraries(clonk PRIVATE standard)
 target_compile_definitions(clonk PRIVATE C4ENGINE)
+
+if (USE_RUST_CONFIG)
+	add_dependencies(clonk rust_build)
+	target_include_directories(clonk PRIVATE ${RUST_INCLUDE_DIR})
+	target_link_libraries(clonk PRIVATE lc_core_static Threads::Threads)
+endif ()
 
 if (USE_SDL_MIXER AND WIN32)
 	target_compile_definitions(clonk PRIVATE SDL_MAIN_HANDLED)
@@ -645,3 +681,7 @@ if (USE_PCH)
 		set_up_pch(${TARGET})
 	endforeach()
 endif ()
+
+# Rust integration notes
+# - Build Rust with `cargo build --release --lib` when enabling USE_RUST_CONFIG.
+# - Set lc_core linkage accordingly for your platform (staticlib/cdylib).

@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/lc-core",
+    "crates/lc-resources"
+]
+resolver = "2"

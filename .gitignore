@@ -78,6 +78,9 @@ docs/generated/
 *.c4m
 Clonk.log
 
+# Rust build artifacts
+rust/target/
+
 # Game data files and directories
 *.c4p
 *.c4d

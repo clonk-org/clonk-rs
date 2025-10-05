@@ -350,6 +350,9 @@ public:
 #endif
 	bool fConfigLoaded; // true if config has been successfully loaded
 	StdStrBuf ConfigFilename; // set for configs loaded from a nondefault config file
+#ifdef USE_RUST_CONFIG
+	bool rustConfigActive = false;
+#endif
 
 public:
 	const char *GetSubkeyPath(const char *strSubkey);
@@ -380,12 +383,21 @@ public:
 	static std::uint8_t GetCharsetCode(const char *charset) noexcept;
 	static std::int32_t GetCharsetCodePage(const char *charset) noexcept;
 
+#ifdef USE_RUST_CONFIG
+#ifdef C4ENGINE
+	bool SyncRust();
+#endif
+#endif
+
 protected:
 	void ExpandEnvironmentVariables(char *strPath, int iMaxLen);
 
 #ifdef C4ENGINE
 private:
 	void AdaptToCurrentVersion();
+#ifdef USE_RUST_CONFIG
+	bool SyncRustConfigFromState(const std::string &iniDump);
+#endif
 #endif
 };
 

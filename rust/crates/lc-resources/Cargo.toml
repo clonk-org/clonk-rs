@@ -1,0 +1,12 @@
+[package]
+name = "lc-resources"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+walkdir = "2"
+thiserror = "1"
+byteorder = "1"
+
+[dev-dependencies]
+tempfile = "3"

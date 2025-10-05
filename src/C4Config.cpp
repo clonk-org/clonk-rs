@@ -34,6 +34,9 @@
 #endif
 
 #include <StdFile.h>
+#ifdef USE_RUST_CONFIG
+#include "rust/RustConfigBridge.h"
+#endif
 
 #ifdef _WIN32
 #include "StdRegistry.h"
@@ -41,7 +44,18 @@
 #include <clocale>
 #endif
 
+#include <algorithm>
+#include <cctype>
+#include <cerrno>
+#include <cstring>
+#include <cstdlib>
 #include <format>
+#include <functional>
+#include <limits>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <string_view>
 
 bool isGermanSystem()
 {
@@ -55,6 +69,281 @@ bool isGermanSystem()
 #endif
 	return false;
 }
+
+#ifdef USE_RUST_CONFIG
+namespace
+{
+	std::optional<std::string> GetRustConfigValue(const char *section, const char *key)
+	{
+		return section ? RustConfigBridge::GetValueIn(section, key) : RustConfigBridge::GetValue(key);
+	}
+
+	std::optional<bool> ParseBoolString(const std::string &value)
+	{
+		std::string lower;
+		lower.reserve(value.size());
+		for (unsigned char ch : value)
+		{
+			lower.push_back(static_cast<char>(std::tolower(ch)));
+		}
+		if (lower == "true" || lower == "1" || lower == "yes" || lower == "on")
+		{
+			return true;
+		}
+		if (lower == "false" || lower == "0" || lower == "no" || lower == "off")
+		{
+			return false;
+		}
+		return std::nullopt;
+	}
+
+	std::optional<int32_t> ParseInt32String(const std::string &value)
+	{
+		char *endptr = nullptr;
+		const long parsed = std::strtol(value.c_str(), &endptr, 10);
+		if (!endptr || *endptr != '\0')
+		{
+			return std::nullopt;
+		}
+		if (parsed < std::numeric_limits<int32_t>::min() || parsed > std::numeric_limits<int32_t>::max())
+		{
+			return std::nullopt;
+		}
+		return static_cast<int32_t>(parsed);
+	}
+
+	std::optional<uint64_t> ParseUInt64String(const std::string &value)
+	{
+		errno = 0;
+		char *endptr = nullptr;
+		const unsigned long long parsed = std::strtoull(value.c_str(), &endptr, 10);
+		if (!endptr || *endptr != '\0' || errno == ERANGE)
+		{
+			return std::nullopt;
+		}
+		return static_cast<uint64_t>(parsed);
+	}
+
+	void ApplyRustConfigOverrides(C4Config &config)
+	{
+		auto assign_char = [&](char *dest, std::size_t capacity, const char *section, const char *key) {
+			if (auto value = GetRustConfigValue(section, key))
+			{
+				std::strncpy(dest, value->c_str(), capacity);
+				dest[capacity] = '\0';
+			}
+		};
+
+		auto assign_buf = [&](StdStrBuf &buf, const char *section, const char *key) {
+			if (auto value = GetRustConfigValue(section, key))
+			{
+				buf.Copy(value->c_str());
+			}
+		};
+
+		auto assign_validated_buf = [&](auto &buf, const char *section, const char *key) {
+			if (auto value = GetRustConfigValue(section, key))
+			{
+				buf.Copy(value->c_str());
+			}
+		};
+
+		auto assign_bool = [&](bool &target, const char *section, const char *key) {
+			if (auto value = GetRustConfigValue(section, key))
+			{
+				if (auto parsed = ParseBoolString(*value))
+				{
+					target = *parsed;
+				}
+			}
+		};
+
+		auto assign_int = [&](int32_t &target, const char *section, const char *key) {
+			if (auto value = GetRustConfigValue(section, key))
+			{
+				if (auto parsed = ParseInt32String(*value))
+				{
+					target = *parsed;
+				}
+			}
+		};
+
+		auto assign_uint32 = [&](uint32_t &target, const char *section, const char *key) {
+			if (auto value = GetRustConfigValue(section, key))
+			{
+				if (auto parsed = ParseInt32String(*value))
+				{
+					target = static_cast<uint32_t>(*parsed);
+				}
+			}
+		};
+
+		auto assign_uint64 = [&](uint64_t &target, const char *section, const char *key) {
+			if (auto value = GetRustConfigValue(section, key))
+			{
+				if (auto parsed = ParseUInt64String(*value))
+				{
+					target = *parsed;
+				}
+			}
+		};
+
+		auto assign_display_mode = [&](C4ConfigGraphics::DisplayMode &mode, const char *section, const char *key) {
+			if (auto value = GetRustConfigValue(section, key))
+			{
+				if (auto parsed = ParseInt32String(*value))
+				{
+					mode = static_cast<C4ConfigGraphics::DisplayMode>(*parsed);
+				}
+			}
+		};
+
+		assign_char(config.General.Name, CFG_MaxString, nullptr, "Name");
+		assign_char(config.General.Language, CFG_MaxString, nullptr, "Language");
+		assign_char(config.General.LanguageEx, CFG_MaxString, nullptr, "LanguageEx");
+		assign_char(config.General.LanguageCharset, CFG_MaxString, nullptr, "LanguageCharset");
+		assign_char(config.General.Definitions, CFG_MaxString, nullptr, "Definitions");
+		assign_char(config.General.Participants, CFG_MaxString, nullptr, "Participants");
+		assign_char(config.General.LogPath, CFG_MaxString, nullptr, "LogPath");
+		assign_char(config.General.PlayerPath, CFG_MaxString, nullptr, "PlayerPath");
+		assign_char(config.General.DefinitionPath, CFG_MaxString, nullptr, "DefinitionPath");
+		assign_char(config.General.UserPath, CFG_MaxString, nullptr, "UserPath");
+		assign_char(config.General.RXFontName, CFG_MaxString, nullptr, "FontName");
+		assign_buf(config.General.SaveGameFolder, nullptr, "SaveGameFolder");
+		assign_buf(config.General.SaveDemoFolder, nullptr, "SaveDemoFolder");
+		assign_buf(config.General.ScreenshotFolder, nullptr, "ScreenshotFolder");
+		assign_char(config.General.MissionAccess, CFG_MaxString, nullptr, "MissionAccess");
+		assign_bool(config.General.FPS, nullptr, "FPS");
+		assign_bool(config.General.Record, nullptr, "Record");
+		assign_bool(config.General.FairCrew, nullptr, "FairCrew");
+		assign_int(config.General.FairCrewStrength, nullptr, "DefCrewStrength");
+		assign_int(config.General.ScrollSmooth, nullptr, "ScrollSmooth");
+		assign_bool(config.General.AlwaysDebug, nullptr, "DebugMode");
+		assign_bool(config.General.AllowScriptingInReplays, nullptr, "AllowScriptingInReplays");
+		assign_bool(config.General.GamepadEnabled, nullptr, "GamepadEnabled");
+		assign_bool(config.General.FirstStart, nullptr, "FirstStart");
+		assign_bool(config.General.UserPortraitsWritten, nullptr, "UserPortraitsWritten");
+		assign_bool(config.General.UseWhiteIngameChat, nullptr, "UseWhiteIngameChat");
+		assign_bool(config.General.UseWhiteLobbyChat, nullptr, "UseWhiteLobbyChat");
+		assign_bool(config.General.ShowLogTimestamps, nullptr, "ShowLogTimestamps");
+		assign_int(config.General.ConfigResetSafety, nullptr, "ConfigResetSafety");
+		assign_int(config.General.RXFontSize, nullptr, "FontSize");
+		assign_int(config.General.MouseAScroll, nullptr, "MouseAScroll");
+		assign_bool(config.General.Preloading, nullptr, "Preloading");
+
+#ifndef _WIN32
+		assign_uint32(config.General.ThreadPoolThreadCount, nullptr, "ThreadPoolThreadCount");
+#endif
+
+		config.General.fUTF8 = std::strcmp(config.General.LanguageCharset, "UTF-8") == 0;
+
+#ifdef C4ENGINE
+		assign_bool(config.Startup.HideMsgStartDedicated, "Startup", "HideMsgStartDedicated");
+		assign_bool(config.Startup.HideMsgPlrTakeOver, "Startup", "HideMsgPlrTakeOver");
+		assign_bool(config.Startup.HideMsgPlrNoTakeOver, "Startup", "HideMsgPlrNoTakeOver");
+		assign_bool(config.Startup.HideMsgNoOfficialLeague, "Startup", "HideMsgNoOfficialLeague");
+		assign_bool(config.Startup.HideMsgIRCDangerous, "Startup", "HideMsgIRCDangerous");
+		assign_bool(config.Startup.AlphabeticalSorting, "Startup", "AlphabeticalSorting");
+		assign_int(config.Startup.LastPortraitFolderIdx, "Startup", "LastPortraitFolderIdx");
+		assign_bool(config.Lobby.AllowPlayerSave, "Lobby", "AllowPlayerSave");
+		assign_int(config.Lobby.CountdownTime, "Lobby", "CountdownTime");
+		assign_char(config.IRC.Server, CFG_MaxString, "IRC", "Server2");
+		assign_char(config.IRC.Nick, CFG_MaxString, "IRC", "Nick");
+		assign_char(config.IRC.RealName, CFG_MaxString, "IRC", "RealName");
+		assign_char(config.IRC.Channel, CFG_MaxString, "IRC", "Channel");
+		assign_bool(config.Toasts.ReadyCheck, "Toasts", "ReadyCheck");
+#endif
+
+		assign_int(config.Graphics.ResX, "Graphics", "ResolutionX");
+		assign_int(config.Graphics.ResY, "Graphics", "ResolutionY");
+		assign_int(config.Graphics.Scale, "Graphics", "Scale");
+		assign_int(config.Graphics.SplitscreenDividers, "Graphics", "SplitscreenDividers");
+		assign_bool(config.Graphics.ShowPlayerHUDAlways, "Graphics", "ShowPlayerHUDAlways");
+		assign_bool(config.Graphics.ShowCommands, "Graphics", "ShowCommands");
+		assign_bool(config.Graphics.ShowCommandKeys, "Graphics", "ShowCommandKeys");
+		assign_bool(config.Graphics.ShowPortraits, "Graphics", "ShowPortraits");
+		assign_bool(config.Graphics.AddNewCrewPortraits, "Graphics", "AddNewCrewPortraits");
+		assign_bool(config.Graphics.SaveDefaultPortraits, "Graphics", "SaveDefaultPortraits");
+		assign_bool(config.Graphics.ColorAnimation, "Graphics", "ColorAnimation");
+		assign_int(config.Graphics.VerboseObjectLoading, "Graphics", "VerboseObjectLoading");
+		assign_bool(config.Graphics.ShowClock, "Graphics", "ShowClock");
+		assign_bool(config.Graphics.MsgBoard, "Graphics", "MsgBoard");
+		assign_bool(config.Graphics.PXSGfx, "Graphics", "PXSGfx");
+		assign_int(config.Graphics.Engine, "Graphics", "Engine");
+		assign_bool(config.Graphics.NoAlphaAdd, "Graphics", "NoAlphaAdd");
+		assign_bool(config.Graphics.PointFiltering, "Graphics", "PointFiltering");
+		assign_bool(config.Graphics.NoBoxFades, "Graphics", "NoBoxFades");
+		assign_bool(config.Graphics.NoAcceleration, "Graphics", "NoAcceleration");
+		assign_bool(config.Graphics.DisableGamma, "Graphics", "DisableGamma");
+		assign_int(config.Graphics.Monitor, "Graphics", "Monitor");
+		assign_int(config.Graphics.TexIndent, "Graphics", "TexIndent");
+		assign_int(config.Graphics.BlitOffset, "Graphics", "BlitOffset");
+		assign_int(config.Graphics.AllowedBlitModes, "Graphics", "AllowedBlitModes");
+		assign_bool(config.Graphics.ShowCrewNames, "Graphics", "ShowCrewNames");
+		assign_bool(config.Graphics.ShowCrewCNames, "Graphics", "ShowCrewCNames");
+		assign_int(config.Graphics.Gamma1, "Graphics", "Gamma1");
+		assign_int(config.Graphics.Gamma2, "Graphics", "Gamma2");
+		assign_int(config.Graphics.Gamma3, "Graphics", "Gamma3");
+		assign_bool(config.Graphics.Shader, "Graphics", "Shader");
+		assign_int(config.Graphics.SmokeLevel, "Graphics", "SmokeLevel");
+		assign_bool(config.Graphics.FireParticles, "Graphics", "FireParticles");
+		assign_int(config.Graphics.MaxRefreshDelay, "Graphics", "MaxRefreshDelay");
+		assign_bool(config.Graphics.AutoFrameSkip, "Graphics", "AutoFrameSkip");
+		assign_int(config.Graphics.CacheTexturesInRAM, "Graphics", "CacheTexturesInRAM");
+		assign_uint32(config.Graphics.RenderInactive, "Graphics", "RenderInactive");
+		assign_display_mode(config.Graphics.UseDisplayMode, "Graphics", "DisplayMode");
+		assign_bool(config.Graphics.ShowFolderMaps, "Graphics", "ShowFolderMaps");
+		assign_bool(config.Graphics.UseShaderGamma, "Graphics", "UseShaderGamma");
+
+#ifdef _WIN32
+		assign_bool(config.Graphics.Maximized, "Graphics", "Maximized");
+		assign_int(config.Graphics.PositionX, "Graphics", "PositionX");
+		assign_int(config.Graphics.PositionY, "Graphics", "PositionY");
+#endif
+
+		assign_bool(config.Sound.RXSound, "Sound", "Sound");
+		assign_bool(config.Sound.RXMusic, "Sound", "Music");
+		assign_bool(config.Sound.FEMusic, "Sound", "MenuMusic");
+		assign_bool(config.Sound.FESamples, "Sound", "MenuSound");
+		assign_int(config.Sound.MusicVolume, "Sound", "MusicVolume");
+		assign_int(config.Sound.SoundVolume, "Sound", "SoundVolume");
+		assign_int(config.Sound.MaxChannels, "Sound", "MaxChannels");
+		config.Sound.MaxChannels = std::clamp(config.Sound.MaxChannels, 1, C4AudioSystem::MaxChannels);
+		assign_bool(config.Sound.PreferLinearResampling, "Sound", "PreferLinearResampling");
+		assign_bool(config.Sound.MuteSoundCommand, "Sound", "MuteSoundCommand");
+
+		assign_int(config.Network.ControlRate, "Network", "ControlRate");
+		assign_char(config.Network.WorkPath, CFG_MaxString, "Network", "WorkPath");
+		assign_validated_buf(config.Network.Comment, "Network", "Comment");
+		assign_bool(config.Network.NoRuntimeJoin, "Network", "NoRuntimeJoin");
+		assign_int(config.Network.MaxResSearchRecursion, "Network", "MaxResSearchRecursion");
+		assign_int(config.Network.PortTCP, "Network", "PortTCP");
+		assign_int(config.Network.PortUDP, "Network", "PortUDP");
+		assign_int(config.Network.PortDiscovery, "Network", "PortDiscovery");
+		assign_int(config.Network.PortRefServer, "Network", "PortRefServer");
+		assign_int(config.Network.ControlMode, "Network", "ControlMode");
+		assign_validated_buf(config.Network.LocalName, "Network", "LocalName");
+		assign_validated_buf(config.Network.Nick, "Network", "Nick");
+		assign_int(config.Network.MaxLoadFileSize, "Network", "MaxLoadFileSize");
+		assign_bool(config.Network.MasterServerSignUp, "Network", "MasterServerSignUp");
+		assign_int(config.Network.MasterReferencePeriod, "Network", "MasterReferencePeriod");
+		assign_bool(config.Network.LeagueServerSignUp, "Network", "LeagueServerSignUp");
+		assign_char(config.Network.ServerAddress, CFG_MaxString, "Network", "ServerAddress");
+		assign_bool(config.Network.UseAlternateServer, "Network", "UseAlternateServer");
+		assign_char(config.Network.AlternateServerAddress, CFG_MaxString, "Network", "AlternateServerAddress");
+		assign_char(config.Network.UpdateServerAddress, CFG_MaxString, "Network", "UpdateServerAddress");
+		assign_char(config.Network.LastPassword, CFG_MaxString, "Network", "LastPassword");
+		assign_bool(config.Network.AutomaticUpdate, "Network", "EnableAutomaticUpdate");
+		assign_uint64(config.Network.LastUpdateTime, "Network", "LastUpdateTime");
+		assign_int(config.Network.AsyncMaxWait, "Network", "AsyncMaxWait");
+		assign_char(config.Network.PuncherAddress, CFG_MaxString, "Network", "PuncherAddress");
+		assign_buf(config.Network.LeagueAccount, "Network", "LeagueNick");
+		assign_bool(config.Network.LeagueAutoLogin, "Network", "LeagueAutoLogin");
+		assign_bool(config.Network.UseCurl, "Network", "UseCurl");
+		assign_bool(config.Network.EnableUPnP, "Network", "EnableUPnP");
+	}
+} // namespace
+#endif
 
 void C4ConfigGeneral::CompileFunc(StdCompiler *pComp)
 {
@@ -433,6 +722,9 @@ C4Config::C4Config()
 
 C4Config::~C4Config()
 {
+#ifdef USE_RUST_CONFIG
+	RustConfigBridge::Unload();
+#endif
 	fConfigLoaded = false;
 }
 
@@ -441,12 +733,20 @@ void C4Config::Default()
 	// force default values
 	StdCompilerNull Comp; Comp.Compile(*this);
 	fConfigLoaded = false;
+#ifdef USE_RUST_CONFIG
+	rustConfigActive = false;
+#endif
 }
 
 bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
 {
 	try
 	{
+#ifdef USE_RUST_CONFIG
+		bool rustParityOk = false;
+		rustConfigActive = false;
+		RustConfigBridge::Unload();
+#endif
 #ifdef _WIN32
 		// Windows: Default load from registry, if no explicit config file is specified
 		if (!szConfigFile)
@@ -481,6 +781,21 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
 
 			// Load config file into buf
 			StdStrBuf buf;
+#ifdef USE_RUST_CONFIG
+			if (!filename.isNull())
+			{
+				const char *configPath = filename.getData();
+				if (configPath && *configPath)
+				{
+					if (!RustConfigBridge::LoadConfig(configPath))
+					{
+#ifdef C4ENGINE
+						DebugLog(spdlog::level::warn, "Rust config loader failed for {}", configPath);
+#endif
+					}
+				}
+			}
+#endif
 			buf.LoadFromFile(filename.getData());
 
 			if (buf.isNull())
@@ -503,7 +818,272 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
 			StdCompilerINIRead IniRead;
 			IniRead.setInput(buf);
 			IniRead.Compile(*this);
+
+#ifdef USE_RUST_CONFIG
+			{
+				StdCompilerINIWrite legacyWriter;
+				legacyWriter.Decompile(*this);
+				const std::string legacyDump{legacyWriter.getOutput()};
+				const std::optional<std::string> rustDump = RustConfigBridge::Dump();
+				if (rustDump)
+				{
+					const std::optional<std::string> diffReport = RustConfigBridge::CompareWithLegacyDump(legacyDump);
+					const bool textMismatch = (*rustDump != legacyDump);
+					rustParityOk = !diffReport && !textMismatch;
+#if defined(C4ENGINE) && !defined(NDEBUG)
+					if (diffReport)
+					{
+						std::istringstream stream(*diffReport);
+						std::string line;
+						while (std::getline(stream, line))
+						{
+							if (!line.empty())
+							{
+								DebugLog(spdlog::level::warn, "Rust config diff: {}", line);
+							}
+						}
+					}
+					if (textMismatch)
+					{
+						const auto legacyHash = std::hash<std::string>{}(legacyDump);
+						const auto rustHash = std::hash<std::string>{}(*rustDump);
+						std::size_t mismatchIndex = 0;
+						const std::size_t minLen = std::min(rustDump->size(), legacyDump.size());
+						while (mismatchIndex < minLen && (*rustDump)[mismatchIndex] == legacyDump[mismatchIndex])
+						{
+							++mismatchIndex;
+						}
+						auto makeSnippet = [mismatchIndex](const std::string &text) {
+							if (mismatchIndex >= text.size())
+							{
+								return std::string{"<end>"};
+							}
+							std::string snippet = text.substr(mismatchIndex, 64);
+							for (char &ch : snippet)
+							{
+								if (ch == '\n' || ch == '\r' || ch == '\t')
+								{
+									ch = ' ';
+								}
+							}
+							return snippet;
+						};
+						const std::string legacySnippet = makeSnippet(legacyDump);
+						const std::string rustSnippetText = makeSnippet(*rustDump);
+						DebugLog(
+							spdlog::level::warn,
+							"Rust config mismatch at offset {} (legacy hash {}, rust hash {}, legacy segment '{}', rust segment '{}')",
+							mismatchIndex,
+							legacyHash,
+							rustHash,
+							legacySnippet,
+							rustSnippetText);
+					}
+
+					if (diffReport || textMismatch)
+					{
+						auto safe_sv = [](const char *str) { return std::string_view(str ? str : ""); };
+						auto log_string_mismatch = [&](std::string_view label, const char *section, const char *key, std::string_view legacy) {
+							if (auto rust = GetRustConfigValue(section, key))
+							{
+								if (*rust != legacy)
+								{
+									DebugLog(
+										spdlog::level::warn,
+										"Rust config mismatch for {} (legacy='{}', rust='{}')",
+										label,
+										legacy,
+										rust->c_str());
+								}
+							}
+							else
+							{
+								DebugLog(spdlog::level::warn, "Rust config missing value for {}", label);
+							}
+						};
+
+						auto log_bool_mismatch = [&](std::string_view label, bool legacy, const char *section, const char *key) {
+							if (auto rust = GetRustConfigValue(section, key))
+							{
+								if (auto parsed = ParseBoolString(*rust))
+								{
+									if (*parsed != legacy)
+									{
+										DebugLog(
+											spdlog::level::warn,
+											"Rust config mismatch for {} (legacy={}, rust={})",
+											label,
+											legacy,
+											*parsed);
+									}
+								}
+								else
+								{
+									DebugLog(spdlog::level::warn, "Rust config has non-boolean value '{}' for {}", rust->c_str(), label);
+								}
+							}
+							else
+							{
+								DebugLog(spdlog::level::warn, "Rust config missing value for {}", label);
+							}
+						};
+
+						auto log_int_mismatch = [&](std::string_view label, int32_t legacy, const char *section, const char *key) {
+							if (auto rust = GetRustConfigValue(section, key))
+							{
+								if (auto parsed = ParseInt32String(*rust))
+								{
+									if (*parsed != legacy)
+									{
+										DebugLog(
+											spdlog::level::warn,
+											"Rust config mismatch for {} (legacy={}, rust={})",
+											label,
+											legacy,
+											*parsed);
+									}
+								}
+								else
+								{
+									DebugLog(spdlog::level::warn, "Rust config has non-integer value '{}' for {}", rust->c_str(), label);
+								}
+							}
+							else
+							{
+								DebugLog(spdlog::level::warn, "Rust config missing value for {}", label);
+							}
+						};
+
+						auto log_uint64_mismatch = [&](std::string_view label, uint64_t legacy, const char *section, const char *key) {
+							if (auto rust = GetRustConfigValue(section, key))
+							{
+								if (auto parsed = ParseUInt64String(*rust))
+								{
+									if (*parsed != legacy)
+									{
+									DebugLog(
+										spdlog::level::warn,
+										"Rust config mismatch for {} (legacy={}, rust={})",
+										label,
+										static_cast<unsigned long long>(legacy),
+										static_cast<unsigned long long>(*parsed));
+									}
+								}
+								else
+								{
+									DebugLog(spdlog::level::warn, "Rust config has non-integer value '{}' for {}", rust->c_str(), label);
+								}
+							}
+							else
+							{
+								DebugLog(spdlog::level::warn, "Rust config missing value for {}", label);
+							}
+						};
+
+						log_string_mismatch("General.Name", nullptr, "Name", General.Name);
+						log_string_mismatch("General.Language", nullptr, "Language", General.Language);
+						log_string_mismatch("General.LanguageEx", nullptr, "LanguageEx", General.LanguageEx);
+						log_string_mismatch("General.Definitions", nullptr, "Definitions", General.Definitions);
+						log_string_mismatch("General.FontName", nullptr, "FontName", General.RXFontName);
+						log_int_mismatch("General.FontSize", General.RXFontSize, nullptr, "FontSize");
+						log_int_mismatch("General.MouseAScroll", General.MouseAScroll, nullptr, "MouseAScroll");
+						log_bool_mismatch("General.Preloading", General.Preloading, nullptr, "Preloading");
+						log_bool_mismatch("General.FPS", General.FPS, nullptr, "FPS");
+						log_int_mismatch("General.ScrollSmooth", General.ScrollSmooth, nullptr, "ScrollSmooth");
+						log_int_mismatch("General.FairCrewStrength", General.FairCrewStrength, nullptr, "DefCrewStrength");
+#ifndef _WIN32
+						log_int_mismatch("General.ThreadPoolThreadCount", static_cast<int32_t>(General.ThreadPoolThreadCount), nullptr, "ThreadPoolThreadCount");
+#endif
+						log_bool_mismatch("Startup.HideMsgStartDedicated", Startup.HideMsgStartDedicated, "Startup", "HideMsgStartDedicated");
+						log_bool_mismatch("Startup.HideMsgPlrTakeOver", Startup.HideMsgPlrTakeOver, "Startup", "HideMsgPlrTakeOver");
+						log_bool_mismatch("Startup.HideMsgPlrNoTakeOver", Startup.HideMsgPlrNoTakeOver, "Startup", "HideMsgPlrNoTakeOver");
+						log_bool_mismatch("Startup.HideMsgNoOfficialLeague", Startup.HideMsgNoOfficialLeague, "Startup", "HideMsgNoOfficialLeague");
+						log_bool_mismatch("Startup.HideMsgIRCDangerous", Startup.HideMsgIRCDangerous, "Startup", "HideMsgIRCDangerous");
+						log_bool_mismatch("Startup.AlphabeticalSorting", Startup.AlphabeticalSorting, "Startup", "AlphabeticalSorting");
+						log_int_mismatch("Startup.LastPortraitFolderIdx", Startup.LastPortraitFolderIdx, "Startup", "LastPortraitFolderIdx");
+						log_bool_mismatch("Lobby.AllowPlayerSave", Lobby.AllowPlayerSave, "Lobby", "AllowPlayerSave");
+						log_int_mismatch("Lobby.CountdownTime", Lobby.CountdownTime, "Lobby", "CountdownTime");
+						log_string_mismatch("IRC.Server", "IRC", "Server2", safe_sv(IRC.Server));
+						log_string_mismatch("IRC.Nick", "IRC", "Nick", safe_sv(IRC.Nick));
+						log_string_mismatch("IRC.RealName", "IRC", "RealName", safe_sv(IRC.RealName));
+						log_string_mismatch("IRC.Channel", "IRC", "Channel", safe_sv(IRC.Channel));
+						log_bool_mismatch("Toasts.ReadyCheck", Toasts.ReadyCheck, "Toasts", "ReadyCheck");
+
+						log_int_mismatch("Graphics.ResX", Graphics.ResX, "Graphics", "ResolutionX");
+						log_int_mismatch("Graphics.ResY", Graphics.ResY, "Graphics", "ResolutionY");
+						log_int_mismatch("Graphics.Scale", Graphics.Scale, "Graphics", "Scale");
+						log_int_mismatch("Graphics.SplitscreenDividers", Graphics.SplitscreenDividers, "Graphics", "SplitscreenDividers");
+						log_int_mismatch("Graphics.Engine", Graphics.Engine, "Graphics", "Engine");
+						log_bool_mismatch("Graphics.ShowClock", Graphics.ShowClock, "Graphics", "ShowClock");
+						log_bool_mismatch("Graphics.ShowPortraits", Graphics.ShowPortraits, "Graphics", "ShowPortraits");
+						log_bool_mismatch("Graphics.ShowCrewNames", Graphics.ShowCrewNames, "Graphics", "ShowCrewNames");
+						log_bool_mismatch("Graphics.ShowCrewCNames", Graphics.ShowCrewCNames, "Graphics", "ShowCrewCNames");
+						log_bool_mismatch("Graphics.FireParticles", Graphics.FireParticles, "Graphics", "FireParticles");
+						log_bool_mismatch("Graphics.AutoFrameSkip", Graphics.AutoFrameSkip, "Graphics", "AutoFrameSkip");
+						log_bool_mismatch("Graphics.Shader", Graphics.Shader, "Graphics", "Shader");
+						log_int_mismatch("Graphics.SmokeLevel", Graphics.SmokeLevel, "Graphics", "SmokeLevel");
+						log_int_mismatch("Graphics.CacheTexturesInRAM", Graphics.CacheTexturesInRAM, "Graphics", "CacheTexturesInRAM");
+						log_int_mismatch("Graphics.RenderInactive", static_cast<int32_t>(Graphics.RenderInactive), "Graphics", "RenderInactive");
+						log_bool_mismatch("Graphics.DisableGamma", Graphics.DisableGamma, "Graphics", "DisableGamma");
+						log_bool_mismatch("Graphics.UseShaderGamma", Graphics.UseShaderGamma, "Graphics", "UseShaderGamma");
+						log_bool_mismatch("Graphics.ShowFolderMaps", Graphics.ShowFolderMaps, "Graphics", "ShowFolderMaps");
+						log_int_mismatch("Graphics.Monitor", Graphics.Monitor, "Graphics", "Monitor");
+						log_int_mismatch("Graphics.MaxRefreshDelay", Graphics.MaxRefreshDelay, "Graphics", "MaxRefreshDelay");
+						log_int_mismatch("Graphics.TexIndent", Graphics.TexIndent, "Graphics", "TexIndent");
+						log_int_mismatch("Graphics.BlitOffset", Graphics.BlitOffset, "Graphics", "BlitOffset");
+						log_int_mismatch("Graphics.AllowedBlitModes", Graphics.AllowedBlitModes, "Graphics", "AllowedBlitModes");
+
+						log_bool_mismatch("Sound.Sound", Sound.RXSound, "Sound", "Sound");
+						log_bool_mismatch("Sound.Music", Sound.RXMusic, "Sound", "Music");
+						log_bool_mismatch("Sound.MenuMusic", Sound.FEMusic, "Sound", "MenuMusic");
+						log_bool_mismatch("Sound.MenuSound", Sound.FESamples, "Sound", "MenuSound");
+						log_int_mismatch("Sound.MusicVolume", Sound.MusicVolume, "Sound", "MusicVolume");
+						log_int_mismatch("Sound.SoundVolume", Sound.SoundVolume, "Sound", "SoundVolume");
+						log_int_mismatch("Sound.MaxChannels", Sound.MaxChannels, "Sound", "MaxChannels");
+						log_bool_mismatch("Sound.PreferLinearResampling", Sound.PreferLinearResampling, "Sound", "PreferLinearResampling");
+						log_bool_mismatch("Sound.MuteSoundCommand", Sound.MuteSoundCommand, "Sound", "MuteSoundCommand");
+
+						log_int_mismatch("Network.ControlRate", Network.ControlRate, "Network", "ControlRate");
+						log_string_mismatch("Network.WorkPath", "Network", "WorkPath", safe_sv(Network.WorkPath));
+						log_string_mismatch("Network.Comment", "Network", "Comment", safe_sv(Network.Comment.getData()));
+						log_bool_mismatch("Network.NoRuntimeJoin", Network.NoRuntimeJoin, "Network", "NoRuntimeJoin");
+						log_int_mismatch("Network.MaxResSearchRecursion", Network.MaxResSearchRecursion, "Network", "MaxResSearchRecursion");
+						log_int_mismatch("Network.PortTCP", Network.PortTCP, "Network", "PortTCP");
+						log_int_mismatch("Network.PortUDP", Network.PortUDP, "Network", "PortUDP");
+						log_int_mismatch("Network.PortDiscovery", Network.PortDiscovery, "Network", "PortDiscovery");
+						log_int_mismatch("Network.PortRefServer", Network.PortRefServer, "Network", "PortRefServer");
+						log_int_mismatch("Network.ControlMode", Network.ControlMode, "Network", "ControlMode");
+						log_string_mismatch("Network.LocalName", "Network", "LocalName", Network.LocalName.getData());
+						log_string_mismatch("Network.Nick", "Network", "Nick", Network.Nick.getData());
+						log_int_mismatch("Network.MaxLoadFileSize", Network.MaxLoadFileSize, "Network", "MaxLoadFileSize");
+						log_bool_mismatch("Network.MasterServerSignUp", Network.MasterServerSignUp, "Network", "MasterServerSignUp");
+						log_int_mismatch("Network.MasterReferencePeriod", Network.MasterReferencePeriod, "Network", "MasterReferencePeriod");
+						log_bool_mismatch("Network.LeagueServerSignUp", Network.LeagueServerSignUp, "Network", "LeagueServerSignUp");
+						log_string_mismatch("Network.ServerAddress", "Network", "ServerAddress", Network.ServerAddress);
+						log_bool_mismatch("Network.UseAlternateServer", Network.UseAlternateServer, "Network", "UseAlternateServer");
+						log_string_mismatch("Network.AlternateServerAddress", "Network", "AlternateServerAddress", Network.AlternateServerAddress);
+						log_string_mismatch("Network.UpdateServerAddress", "Network", "UpdateServerAddress", Network.UpdateServerAddress);
+						log_bool_mismatch("Network.AutomaticUpdate", Network.AutomaticUpdate, "Network", "EnableAutomaticUpdate");
+						log_uint64_mismatch("Network.LastUpdateTime", Network.LastUpdateTime, "Network", "LastUpdateTime");
+						log_int_mismatch("Network.AsyncMaxWait", Network.AsyncMaxWait, "Network", "AsyncMaxWait");
+						log_string_mismatch("Network.PuncherAddress", "Network", "PuncherAddress", safe_sv(Network.PuncherAddress));
+						log_string_mismatch("Network.LeagueAccount", "Network", "LeagueNick", safe_sv(Network.LeagueAccount.getData()));
+						log_bool_mismatch("Network.LeagueAutoLogin", Network.LeagueAutoLogin, "Network", "LeagueAutoLogin");
+						log_bool_mismatch("Network.UseCurl", Network.UseCurl, "Network", "UseCurl");
+						log_bool_mismatch("Network.EnableUPnP", Network.EnableUPnP, "Network", "EnableUPnP");
+					}
+#endif
+				}
+			}
+#endif
+				}
+#ifdef USE_RUST_CONFIG
+		if (rustParityOk)
+		{
+			ApplyRustConfigOverrides(*this);
 		}
+	rustConfigActive = rustParityOk;
+#endif
 	}
 	catch ([[maybe_unused]] const StdCompiler::Exception &e)
 	{
@@ -598,7 +1178,26 @@ bool C4Config::Save()
 			StdCompilerINIWrite IniWrite;
 			IniWrite.Decompile(*this);
 			const std::string output{IniWrite.getOutput()};
+			#ifdef USE_RUST_CONFIG
+			bool saved_with_rust = false;
+			if (rustConfigActive && SyncRustConfigFromState(output))
+			{
+				saved_with_rust = RustConfigBridge::SaveConfig(filename.getData());
+				if (!saved_with_rust)
+				{
+#ifdef C4ENGINE
+					DebugLog(spdlog::level::warn, "Rust config save failed for {}", filename.getData());
+#endif
+					rustConfigActive = false;
+				}
+			}
+			if (!saved_with_rust)
+			{
+				StdStrBuf{output.c_str(), output.size(), false}.SaveToFile(filename.getData());
+			}
+			#else
 			StdStrBuf{output.c_str(), output.size(), false}.SaveToFile(filename.getData());
+			#endif
 		}
 	}
 	catch ([[maybe_unused]] const StdCompiler::Exception &e)
@@ -610,6 +1209,37 @@ bool C4Config::Save()
 	}
 	return true;
 }
+
+#ifdef USE_RUST_CONFIG
+bool C4Config::SyncRustConfigFromState(const std::string &iniDump)
+{
+	if (!rustConfigActive)
+	{
+		return false;
+	}
+	if (!RustConfigBridge::ReplaceFromText(iniDump))
+	{
+#ifdef C4ENGINE
+		DebugLog(spdlog::level::warn, "Rust config replace failed; disabling Rust config sync");
+#endif
+		rustConfigActive = false;
+		return false;
+	}
+	return true;
+}
+#ifdef C4ENGINE
+bool C4Config::SyncRust()
+{
+	if (!rustConfigActive)
+	{
+		return false;
+	}
+	StdCompilerINIWrite writer;
+	writer.Decompile(*this);
+	return SyncRustConfigFromState(writer.getOutput());
+}
+#endif
+#endif
 
 void C4ConfigGeneral::DeterminePaths(bool forceWorkingDirectory)
 {
@@ -1002,5 +1632,9 @@ void C4Config::AdaptToCurrentVersion()
 	}
 
 	General.Version = C4XVERBUILD;
+
+#ifdef USE_RUST_CONFIG
+	SyncRust();
+#endif
 }
 #endif
