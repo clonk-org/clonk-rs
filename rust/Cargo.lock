@@ -425,6 +425,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lc-network"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "lc-resources"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,490 @@
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::{ClientId, Tick};
+
+/// Error cases that can occur when coordinating control packets.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ControlError {
+    #[error("client {0} already registered")]
+    ClientAlreadyRegistered(ClientId),
+    #[error("client {0} not registered")]
+    UnknownClient(ClientId),
+}
+
+/// A control packet that mirrors the information exchanged in the legacy
+/// `C4GameControlPacket`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlPacket {
+    client_id: ClientId,
+    tick: Tick,
+    timestamp_ms: u64,
+    payload: Vec<u8>,
+}
+
+impl ControlPacket {
+    pub fn builder(client_id: ClientId, tick: Tick) -> ControlPacketBuilder {
+        ControlPacketBuilder {
+            client_id,
+            tick,
+            timestamp_ms: 0,
+        }
+    }
+
+    pub fn client_id(&self) -> ClientId {
+        self.client_id
+    }
+
+    pub fn tick(&self) -> Tick {
+        self.tick
+    }
+
+    pub fn timestamp_ms(&self) -> u64 {
+        self.timestamp_ms
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+/// Builder for [`ControlPacket`]. Keeps construction ergonomic while enforcing
+/// that a payload is supplied.
+#[derive(Debug, Clone)]
+pub struct ControlPacketBuilder {
+    client_id: ClientId,
+    tick: Tick,
+    timestamp_ms: u64,
+}
+
+impl ControlPacketBuilder {
+    pub fn timestamp_ms(mut self, timestamp_ms: u64) -> Self {
+        self.timestamp_ms = timestamp_ms;
+        self
+    }
+
+    pub fn payload<T: Into<Vec<u8>>>(self, payload: T) -> ControlPacket {
+        ControlPacket {
+            client_id: self.client_id,
+            tick: self.tick,
+            timestamp_ms: self.timestamp_ms,
+            payload: payload.into(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct ClientState {
+    pending: BTreeMap<Tick, ControlPacket>,
+    highest_tick_seen: Option<Tick>,
+}
+
+impl ClientState {
+    fn register_packet(&mut self, packet: ControlPacket) -> (InsertStatus, Option<ControlPacket>) {
+        let tick = packet.tick;
+        let previous = self.pending.insert(tick, packet);
+        let status = if previous.is_some() {
+            InsertStatus::Replaced
+        } else {
+            InsertStatus::Stored
+        };
+        self.highest_tick_seen = Some(self.highest_tick_seen.map_or(tick, |prev| prev.max(tick)));
+        (status, previous)
+    }
+}
+
+/// Coordinates control packets from multiple clients while keeping deterministic
+/// ordering and tracking gaps that require re-requests.
+#[derive(Debug, Clone)]
+pub struct ControlCoordinator {
+    backlog_limit: usize,
+    current_tick: Tick,
+    clients: BTreeMap<ClientId, ClientState>,
+}
+
+impl ControlCoordinator {
+    pub fn new(backlog_limit: usize) -> Self {
+        Self::with_start_tick(backlog_limit, 0)
+    }
+
+    pub fn with_start_tick(backlog_limit: usize, start_tick: Tick) -> Self {
+        Self {
+            backlog_limit,
+            current_tick: start_tick,
+            clients: BTreeMap::new(),
+        }
+    }
+
+    pub fn register_client(&mut self, client_id: ClientId) -> Result<(), ControlError> {
+        if self.clients.contains_key(&client_id) {
+            return Err(ControlError::ClientAlreadyRegistered(client_id));
+        }
+        self.clients.insert(client_id, ClientState::default());
+        Ok(())
+    }
+
+    pub fn remove_client(&mut self, client_id: ClientId) -> Result<Vec<ReadyBatch>, ControlError> {
+        if self.clients.remove(&client_id).is_none() {
+            return Err(ControlError::UnknownClient(client_id));
+        }
+        Ok(self.collect_ready())
+    }
+
+    pub fn ingest(&mut self, packet: ControlPacket) -> Result<ControlOutcome, ControlError> {
+        let client_id = packet.client_id();
+        let tick = packet.tick();
+        let state = self
+            .clients
+            .get_mut(&client_id)
+            .ok_or(ControlError::UnknownClient(client_id))?;
+
+        if tick < self.current_tick {
+            return Ok(ControlOutcome::stale());
+        }
+
+        let (status, _previous) = state.register_packet(packet);
+        let missing = self.compute_missing(client_id);
+        let ready = self.collect_ready();
+        self.enforce_backlog();
+
+        Ok(ControlOutcome {
+            status,
+            ready,
+            missing,
+        })
+    }
+
+    pub fn current_tick(&self) -> Tick {
+        self.current_tick
+    }
+
+    pub fn backlog_limit(&self) -> usize {
+        self.backlog_limit
+    }
+
+    pub fn client_ids(&self) -> impl Iterator<Item = ClientId> + '_ {
+        self.clients.keys().copied()
+    }
+
+    fn collect_ready(&mut self) -> Vec<ReadyBatch> {
+        let mut ready = Vec::new();
+        loop {
+            if self.clients.is_empty() {
+                break;
+            }
+
+            let tick = self.current_tick;
+            if !self
+                .clients
+                .values()
+                .all(|state| state.pending.contains_key(&tick))
+            {
+                break;
+            }
+
+            let mut packets = Vec::with_capacity(self.clients.len());
+            for (client_id, state) in self.clients.iter_mut() {
+                if let Some(packet) = state.pending.remove(&tick) {
+                    packets.push(packet);
+                } else {
+                    // Defensive: all() above already ensured availability.
+                    panic!("missing packet for client {client_id} at tick {tick}");
+                }
+            }
+
+            ready.push(ReadyBatch { tick, packets });
+            self.current_tick = self.current_tick.saturating_add(1);
+        }
+        ready
+    }
+
+    fn enforce_backlog(&mut self) {
+        if self.backlog_limit == 0 {
+            return;
+        }
+        let threshold = self.current_tick.saturating_sub(self.backlog_limit as Tick);
+        for state in self.clients.values_mut() {
+            state.pending.retain(|&tick, _| tick >= threshold);
+        }
+    }
+
+    fn compute_missing(&self, client_id: ClientId) -> Vec<MissingRange> {
+        let mut missing = Vec::new();
+        let Some(state) = self.clients.get(&client_id) else {
+            return missing;
+        };
+
+        let mut expected = self.current_tick;
+        for &tick in state.pending.keys() {
+            if tick < expected {
+                continue;
+            }
+            if tick > expected {
+                missing.push(MissingRange::new(client_id, expected, tick));
+            }
+            expected = tick.saturating_add(1);
+        }
+
+        if let Some(highest) = state.highest_tick_seen {
+            if highest >= expected {
+                missing.push(MissingRange::new(
+                    client_id,
+                    expected,
+                    highest.saturating_add(1),
+                ));
+            }
+        }
+
+        if self.backlog_limit > 0 {
+            let min_allowed = self.current_tick.saturating_sub(self.backlog_limit as Tick);
+            for range in &mut missing {
+                range.from = range.from.max(min_allowed);
+                if range.to <= range.from {
+                    range.to = range.from;
+                }
+            }
+            missing.retain(|range| range.len() > 0);
+        }
+
+        merge_adjacent_ranges(missing)
+    }
+}
+
+fn merge_adjacent_ranges(mut ranges: Vec<MissingRange>) -> Vec<MissingRange> {
+    if ranges.len() <= 1 {
+        return ranges;
+    }
+    ranges.sort_by_key(|r| (r.client_id, r.from, r.to));
+    let mut merged = Vec::with_capacity(ranges.len());
+    let mut current = ranges[0].clone();
+    for range in ranges.into_iter().skip(1) {
+        if range.client_id == current.client_id && range.from <= current.to {
+            current.to = current.to.max(range.to);
+        } else {
+            if current.len() > 0 {
+                merged.push(current);
+            }
+            current = range;
+        }
+    }
+    if current.len() > 0 {
+        merged.push(current);
+    }
+    merged
+}
+
+/// Outcome of calling [`ControlCoordinator::ingest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlOutcome {
+    pub status: InsertStatus,
+    pub ready: Vec<ReadyBatch>,
+    pub missing: Vec<MissingRange>,
+}
+
+impl ControlOutcome {
+    pub fn stale() -> Self {
+        Self {
+            status: InsertStatus::Stale,
+            ready: Vec::new(),
+            missing: Vec::new(),
+        }
+    }
+}
+
+/// Insert status for a control packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertStatus {
+    Stored,
+    Replaced,
+    Stale,
+}
+
+/// Batch of synchronized control packets for a given tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyBatch {
+    tick: Tick,
+    packets: Vec<ControlPacket>,
+}
+
+impl ReadyBatch {
+    pub fn tick(&self) -> Tick {
+        self.tick
+    }
+
+    pub fn packets(&self) -> &[ControlPacket] {
+        &self.packets
+    }
+
+    pub fn into_packets(self) -> Vec<ControlPacket> {
+        self.packets
+    }
+}
+
+/// Missing control range that should be requested again from a client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingRange {
+    client_id: ClientId,
+    from: Tick,
+    to: Tick,
+}
+
+impl MissingRange {
+    pub fn new(client_id: ClientId, from: Tick, to: Tick) -> Self {
+        Self {
+            client_id,
+            from,
+            to,
+        }
+    }
+
+    pub fn client_id(&self) -> ClientId {
+        self.client_id
+    }
+
+    pub fn from(&self) -> Tick {
+        self.from
+    }
+
+    pub fn to(&self) -> Tick {
+        self.to
+    }
+
+    pub fn len(&self) -> Tick {
+        self.to.saturating_sub(self.from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn packet(client: ClientId, tick: Tick, payload: &[u8]) -> ControlPacket {
+        ControlPacket::builder(client, tick)
+            .timestamp_ms(42)
+            .payload(payload.to_vec())
+    }
+
+    #[test]
+    fn collects_ready_batches_once_all_clients_present() {
+        let mut coord = ControlCoordinator::new(100);
+        coord.register_client(1).unwrap();
+        coord.register_client(2).unwrap();
+
+        let out = coord.ingest(packet(1, 0, b"A")).unwrap();
+        assert!(out.ready.is_empty());
+
+        let out = coord.ingest(packet(2, 0, b"B")).unwrap();
+        assert_eq!(out.ready.len(), 1);
+        let batch = &out.ready[0];
+        assert_eq!(batch.tick(), 0);
+        assert_eq!(batch.packets().len(), 2);
+        assert_eq!(coord.current_tick(), 1);
+    }
+
+    #[test]
+    fn detects_missing_ranges_for_out_of_order_messages() {
+        let mut coord = ControlCoordinator::new(100);
+        coord.register_client(7).unwrap();
+        coord.register_client(9).unwrap();
+
+        let out = coord.ingest(packet(7, 0, b"foo")).unwrap();
+        assert!(out.missing.is_empty());
+
+        let out = coord.ingest(packet(9, 2, b"bar")).unwrap();
+        assert_eq!(out.missing.len(), 1);
+        let miss = &out.missing[0];
+        assert_eq!(miss.client_id(), 9);
+        assert_eq!(miss.from(), 0);
+        assert_eq!(miss.to(), 2);
+    }
+
+    #[test]
+    fn missing_range_clears_after_receiving_gap() {
+        let mut coord = ControlCoordinator::new(100);
+        coord.register_client(1).unwrap();
+        coord.register_client(2).unwrap();
+
+        coord.ingest(packet(1, 0, b"a")).unwrap();
+        let out = coord.ingest(packet(2, 2, b"b")).unwrap();
+        assert_eq!(out.missing.len(), 1);
+
+        let out = coord.ingest(packet(2, 0, b"c")).unwrap();
+        assert!(out
+            .missing
+            .iter()
+            .any(|range| range.from() == 1 && range.to() == 2));
+        assert!(out.ready.iter().any(|batch| batch.tick() == 0));
+
+        let out = coord.ingest(packet(2, 1, b"d")).unwrap();
+        assert!(out.missing.is_empty());
+
+        let out = coord.ingest(packet(1, 1, b"sync")).unwrap();
+        assert!(out.ready.iter().any(|batch| batch.tick() == 1));
+    }
+
+    #[test]
+    fn replaces_existing_packet_for_same_tick() {
+        let mut coord = ControlCoordinator::new(100);
+        coord.register_client(1).unwrap();
+        coord.register_client(2).unwrap();
+
+        let out = coord.ingest(packet(1, 0, b"old")).unwrap();
+        assert_eq!(out.status, InsertStatus::Stored);
+
+        let out = coord.ingest(packet(1, 0, b"new")).unwrap();
+        assert_eq!(out.status, InsertStatus::Replaced);
+        assert!(out.ready.is_empty());
+    }
+
+    #[test]
+    fn stale_packets_are_ignored() {
+        let mut coord = ControlCoordinator::new(100);
+        coord.register_client(1).unwrap();
+        coord.register_client(2).unwrap();
+
+        coord.ingest(packet(1, 0, b"foo")).unwrap();
+        coord.ingest(packet(2, 0, b"bar")).unwrap();
+        assert_eq!(coord.current_tick(), 1);
+
+        let out = coord.ingest(packet(1, 0, b"late")).unwrap();
+        assert_eq!(out.status, InsertStatus::Stale);
+        assert!(out.ready.is_empty());
+    }
+
+    #[test]
+    fn removal_of_client_unlocks_waiting_batches() {
+        let mut coord = ControlCoordinator::new(100);
+        coord.register_client(1).unwrap();
+        coord.register_client(2).unwrap();
+
+        coord.ingest(packet(1, 0, b"a")).unwrap();
+        coord.ingest(packet(1, 1, b"b")).unwrap();
+        coord.ingest(packet(2, 1, b"c")).unwrap();
+
+        let ready = coord.remove_client(2).unwrap();
+        assert_eq!(ready.len(), 2);
+        assert_eq!(ready[0].tick(), 0);
+        assert_eq!(ready[1].tick(), 1);
+        assert_eq!(coord.current_tick(), 2);
+    }
+
+    #[test]
+    fn backlog_limit_drops_ancient_packets() {
+        let mut coord = ControlCoordinator::with_start_tick(2, 50);
+        coord.register_client(1).unwrap();
+
+        for tick in 50..70 {
+            coord.ingest(packet(1, tick, b"x")).unwrap();
+        }
+
+        assert!(coord
+            .clients
+            .get(&1)
+            .unwrap()
+            .pending
+            .keys()
+            .all(|&tick| tick >= 48));
+    }
+}

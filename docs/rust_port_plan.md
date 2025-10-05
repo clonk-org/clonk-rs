@@ -66,6 +66,9 @@ Each crate exposes FFI-safe boundaries to ease testing and permit staged migrati
    - [x] Established `lc-graphics` crate with RGBA surface abstraction, alpha-aware blitting, deterministic snapshot hashing, and `lc_surface_*` FFI hooks for legacy parity checks.
    - [x] Implemented `lc-audio` crate mirroring SDL2_mixer semantics with Rust backends (decoded WAV/OGG/MP3 support via hound/lewton/minimp3, deterministic software mixer with channel callbacks, CPAL output with null fallback, FFI handles for sounds/music/channels, and parity-oriented unit tests).
 6. **Networking** – port control streams and lobby after engine parity to avoid divergence; use integration tests between Rust/C++ builds to confirm protocol compatibility.
+   - [x] Added `lc-network` crate with a deterministic control coordinator handling backlog limits, re-request generation, client removal, and ready batch aggregation plus dedicated unit tests mirroring `C4GameControlNetwork` semantics.
+   - [x] Implemented Rust lobby state management (host election, readiness tracking, player vs observer capacity) with parity-focused tests.
+   - [ ] Introduce async transport layer bindings and protocol compatibility checks against the C++ build.
 7. **UI/editor** – migrate GUI components last once core engine validated.
 8. **Final integration** – remove C++ harness, produce final Rust binary, update tooling/tests, ensure packaging scripts replaced (cargo xtask).
 
