@@ -48,7 +48,7 @@ Each crate exposes FFI-safe boundaries to ease testing and permit staged migrati
 1. **Foundation pass** – replicate low-level utilities (`lc-core`) with comprehensive unit tests derived from existing C++ behavior (use golden tests where available).
    - [x] `StdBuf`, `StdStrBuf`, `StdFile`, `StdConfig`, `StdMarkup` implemented and under test in `lc-core`.
    - [x] `StdSync` ported via `lc-core::std_sync` (reentrant critical sections, manual/auto reset events, shared lock + callback) with concurrency-focused tests.
-   - [ ] `StdScheduler` scaffolding/TODO – design pending once async model settled.
+   - [x] `StdScheduler` implemented with poll-based fd/event handling and cooperative thread runner; Windows path currently uses condvar wake-ups pending native event integration.
 2. **Resource & IO layer** – port `C4Group` stack to ensure game data loads. Provide FFI layer to call Rust from existing C++ for verification during transition.
 3. **Scripting VM** – port AUL parser/executor; validate against existing script test suite and game scenarios.
 4. **Engine loop & objects** – migrate game simulation in slices (definitions, object control, landscape handling), comparing frame-by-frame outputs against the C++ build using deterministic seeds.
