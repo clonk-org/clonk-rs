@@ -1,0 +1,17 @@
+[package]
+name = "lc-audio"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[features]
+default = ["cpal"]
+
+[dependencies]
+thiserror = "1"
+hound = "3"
+lewton = "0.10"
+minimp3 = "0.5"
+cpal = { version = "0.15", optional = true }
