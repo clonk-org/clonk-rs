@@ -154,5 +154,6 @@ fn rust_value_to_lc(value: &Value) -> LcScriptValue {
             },
             Err(_) => LcScriptValue::default(),
         },
+        Value::Array(_) | Value::Proplist(_) => LcScriptValue::default(),
     }
 }

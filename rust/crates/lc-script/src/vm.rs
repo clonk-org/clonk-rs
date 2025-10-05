@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{BinaryOp, Expr, Function, Stmt, UnaryOp};
+use crate::debugger::DebuggerHooks;
 use crate::error::RuntimeError;
 use crate::value::{Literal, Value};
 
@@ -8,11 +9,15 @@ const MAX_CALL_DEPTH: usize = 64;
 
 pub struct Vm<'a> {
     functions: &'a HashMap<String, Function>,
+    debugger: Option<DebuggerHooks>,
 }
 
 impl<'a> Vm<'a> {
-    pub fn new(functions: &'a HashMap<String, Function>) -> Self {
-        Self { functions }
+    pub fn new(functions: &'a HashMap<String, Function>, debugger: Option<DebuggerHooks>) -> Self {
+        Self {
+            functions,
+            debugger,
+        }
     }
 
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeError> {
@@ -35,9 +40,23 @@ impl<'a> Vm<'a> {
             )));
         }
 
+        if let Some(debugger) = &self.debugger {
+            if let Some(callback) = debugger.on_call() {
+                callback(name, args);
+            }
+        }
+
         let mut env = Environment::new_with_params(&function.params, args);
-        self.execute_statements(&function.body, &mut env, depth)
-            .map(|value| value.unwrap_or(Value::Nil))
+        let result = self.execute_statements(&function.body, &mut env, depth)?;
+        let value = result.unwrap_or(Value::Nil);
+
+        if let Some(debugger) = &self.debugger {
+            if let Some(callback) = debugger.on_return() {
+                callback(name, &value);
+            }
+        }
+
+        Ok(value)
     }
 
     fn execute_statements(
@@ -179,6 +198,30 @@ impl<'a> Vm<'a> {
                     evaluated_args.push(self.evaluate(arg, env, depth + 1)?);
                 }
                 self.invoke(callee, &evaluated_args, depth + 1)
+            }
+            Expr::Array(elements) => {
+                let mut values = Vec::with_capacity(elements.len());
+                for element in elements {
+                    values.push(self.evaluate(element, env, depth)?);
+                }
+                Ok(Value::Array(values))
+            }
+            Expr::Proplist(entries) => {
+                let mut map = HashMap::with_capacity(entries.len());
+                for (key, expr) in entries {
+                    let value = self.evaluate(expr, env, depth)?;
+                    map.insert(key.clone(), value);
+                }
+                Ok(Value::Proplist(map))
+            }
+            Expr::Index(target, index) => {
+                let collection = self.evaluate(target, env, depth)?;
+                let idx = self.evaluate(index, env, depth)?;
+                self.eval_index(collection, idx)
+            }
+            Expr::Property(target, name) => {
+                let proplist = self.evaluate(target, env, depth)?;
+                self.eval_property(proplist, name)
             }
         }
     }
@@ -332,8 +375,46 @@ impl<'a> Vm<'a> {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
+            (Value::Array(a), Value::Array(b)) => a == b,
+            (Value::Proplist(a), Value::Proplist(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
             _ => false,
+        }
+    }
+
+    fn eval_index(&self, collection: Value, index: Value) -> Result<Value, RuntimeError> {
+        match (&collection, index) {
+            (Value::Array(elements), Value::Int(raw_index)) => {
+                if raw_index < 0 {
+                    return Err(RuntimeError::new("array index cannot be negative"));
+                }
+                let index = raw_index as usize;
+                elements
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| RuntimeError::new("array index out of bounds"))
+            }
+            (Value::Proplist(entries), Value::String(key)) => {
+                Ok(entries.get(&key).cloned().unwrap_or(Value::Nil))
+            }
+            (Value::Proplist(_), other) => Err(RuntimeError::new(format!(
+                "proplist keys must be strings, got {}",
+                other.type_name()
+            ))),
+            (other, _) => Err(RuntimeError::new(format!(
+                "cannot index value of type {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn eval_property(&self, value: Value, name: &str) -> Result<Value, RuntimeError> {
+        match &value {
+            Value::Proplist(entries) => Ok(entries.get(name).cloned().unwrap_or(Value::Nil)),
+            other => Err(RuntimeError::new(format!(
+                "cannot access property '{name}' on value of type {}",
+                other.type_name()
+            ))),
         }
     }
 }

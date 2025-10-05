@@ -300,6 +300,18 @@ impl<'a> Parser<'a> {
                         ));
                     }
                 }
+            } else if self.consume_if_symbol(Symbol::LBracket)?.is_some() {
+                let index = self.parse_expression()?;
+                self.expect_symbol(Symbol::RBracket, "expected ']' after index expression")?;
+                expr = Expr::Index(Box::new(expr), Box::new(index));
+            } else if self.consume_if_symbol(Symbol::Dot)?.is_some() {
+                let token = self.expect_identifier("expected property name after '.'")?;
+                let name = if let TokenKind::Identifier(name) = token.kind {
+                    name
+                } else {
+                    unreachable!()
+                };
+                expr = Expr::Property(Box::new(expr), name);
             } else {
                 break;
             }
@@ -336,8 +348,66 @@ impl<'a> Parser<'a> {
                 self.expect_symbol(Symbol::RParen, "expected ')' after expression")?;
                 Ok(expr)
             }
+            TokenKind::Symbol(Symbol::LBracket) => self.parse_array_literal(),
+            TokenKind::Symbol(Symbol::LBrace) => self.parse_proplist_literal(),
             _ => Err(ParseError::new(
                 "unexpected token in expression",
+                token.line,
+                token.column,
+            )),
+        }
+    }
+
+    fn parse_array_literal(&mut self) -> Result<Expr, ParseError> {
+        if self.consume_if_symbol(Symbol::RBracket)?.is_some() {
+            return Ok(Expr::Array(Vec::new()));
+        }
+        let mut elements = Vec::new();
+        loop {
+            elements.push(self.parse_expression()?);
+            if self.consume_if_symbol(Symbol::Comma)?.is_some() {
+                if self.consume_if_symbol(Symbol::RBracket)?.is_some() {
+                    break;
+                }
+                continue;
+            }
+            self.expect_symbol(Symbol::RBracket, "expected ']' after array literal")?;
+            break;
+        }
+        Ok(Expr::Array(elements))
+    }
+
+    fn parse_proplist_literal(&mut self) -> Result<Expr, ParseError> {
+        if self.consume_if_symbol(Symbol::RBrace)?.is_some() {
+            return Ok(Expr::Proplist(Vec::new()));
+        }
+        let mut entries = Vec::new();
+        loop {
+            let key = self.parse_proplist_key()?;
+            self.expect_symbol(Symbol::Equal, "expected '=' after proplist key")?;
+            let value = self.parse_expression()?;
+            entries.push((key, value));
+
+            if self.consume_if_symbol(Symbol::Comma)?.is_some() {
+                if self.consume_if_symbol(Symbol::RBrace)?.is_some() {
+                    break;
+                }
+                continue;
+            }
+
+            self.expect_symbol(Symbol::RBrace, "expected '}' after proplist literal")?;
+            break;
+        }
+        Ok(Expr::Proplist(entries))
+    }
+
+    fn parse_proplist_key(&mut self) -> Result<String, ParseError> {
+        let token = self.consume()?;
+        match token.kind {
+            TokenKind::Identifier(name) => Ok(name),
+            TokenKind::String(value) => Ok(value),
+            _ => Err(ParseError::new(
+                "expected identifier or string for proplist key",
                 token.line,
                 token.column,
             )),

@@ -37,11 +37,13 @@ pub enum Symbol {
     RBrace,
     Comma,
     Semicolon,
+    Colon,
     Plus,
     Minus,
     Star,
     Slash,
     Percent,
+    Dot,
     Equal,
     EqualEqual,
     Bang,
@@ -52,6 +54,8 @@ pub enum Symbol {
     GreaterEqual,
     AndAnd,
     OrOr,
+    LBracket,
+    RBracket,
 }
 
 impl Token {

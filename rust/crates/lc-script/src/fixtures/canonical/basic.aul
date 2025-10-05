@@ -1,0 +1,13 @@
+global func CanonicalArrayCheck() {
+    var values = [1, 2, 3, 4, 5, 6];
+    return values[0] + values[1] + values[2] + values[3] + values[4] + values[5];
+}
+
+global func CanonicalProplistCheck() {
+    var base = { count = 10, nested = { offset = 3 }, list = [8, 5, 40] };
+    return base.count + base.nested.offset + base.list[2];
+}
+
+global func FxCanonicalStart(amount) {
+    return amount;
+}

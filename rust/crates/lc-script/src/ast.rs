@@ -50,6 +50,10 @@ pub enum Expr {
     Unary(UnaryOp, Box<Expr>),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     Call { callee: String, args: Vec<Expr> },
+    Array(Vec<Expr>),
+    Proplist(Vec<(String, Expr)>),
+    Index(Box<Expr>, Box<Expr>),
+    Property(Box<Expr>, String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

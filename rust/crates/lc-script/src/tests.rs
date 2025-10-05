@@ -1,4 +1,5 @@
-use crate::{Engine, Value};
+use crate::{DebuggerHooks, Engine, Value};
+use std::sync::{Arc, Mutex};
 
 fn load_script(engine: &mut Engine, source: &str) {
     engine.load_script(source).expect("script should load");
@@ -99,4 +100,129 @@ fn reports_unknown_function() {
     let engine = Engine::new();
     let error = engine.call("Missing", &[]).unwrap_err();
     assert!(format!("{error}").contains("unknown function"));
+}
+
+#[test]
+fn supports_arrays_and_indexing() {
+    let mut engine = Engine::new();
+    load_script(
+        &mut engine,
+        r#"
+        global func ThirdElement() {
+            var arr = [1, 2, 3, 4];
+            return arr[2];
+        }
+        "#,
+    );
+
+    let result = engine.call("ThirdElement", &[]).expect("call succeeds");
+    assert_eq!(result, Value::Int(3));
+}
+
+#[test]
+fn supports_proplists_and_nested_access() {
+    let mut engine = Engine::new();
+    load_script(
+        &mut engine,
+        r#"
+        global func ProplistQuery() {
+            var data = { foo = 42, nested = { value = 7 }, numbers = [5, 9] };
+            return data.foo + data.nested.value + data.numbers[1];
+        }
+        "#,
+    );
+
+    let result = engine.call("ProplistQuery", &[]).expect("call succeeds");
+    assert_eq!(result, Value::Int(58));
+}
+
+#[test]
+fn effect_callbacks_dispatch_via_engine_helper() {
+    let mut engine = Engine::new();
+    load_script(
+        &mut engine,
+        r#"
+        global func FxFireStart(effect, target) {
+            return effect + target;
+        }
+        "#,
+    );
+
+    let effect_result = engine
+        .call_effect_callback("Fire", "Start", &[Value::Int(10), Value::Int(5)])
+        .expect("effect dispatch succeeds");
+    assert_eq!(effect_result, Some(Value::Int(15)));
+
+    let missing = engine
+        .call_effect_callback("Fire", "Stop", &[])
+        .expect("missing callback returns None");
+    assert!(missing.is_none());
+}
+
+#[test]
+fn debugger_hooks_capture_call_and_return() {
+    let mut engine = Engine::new();
+    load_script(
+        &mut engine,
+        r#"
+        global func AddOne(value) {
+            return value + 1;
+        }
+        "#,
+    );
+
+    let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let return_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let mut hooks = DebuggerHooks::new();
+    {
+        let call_log = Arc::clone(&call_log);
+        hooks.set_on_call(move |name, args| {
+            let mut log = call_log.lock().unwrap();
+            log.push(format!("{name}({})", args.len()));
+        });
+    }
+    {
+        let return_log = Arc::clone(&return_log);
+        hooks.set_on_return(move |name, value| {
+            let mut log = return_log.lock().unwrap();
+            log.push(format!("{name} -> {value}"));
+        });
+    }
+    engine.set_debugger_hooks(hooks);
+
+    let result = engine
+        .call("AddOne", &[Value::Int(41)])
+        .expect("call succeeds");
+    assert_eq!(result, Value::Int(42));
+
+    let call_entries = call_log.lock().unwrap().clone();
+    assert_eq!(call_entries, vec!["AddOne(1)".to_string()]);
+    let return_entries = return_log.lock().unwrap().clone();
+    assert_eq!(return_entries, vec!["AddOne -> 42".to_string()]);
+}
+
+const CANONICAL_SCENARIO: &str = include_str!("fixtures/canonical/basic.aul");
+
+#[test]
+fn canonical_scenario_parity_harness() {
+    let mut engine = Engine::new();
+    engine
+        .load_script(CANONICAL_SCENARIO)
+        .expect("canonical script loads");
+
+    let array_sum = engine
+        .call("CanonicalArrayCheck", &[])
+        .expect("array parity call succeeds");
+    assert_eq!(array_sum, Value::Int(21));
+
+    let proplist = engine
+        .call("CanonicalProplistCheck", &[])
+        .expect("proplist parity call succeeds");
+    assert_eq!(proplist, Value::Int(53));
+
+    let effect = engine
+        .call_effect_callback("Canonical", "Start", &[Value::Int(7)])
+        .expect("effect callback dispatches");
+    assert_eq!(effect, Some(Value::Int(7)));
 }

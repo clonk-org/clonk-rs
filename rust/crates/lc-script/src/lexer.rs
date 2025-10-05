@@ -60,6 +60,20 @@ impl<'a> Lexer<'a> {
                 ')' => return Ok(Token::new(TokenKind::Symbol(Symbol::RParen), line, column)),
                 '{' => return Ok(Token::new(TokenKind::Symbol(Symbol::LBrace), line, column)),
                 '}' => return Ok(Token::new(TokenKind::Symbol(Symbol::RBrace), line, column)),
+                '[' => {
+                    return Ok(Token::new(
+                        TokenKind::Symbol(Symbol::LBracket),
+                        line,
+                        column,
+                    ))
+                }
+                ']' => {
+                    return Ok(Token::new(
+                        TokenKind::Symbol(Symbol::RBracket),
+                        line,
+                        column,
+                    ))
+                }
                 ',' => return Ok(Token::new(TokenKind::Symbol(Symbol::Comma), line, column)),
                 ';' => {
                     return Ok(Token::new(
@@ -68,6 +82,8 @@ impl<'a> Lexer<'a> {
                         column,
                     ))
                 }
+                ':' => return Ok(Token::new(TokenKind::Symbol(Symbol::Colon), line, column)),
+                '.' => return Ok(Token::new(TokenKind::Symbol(Symbol::Dot), line, column)),
                 '+' => return Ok(Token::new(TokenKind::Symbol(Symbol::Plus), line, column)),
                 '-' => return Ok(Token::new(TokenKind::Symbol(Symbol::Minus), line, column)),
                 '*' => return Ok(Token::new(TokenKind::Symbol(Symbol::Star), line, column)),
