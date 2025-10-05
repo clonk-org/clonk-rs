@@ -24,6 +24,10 @@
 #include <C4InputValidation.h>
 #include "StdConfig.h"
 
+#if defined(USE_RUST_GROUP_VALIDATION)
+#include "rust/RustGroupBridge.h"
+#endif
+
 #ifdef C4ENGINE
 #include "C4Log.h"
 #endif
@@ -732,6 +736,9 @@ bool C4Group::OpenReal(const char *szFilename)
 		Status = GRPF_Folder;
 		SCopy("Open directory", Head.Maker, C4GroupMaxMaker);
 		ResetSearch();
+#if defined(USE_RUST_GROUP_VALIDATION)
+		RustGroupBridge::ValidateOnOpen(*this);
+#endif
 		// Success
 		return true;
 	}
@@ -741,6 +748,9 @@ bool C4Group::OpenReal(const char *szFilename)
 	{
 		Status = GRPF_File;
 		ResetSearch();
+#if defined(USE_RUST_GROUP_VALIDATION)
+		RustGroupBridge::ValidateOnOpen(*this);
+#endif
 		return true;
 	}
 	else

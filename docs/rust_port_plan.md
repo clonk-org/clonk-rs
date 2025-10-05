@@ -52,7 +52,7 @@ Each crate exposes FFI-safe boundaries to ease testing and permit staged migrati
 2. **Resource & IO layer** – port `C4Group` stack to ensure game data loads. Provide FFI layer to call Rust from existing C++ for verification during transition.
    - [x] `lc-resources::Group` handles directory and packed groups, including header unscrambling, with regression tests covering synthetic archives.
    - [x] Exposed `lc_group_*` C ABI for opening groups, enumerating entries, and reading files so legacy C++ can validate Rust outputs.
-   - [ ] Tie new FFI into the legacy loader to cross-check live content (pending).
+   - [x] Tied the Rust `lc_group_*` FFI into the legacy loader via the optional `USE_RUST_GROUP_VALIDATION` flag, running metadata parity checks against every on-disk group open.
 3. **Scripting VM** – port AUL parser/executor; validate against existing script test suite and game scenarios.
 4. **Engine loop & objects** – migrate game simulation in slices (definitions, object control, landscape handling), comparing frame-by-frame outputs against the C++ build using deterministic seeds.
 5. **Rendering & audio** – implement wrapper surfaces and audio mixers; rely on original assets to cross-check rendering results (image snapshots via integration tests).

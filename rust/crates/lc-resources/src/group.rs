@@ -183,7 +183,7 @@ impl PackedGroup {
 
 fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
     let mut entries = Vec::new();
-    for entry in WalkDir::new(root) {
+    for entry in WalkDir::new(root).min_depth(1).max_depth(1) {
         let entry = entry.map_err(convert_walkdir_error)?;
         if entry.path() == root {
             continue;
@@ -333,6 +333,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::create_dir(dir.path().join("sub")).unwrap();
         fs::write(dir.path().join("sub/file.txt"), b"hello").unwrap();
+        fs::write(dir.path().join("root.txt"), b"world").unwrap();
 
         let group = Group::open(dir.path()).unwrap();
         assert_eq!(group.root(), dir.path());
@@ -340,10 +341,15 @@ mod tests {
         assert_eq!(entries.len(), 2);
         let file_entry = entries
             .iter()
-            .find(|entry| entry.relative_path == Path::new("sub/file.txt"))
+            .find(|entry| entry.relative_path == Path::new("root.txt"))
             .unwrap();
         assert!(!file_entry.is_directory);
         assert_eq!(file_entry.size, 5);
+        let dir_entry = entries
+            .iter()
+            .find(|entry| entry.relative_path == Path::new("sub"))
+            .unwrap();
+        assert!(dir_entry.is_directory);
 
         let data = group.read_file("sub/file.txt").unwrap();
         assert_eq!(data, b"hello");

@@ -40,9 +40,22 @@ project("LegacyClonk" LANGUAGES CXX ${LANGUAGE_OBJCXX})
 
 # Rust integration
 option(USE_RUST_CONFIG "Use Rust-based configuration loader" OFF)
-if(USE_RUST_CONFIG)
+option(USE_RUST_GROUP_VALIDATION "Cross-check group contents with the Rust port" OFF)
+if(USE_RUST_CONFIG OR USE_RUST_GROUP_VALIDATION)
     find_package(Threads REQUIRED)
-    add_definitions(-DUSE_RUST_CONFIG)
+    if (CMAKE_BUILD_TYPE AND NOT DEFINED CMAKE_BUILD_TYPE_LOWER)
+        string(TOLOWER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_LOWER)
+    endif()
+    if (NOT DEFINED CMAKE_BUILD_TYPE_LOWER)
+        set(CMAKE_BUILD_TYPE_LOWER "debug")
+    endif()
+    if (USE_RUST_CONFIG)
+        add_definitions(-DUSE_RUST_CONFIG)
+    endif()
+    if (USE_RUST_GROUP_VALIDATION)
+        add_definitions(-DUSE_RUST_GROUP_VALIDATION)
+    endif()
+
     add_library(lc_core STATIC IMPORTED GLOBAL)
     set_target_properties(lc_core PROPERTIES
         IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_core.a"
@@ -55,10 +68,24 @@ if(USE_RUST_CONFIG)
     set_target_properties(lc_core_static PROPERTIES
         IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_core.a"
     )
+
+    add_library(lc_resources STATIC IMPORTED GLOBAL)
+    set_target_properties(lc_resources PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_resources.a"
+    )
+    add_library(lc_resources_cdylib SHARED IMPORTED GLOBAL)
+    set_target_properties(lc_resources_cdylib PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_resources.dylib"
+    )
+    add_library(lc_resources_static STATIC IMPORTED GLOBAL)
+    set_target_properties(lc_resources_static PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_resources.a"
+    )
+
     add_custom_target(rust_build ALL
-        COMMAND cargo build --manifest-path ${CMAKE_SOURCE_DIR}/rust/Cargo.toml --lib
+        COMMAND cargo build --manifest-path ${CMAKE_SOURCE_DIR}/rust/Cargo.toml --lib --package lc-core --package lc-resources
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/rust
-        COMMENT "Building Rust lc_core"
+        COMMENT "Building Rust workspace"
     )
     set(RUST_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/rust/include")
 endif()
@@ -205,6 +232,9 @@ append_filelist(CLONK_SOURCES Engine)
 if (USE_RUST_CONFIG)
 	list(APPEND CLONK_SOURCES src/rust/RustConfigBridge.cpp)
 endif ()
+if (USE_RUST_GROUP_VALIDATION)
+	list(APPEND CLONK_SOURCES src/rust/RustGroupBridge.cpp)
+endif ()
 
 set(LICENSES
 	"COPYING@LegacyClonk@ISC"
@@ -298,10 +328,15 @@ endif ()
 target_link_libraries(clonk PRIVATE standard)
 target_compile_definitions(clonk PRIVATE C4ENGINE)
 
-if (USE_RUST_CONFIG)
+if (USE_RUST_CONFIG OR USE_RUST_GROUP_VALIDATION)
 	add_dependencies(clonk rust_build)
 	target_include_directories(clonk PRIVATE ${RUST_INCLUDE_DIR})
+endif ()
+if (USE_RUST_CONFIG)
 	target_link_libraries(clonk PRIVATE lc_core_static Threads::Threads)
+endif ()
+if (USE_RUST_GROUP_VALIDATION)
+	target_link_libraries(clonk PRIVATE lc_resources_static Threads::Threads)
 endif ()
 
 if (USE_SDL_MIXER AND WIN32)

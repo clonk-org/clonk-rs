@@ -218,6 +218,8 @@ mod tests {
         std::fs::create_dir(&subdir).unwrap();
         let file_path = subdir.join("file.txt");
         std::fs::write(&file_path, b"hello").unwrap();
+        let root_file = dir.path().join("root.txt");
+        std::fs::write(&root_file, b"world").unwrap();
 
         let c_path = CString::new(dir.path().to_string_lossy().into_owned()).unwrap();
         let handle = lc_group_open(c_path.as_ptr());
@@ -226,22 +228,27 @@ mod tests {
         let mut len = 0usize;
         let entries_ptr = lc_group_entries(handle, &mut len as *mut usize);
         assert!(!entries_ptr.is_null());
-        assert!(len >= 2);
+        assert_eq!(len, 2);
 
         let entries = unsafe { slice::from_raw_parts(entries_ptr, len) };
-        let mut found_file = false;
+        let mut found_root = false;
+        let mut found_sub = false;
         for entry in entries {
             if entry.path.is_null() {
                 continue;
             }
             let path = unsafe { CStr::from_ptr(entry.path) }.to_string_lossy();
-            if path == "sub/file.txt" {
-                found_file = true;
+            if path == "root.txt" {
+                found_root = true;
                 assert!(!entry.is_directory);
                 assert_eq!(entry.size, 5);
+            } else if path == "sub" {
+                found_sub = true;
+                assert!(entry.is_directory);
             }
         }
-        assert!(found_file);
+        assert!(found_root);
+        assert!(found_sub);
         lc_group_entries_free(entries_ptr, len);
 
         let relative = CString::new("sub/file.txt").unwrap();
