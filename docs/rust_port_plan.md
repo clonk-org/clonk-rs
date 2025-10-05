@@ -63,6 +63,8 @@ Each crate exposes FFI-safe boundaries to ease testing and permit staged migrati
      - Added a `Landscape` module with collision resolution, ensured engine spawns/ticks clamp objects to terrain, and covered the path with unit tests.
      - Introduced a JSON recorder/playback harness backed by serde, exported FFI bindings, and hooked `C4Game` through a new `USE_RUST_ENGINE_VALIDATION` bridge so legacy runs can stream frames for Rust comparison or recording.
 5. **Rendering & audio** – implement wrapper surfaces and audio mixers; rely on original assets to cross-check rendering results (image snapshots via integration tests).
+   - [x] Established `lc-graphics` crate with RGBA surface abstraction, alpha-aware blitting, deterministic snapshot hashing, and `lc_surface_*` FFI hooks for legacy parity checks.
+   - [ ] Implement `lc-audio` crate mirroring SDL2_mixer semantics with Rust backends.
 6. **Networking** – port control streams and lobby after engine parity to avoid divergence; use integration tests between Rust/C++ builds to confirm protocol compatibility.
 7. **UI/editor** – migrate GUI components last once core engine validated.
 8. **Final integration** – remove C++ harness, produce final Rust binary, update tooling/tests, ensure packaging scripts replaced (cargo xtask).

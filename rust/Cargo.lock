@@ -199,6 +199,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lc-graphics"
+version = "0.1.0"
+dependencies = [
+ "rand",
+ "thiserror",
+]
+
+[[package]]
 name = "lc-resources"
 version = "0.1.0"
 dependencies = [
