@@ -1,0 +1,10 @@
+[package]
+name = "lc-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lc-script = { path = "../lc-script" }
+rand = { version = "0.8", default-features = false, features = ["std", "small_rng"] }
+thiserror = "1"
+

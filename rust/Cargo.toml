@@ -3,5 +3,6 @@ members = [
     "crates/lc-core",
     "crates/lc-resources",
     "crates/lc-script",
+    "crates/lc-engine",
 ]
 resolver = "2"
