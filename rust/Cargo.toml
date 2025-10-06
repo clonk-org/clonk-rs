@@ -7,5 +7,6 @@ members = [
     "crates/lc-graphics",
     "crates/lc-audio",
     "crates/lc-network",
+    "crates/lc-gui",
 ]
 resolver = "2"
