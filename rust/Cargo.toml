@@ -10,5 +10,6 @@ members = [
     "crates/lc-gui",
     "crates/lc-platform",
     "crates/lc-app",
+    "xtask",
 ]
 resolver = "2"
