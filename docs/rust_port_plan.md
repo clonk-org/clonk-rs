@@ -87,7 +87,7 @@ Each crate exposes FFI-safe boundaries to ease testing and permit staged migrati
   - Added `cargo xtask engine-snapshots record|verify` to manage JSON baselines under `rust/snapshots/engine/v1` and a parity test that replays them through `lc-engine::Playback`.
   - Baseline seeded with the deterministic `basic_movement` scenario; refresh by running the C++ build with `LC_RUST_ENGINE_RECORD=<path>` or via the xtask helper.
 - Continuous integration: use `cargo fmt`, `cargo clippy`, OS-specific integration tests via GitHub Actions/CI equivalent.
-- Performance regressions tracked via criterion benchmarks for hotspots (script execution, landscape updates).
+- [x] Performance regressions tracked via Criterion benchmarks for hotspots (script execution, landscape updates) under `lc-script/benches/script_execution.rs` and `lc-engine/benches/engine_tick.rs`.
 
 ## 6. Tooling & Automation Ideas
 - Source-to-source assistance: write `clang`-based extractor to emit annotated AST -> Rust skeletons for manual filling.

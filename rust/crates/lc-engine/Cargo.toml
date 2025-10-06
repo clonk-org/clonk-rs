@@ -12,3 +12,10 @@ rand = { version = "0.8", default-features = false, features = ["std", "small_rn
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "engine_tick"
+harness = false

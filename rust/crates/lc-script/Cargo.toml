@@ -8,3 +8,10 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 thiserror = "1"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "script_execution"
+harness = false
