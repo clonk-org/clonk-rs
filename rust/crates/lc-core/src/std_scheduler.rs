@@ -4,8 +4,18 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+use std::ptr;
+#[cfg(all(not(unix), not(windows)))]
 use std::sync::Condvar;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HANDLE, WAIT_ABANDONED_0, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject, INFINITE,
+};
 
 pub const INFINITE_TIMEOUT: i32 = -1;
 
@@ -40,11 +50,33 @@ impl FdInterest {
     }
 }
 
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HandleInterest {
+    handle: HANDLE,
+}
+
+#[cfg(windows)]
+impl HandleInterest {
+    pub fn new(handle: HANDLE) -> Self {
+        Self { handle }
+    }
+
+    pub fn handle(&self) -> HANDLE {
+        self.handle
+    }
+}
+
 pub trait StdSchedulerProc: Send + Sync {
     fn execute(&self, timeout: i32) -> bool;
 
     #[cfg(unix)]
     fn get_fds(&self) -> Vec<FdInterest> {
+        Vec::new()
+    }
+
+    #[cfg(windows)]
+    fn get_handles(&self) -> Vec<HandleInterest> {
         Vec::new()
     }
 
@@ -143,14 +175,58 @@ impl Drop for Unblocker {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[derive(Debug)]
+struct Unblocker {
+    handle: HANDLE,
+}
+
+#[cfg(windows)]
+impl Unblocker {
+    fn new() -> io::Result<Self> {
+        let handle = unsafe { CreateEventW(ptr::null_mut(), 0, 0, ptr::null()) };
+        if handle == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(Self { handle })
+        }
+    }
+
+    fn handle(&self) -> HANDLE {
+        self.handle
+    }
+
+    fn notify(&self) -> io::Result<()> {
+        let result = unsafe { SetEvent(self.handle) };
+        if result == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn reset(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Unblocker {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
 #[derive(Debug)]
 struct Unblocker {
     state: Mutex<bool>,
     condvar: Condvar,
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 impl Unblocker {
     fn new() -> io::Result<Self> {
         Ok(Self {
@@ -316,7 +392,130 @@ impl StdScheduler {
         success
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    pub fn execute(&mut self, mut timeout: i32) -> bool {
+        if self.procs.is_empty() {
+            return false;
+        }
+
+        for entry in &self.procs {
+            let proc_timeout = entry.proc.get_timeout();
+            if proc_timeout >= 0 && (timeout == INFINITE_TIMEOUT || timeout > proc_timeout) {
+                timeout = proc_timeout;
+            }
+        }
+
+        let wait_timeout = if timeout < 0 {
+            INFINITE
+        } else {
+            timeout as u32
+        };
+
+        let mut handles: Vec<HANDLE> = Vec::with_capacity(1 + self.procs.len());
+        handles.push(self.unblocker.handle());
+
+        struct HandleRange {
+            proc: ProcHandle,
+            start: usize,
+            end: usize,
+        }
+
+        let mut ranges: Vec<HandleRange> = Vec::new();
+        let mut fallbacks: Vec<(ProcHandle, i32)> = Vec::new();
+
+        for entry in &self.procs {
+            let proc = Arc::clone(&entry.proc);
+            let handle_list = proc.get_handles();
+            if handle_list.is_empty() {
+                fallbacks.push((proc, entry.proc.get_timeout()));
+            } else {
+                let start = handles.len();
+                handles.extend(handle_list.iter().map(|interest| interest.handle()));
+                let end = handles.len();
+                ranges.push(HandleRange { proc, start, end });
+            }
+        }
+
+        let mut success = true;
+        let mut signalled: Vec<usize> = Vec::new();
+
+        if handles.len() > 0 {
+            let wait_result = unsafe {
+                WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, wait_timeout)
+            };
+
+            match wait_result {
+                WAIT_FAILED => {
+                    let err = io::Error::last_os_error();
+                    eprintln!("StdScheduler::execute wait failed: {}", err);
+                    success = false;
+                }
+                WAIT_TIMEOUT => {}
+                result => {
+                    if let Some(idx) = decode_wait_index(result, handles.len()) {
+                        signalled.push(idx);
+                    }
+                }
+            }
+        }
+
+        if handles.len() > 1 {
+            for index in 1..handles.len() {
+                if signalled.contains(&index) {
+                    continue;
+                }
+                let status = unsafe { WaitForSingleObject(handles[index], 0) };
+                match status {
+                    WAIT_FAILED => {
+                        let err = io::Error::last_os_error();
+                        eprintln!("StdScheduler::execute wait failed: {}", err);
+                        success = false;
+                    }
+                    WAIT_OBJECT_0 | WAIT_ABANDONED_0 => {
+                        signalled.push(index);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        for idx in signalled {
+            if idx == 0 {
+                let _ = self.unblocker.reset();
+                continue;
+            }
+            for range in &ranges {
+                if idx >= range.start && idx < range.end {
+                    if !range.proc.execute(0) {
+                        success = false;
+                        self.handle_error(&range.proc);
+                    }
+                    break;
+                }
+            }
+        }
+
+        for (proc, proc_timeout) in &fallbacks {
+            let should_run = timeout == 0 || *proc_timeout == 0 || timeout >= 0;
+            if should_run && !proc.execute(timeout) {
+                success = false;
+                self.handle_error(proc);
+            }
+        }
+
+        for entry in &self.procs {
+            if entry.proc.get_timeout() == 0 {
+                if !entry.proc.execute(INFINITE_TIMEOUT) {
+                    success = false;
+                    self.handle_error(&entry.proc);
+                }
+            }
+        }
+
+        success
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
     pub fn execute(&mut self, mut timeout: i32) -> bool {
         if self.procs.is_empty() {
             return false;
@@ -358,6 +557,18 @@ impl StdScheduler {
         if let Some(handler) = &self.on_error {
             handler(proc.as_ref());
         }
+    }
+}
+
+#[cfg(windows)]
+fn decode_wait_index(result: u32, handle_count: usize) -> Option<usize> {
+    let count = handle_count as u32;
+    if result >= WAIT_OBJECT_0 && result < WAIT_OBJECT_0 + count {
+        Some((result - WAIT_OBJECT_0) as usize)
+    } else if result >= WAIT_ABANDONED_0 && result < WAIT_ABANDONED_0 + count {
+        Some((result - WAIT_ABANDONED_0) as usize)
+    } else {
+        None
     }
 }
 
