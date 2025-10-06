@@ -439,6 +439,7 @@ dependencies = [
  "lc-graphics",
  "lc-gui",
  "lc-network",
+ "lc-platform",
  "lc-resources",
  "lc-script",
  "thiserror",
@@ -500,6 +501,14 @@ dependencies = [
  "serde",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "lc-platform"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

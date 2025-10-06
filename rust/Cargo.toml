@@ -8,6 +8,7 @@ members = [
     "crates/lc-audio",
     "crates/lc-network",
     "crates/lc-gui",
+    "crates/lc-platform",
     "crates/lc-app",
 ]
 resolver = "2"

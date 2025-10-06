@@ -1,6 +1,6 @@
 use std::f32::consts::PI;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use lc_audio::{AudioSystem, SoundHandle};
@@ -14,6 +14,7 @@ use lc_gui::{
     DrawCommand, Gui, GuiError, Point as GuiPoint, Rect as GuiRect, Size as GuiSize, WidgetId,
 };
 use lc_network::{ClientId, ControlCoordinator, ControlError, ControlPacket, Lobby, LobbyError};
+use lc_platform::{AppPaths, PathsError};
 use lc_resources::{Group, GroupError};
 
 const DEMO_CONFIG_BYTES: &[u8] = include_bytes!("demo_config.cfg");
@@ -30,6 +31,8 @@ pub type GameResult<T> = Result<T, GameError>;
 pub enum GameError {
     #[error("configuration error: {0}")]
     Config(#[from] std::io::Error),
+    #[error("platform error: {0}")]
+    Platform(#[from] PathsError),
     #[error("engine error: {0}")]
     Engine(#[from] EngineError),
     #[error("audio error: {0}")]
@@ -46,6 +49,7 @@ pub enum GameError {
 
 pub struct DemoGame {
     engine: Engine,
+    paths: AppPaths,
     object_id: ObjectId,
     ground_height: i32,
     configured_ticks: u32,
@@ -74,6 +78,10 @@ pub struct GameSummary {
     pub scenario_name: String,
     pub system_version: String,
     pub system_entry_count: usize,
+    pub install_root: PathBuf,
+    pub user_data_dir: PathBuf,
+    pub logs_dir: PathBuf,
+    pub cache_dir: PathBuf,
 }
 
 impl DemoGame {
@@ -91,6 +99,7 @@ impl DemoGame {
             .unwrap_or_else(|| "Rust Demo Bounce".to_string());
         let scenario_label = format!("SCENARIO {}", sanitize_label(&scenario_name));
 
+        let paths = AppPaths::discover()?;
         let mut engine = Engine::with_seed(12345);
         let definition = Definition::from_script("DemoBouncer", "Demo Bouncer", DEMO_SCRIPT)?;
         engine.register_definition(definition)?;
@@ -126,7 +135,7 @@ impl DemoGame {
         lobby.settings_mut().scenario = Some(scenario_name.clone());
         lobby.settings_mut().script_hash = Some("demo".to_string());
 
-        let system_group = Group::open(planet_group_path())?;
+        let system_group = Group::open(paths.system_group_path())?;
         let system_entry_count = system_group.entries()?.len();
         let system_version = system_group
             .read_file("Version.txt")
@@ -147,6 +156,7 @@ impl DemoGame {
 
         Ok(Self {
             engine,
+            paths,
             object_id,
             ground_height,
             configured_ticks,
@@ -224,6 +234,10 @@ impl DemoGame {
             scenario_name: self.scenario_name.clone(),
             system_version: self.system_version.clone(),
             system_entry_count: self.system_entry_count,
+            install_root: self.paths.install_root().to_path_buf(),
+            user_data_dir: self.paths.user_data_dir().to_path_buf(),
+            logs_dir: self.paths.logs_dir().to_path_buf(),
+            cache_dir: self.paths.cache_dir().to_path_buf(),
         })
     }
 
@@ -319,10 +333,6 @@ impl DemoGame {
             }
         }
     }
-}
-
-fn planet_group_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../planet/System.c4g")
 }
 
 fn load_demo_config() -> std::io::Result<Config> {

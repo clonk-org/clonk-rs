@@ -12,4 +12,5 @@ lc-graphics = { path = "../lc-graphics" }
 lc-gui = { path = "../lc-gui" }
 lc-audio = { path = "../lc-audio" }
 lc-network = { path = "../lc-network" }
+lc-platform = { path = "../lc-platform" }
 thiserror = "1.0"

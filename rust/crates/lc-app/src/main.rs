@@ -40,6 +40,10 @@ fn report(summary: &GameSummary) {
         "System version: {} ({} entries)",
         summary.system_version, summary.system_entry_count
     );
+    println!("Install root: {}", summary.install_root.display());
+    println!("User data dir: {}", summary.user_data_dir.display());
+    println!("Logs dir: {}", summary.logs_dir.display());
+    println!("Cache dir: {}", summary.cache_dir.display());
     println!("Frames simulated: {}", summary.ticks);
     println!("Ground contacts: {}", summary.ground_hits);
     println!("Control ready batches: {}", summary.ready_batches);

@@ -42,7 +42,7 @@ Each crate exposes FFI-safe boundaries to ease testing and permit staged migrati
 - `C4AudioSystem*` → `lc-audio` (wrap SDL2_mixer parity via `sdl2` crate initially, then abstract to cross-platform backend).
 - `C4Network*`, `C4GameControlNetwork`, `C4HTTPClient` → `lc-network` (use `tokio`/`async-std` for async networking but keep deterministic message ordering; replicate miniupnpc using `igd` crate).
 - `C4Gui*`, `C4Startup*`, dialogs → `lc-gui` (port to Rust immediate-mode GUI using `egui`/custom; ensure identical layout by mirroring original widget tree data).
-- Platform entry points (`C4Application`, `StdApp*`, `C4WinMain`, `StdGtkWindow`, `StdSDLWindow`) → `lc-platform` and `lc-app` crates, using `winit` + conditionally compiled modules per OS.
+- Platform entry points (`C4Application`, `StdApp*`, `C4WinMain`, `StdGtkWindow`, `StdSDLWindow`) → `lc-platform` (runtime directory/env discovery + FFI surface) and `lc-app` crates, with `winit`-backed bootstrap planned per OS.
 
 ## 4. Porting Strategy
 1. **Foundation pass** – replicate low-level utilities (`lc-core`) with comprehensive unit tests derived from existing C++ behavior (use golden tests where available).
@@ -77,6 +77,7 @@ Each crate exposes FFI-safe boundaries to ease testing and permit staged migrati
 8. **Final integration** – remove C++ harness, produce final Rust binary, update tooling/tests, ensure packaging scripts replaced (cargo xtask).
    - [x] Added the `lc-app` workspace crate that stitches engine, resources, GUI, audio, and networking layers into a deterministic headless binary with CLI controls.
    - [x] Wired configuration + system metadata loading from `planet/System.c4g`, synthesized audio/graphics output, and introduced smoke tests for the integrated app.
+   - [x] Implemented the `lc-platform` crate for install/user/cache/log directory discovery with C ABI helpers and updated `lc-app` to rely on the runtime-detected `System.c4g` path instead of hard-coded manifests.
 
 ## 5. Testing & Validation
 - Mirror existing Catch2 tests with `cargo test`; translate fixtures.
