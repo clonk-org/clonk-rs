@@ -1,6 +1,6 @@
 use std::f32::consts::PI;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use lc_audio::{AudioSystem, SoundHandle};
@@ -16,6 +16,7 @@ use lc_gui::{
 use lc_network::{ClientId, ControlCoordinator, ControlError, ControlPacket, Lobby, LobbyError};
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{Group, GroupError};
+use serde::Serialize;
 
 const DEMO_CONFIG_BYTES: &[u8] = include_bytes!("demo_config.cfg");
 const DEMO_SCRIPT: &str = include_str!("demo_script.aul");
@@ -45,6 +46,10 @@ pub enum GameError {
     Network(#[from] ControlError),
     #[error("lobby error: {0}")]
     Lobby(#[from] LobbyError),
+    #[error("summary output error: {0}")]
+    SummaryOutput(std::io::Error),
+    #[error("summary serialization error: {0}")]
+    SummarySerialize(#[from] serde_json::Error),
 }
 
 pub struct DemoGame {
@@ -69,6 +74,17 @@ pub struct DemoGame {
 }
 
 #[derive(Debug, Clone)]
+pub struct DemoGameOptions {
+    pub config_path: Option<PathBuf>,
+}
+
+impl Default for DemoGameOptions {
+    fn default() -> Self {
+        Self { config_path: None }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct GameSummary {
     pub ticks: u32,
     pub ground_hits: u32,
@@ -85,8 +101,8 @@ pub struct GameSummary {
 }
 
 impl DemoGame {
-    pub fn new() -> GameResult<Self> {
-        let config = load_demo_config()?;
+    pub fn new(options: DemoGameOptions) -> GameResult<Self> {
+        let config = load_demo_config(options.config_path.as_deref())?;
         let configured_ticks = parse_config_value::<u32>(&config, "ticks").unwrap_or(180);
         let ground_height = parse_config_value::<i32>(&config, "ground_height").unwrap_or(220);
         let spawn_x = parse_config_value::<i32>(&config, "spawn_x").unwrap_or(64);
@@ -335,9 +351,14 @@ impl DemoGame {
     }
 }
 
-fn load_demo_config() -> std::io::Result<Config> {
-    let mut cursor = Cursor::new(DEMO_CONFIG_BYTES);
-    Config::from_reader(&mut cursor)
+fn load_demo_config(path: Option<&Path>) -> std::io::Result<Config> {
+    match path {
+        Some(path) => Config::load(path),
+        None => {
+            let mut cursor = Cursor::new(DEMO_CONFIG_BYTES);
+            Config::from_reader(&mut cursor)
+        }
+    }
 }
 
 fn parse_config_value<T>(config: &Config, key: &str) -> Option<T>
@@ -482,7 +503,7 @@ mod tests {
 
     #[test]
     fn demo_game_runs_short_session() {
-        let mut game = DemoGame::new().expect("game constructed");
+        let mut game = DemoGame::new(DemoGameOptions::default()).expect("game constructed");
         let summary = game.run(8).expect("simulation runs");
         assert_eq!(summary.ticks, 8);
         assert!(summary.surface_hash != 0);

@@ -79,6 +79,7 @@ Each crate exposes FFI-safe boundaries to ease testing and permit staged migrati
    - [x] Wired configuration + system metadata loading from `planet/System.c4g`, synthesized audio/graphics output, and introduced smoke tests for the integrated app.
    - [x] Implemented the `lc-platform` crate for install/user/cache/log directory discovery with C ABI helpers and updated `lc-app` to rely on the runtime-detected `System.c4g` path instead of hard-coded manifests.
    - [x] Replaced the ad-hoc shell packaging scripts with `cargo xtask package`, which builds the release `lc-app` binary and assembles a distributable archive under `rust/target/dist/legacyclonk-rs.zip` including game assets and licensing files.
+   - [x] Hardened the `lc-app` CLI using `clap`, adding documented `--ticks`, `--config <path>`, `--summary-json <path>`, and `--quiet` flags (with tests) so scripted parity runs can override the bundled demo config and capture structured output alongside the improved `--help`/`--version` UX.
 
 ## 5. Testing & Validation
 - [x] Mirror existing Catch2 tests with `cargo test`; translate fixtures (language pack fixture now covered via `lc-core` integration test parsing `planet/System.c4g/LanguageUS.txt`).
