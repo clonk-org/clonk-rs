@@ -81,7 +81,7 @@ Each crate exposes FFI-safe boundaries to ease testing and permit staged migrati
    - [x] Replaced the ad-hoc shell packaging scripts with `cargo xtask package`, which builds the release `lc-app` binary and assembles a distributable archive under `rust/target/dist/legacyclonk-rs.zip` including game assets and licensing files.
 
 ## 5. Testing & Validation
-- Mirror existing Catch2 tests with `cargo test`; translate fixtures.
+- [x] Mirror existing Catch2 tests with `cargo test`; translate fixtures (language pack fixture now covered via `lc-core` integration test parsing `planet/System.c4g/LanguageUS.txt`).
 - Build deterministic comparison harness to record authoritative outputs from C++ build and check Rust port (`snapshots/` stored per version).
 - Continuous integration: use `cargo fmt`, `cargo clippy`, OS-specific integration tests via GitHub Actions/CI equivalent.
 - Performance regressions tracked via criterion benchmarks for hotspots (script execution, landscape updates).
