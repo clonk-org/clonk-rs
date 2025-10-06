@@ -1,13 +1,28 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use lc_engine::{fixtures, EngineError, Playback, Recording};
 use std::env;
 use std::fs;
 use std::fs::File;
-use std::io;
+use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipWriter};
+
+type ScenarioGenerator = fn(usize) -> Result<Recording, EngineError>;
+
+struct EngineSnapshotScenario {
+    name: &'static str,
+    frames: usize,
+    generator: ScenarioGenerator,
+}
+
+const ENGINE_SNAPSHOT_SCENARIOS: &[EngineSnapshotScenario] = &[EngineSnapshotScenario {
+    name: "basic_movement",
+    frames: 6,
+    generator: fixtures::basic_movement_recording,
+}];
 
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
@@ -22,16 +37,123 @@ fn main() -> Result<()> {
             }
             package()
         }
-        Some(cmd) => {
-            bail!("unknown command `{}` (try `cargo xtask --help`)", cmd)
+        Some("engine-snapshots") => {
+            let tail: Vec<String> = args.collect();
+            engine_snapshots_command(&tail)
         }
+        Some(cmd) => bail!("unknown command `{}` (try `cargo xtask --help`)", cmd),
     }
 }
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  cargo xtask package    Build the Rust port and bundle a distributable archive."
+        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines."
     );
+}
+
+fn engine_snapshots_command(args: &[String]) -> Result<()> {
+    if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h") {
+        print_engine_snapshots_usage();
+        return Ok(());
+    }
+
+    match args[0].as_str() {
+        "record" => {
+            if args.len() > 1 {
+                bail!("`engine-snapshots record` does not take additional arguments");
+            }
+            record_engine_snapshots()
+        }
+        "verify" => {
+            if args.len() > 1 {
+                bail!("`engine-snapshots verify` does not take additional arguments");
+            }
+            verify_engine_snapshots()
+        }
+        other => bail!(
+            "unknown `engine-snapshots` subcommand `{}` (try `cargo xtask engine-snapshots --help`)",
+            other
+        ),
+    }
+}
+
+fn print_engine_snapshots_usage() {
+    eprintln!(
+        "Usage:\n  cargo xtask engine-snapshots record\n  cargo xtask engine-snapshots verify"
+    );
+}
+
+fn record_engine_snapshots() -> Result<()> {
+    let paths = WorkspacePaths::detect()?;
+    let snapshot_dir = engine_snapshot_dir(&paths);
+    fs::create_dir_all(&snapshot_dir)
+        .with_context(|| format!("failed to create {}", snapshot_dir.display()))?;
+
+    for scenario in ENGINE_SNAPSHOT_SCENARIOS {
+        let recording = (scenario.generator)(scenario.frames)
+            .with_context(|| format!("failed to record scenario `{}`", scenario.name))?;
+        let path = snapshot_dir.join(format!("{}.json", scenario.name));
+        let file =
+            File::create(&path).with_context(|| format!("failed to create {}", path.display()))?;
+        recording
+            .to_writer(file)
+            .map_err(|error| anyhow!(error))
+            .with_context(|| format!("failed to serialize recording for `{}`", scenario.name))?;
+        let display_path = match path.strip_prefix(&paths.repo_root) {
+            Ok(rel) => rel.to_path_buf(),
+            Err(_) => path.clone(),
+        };
+        println!(
+            "wrote {} ({} frames)",
+            display_path.display(),
+            scenario.frames
+        );
+    }
+
+    Ok(())
+}
+
+fn verify_engine_snapshots() -> Result<()> {
+    let paths = WorkspacePaths::detect()?;
+    let snapshot_dir = engine_snapshot_dir(&paths);
+
+    for scenario in ENGINE_SNAPSHOT_SCENARIOS {
+        let path = snapshot_dir.join(format!("{}.json", scenario.name));
+        let baseline = load_recording(&path)
+            .with_context(|| format!("failed to load baseline {}", path.display()))?;
+        let frames = baseline.frames().len();
+        if frames != scenario.frames {
+            bail!(
+                "baseline {} contains {} frames but scenario expects {}",
+                path.display(),
+                frames,
+                scenario.frames
+            );
+        }
+        let playback = Playback::from_recording(baseline);
+        let actual = (scenario.generator)(scenario.frames)
+            .with_context(|| format!("failed to run scenario `{}`", scenario.name))?;
+        playback
+            .validate_sequence(actual.into_frames())
+            .map_err(|error| anyhow!(error))
+            .with_context(|| format!("snapshot mismatch for `{}`", scenario.name))?;
+        println!("validated {} ({} frames)", scenario.name, scenario.frames);
+    }
+
+    Ok(())
+}
+
+fn engine_snapshot_dir(paths: &WorkspacePaths) -> PathBuf {
+    paths
+        .workspace_dir
+        .join("snapshots")
+        .join("engine")
+        .join("v1")
+}
+
+fn load_recording(path: &Path) -> Result<Recording> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    Recording::from_reader(BufReader::new(file)).map_err(|error| anyhow!(error))
 }
 
 fn package() -> Result<()> {

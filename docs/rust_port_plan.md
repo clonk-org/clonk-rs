@@ -82,7 +82,9 @@ Each crate exposes FFI-safe boundaries to ease testing and permit staged migrati
 
 ## 5. Testing & Validation
 - [x] Mirror existing Catch2 tests with `cargo test`; translate fixtures (language pack fixture now covered via `lc-core` integration test parsing `planet/System.c4g/LanguageUS.txt`).
-- Build deterministic comparison harness to record authoritative outputs from C++ build and check Rust port (`snapshots/` stored per version).
+- [x] Build deterministic comparison harness to record authoritative outputs from C++ build and check Rust port (`snapshots/` stored per version).
+  - Added `cargo xtask engine-snapshots record|verify` to manage JSON baselines under `rust/snapshots/engine/v1` and a parity test that replays them through `lc-engine::Playback`.
+  - Baseline seeded with the deterministic `basic_movement` scenario; refresh by running the C++ build with `LC_RUST_ENGINE_RECORD=<path>` or via the xtask helper.
 - Continuous integration: use `cargo fmt`, `cargo clippy`, OS-specific integration tests via GitHub Actions/CI equivalent.
 - Performance regressions tracked via criterion benchmarks for hotspots (script execution, landscape updates).
 
