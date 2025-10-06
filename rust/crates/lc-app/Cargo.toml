@@ -1,0 +1,15 @@
+[package]
+name = "lc-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lc-core = { path = "../lc-core" }
+lc-resources = { path = "../lc-resources" }
+lc-script = { path = "../lc-script" }
+lc-engine = { path = "../lc-engine" }
+lc-graphics = { path = "../lc-graphics" }
+lc-gui = { path = "../lc-gui" }
+lc-audio = { path = "../lc-audio" }
+lc-network = { path = "../lc-network" }
+thiserror = "1.0"

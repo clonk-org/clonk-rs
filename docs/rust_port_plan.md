@@ -75,6 +75,8 @@ Each crate exposes FFI-safe boundaries to ease testing and permit staged migrati
    - [x] Port scenario browser/editor panels to the Rust UI and replace remaining `C4Gui*` widgets.
      - Introduced a `ScenarioBrowser` UI module in `lc-gui` with selectable scenario listings, contextual detail panels, and action buttons wired through the existing event system, plus coverage via unit tests.
 8. **Final integration** – remove C++ harness, produce final Rust binary, update tooling/tests, ensure packaging scripts replaced (cargo xtask).
+   - [x] Added the `lc-app` workspace crate that stitches engine, resources, GUI, audio, and networking layers into a deterministic headless binary with CLI controls.
+   - [x] Wired configuration + system metadata loading from `planet/System.c4g`, synthesized audio/graphics output, and introduced smoke tests for the integrated app.
 
 ## 5. Testing & Validation
 - Mirror existing Catch2 tests with `cargo test`; translate fixtures.

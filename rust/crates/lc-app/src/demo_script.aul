@@ -1,0 +1,24 @@
+global func Initialize(state, random) {
+    var vx = state.velocity[0];
+    var vy = state.velocity[1];
+    return { velocity = [vx, vy], energy = 100 };
+}
+
+global func Step(state, frame, random) {
+    var vx = state.velocity[0];
+    var vy = state.velocity[1] + 1;
+    if (state.position[1] >= 215) {
+        vy = -15;
+    }
+    if (vy > 12) {
+        vy = 12;
+    }
+    if (vy < -20) {
+        vy = -20;
+    }
+    var energy = state.energy;
+    if (energy > 0) {
+        energy = energy - 1;
+    }
+    return { velocity = [vx, vy], energy = energy };
+}

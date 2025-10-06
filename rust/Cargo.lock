@@ -430,6 +430,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lc-app"
+version = "0.1.0"
+dependencies = [
+ "lc-audio",
+ "lc-core",
+ "lc-engine",
+ "lc-graphics",
+ "lc-gui",
+ "lc-network",
+ "lc-resources",
+ "lc-script",
+ "thiserror",
+]
+
+[[package]]
 name = "lc-audio"
 version = "0.1.0"
 dependencies = [
