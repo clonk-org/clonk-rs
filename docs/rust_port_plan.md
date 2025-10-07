@@ -7,10 +7,11 @@
 - The Rust engine now applies configurable gravity and vertical speed caps each tick, and both demo configs and scenario manifests can override those physics defaults.
 - A JSON-backed scenario loader now registers definitions, landscapes, and initial spawns so `lc-app` can bootstrap from external scenario bundles.
 - `lc-app` now replays scripted control packets and uses `lc-engine::apply_object_update` to steer the demo object, and an interactive terminal mode captures live keyboard input for the demo bouncer.
+- The demo viewport now scrolls horizontally across loaded landscapes and keeps the focus object in view so larger scenarios are observable inside the harness.
 
 ## Rust Workspace Scope
 - `lc-core`, `lc-resources`, `lc-script`, `lc-engine`, `lc-graphics`, `lc-audio`, `lc-network`, `lc-gui`, `lc-platform`, and `lc-app` provide demo-friendly utilities, parsers, in-memory surfaces, a toy physics loop, and basic networking abstractions.
-- `lc-app` drives a self-contained bounce simulation with a bundled AUL script and synthetic audio/graphics output. It can optionally load JSON scenarios and now replays a deterministic control stream, but there is still no viewport management or real player input handling.
+- `lc-app` drives a self-contained bounce simulation with a bundled AUL script and synthetic audio/graphics output. It can optionally load JSON scenarios, replays deterministic control streams, and now offers a scrolling viewport plus optional live terminal controls; full UI integration is still absent.
 - `rust/include` exposes FFI headers so the C++ codebase can record/play back engine snapshots or cross-check groups/GUI layouts when the matching `USE_RUST_*` option is enabled.
 
 ## Integration with the C++ Build
@@ -35,7 +36,7 @@
 - `lc-app` can replay a scripted control sequence or accept live terminal input to drive the demo object through the control hook.
 
 ## Major Gaps to Reach Behavior Parity
-- Recreate the complete C4 object lifecycle, including action system, physics integration beyond the new baseline gravity/velocity caps, robust scenario/environment management beyond the current JSON loader, real player control pathways beyond the scripted demo hook, and serialization.
+- Recreate the complete C4 object lifecycle, including action system, physics integration beyond the new baseline gravity/velocity caps, robust scenario/environment management beyond the current JSON loader, and player control/GUI pathways that match the shipping UI; savegame compatibility and synchronous serialization remain open.
 - Port AUL runtime features: effect handlers, engine call map, proplist semantics, debugging, and compatibility behaviors relied upon by shipped scripts.
 - Implement rendering and audio backends that match the SDL/OpenGL pipeline and mixer behavior across all supported platforms.
 - Mirror GUI subsystems (dialogs, HUD, console, editor) and integrate them with input, networking, and engine state.

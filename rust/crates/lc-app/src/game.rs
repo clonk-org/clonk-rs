@@ -89,6 +89,9 @@ pub struct DemoGame {
     control: ControlCoordinator,
     lobby: Lobby,
     control_mode: ControlMode,
+    world_width: i32,
+    viewport_x: i32,
+    viewport_y: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -363,6 +366,10 @@ impl DemoGame {
             )?
         };
         let scenario_label = format!("SCENARIO {}", sanitize_label(&scenario_name));
+        let world_width = engine
+            .landscape()
+            .map(|landscape| landscape.width() as i32)
+            .unwrap_or(SURFACE_WIDTH as i32);
 
         let mut gui = Gui::new();
         let root = gui.root();
@@ -433,6 +440,9 @@ impl DemoGame {
             control,
             lobby,
             control_mode,
+            world_width,
+            viewport_x: 0,
+            viewport_y: 0,
         })
     }
 
@@ -478,7 +488,8 @@ impl DemoGame {
                 .find(|object| object.id == self.object_id)
                 .cloned()
                 .unwrap_or_else(|| snapshot.objects[0].clone());
-            let on_ground = object.position.y >= self.ground_height;
+            self.update_viewport(&object);
+            let on_ground = self.is_on_ground(&object);
 
             if on_ground && !was_grounded {
                 self.audio
@@ -572,7 +583,7 @@ impl DemoGame {
 
         let mut velocity = snapshot.velocity;
         velocity.x = (control.horizontal as i32) * HORIZONTAL_SPEED;
-        if control.jump && snapshot.position.y >= self.ground_height {
+        if control.jump && self.is_on_ground(&snapshot) {
             velocity.y = JUMP_VELOCITY;
         }
 
@@ -590,12 +601,21 @@ impl DemoGame {
     }
 
     fn draw_ground(&mut self) {
-        let ground = self
-            .ground_height
-            .clamp(0, (SURFACE_HEIGHT.saturating_sub(1)) as i32) as u32;
-        for y in ground..SURFACE_HEIGHT {
-            for x in 0..SURFACE_WIDTH {
-                let _ = self.surface.set_pixel(x, y, Color::opaque(28, 84, 44));
+        for screen_x in 0..SURFACE_WIDTH {
+            let world_x = self.viewport_x + screen_x as i32;
+            let ground_world = self.ground_height_at(world_x);
+            let mut ground_screen = ground_world - self.viewport_y;
+            if ground_screen < 0 {
+                ground_screen = 0;
+            }
+            if ground_screen >= SURFACE_HEIGHT as i32 {
+                continue;
+            }
+            let ground_screen = ground_screen as u32;
+            for y in ground_screen..SURFACE_HEIGHT {
+                let _ = self
+                    .surface
+                    .set_pixel(screen_x, y, Color::opaque(28, 84, 44));
             }
         }
     }
@@ -607,8 +627,15 @@ impl DemoGame {
     }
 
     fn paint_object(&mut self, object: &ObjectSnapshot) {
-        let x = clamp_positive(object.position.x, (SURFACE_WIDTH - 1) as i32) as i32;
-        let y = clamp_positive(object.position.y, (SURFACE_HEIGHT - 1) as i32) as i32;
+        let screen_x = object.position.x - self.viewport_x;
+        let screen_y = object.position.y - self.viewport_y;
+        if screen_x < -10
+            || screen_y < -10
+            || screen_x > SURFACE_WIDTH as i32 + 10
+            || screen_y > SURFACE_HEIGHT as i32 + 10
+        {
+            return;
+        }
         let energy = object.energy.max(0).min(100) as u8;
         let color = if energy > 50 {
             Color::opaque(252, 196, 64)
@@ -617,7 +644,10 @@ impl DemoGame {
         };
         let size = 6i32;
         let rect = GuiRect::from_origin_size(
-            GuiPoint::new((x - size / 2).max(0) as f32, (y - size / 2).max(0) as f32),
+            GuiPoint::new(
+                (screen_x - size / 2).max(0) as f32,
+                (screen_y - size / 2).max(0) as f32,
+            ),
             GuiSize::new(size as f32, size as f32),
         );
         fill_rect(&mut self.surface, &rect, color);
@@ -633,6 +663,34 @@ impl DemoGame {
                 }
             }
         }
+    }
+
+    fn update_viewport(&mut self, focus: &ObjectSnapshot) {
+        let half_width = (SURFACE_WIDTH / 2) as i32;
+        let mut desired = focus.position.x - half_width;
+        if desired < 0 {
+            desired = 0;
+        }
+        let max_offset = (self.world_width - SURFACE_WIDTH as i32).max(0);
+        if desired > max_offset {
+            desired = max_offset;
+        }
+        self.viewport_x = desired;
+    }
+
+    fn is_on_ground(&self, object: &ObjectSnapshot) -> bool {
+        let ground = self.ground_height_at(object.position.x);
+        object.position.y >= ground
+    }
+
+    fn ground_height_at(&self, x: i32) -> i32 {
+        self.surface_height_at(x).unwrap_or(self.ground_height)
+    }
+
+    fn surface_height_at(&self, x: i32) -> Option<i32> {
+        self.engine
+            .landscape()
+            .and_then(|landscape| landscape.surface_height(x))
     }
 }
 
