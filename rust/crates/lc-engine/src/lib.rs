@@ -1,4 +1,5 @@
 mod action;
+mod compat;
 mod effect;
 pub mod ffi;
 pub mod fixtures;
@@ -722,6 +723,7 @@ impl Definition {
                 function: "load",
                 source,
             })?;
+        compat::register_host_functions(&mut script);
         let has_initialize = script.has_function("Initialize");
         let has_step = script.has_function("Step");
         Ok(Self {
@@ -2117,6 +2119,40 @@ mod tests {
     }
     "#;
 
+    const EFFECT_HOST_SCRIPT: &str = r#"
+    global func Initialize(state, random)
+    {
+        if (!GetEffect("Glow", state))
+        {
+            return { effects = [ { op = "add", name = "Glow", priority = 150, interval = 4 } ] };
+        }
+        return nil;
+    }
+
+    global func Step(state, frame, random)
+    {
+        if (frame == 1)
+        {
+            return { effects = [ { op = "add", name = "Spark", priority = 60 } ] };
+        }
+        if (frame == 2)
+        {
+            var glow_number = GetEffect("Glow", state);
+            var glow_priority = GetEffect("Glow", state, 0, 2);
+            var spark_priority = GetEffect("Spark", state, 0, 2);
+            var interval = GetEffect("Glow", state, 0, 3);
+            var filtered = GetEffect("Glow", state, 0, 2, 100);
+            var allowed = GetEffect("Glow", state, 0, 2, 200);
+            if (filtered)
+            {
+                return { energy = -1 };
+            }
+            return { energy = glow_number + glow_priority + spark_priority + interval + allowed };
+        }
+        return nil;
+    }
+    "#;
+
     fn build_definition() -> Definition {
         let source = r#"
         global func Initialize(state, random) {
@@ -2166,6 +2202,34 @@ mod tests {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.action.name, "Idle");
         assert_eq!(object.action.phase, 0);
+    }
+
+    #[test]
+    fn host_get_effect_queries_effect_stack() {
+        let definition = Definition::from_script("EffectUser", "Effect User", EFFECT_HOST_SCRIPT)
+            .expect("script compiles");
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("EffectUser"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("first tick runs");
+        engine.tick().expect("second tick runs");
+
+        let snapshot = engine
+            .object_snapshot(id)
+            .expect("object snapshot available");
+        assert_eq!(snapshot.effects.len(), 2);
+        assert_eq!(snapshot.effects[0].name, "Glow");
+        assert_eq!(snapshot.effects[0].priority, 150);
+        assert_eq!(snapshot.effects[1].name, "Spark");
+        assert_eq!(snapshot.effects[1].priority, 60);
+        assert_eq!(snapshot.energy, 365);
     }
 
     #[test]
