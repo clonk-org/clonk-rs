@@ -1575,11 +1575,17 @@ fn build_state_value(
         .effects
         .iter()
         .map(|effect| {
-            let mut props = HashMap::with_capacity(4);
+            let mut props = HashMap::with_capacity(6);
             props.insert("name".into(), Value::String(effect.name.clone()));
             props.insert("priority".into(), Value::Int(effect.priority));
             props.insert("interval".into(), Value::Int(effect.interval));
             props.insert("timer".into(), Value::Int(effect.timer));
+            if let Some(target) = effect.command_target {
+                props.insert("command_target".into(), Value::Int(target));
+            }
+            if let Some(id) = &effect.command_id {
+                props.insert("command_target_id".into(), Value::String(id.clone()));
+            }
             Value::Proplist(props)
         })
         .collect();
@@ -1588,11 +1594,17 @@ fn build_state_value(
 }
 
 fn build_effect_value(effect: &EffectState) -> Value {
-    let mut props = HashMap::with_capacity(4);
+    let mut props = HashMap::with_capacity(6);
     props.insert("name".into(), Value::String(effect.name.clone()));
     props.insert("priority".into(), Value::Int(effect.priority));
     props.insert("interval".into(), Value::Int(effect.interval));
     props.insert("timer".into(), Value::Int(effect.timer));
+    if let Some(target) = effect.command_target {
+        props.insert("command_target".into(), Value::Int(target));
+    }
+    if let Some(id) = &effect.command_id {
+        props.insert("command_target_id".into(), Value::String(id.clone()));
+    }
     Value::Proplist(props)
 }
 
@@ -2139,6 +2151,36 @@ fn value_to_effect_commands(
                     None => 0,
                 };
 
+                let command_target = match map.remove("command_target") {
+                    Some(Value::Int(value)) => Some(value),
+                    Some(Value::Nil) | None => None,
+                    Some(other) => {
+                        return Err(EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: format!(
+                                "effect command_target must be int or nil, got {}",
+                                other.type_name()
+                            ),
+                        })
+                    }
+                };
+
+                let command_target_id = match map.remove("command_target_id") {
+                    Some(Value::String(value)) if !value.is_empty() => Some(value),
+                    Some(Value::String(_)) | Some(Value::Nil) | None => None,
+                    Some(other) => {
+                        return Err(EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: format!(
+                                "effect command_target_id must be string or nil, got {}",
+                                other.type_name()
+                            ),
+                        })
+                    }
+                };
+
                 if let Some((key, _)) = map.into_iter().next() {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
@@ -2150,7 +2192,9 @@ fn value_to_effect_commands(
                 let effect = EffectState::new(name)
                     .with_priority(priority)
                     .with_interval(interval)
-                    .with_timer(timer);
+                    .with_timer(timer)
+                    .with_command_target(command_target)
+                    .with_command_id(command_target_id);
                 commands.push(EffectCommand::add(effect));
             }
             "remove" => {

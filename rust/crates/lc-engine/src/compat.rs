@@ -97,21 +97,94 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let timer = match args.get(4) {
-        Some(Value::Int(value)) if *value >= 0 => Some(*value),
-        Some(Value::Int(_)) => {
-            return Err(RuntimeError::new(
-                "AddEffect: timer must be >= 0 when provided",
-            ))
+    let len = args.len();
+    let mut idx = 4;
+    let mut command_target: Option<i32> = None;
+    let mut command_target_id: Option<String> = None;
+    let mut timer: Option<i32> = None;
+
+    if idx < len {
+        match &args[idx] {
+            Value::Proplist(_) | Value::Nil => {
+                command_target = parse_command_target(&args[idx])?;
+                idx += 1;
+            }
+            Value::Int(value) if *value == 0 && len > idx + 1 => {
+                command_target = None;
+                idx += 1;
+            }
+            Value::Int(value) if *value == 0 && len == idx + 1 => {
+                timer = Some(parse_timer_from_int(*value)?);
+                idx += 1;
+            }
+            Value::Int(value) if len == idx + 1 => {
+                timer = Some(parse_timer_from_int(*value)?);
+                idx += 1;
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "AddEffect: expected proplist, nil, or int for command target, got {}",
+                    other.type_name()
+                )));
+            }
         }
-        Some(Value::Nil) | None => None,
-        Some(other) => {
-            return Err(RuntimeError::new(format!(
-                "AddEffect: expected int for timer, got {}",
-                other.type_name()
-            )))
+    }
+
+    if idx < len {
+        match &args[idx] {
+            Value::String(_) | Value::Nil => {
+                command_target_id = parse_command_target_id(&args[idx])?;
+                idx += 1;
+            }
+            Value::Int(value) if *value == 0 && idx < len - 1 => {
+                command_target_id = None;
+                idx += 1;
+            }
+            Value::Int(value) if *value == 0 && timer.is_none() && idx == len - 1 => {
+                command_target_id = None;
+                idx += 1;
+            }
+            Value::Int(value) if timer.is_none() && idx == len - 1 => {
+                timer = Some(parse_timer_from_int(*value)?);
+                idx += 1;
+            }
+            Value::Int(_) => {
+                return Err(RuntimeError::new(
+                    "AddEffect: command target id must be string, nil, or 0",
+                ));
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "AddEffect: expected string or nil for command target id, got {}",
+                    other.type_name()
+                )));
+            }
         }
-    };
+    }
+
+    if idx < len {
+        match &args[idx] {
+            Value::Int(value) if timer.is_none() => {
+                timer = Some(parse_timer_from_int(*value)?);
+                idx += 1;
+            }
+            Value::Nil => {
+                idx += 1;
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "AddEffect: expected int or nil for timer, got {}",
+                    other.type_name()
+                )));
+            }
+        }
+    }
+
+    if idx < len {
+        return Err(RuntimeError::new(
+            "AddEffect: additional arguments are not supported",
+        ));
+    }
 
     let identifier = with_context_mut(|ctx| {
         let mut effect = EffectState::new(name)
@@ -120,6 +193,8 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(timer) = timer {
             effect = effect.with_timer(timer);
         }
+        effect = effect.with_command_target(command_target);
+        effect = effect.with_command_id(command_target_id);
         ctx.add_effect(effect)
     })?;
 
@@ -278,6 +353,12 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
                 1 => Value::String(effect.name.clone()),
                 2 => Value::Int(effect.priority),
                 3 => Value::Int(effect.interval),
+                4 => effect.command_target.map(Value::Int).unwrap_or(Value::Nil),
+                5 => effect
+                    .command_id
+                    .as_ref()
+                    .map(|id| Value::String(id.clone()))
+                    .unwrap_or(Value::Nil),
                 6 => Value::Int(effect.timer),
                 _ => build_effect_value(effect),
             });
@@ -350,10 +431,21 @@ fn extract_effects_from_state(state: &Value) -> Result<Vec<EffectState>, Runtime
                     _ => 0,
                 };
 
+                let command_target = match props.get("command_target") {
+                    Some(Value::Int(value)) => Some(*value),
+                    _ => None,
+                };
+                let command_id = match props.get("command_target_id") {
+                    Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+                    _ => None,
+                };
+
                 let effect = EffectState::new(name)
                     .with_priority(priority)
                     .with_interval(interval)
-                    .with_timer(timer);
+                    .with_timer(timer)
+                    .with_command_target(command_target)
+                    .with_command_id(command_id);
                 effects.push(effect);
             }
             Ok(effects)
@@ -371,7 +463,52 @@ fn build_effect_value(effect: &EffectState) -> Value {
     map.insert("priority".into(), Value::Int(effect.priority));
     map.insert("interval".into(), Value::Int(effect.interval));
     map.insert("timer".into(), Value::Int(effect.timer));
+    if let Some(target) = effect.command_target {
+        map.insert("command_target".into(), Value::Int(target));
+    }
+    if let Some(id) = &effect.command_id {
+        map.insert("command_target_id".into(), Value::String(id.clone()));
+    }
     Value::Proplist(map)
+}
+
+fn parse_command_target(value: &Value) -> Result<Option<i32>, RuntimeError> {
+    match value {
+        Value::Proplist(map) => match map.get("id") {
+            Some(Value::Int(id)) => Ok(Some(*id)),
+            _ => Err(RuntimeError::new(
+                "AddEffect: command target proplist must contain int `id`",
+            )),
+        },
+        Value::Nil => Ok(None),
+        Value::Int(value) if *value == 0 => Ok(None),
+        other => Err(RuntimeError::new(format!(
+            "AddEffect: expected proplist, nil, or 0 for command target, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn parse_command_target_id(value: &Value) -> Result<Option<String>, RuntimeError> {
+    match value {
+        Value::String(id) if !id.is_empty() => Ok(Some(id.clone())),
+        Value::String(_) | Value::Nil => Ok(None),
+        Value::Int(value) if *value == 0 => Ok(None),
+        other => Err(RuntimeError::new(format!(
+            "AddEffect: expected string or nil for command target id, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn parse_timer_from_int(value: i32) -> Result<i32, RuntimeError> {
+    if value < 0 {
+        Err(RuntimeError::new(
+            "AddEffect: timer must be >= 0 when provided",
+        ))
+    } else {
+        Ok(value)
+    }
 }
 
 #[derive(Debug)]
@@ -496,6 +633,38 @@ mod tests {
                 assert_eq!(effect.name, "Glow");
                 assert_eq!(effect.priority, 150);
                 assert_eq!(effect.interval, 3);
+                assert_eq!(effect.command_target, None);
+                assert!(effect.command_id.is_none());
+            }
+            other => panic!("unexpected command: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn add_effect_records_command_target_metadata() {
+        let state = empty_state();
+        let mut target_map = HashMap::new();
+        target_map.insert("id".into(), Value::Int(42));
+        let target = Value::Proplist(target_map);
+
+        let (result, commands) = with_effect_context(&[], || {
+            add_effect(&[
+                Value::String("Glow".into()),
+                state.clone(),
+                Value::Int(120),
+                Value::Int(2),
+                target.clone(),
+                Value::String("FOOB".into()),
+            ])
+        });
+
+        let value = result.expect("AddEffect succeeds");
+        assert_eq!(value, Value::Int(1));
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            EffectCommand::Add(effect) => {
+                assert_eq!(effect.command_target, Some(42));
+                assert_eq!(effect.command_id.as_deref(), Some("FOOB"));
             }
             other => panic!("unexpected command: {:?}", other),
         }
@@ -541,5 +710,51 @@ mod tests {
 
         let value = result.expect("GetEffect succeeds");
         assert_eq!(value, Value::String("Glow".into()));
+    }
+
+    #[test]
+    fn get_effect_returns_command_target_metadata() {
+        let state = empty_state();
+        let mut target_map = HashMap::new();
+        target_map.insert("id".into(), Value::Int(7));
+        let target = Value::Proplist(target_map);
+
+        let (result, _) = with_effect_context(&[], || -> Result<Value, RuntimeError> {
+            add_effect(&[
+                Value::String("Glow".into()),
+                state.clone(),
+                Value::Int(100),
+                Value::Int(1),
+                target.clone(),
+                Value::String("BARL".into()),
+            ])?;
+            get_effect(&[
+                Value::String("Glow".into()),
+                state.clone(),
+                Value::Int(0),
+                Value::Int(4),
+            ])
+        });
+        let value = result.expect("GetEffect command target succeeds");
+        assert_eq!(value, Value::Int(7));
+
+        let (result, _) = with_effect_context(&[], || -> Result<Value, RuntimeError> {
+            add_effect(&[
+                Value::String("Glow".into()),
+                state.clone(),
+                Value::Int(100),
+                Value::Int(1),
+                target.clone(),
+                Value::String("BARL".into()),
+            ])?;
+            get_effect(&[
+                Value::String("Glow".into()),
+                state.clone(),
+                Value::Int(0),
+                Value::Int(5),
+            ])
+        });
+        let value = result.expect("GetEffect command id succeeds");
+        assert_eq!(value, Value::String("BARL".into()));
     }
 }

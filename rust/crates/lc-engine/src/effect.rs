@@ -6,6 +6,10 @@ pub struct EffectState {
     pub priority: i32,
     pub interval: i32,
     pub timer: i32,
+    #[serde(default)]
+    pub command_target: Option<i32>,
+    #[serde(default)]
+    pub command_id: Option<String>,
 }
 
 impl EffectState {
@@ -15,6 +19,8 @@ impl EffectState {
             priority: 100,
             interval: 1,
             timer: 0,
+            command_target: None,
+            command_id: None,
         }
     }
 
@@ -36,6 +42,19 @@ impl EffectState {
         if self.interval > 0 && self.timer >= self.interval {
             self.timer %= self.interval;
         }
+        self
+    }
+
+    pub fn with_command_target(mut self, target: Option<i32>) -> Self {
+        self.command_target = target;
+        self
+    }
+
+    pub fn with_command_id<I>(mut self, id: Option<I>) -> Self
+    where
+        I: Into<String>,
+    {
+        self.command_id = id.map(|value| value.into());
         self
     }
 
