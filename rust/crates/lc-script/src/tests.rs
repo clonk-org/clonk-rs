@@ -1,4 +1,4 @@
-use crate::{DebuggerHooks, Engine, Value};
+use crate::{DebuggerHooks, Engine, RuntimeError, Value};
 use std::sync::{Arc, Mutex};
 
 fn load_script(engine: &mut Engine, source: &str) {
@@ -100,6 +100,82 @@ fn reports_unknown_function() {
     let engine = Engine::new();
     let error = engine.call("Missing", &[]).unwrap_err();
     assert!(format!("{error}").contains("unknown function"));
+}
+
+#[test]
+fn host_function_can_be_called_directly() {
+    let mut engine = Engine::new();
+    engine.register_host_function("HostAdd", |args| {
+        let lhs = match args.get(0) {
+            Some(Value::Int(value)) => *value,
+            _ => {
+                return Err(RuntimeError::new(
+                    "HostAdd expects first argument to be an int",
+                ))
+            }
+        };
+        let rhs = match args.get(1) {
+            Some(Value::Int(value)) => *value,
+            _ => {
+                return Err(RuntimeError::new(
+                    "HostAdd expects second argument to be an int",
+                ))
+            }
+        };
+        Ok(Value::Int(lhs + rhs))
+    });
+
+    let result = engine
+        .call("HostAdd", &[Value::Int(40), Value::Int(2)])
+        .expect("host call succeeds");
+    assert_eq!(result, Value::Int(42));
+}
+
+#[test]
+fn script_can_call_host_function() {
+    let mut engine = Engine::new();
+    engine.register_host_function("HostMul", |args| {
+        let lhs = match args.get(0) {
+            Some(Value::Int(value)) => *value,
+            _ => {
+                return Err(RuntimeError::new(
+                    "HostMul expects first argument to be an int",
+                ))
+            }
+        };
+        let rhs = match args.get(1) {
+            Some(Value::Int(value)) => *value,
+            _ => {
+                return Err(RuntimeError::new(
+                    "HostMul expects second argument to be an int",
+                ))
+            }
+        };
+        Ok(Value::Int(lhs * rhs))
+    });
+
+    load_script(
+        &mut engine,
+        r#"
+        global func DoubleProduct(a, b) {
+            return HostMul(a, b) * 2;
+        }
+        "#,
+    );
+
+    let result = engine
+        .call("DoubleProduct", &[Value::Int(3), Value::Int(4)])
+        .expect("script call succeeds");
+    assert_eq!(result, Value::Int(24));
+}
+
+#[test]
+fn host_function_errors_propagate() {
+    let mut engine = Engine::new();
+    engine.register_host_function("HostFail", |_| Err(RuntimeError::new("host failure")));
+
+    let error = engine.call("HostFail", &[]).unwrap_err();
+    assert!(format!("{error}").contains("host failure"));
 }
 
 #[test]

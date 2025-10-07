@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::ast::{BinaryOp, Expr, Function, Stmt, UnaryOp};
 use crate::debugger::DebuggerHooks;
+use crate::engine::HostFunction;
 use crate::error::RuntimeError;
 use crate::value::{Literal, Value};
 
@@ -9,13 +10,19 @@ const MAX_CALL_DEPTH: usize = 64;
 
 pub struct Vm<'a> {
     functions: &'a HashMap<String, Function>,
+    host_functions: &'a HashMap<String, HostFunction>,
     debugger: Option<DebuggerHooks>,
 }
 
 impl<'a> Vm<'a> {
-    pub fn new(functions: &'a HashMap<String, Function>, debugger: Option<DebuggerHooks>) -> Self {
+    pub fn new(
+        functions: &'a HashMap<String, Function>,
+        host_functions: &'a HashMap<String, HostFunction>,
+        debugger: Option<DebuggerHooks>,
+    ) -> Self {
         Self {
             functions,
+            host_functions,
             debugger,
         }
     }
@@ -28,10 +35,25 @@ impl<'a> Vm<'a> {
         if depth >= MAX_CALL_DEPTH {
             return Err(RuntimeError::new("maximum call depth exceeded"));
         }
-        let function = self
-            .functions
-            .get(name)
-            .ok_or_else(|| RuntimeError::new(format!("unknown function '{name}'")))?;
+
+        if let Some(function) = self.functions.get(name) {
+            return self.invoke_script_function(name, function, args, depth);
+        }
+
+        if let Some(function) = self.host_functions.get(name) {
+            return self.invoke_host_function(name, function, args);
+        }
+
+        Err(RuntimeError::new(format!("unknown function '{name}'")))
+    }
+
+    fn invoke_script_function(
+        &self,
+        name: &str,
+        function: &Function,
+        args: &[Value],
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
         if args.len() != function.params.len() {
             return Err(RuntimeError::new(format!(
                 "function '{name}' expects {} arguments but received {}",
@@ -57,6 +79,30 @@ impl<'a> Vm<'a> {
         }
 
         Ok(value)
+    }
+
+    fn invoke_host_function(
+        &self,
+        name: &str,
+        function: &HostFunction,
+        args: &[Value],
+    ) -> Result<Value, RuntimeError> {
+        if let Some(debugger) = &self.debugger {
+            if let Some(callback) = debugger.on_call() {
+                callback(name, args);
+            }
+        }
+
+        let outcome = function(args);
+        let result = outcome?;
+
+        if let Some(debugger) = &self.debugger {
+            if let Some(callback) = debugger.on_return() {
+                callback(name, &result);
+            }
+        }
+
+        Ok(result)
     }
 
     fn execute_statements(

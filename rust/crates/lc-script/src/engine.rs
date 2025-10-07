@@ -1,11 +1,14 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::ast::{Function, Script as AstScript};
 use crate::debugger::DebuggerHooks;
-use crate::error::{ParseError, ScriptError};
+use crate::error::{ParseError, RuntimeError, ScriptError};
 use crate::parser::Parser;
 use crate::value::Value;
 use crate::vm::Vm;
+
+pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub struct Script {
@@ -34,6 +37,7 @@ impl Script {
 
 pub struct Engine {
     functions: HashMap<String, Function>,
+    host_functions: HashMap<String, HostFunction>,
     debugger_hooks: Option<DebuggerHooks>,
 }
 
@@ -41,6 +45,7 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             functions: HashMap::new(),
+            host_functions: HashMap::new(),
             debugger_hooks: None,
         }
     }
@@ -57,8 +62,27 @@ impl Engine {
         }
     }
 
+    pub fn register_host_function<F>(&mut self, name: impl Into<String>, func: F)
+    where
+        F: Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync + 'static,
+    {
+        self.host_functions.insert(name.into(), Arc::new(func));
+    }
+
+    pub fn clear_host_functions(&mut self) {
+        self.host_functions.clear();
+    }
+
+    pub fn remove_host_function(&mut self, name: &str) -> Option<HostFunction> {
+        self.host_functions.remove(name)
+    }
+
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, ScriptError> {
-        let vm = Vm::new(&self.functions, self.debugger_hooks.clone());
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            self.debugger_hooks.clone(),
+        );
         vm.call(name, args).map_err(ScriptError::from)
     }
 
