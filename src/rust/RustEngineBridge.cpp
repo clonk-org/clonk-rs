@@ -54,6 +54,8 @@ struct SnapshotEntry {
 struct SnapshotBuffer {
     std::vector<SnapshotEntry> entries;
     std::vector<LcEngineObjectSnapshot> raw;
+    std::vector<LcEngineEffectSnapshot> global_effects;
+    std::vector<std::string> global_effect_names;
 };
 
 std::mutex g_mutex;
@@ -152,6 +154,23 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
         entry.snapshot.effects = entry.effects.empty() ? nullptr : entry.effects.data();
         entry.snapshot.effect_count = entry.effects.size();
         buffer.raw.push_back(entry.snapshot);
+    }
+
+    for (C4Effect *effect = game.pGlobalEffects; effect; effect = effect->pNext) {
+        if (effect->IsDead()) {
+            continue;
+        }
+
+        buffer.global_effect_names.emplace_back(effect->Name);
+        LcEngineEffectSnapshot effect_snapshot{};
+        effect_snapshot.priority = effect->iPriority;
+        effect_snapshot.interval = effect->iIntervall;
+        effect_snapshot.timer = effect->iTime;
+        buffer.global_effects.push_back(effect_snapshot);
+    }
+
+    for (size_t i = 0; i < buffer.global_effects.size(); ++i) {
+        buffer.global_effects[i].name = buffer.global_effect_names[i].c_str();
     }
 
     return buffer;
@@ -287,11 +306,22 @@ void OnFrame(C4Game &game) {
 
     SnapshotBuffer buffer = CollectSnapshotBuffer(game);
     const auto &raw = buffer.raw;
+    const auto &global_effects = buffer.global_effects;
+    const LcEngineObjectSnapshot *object_data = raw.empty() ? nullptr : raw.data();
+    const LcEngineEffectSnapshot *global_effect_data =
+        global_effects.empty() ? nullptr : global_effects.data();
     const uint64_t frame = static_cast<uint64_t>(game.FrameCounter);
 
     if (g_playback) {
         char *error_message = nullptr;
-        if (!lc_engine_playback_compare(g_playback.get(), frame, raw.data(), raw.size(), &error_message)) {
+        if (!lc_engine_playback_compare(
+                g_playback.get(),
+                frame,
+                object_data,
+                raw.size(),
+                global_effect_data,
+                global_effects.size(),
+                &error_message)) {
             RustStringPtr error = MakeString(error_message);
             if (error) {
                 LogError(std::string("Rust engine playback mismatch: ") + error.get());
@@ -304,7 +334,13 @@ void OnFrame(C4Game &game) {
     }
 
     if (g_recorder) {
-        lc_engine_recorder_record(g_recorder.get(), frame, raw.data(), raw.size());
+        lc_engine_recorder_record(
+            g_recorder.get(),
+            frame,
+            object_data,
+            raw.size(),
+            global_effect_data,
+            global_effects.size());
     }
 }
 

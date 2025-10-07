@@ -57,14 +57,19 @@ impl PlaybackHandle {
 unsafe fn make_snapshot(
     frame: u64,
     objects: *const LcEngineObjectSnapshot,
-    len: usize,
+    object_len: usize,
+    global_effects: *const LcEngineEffectSnapshot,
+    global_effect_len: usize,
 ) -> Option<SimulationSnapshot> {
-    if objects.is_null() && len > 0 {
+    let objects_slice: &[LcEngineObjectSnapshot] = if object_len == 0 {
+        &[]
+    } else if objects.is_null() {
         return None;
-    }
-    let raw = slice::from_raw_parts(objects, len);
-    let mut snapshots = Vec::with_capacity(len);
-    for entry in raw.iter() {
+    } else {
+        slice::from_raw_parts(objects, object_len)
+    };
+    let mut snapshots = Vec::with_capacity(objects_slice.len());
+    for entry in objects_slice.iter() {
         let definition_id = if entry.definition_id.is_null() {
             String::new()
         } else {
@@ -127,10 +132,37 @@ unsafe fn make_snapshot(
         });
     }
     snapshots.sort_by_key(|object| object.id);
+
+    let global_effects_slice: &[LcEngineEffectSnapshot] = if global_effect_len == 0 {
+        &[]
+    } else if global_effects.is_null() {
+        return None;
+    } else {
+        slice::from_raw_parts(global_effects, global_effect_len)
+    };
+    let mut global_effects_vec = Vec::with_capacity(global_effects_slice.len());
+    for effect_entry in global_effects_slice {
+        let effect_name = if effect_entry.name.is_null() {
+            String::new()
+        } else {
+            match CStr::from_ptr(effect_entry.name).to_str() {
+                Ok(value) => value.to_string(),
+                Err(_) => CStr::from_ptr(effect_entry.name)
+                    .to_string_lossy()
+                    .into_owned(),
+            }
+        };
+        let effect = EffectState::new(effect_name)
+            .with_priority(effect_entry.priority)
+            .with_interval(effect_entry.interval)
+            .with_timer(effect_entry.timer);
+        global_effects_vec.push(effect);
+    }
+
     Some(SimulationSnapshot {
         frame,
         objects: snapshots,
-        global_effects: Vec::new(),
+        global_effects: global_effects_vec,
     })
 }
 
@@ -167,11 +199,13 @@ pub extern "C" fn lc_engine_recorder_record(
     frame: u64,
     objects: *const LcEngineObjectSnapshot,
     len: usize,
+    global_effects: *const LcEngineEffectSnapshot,
+    global_effect_len: usize,
 ) {
     if handle.is_null() {
         return;
     }
-    let snapshot = unsafe { make_snapshot(frame, objects, len) };
+    let snapshot = unsafe { make_snapshot(frame, objects, len, global_effects, global_effect_len) };
     if let Some(snapshot) = snapshot {
         unsafe {
             let handle = &mut *handle;
@@ -246,13 +280,15 @@ pub extern "C" fn lc_engine_playback_compare(
     frame: u64,
     objects: *const LcEngineObjectSnapshot,
     len: usize,
+    global_effects: *const LcEngineEffectSnapshot,
+    global_effect_len: usize,
     error_out: *mut *mut c_char,
 ) -> bool {
     if handle.is_null() {
         set_error(error_out, "playback handle is null".to_string());
         return false;
     }
-    let snapshot = unsafe { make_snapshot(frame, objects, len) };
+    let snapshot = unsafe { make_snapshot(frame, objects, len, global_effects, global_effect_len) };
     let Some(snapshot) = snapshot else {
         set_error(error_out, "invalid object snapshot data".to_string());
         return false;
@@ -346,8 +382,8 @@ mod tests {
             effect_count: 1,
         };
 
-        let snapshot =
-            unsafe { make_snapshot(5, &object, 1) }.expect("snapshot should deserialize");
+        let snapshot = unsafe { make_snapshot(5, &object, 1, ptr::null(), 0) }
+            .expect("snapshot should deserialize");
 
         assert_eq!(snapshot.objects.len(), 1);
         let recorded = &snapshot.objects[0];
@@ -360,5 +396,28 @@ mod tests {
         assert_eq!(effect.priority, 100);
         assert_eq!(effect.interval, 2);
         assert_eq!(effect.timer, 1);
+    }
+
+    #[test]
+    fn make_snapshot_collects_global_effects() {
+        let effect_name = CString::new("FxGlobal").unwrap();
+
+        let effect_snapshot = LcEngineEffectSnapshot {
+            name: effect_name.as_ptr(),
+            priority: 42,
+            interval: 10,
+            timer: 3,
+        };
+
+        let snapshot = unsafe { make_snapshot(1, ptr::null(), 0, &effect_snapshot, 1) }
+            .expect("snapshot should deserialize");
+
+        assert!(snapshot.objects.is_empty());
+        assert_eq!(snapshot.global_effects.len(), 1);
+        let effect = &snapshot.global_effects[0];
+        assert_eq!(effect.name, "FxGlobal");
+        assert_eq!(effect.priority, 42);
+        assert_eq!(effect.interval, 10);
+        assert_eq!(effect.timer, 3);
     }
 }

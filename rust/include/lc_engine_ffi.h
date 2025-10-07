@@ -36,12 +36,25 @@ typedef struct LcEngineObjectSnapshot {
 
 LcEngineRecorderHandle *lc_engine_recorder_new(void);
 void lc_engine_recorder_clear(LcEngineRecorderHandle *handle);
-void lc_engine_recorder_record(LcEngineRecorderHandle *handle, uint64_t frame, const LcEngineObjectSnapshot *objects, size_t len);
+void lc_engine_recorder_record(
+    LcEngineRecorderHandle *handle,
+    uint64_t frame,
+    const LcEngineObjectSnapshot *objects,
+    size_t object_count,
+    const LcEngineEffectSnapshot *global_effects,
+    size_t global_effect_count);
 char *lc_engine_recorder_export_json(LcEngineRecorderHandle *handle);
 void lc_engine_recorder_free(LcEngineRecorderHandle *handle);
 
 LcEnginePlaybackHandle *lc_engine_playback_from_json(const char *json, char **error_message);
-bool lc_engine_playback_compare(LcEnginePlaybackHandle *handle, uint64_t frame, const LcEngineObjectSnapshot *objects, size_t len, char **error_message);
+bool lc_engine_playback_compare(
+    LcEnginePlaybackHandle *handle,
+    uint64_t frame,
+    const LcEngineObjectSnapshot *objects,
+    size_t object_count,
+    const LcEngineEffectSnapshot *global_effects,
+    size_t global_effect_count,
+    char **error_message);
 bool lc_engine_playback_finish(LcEnginePlaybackHandle *handle, char **error_message);
 void lc_engine_playback_free(LcEnginePlaybackHandle *handle);
 
