@@ -45,7 +45,7 @@ impl Default for ActionState {
 }
 
 /// Partial update to an object's action state.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ActionUpdate {
     pub name: Option<String>,
     pub phase: Option<i32>,

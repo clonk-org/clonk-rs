@@ -18,7 +18,8 @@ use std::fmt;
 use std::ops::AddAssign;
 
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, ScriptError, Value};
-use rand::{rngs::SmallRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -68,7 +69,7 @@ impl AddAssign<Vector2> for Vector2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhysicsSettings {
     pub gravity: i32,
     pub max_fall_speed: i32,
@@ -115,7 +116,7 @@ impl Default for PhysicsSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectState {
     pub position: Vector2,
     pub velocity: Vector2,
@@ -160,7 +161,7 @@ impl From<ObjectUpdate> for ObjectDelta {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectUpdate {
     pub position: Option<Vector2>,
     pub velocity: Option<Vector2>,
@@ -208,7 +209,7 @@ impl ObjectUpdate {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedCommand {
     pub delay: u32,
     pub update: ObjectUpdate,
@@ -474,7 +475,7 @@ pub enum EngineError {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnConfig {
     pub definition_id: DefinitionId,
     pub position: Vector2,
@@ -538,6 +539,25 @@ impl SimulationSnapshot {
     pub fn object(&self, id: ObjectId) -> Option<&ObjectSnapshot> {
         self.objects.iter().find(|object| object.id == id)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedObject {
+    pub snapshot: ObjectSnapshot,
+    #[serde(default)]
+    pub command_queue: Vec<QueuedCommand>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineState {
+    pub frame: u64,
+    pub physics: PhysicsSettings,
+    pub next_object_id: u64,
+    #[serde(default)]
+    pub landscape: Option<Landscape>,
+    #[serde(default)]
+    pub objects: Vec<PersistedObject>,
+    pub rng: ChaCha8Rng,
 }
 
 pub struct Definition {
@@ -726,7 +746,7 @@ pub struct Engine {
     definitions: HashMap<DefinitionId, Definition>,
     objects: Vec<Object>,
     next_object_id: u64,
-    rng: SmallRng,
+    rng: ChaCha8Rng,
     frame: u64,
     landscape: Option<Landscape>,
     physics: PhysicsSettings,
@@ -742,7 +762,7 @@ impl Engine {
             definitions: HashMap::new(),
             objects: Vec::new(),
             next_object_id: 1,
-            rng: SmallRng::seed_from_u64(seed),
+            rng: ChaCha8Rng::seed_from_u64(seed),
             frame: 0,
             landscape: None,
             physics: PhysicsSettings::default(),
@@ -987,6 +1007,72 @@ impl Engine {
             frame: self.frame,
             objects,
         }
+    }
+
+    pub fn capture_state(&self) -> EngineState {
+        let objects = self
+            .objects
+            .iter()
+            .map(|object| PersistedObject {
+                snapshot: object.snapshot(),
+                command_queue: object.command_queue.iter().cloned().collect(),
+            })
+            .collect();
+
+        EngineState {
+            frame: self.frame,
+            physics: self.physics,
+            next_object_id: self.next_object_id,
+            landscape: self.landscape.clone(),
+            objects,
+            rng: self.rng.clone(),
+        }
+    }
+
+    pub fn restore_state(&mut self, state: &EngineState) -> Result<(), EngineError> {
+        for object in &state.objects {
+            if !self
+                .definitions
+                .contains_key(&object.snapshot.definition_id)
+            {
+                return Err(EngineError::UnknownDefinition(
+                    object.snapshot.definition_id.clone(),
+                ));
+            }
+        }
+
+        self.frame = state.frame;
+        self.physics = state.physics;
+        self.landscape = state.landscape.clone();
+        self.rng = state.rng.clone();
+        self.objects.clear();
+
+        for persisted in &state.objects {
+            let snapshot = &persisted.snapshot;
+            let mut object = Object::new(
+                snapshot.id,
+                snapshot.definition_id.clone(),
+                ObjectState {
+                    position: snapshot.position,
+                    velocity: snapshot.velocity,
+                    energy: snapshot.energy,
+                    action: snapshot.action.clone(),
+                    effects: snapshot.effects.clone(),
+                },
+            );
+            object.command_queue = VecDeque::from(persisted.command_queue.clone());
+            self.objects.push(object);
+        }
+
+        let highest_id = self
+            .objects
+            .iter()
+            .map(|object| object.id.as_u64())
+            .max()
+            .unwrap_or(0);
+        self.next_object_id = state.next_object_id.max(highest_id + 1);
+
+        Ok(())
     }
 
     fn dispatch_effect_events(
@@ -1796,6 +1882,33 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    const STATEFUL_SCRIPT: &str = r#"
+    global func Initialize(state, random)
+    {
+        var vx = state.velocity[0] + (random % 5);
+        var phase = random % 3;
+        return {
+            velocity = [vx, state.velocity[1]],
+            energy = state.energy + (random % 7),
+            action = { name = "Active", phase = phase }
+        };
+    }
+
+    global func Step(state, frame, random)
+    {
+        var vx = state.velocity[0] + (random % 3) - 1;
+        var energy = state.energy + (random % 5) - 2;
+        if (energy < 0)
+        {
+            energy = 0;
+        }
+        return {
+            velocity = [vx, state.velocity[1]],
+            energy = energy
+        };
+    }
+    "#;
+
     fn build_definition() -> Definition {
         let source = r#"
         global func Initialize(state, random) {
@@ -2377,5 +2490,70 @@ mod tests {
         let third = engine.tick().expect("third tick succeeds");
         let object = third.object(id).expect("object present");
         assert_eq!(object.action.name, "Slide");
+    }
+
+    #[test]
+    fn captures_and_restores_engine_state() -> Result<(), EngineError> {
+        let mut engine = Engine::with_seed(0xBAD_F00D);
+        engine.set_physics(PhysicsSettings::new(2, 9, -6));
+        engine.set_landscape(Landscape::flat(128, 15));
+
+        let definition = Definition::from_script("Stateful", "Stateful", STATEFUL_SCRIPT)?;
+        engine.register_definition(definition)?;
+
+        let object_id = engine.spawn_object(
+            SpawnConfig::new("Stateful")
+                .with_position(Vector2::new(10, 5))
+                .with_velocity(Vector2::new(1, -2))
+                .with_energy(12),
+        )?;
+
+        engine.queue_object_command(
+            object_id,
+            QueuedCommand::new(
+                2,
+                ObjectUpdate::new()
+                    .with_action_update(ActionUpdate::default().with_name("Rest").with_phase(4)),
+            )
+            .with_effects(vec![EffectCommand::add(
+                EffectState::new("Glow")
+                    .with_priority(90)
+                    .with_interval(3)
+                    .with_timer(1),
+            )])
+            .with_spawns(vec![SpawnConfig::new("Stateful")
+                .with_position(Vector2::new(3, 0))
+                .with_velocity(Vector2::new(0, 0))
+                .with_energy(5)
+                .with_action(ActionState::new("Helper"))]),
+        )?;
+
+        let _ = engine.tick()?;
+
+        let state = engine.capture_state();
+        let serialized = serde_json::to_string(&state).expect("state serializes");
+        let decoded: EngineState =
+            serde_json::from_str(&serialized).expect("state round-trips via JSON");
+
+        let mut restored = Engine::with_seed(123);
+        restored.set_physics(PhysicsSettings::new(5, 11, -8));
+        restored.set_landscape(Landscape::flat(64, 9));
+        let definition = Definition::from_script("Stateful", "Stateful", STATEFUL_SCRIPT)?;
+        restored.register_definition(definition)?;
+        restored.restore_state(&decoded)?;
+
+        assert_eq!(restored.physics(), state.physics);
+        assert_eq!(restored.landscape(), state.landscape.as_ref());
+        assert_eq!(engine.snapshot(), restored.snapshot());
+
+        let next_original = engine.tick()?;
+        let next_restored = restored.tick()?;
+        assert_eq!(next_original, next_restored);
+
+        let spawn_original = engine.tick()?;
+        let spawn_restored = restored.tick()?;
+        assert_eq!(spawn_original, spawn_restored);
+
+        Ok(())
     }
 }

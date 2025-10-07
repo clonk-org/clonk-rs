@@ -11,6 +11,7 @@
 - The demo viewport now scrolls horizontally across loaded landscapes and keeps the focus object in view so larger scenarios are observable inside the harness.
 - Object snapshots now surface each object's action name and phase, scripts can request action transitions, and the C++ validation bridge records the same metadata so playback parity covers basic action state changes.
 - Engine objects now track prioritized effect stacks with per-frame timers; scripts and queued commands can add, remove, or clear effects, snapshots plus FFI exports include the same metadata for validation, and the engine now dispatches `Fx*Start`, `Fx*Timer`, and `Fx*Stop` callbacks so scripts can react to lifecycle events.
+- Engine state snapshots can now be exported and restored via a serializable `EngineState`, enabling deterministic save/resume flows for validation harnesses and future savegame experiments.
 
 ## Rust Workspace Scope
 - `lc-core`, `lc-resources`, `lc-script`, `lc-engine`, `lc-graphics`, `lc-audio`, `lc-network`, `lc-gui`, `lc-platform`, and `lc-app` provide demo-friendly utilities, parsers, in-memory surfaces, a toy physics loop, and basic networking abstractions.
@@ -41,7 +42,7 @@
 - `lc-app` can replay a scripted control sequence or accept live terminal input to drive the demo object through the control hook.
 
 ## Major Gaps to Reach Behavior Parity
-- Recreate the complete C4 object lifecycle, including the full action procedure system, physics integration beyond the new baseline gravity/velocity caps, robust scenario/environment management beyond the current JSON loader, and player control/GUI pathways that match the shipping UI; savegame compatibility and synchronous serialization remain open. (Action name/phase tracking and effect stacks now exist as minimal scaffolds, the command queue now covers deferred state updates and queued spawn/destroy requests, effect lifecycle callbacks now fire for start/timer/stop events, and animation graphs plus serialization remain outstanding even though the C++ bridge now forwards live effect stacks.)
+- Recreate the complete C4 object lifecycle, including the full action procedure system, physics integration beyond the new baseline gravity/velocity caps, robust scenario/environment management beyond the current JSON loader, and player control/GUI pathways that match the shipping UI; cross-runtime savegame formats and animation graphs remain open. (Action name/phase tracking and effect stacks now exist as minimal scaffolds, the command queue now covers deferred state updates and queued spawn/destroy requests, effect lifecycle callbacks now fire for start/timer/stop events, and the new `EngineState` serialization restores deterministic engine state even though a production-ready save pipeline and animation graphs are still missing.)
 - Port AUL runtime features: effect handlers, engine call map, proplist semantics, debugging, and compatibility behaviors relied upon by shipped scripts.
 - Implement rendering and audio backends that match the SDL/OpenGL pipeline and mixer behavior across all supported platforms.
 - Mirror GUI subsystems (dialogs, HUD, console, editor) and integrate them with input, networking, and engine state.

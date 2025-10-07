@@ -60,7 +60,7 @@ impl Default for EffectState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectCommand {
     Add(EffectState),
     Remove { name: String },
