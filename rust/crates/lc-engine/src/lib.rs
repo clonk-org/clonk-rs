@@ -91,6 +91,34 @@ struct ObjectDelta {
     energy: Option<i32>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjectUpdate {
+    pub position: Option<Vector2>,
+    pub velocity: Option<Vector2>,
+    pub energy: Option<i32>,
+}
+
+impl ObjectUpdate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_position(mut self, position: Vector2) -> Self {
+        self.position = Some(position);
+        self
+    }
+
+    pub fn with_velocity(mut self, velocity: Vector2) -> Self {
+        self.velocity = Some(velocity);
+        self
+    }
+
+    pub fn with_energy(mut self, energy: i32) -> Self {
+        self.energy = Some(energy);
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Object {
     id: ObjectId,
@@ -130,6 +158,8 @@ pub enum EngineError {
     DefinitionAlreadyExists(String),
     #[error("unknown definition `{0}`")]
     UnknownDefinition(String),
+    #[error("unknown object `{0}`")]
+    UnknownObject(ObjectId),
     #[error("script error in {function} of `{definition}`")]
     Script {
         definition: String,
@@ -401,6 +431,47 @@ impl Engine {
         self.objects.retain(|object| !object.destroyed);
         self.process_spawn_queue(spawn_requests)?;
         Ok(self.snapshot())
+    }
+
+    pub fn object_snapshot(&self, id: ObjectId) -> Option<ObjectSnapshot> {
+        self.objects
+            .iter()
+            .find(|object| object.id == id)
+            .map(Object::snapshot)
+    }
+
+    pub fn apply_object_update(
+        &mut self,
+        id: ObjectId,
+        update: ObjectUpdate,
+    ) -> Result<(), EngineError> {
+        let landscape = self.landscape.clone();
+        let object = self
+            .objects
+            .iter_mut()
+            .find(|object| object.id == id)
+            .ok_or(EngineError::UnknownObject(id))?;
+
+        if let Some(position) = update.position {
+            object.state.position = position;
+        }
+        if let Some(velocity) = update.velocity {
+            object.state.velocity = velocity;
+        }
+        if let Some(energy) = update.energy {
+            object.state.energy = energy;
+        }
+
+        if let Some(landscape) = landscape.as_ref() {
+            let resolution =
+                landscape.resolve_collision(object.state.position, object.state.velocity);
+            if resolution.collided {
+                object.state.position = resolution.position;
+                object.state.velocity = resolution.velocity;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn snapshot(&self) -> SimulationSnapshot {
@@ -914,5 +985,39 @@ mod tests {
                 .expect("snapshots match");
         }
         playback.finish().expect("playback completed");
+    }
+
+    #[test]
+    fn apply_object_update_overrides_velocity() {
+        let mut engine = Engine::with_seed(1);
+        engine
+            .register_definition(build_definition())
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_position(Vector2::new(0, 0))
+                    .with_velocity(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+
+        engine
+            .apply_object_update(id, ObjectUpdate::new().with_velocity(Vector2::new(5, -3)))
+            .expect("update applies");
+
+        let snapshot = engine.object_snapshot(id).expect("object snapshot");
+        assert_eq!(snapshot.velocity, Vector2::new(5, -3));
+    }
+
+    #[test]
+    fn apply_object_update_unknown_object_errors() {
+        let mut engine = Engine::with_seed(1);
+        let error = engine
+            .apply_object_update(ObjectId::new(999), ObjectUpdate::default())
+            .expect_err("update fails");
+        match error {
+            EngineError::UnknownObject(id) => assert_eq!(id.as_u64(), 999),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

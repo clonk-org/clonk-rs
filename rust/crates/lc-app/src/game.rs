@@ -6,8 +6,8 @@ use std::str::FromStr;
 use lc_audio::{AudioSystem, SoundHandle};
 use lc_core::std_config::Config;
 use lc_engine::{
-    Definition, Engine, EngineError, Landscape, ObjectId, ObjectSnapshot, Scenario, ScenarioError,
-    SimulationSnapshot, SpawnConfig, Vector2,
+    Definition, Engine, EngineError, Landscape, ObjectId, ObjectSnapshot, ObjectUpdate, Scenario,
+    ScenarioError, SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_graphics::{Color, PixelFormat, SnapshotHasher, Surface};
 use lc_gui::{
@@ -16,7 +16,7 @@ use lc_gui::{
 use lc_network::{ClientId, ControlCoordinator, ControlError, ControlPacket, Lobby, LobbyError};
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{Group, GroupError};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const DEMO_CONFIG_BYTES: &[u8] = include_bytes!("demo_config.cfg");
 const DEMO_SCRIPT: &str = include_str!("demo_script.aul");
@@ -25,6 +25,8 @@ const SAMPLE_RATE: u32 = 44_100;
 const SURFACE_WIDTH: u32 = 640;
 const SURFACE_HEIGHT: u32 = 360;
 const MIX_CHANNELS: usize = 8;
+const HORIZONTAL_SPEED: i32 = 6;
+const JUMP_VELOCITY: i32 = -18;
 
 pub type GameResult<T> = Result<T, GameError>;
 
@@ -50,6 +52,8 @@ pub enum GameError {
     Scenario(#[from] ScenarioError),
     #[error("scenario did not spawn any objects")]
     ScenarioNoObjects,
+    #[error("control payload error: {0}")]
+    ControlPayload(String),
     #[error("summary output error: {0}")]
     SummaryOutput(std::io::Error),
     #[error("summary serialization error: {0}")]
@@ -106,6 +110,21 @@ pub struct GameSummary {
     pub user_data_dir: PathBuf,
     pub logs_dir: PathBuf,
     pub cache_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct ControlPayload {
+    horizontal: i8,
+    jump: bool,
+}
+
+impl ControlPayload {
+    const fn neutral() -> Self {
+        Self {
+            horizontal: 0,
+            jump: false,
+        }
+    }
 }
 
 impl DemoGame {
@@ -245,14 +264,26 @@ impl DemoGame {
         let mut ready_batches = 0u32;
         let mut last_snapshot = None;
         let mut was_grounded = false;
+        let mut current_control = ControlPayload::neutral();
 
         for tick in 0..ticks {
-            let payload = format!("FRAME{:03}", tick).into_bytes();
+            let scripted_control = scripted_control_for_tick(tick);
+            let payload = encode_control_payload(&scripted_control)?;
             let packet = ControlPacket::builder(LOCAL_CLIENT_ID, tick as u32)
                 .timestamp_ms((tick as u64) * 16)
                 .payload(payload);
             let outcome = self.control.ingest(packet)?;
             ready_batches += outcome.ready.len() as u32;
+
+            for batch in &outcome.ready {
+                for packet in batch.packets() {
+                    if packet.client_id() == LOCAL_CLIENT_ID {
+                        current_control = decode_control_payload(packet.payload())?;
+                    }
+                }
+            }
+
+            self.apply_control(current_control)?;
 
             let snapshot = self.engine.tick()?;
             let object = snapshot
@@ -336,6 +367,24 @@ impl DemoGame {
             .set_label_text(self.title_label, &self.scenario_label)?;
         self.gui.set_label_text(self.frame_label, frame_text)?;
         self.gui.set_label_text(self.status_label, status_text)?;
+
+        Ok(())
+    }
+
+    fn apply_control(&mut self, control: ControlPayload) -> GameResult<()> {
+        let snapshot = self
+            .engine
+            .object_snapshot(self.object_id)
+            .ok_or_else(|| GameError::Engine(EngineError::UnknownObject(self.object_id)))?;
+
+        let mut velocity = snapshot.velocity;
+        velocity.x = (control.horizontal as i32) * HORIZONTAL_SPEED;
+        if control.jump && snapshot.position.y >= self.ground_height {
+            velocity.y = JUMP_VELOCITY;
+        }
+
+        self.engine
+            .apply_object_update(self.object_id, ObjectUpdate::new().with_velocity(velocity))?;
 
         Ok(())
     }
@@ -530,6 +579,26 @@ fn generate_bounce_wav(duration_seconds: f32, frequency_hz: f32, sample_rate: u3
     }
 
     data
+}
+
+fn encode_control_payload(payload: &ControlPayload) -> GameResult<Vec<u8>> {
+    serde_json::to_vec(payload).map_err(|err| GameError::ControlPayload(err.to_string()))
+}
+
+fn decode_control_payload(bytes: &[u8]) -> GameResult<ControlPayload> {
+    serde_json::from_slice(bytes).map_err(|err| GameError::ControlPayload(err.to_string()))
+}
+
+fn scripted_control_for_tick(tick: u32) -> ControlPayload {
+    let phase = (tick / 90) % 4;
+    let horizontal = match phase {
+        0 => 1,
+        1 => 0,
+        2 => -1,
+        _ => 0,
+    };
+    let jump = tick % 120 == 0;
+    ControlPayload { horizontal, jump }
 }
 
 #[cfg(test)]
