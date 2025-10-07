@@ -873,6 +873,10 @@ pub struct EngineState {
     pub crew_selection: HashMap<i32, CrewSelectionState>,
     #[serde(default)]
     pub global_effects: Vec<EffectState>,
+    #[serde(default)]
+    pub known_crew_owners: Vec<i32>,
+    #[serde(default)]
+    pub eliminated_crew_owners: Vec<i32>,
     pub rng: ChaCha8Rng,
 }
 
@@ -1157,6 +1161,8 @@ pub struct Engine {
     environment: EnvironmentSettings,
     global_effects: Vec<EffectState>,
     crew_selection: HashMap<i32, CrewSelection>,
+    known_crew_owners: HashSet<i32>,
+    eliminated_crew_owners: HashSet<i32>,
 }
 
 impl Engine {
@@ -1176,6 +1182,8 @@ impl Engine {
             environment: EnvironmentSettings::default(),
             global_effects: Vec::new(),
             crew_selection: HashMap::new(),
+            known_crew_owners: HashSet::new(),
+            eliminated_crew_owners: HashSet::new(),
         }
     }
 
@@ -1220,6 +1228,16 @@ impl Engine {
             .filter(|object| object.state.crew_member && object.state.owner == owner)
             .map(|object| object.id)
             .collect()
+    }
+
+    pub fn eliminated_owners(&self) -> Vec<i32> {
+        let mut eliminated: Vec<_> = self.eliminated_crew_owners.iter().cloned().collect();
+        eliminated.sort_unstable();
+        eliminated
+    }
+
+    pub fn is_owner_eliminated(&self, owner: i32) -> bool {
+        self.eliminated_crew_owners.contains(&owner)
     }
 
     pub fn selected_crew(&self, owner: i32) -> Vec<ObjectId> {
@@ -1350,6 +1368,7 @@ impl Engine {
     pub fn spawn_object(&mut self, config: SpawnConfig) -> Result<ObjectId, EngineError> {
         let (id, additional) = self.spawn_single(config)?;
         self.process_spawn_queue(additional)?;
+        self.refresh_elimination_state();
         Ok(id)
     }
 
@@ -1557,6 +1576,7 @@ impl Engine {
         self.objects.retain(|object| !object.destroyed);
         self.prune_selection();
         self.process_spawn_queue(spawn_requests)?;
+        self.refresh_elimination_state();
         Ok(self.snapshot())
     }
 
@@ -1631,6 +1651,7 @@ impl Engine {
         };
 
         self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
+        self.refresh_elimination_state();
 
         Ok(())
     }
@@ -1682,6 +1703,12 @@ impl Engine {
             .map(|(&owner, selection)| (owner, CrewSelectionState::from(selection)))
             .collect();
 
+        let mut known_crew_owners: Vec<_> = self.known_crew_owners.iter().cloned().collect();
+        known_crew_owners.sort_unstable();
+        let mut eliminated_crew_owners: Vec<_> =
+            self.eliminated_crew_owners.iter().cloned().collect();
+        eliminated_crew_owners.sort_unstable();
+
         EngineState {
             frame: self.frame,
             physics: self.physics,
@@ -1691,6 +1718,8 @@ impl Engine {
             objects,
             crew_selection,
             global_effects: self.global_effects.clone(),
+            known_crew_owners,
+            eliminated_crew_owners,
             rng: self.rng.clone(),
         }
     }
@@ -1739,6 +1768,9 @@ impl Engine {
             self.objects.push(object);
         }
 
+        self.known_crew_owners = state.known_crew_owners.iter().cloned().collect();
+        self.eliminated_crew_owners = state.eliminated_crew_owners.iter().cloned().collect();
+
         let highest_id = self
             .objects
             .iter()
@@ -1748,6 +1780,7 @@ impl Engine {
         self.next_object_id = state.next_object_id.max(highest_id + 1);
 
         self.prune_selection();
+        self.refresh_elimination_state();
 
         Ok(())
     }
@@ -1862,6 +1895,33 @@ impl Engine {
             selection.prune(&alive);
             !selection.is_empty()
         });
+    }
+
+    fn refresh_elimination_state(&mut self) {
+        if self.objects.is_empty() && self.known_crew_owners.is_empty() {
+            return;
+        }
+
+        let mut active = HashSet::new();
+        for object in &self.objects {
+            if !object.state.crew_member {
+                continue;
+            }
+            let owner = object.state.owner;
+            if owner == OWNER_NONE {
+                continue;
+            }
+            active.insert(owner);
+            self.known_crew_owners.insert(owner);
+            self.eliminated_crew_owners.remove(&owner);
+        }
+
+        let known: Vec<i32> = self.known_crew_owners.iter().cloned().collect();
+        for owner in known {
+            if !active.contains(&owner) {
+                self.eliminated_crew_owners.insert(owner);
+            }
+        }
     }
 
     fn apply_physics_at_index(&mut self, idx: usize) {
@@ -3538,6 +3598,69 @@ mod tests {
     }
 
     #[test]
+    fn crew_elimination_marks_owner_after_last_crew_destroyed() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let owner_one = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+        engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(2))
+            .expect("spawn succeeds");
+
+        assert!(engine.eliminated_owners().is_empty());
+
+        engine
+            .queue_object_command(
+                owner_one,
+                QueuedCommand::immediate(ObjectUpdate::new()).with_destroy(true),
+            )
+            .expect("queue succeeds");
+
+        engine.tick().expect("tick succeeds");
+
+        assert!(engine.is_owner_eliminated(1));
+        assert_eq!(engine.eliminated_owners(), vec![1]);
+        assert!(!engine.is_owner_eliminated(2));
+    }
+
+    #[test]
+    fn crew_elimination_clears_when_new_crew_spawned() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let owner = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+
+        engine
+            .queue_object_command(
+                owner,
+                QueuedCommand::immediate(ObjectUpdate::new()).with_destroy(true),
+            )
+            .expect("queue succeeds");
+        engine.tick().expect("tick succeeds");
+
+        assert!(engine.is_owner_eliminated(1));
+
+        engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+
+        assert!(!engine.is_owner_eliminated(1));
+        assert!(engine.eliminated_owners().is_empty());
+    }
+
+    #[test]
     fn capture_state_preserves_crew_selection() {
         let mut engine = Engine::with_seed(0);
         let mut definition = build_definition();
@@ -3574,6 +3697,54 @@ mod tests {
         restored_selected.sort_by_key(|id| id.as_u64());
         assert_eq!(restored_selected, vec![first, second]);
         assert_eq!(restored.crew_cursor(1), Some(second));
+    }
+
+    #[test]
+    fn capture_state_preserves_elimination_status() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let eliminated = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+        engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(2))
+            .expect("spawn succeeds");
+
+        engine
+            .queue_object_command(
+                eliminated,
+                QueuedCommand::immediate(ObjectUpdate::new()).with_destroy(true),
+            )
+            .expect("queue succeeds");
+        engine.tick().expect("tick succeeds");
+
+        assert!(engine.is_owner_eliminated(1));
+        assert!(!engine.is_owner_eliminated(2));
+
+        let state = engine.capture_state();
+
+        let mut restored = Engine::with_seed(5);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        restored
+            .register_definition(definition)
+            .expect("definition registers");
+        restored.restore_state(&state).expect("restore succeeds");
+
+        assert!(restored.is_owner_eliminated(1));
+        assert!(!restored.is_owner_eliminated(2));
+
+        restored
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+
+        assert!(!restored.is_owner_eliminated(1));
+        assert!(restored.eliminated_owners().is_empty());
     }
 
     #[test]
