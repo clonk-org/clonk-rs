@@ -1,18 +1,39 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState};
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
+use rand::Rng;
+use rand_chacha::ChaCha8Rng;
 
 thread_local! {
     static HOST_CONTEXT: RefCell<Option<EffectHostContext>> = const { RefCell::new(None) };
+    static RANDOM_CONTEXT: RefCell<Option<Rc<RandomContext>>> = const { RefCell::new(None) };
 }
 
 pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("AddEffect", add_effect);
     script.register_host_function("RemoveEffect", remove_effect);
     script.register_host_function("GetEffect", get_effect);
+    script.register_host_function("Random", random);
+}
+
+pub(crate) fn enter_random_context(rng: ChaCha8Rng) -> RandomContextGuard {
+    RANDOM_CONTEXT.with(|cell| {
+        assert!(
+            cell.borrow().is_none(),
+            "nested random contexts are not supported"
+        );
+        let context = Rc::new(RandomContext {
+            rng: RefCell::new(rng),
+        });
+        *cell.borrow_mut() = Some(context.clone());
+        RandomContextGuard {
+            context: Some(context),
+        }
+    })
 }
 
 pub(crate) fn with_effect_context<F, T, E>(
@@ -64,6 +85,50 @@ impl EffectContextOutcome {
 enum EffectScope {
     Object,
     Global,
+}
+
+#[derive(Debug)]
+struct RandomContext {
+    rng: RefCell<ChaCha8Rng>,
+}
+
+impl RandomContext {
+    fn into_rng(self) -> ChaCha8Rng {
+        self.rng.into_inner()
+    }
+}
+
+pub(crate) struct RandomContextGuard {
+    context: Option<Rc<RandomContext>>,
+}
+
+impl RandomContextGuard {
+    pub fn finish(mut self) -> ChaCha8Rng {
+        let context = self
+            .context
+            .take()
+            .expect("random context already consumed");
+        RANDOM_CONTEXT.with(|cell| {
+            let stored = cell
+                .borrow_mut()
+                .take()
+                .expect("random context must be present");
+            debug_assert!(Rc::ptr_eq(&stored, &context));
+        });
+        Rc::try_unwrap(context)
+            .expect("random context still referenced")
+            .into_rng()
+    }
+}
+
+impl Drop for RandomContextGuard {
+    fn drop(&mut self) {
+        if self.context.is_some() {
+            RANDOM_CONTEXT.with(|cell| {
+                cell.borrow_mut().take();
+            });
+        }
+    }
 }
 
 fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -407,6 +472,40 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     Ok(Value::Nil)
+}
+
+fn random(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new(
+            "Random expects exactly 1 argument: upper exclusive bound",
+        ));
+    }
+
+    let range = match &args[0] {
+        Value::Int(value) => *value,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Random: expected int for range, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    if range <= 0 {
+        return Ok(Value::Int(0));
+    }
+
+    RANDOM_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("Random: host context unavailable"))?
+            .clone();
+        let mut rng = context.rng.borrow_mut();
+        let upper = range as u32;
+        let value = rng.gen_range(0..upper) as i32;
+        Ok(Value::Int(value))
+    })
 }
 
 fn with_context_mut<R>(

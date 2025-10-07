@@ -13,7 +13,7 @@ pub use landscape::{CollisionResolution, Landscape, LandscapeError};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
 
-use compat::EffectContextOutcome;
+use compat::{enter_random_context, EffectContextOutcome};
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -957,19 +957,22 @@ impl Definition {
         state: &ObjectState,
         object_id: ObjectId,
         random: i32,
+        rng: ChaCha8Rng,
         global_effects: &[EffectState],
-    ) -> Result<CommandBatch, EngineError> {
+    ) -> Result<(CommandBatch, ChaCha8Rng), EngineError> {
         if !self.has_initialize {
-            return Ok(CommandBatch::default());
+            return Ok((CommandBatch::default(), rng));
         }
         let args = [
             build_state_value(&self.id, object_id, state, &self.action_library),
             Value::Int(random),
         ];
+        let guard = enter_random_context(rng);
         let (result, host_effects) =
             compat::with_effect_context(&state.effects, global_effects, || {
                 self.script.call("Initialize", &args)
             });
+        let rng = guard.finish();
         let result = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: "Initialize",
@@ -982,7 +985,7 @@ impl Definition {
         if !host_effects.global.is_empty() {
             batch.global_effects.extend(host_effects.global);
         }
-        Ok(batch)
+        Ok((batch, rng))
     }
 
     fn call_step(
@@ -991,10 +994,11 @@ impl Definition {
         object_id: ObjectId,
         frame: u64,
         random: i32,
+        rng: ChaCha8Rng,
         global_effects: &[EffectState],
-    ) -> Result<CommandBatch, EngineError> {
+    ) -> Result<(CommandBatch, ChaCha8Rng), EngineError> {
         if !self.has_step {
-            return Ok(CommandBatch::default());
+            return Ok((CommandBatch::default(), rng));
         }
         let frame_value = if frame > i32::MAX as u64 {
             i32::MAX
@@ -1006,10 +1010,12 @@ impl Definition {
             Value::Int(frame_value),
             Value::Int(random),
         ];
+        let guard = enter_random_context(rng);
         let (result, host_effects) =
             compat::with_effect_context(&state.effects, global_effects, || {
                 self.script.call("Step", &args)
             });
+        let rng = guard.finish();
         let result = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: "Step",
@@ -1022,7 +1028,7 @@ impl Definition {
         if !host_effects.global.is_empty() {
             batch.global_effects.extend(host_effects.global);
         }
-        Ok(batch)
+        Ok((batch, rng))
     }
 
     fn call_effect_start(
@@ -1030,8 +1036,9 @@ impl Definition {
         state: &ObjectState,
         object_id: ObjectId,
         effect: &EffectState,
+        rng: ChaCha8Rng,
         global_effects: &[EffectState],
-    ) -> Result<EffectContextOutcome, EngineError> {
+    ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
             state,
             object_id,
@@ -1039,6 +1046,7 @@ impl Definition {
             "Start",
             "FxStart",
             Vec::new(),
+            rng,
             global_effects,
         )
     }
@@ -1048,8 +1056,9 @@ impl Definition {
         state: &ObjectState,
         object_id: ObjectId,
         effect: &EffectState,
+        rng: ChaCha8Rng,
         global_effects: &[EffectState],
-    ) -> Result<EffectContextOutcome, EngineError> {
+    ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
             state,
             object_id,
@@ -1057,6 +1066,7 @@ impl Definition {
             "Timer",
             "FxTimer",
             vec![Value::Int(effect.timer)],
+            rng,
             global_effects,
         )
     }
@@ -1067,8 +1077,9 @@ impl Definition {
         object_id: ObjectId,
         effect: &EffectState,
         reason: EffectStopReason,
+        rng: ChaCha8Rng,
         global_effects: &[EffectState],
-    ) -> Result<EffectContextOutcome, EngineError> {
+    ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
             state,
             object_id,
@@ -1076,6 +1087,7 @@ impl Definition {
             "Stop",
             "FxStop",
             vec![effect_stop_reason_value(reason)],
+            rng,
             global_effects,
         )
     }
@@ -1088,10 +1100,11 @@ impl Definition {
         event: &'static str,
         function_label: &'static str,
         mut extras: Vec<Value>,
+        rng: ChaCha8Rng,
         global_effects: &[EffectState],
-    ) -> Result<EffectContextOutcome, EngineError> {
+    ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
         if !self.script.has_effect_callback(&effect.name, event) {
-            return Ok(EffectContextOutcome::empty());
+            return Ok((EffectContextOutcome::empty(), rng));
         }
 
         let mut args = Vec::with_capacity(2 + extras.len());
@@ -1104,15 +1117,17 @@ impl Definition {
         args.push(build_effect_value(effect));
         args.append(&mut extras);
 
+        let guard = enter_random_context(rng);
         let (result, commands) =
             compat::with_effect_context(&state.effects, global_effects, || {
                 self.script
                     .call_effect_callback(&effect.name, event, &args)
                     .map(|_| ())
             });
+        let rng = guard.finish();
 
         result
-            .map(|_| commands)
+            .map(|_| (commands, rng))
             .map_err(|source| EngineError::Script {
                 definition: format!("{}::{}", self.id, effect.name),
                 function: function_label,
@@ -1370,19 +1385,24 @@ impl Engine {
             if !queue_events.is_empty() {
                 let definition_id = self.objects[idx].definition_id.clone();
                 let object_id = self.objects[idx].id;
-                let definition = self
-                    .definitions
-                    .get(&definition_id)
-                    .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
                 let global_view = self.global_effects.clone();
-                let object = &mut self.objects[idx];
-                let global_cmds = Self::run_effect_events_for_object(
-                    definition,
-                    object_id,
-                    object,
-                    queue_events,
-                    global_view,
-                )?;
+                let rng_state = self.rng.clone();
+                let (global_cmds, new_rng) = {
+                    let definition = self
+                        .definitions
+                        .get(&definition_id)
+                        .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let object = &mut self.objects[idx];
+                    Self::run_effect_events_for_object(
+                        definition,
+                        rng_state,
+                        object_id,
+                        object,
+                        queue_events,
+                        global_view,
+                    )?
+                };
+                self.rng = new_rng;
                 if !global_cmds.is_empty() {
                     self.apply_global_effect_commands(&global_cmds);
                 }
@@ -1404,19 +1424,24 @@ impl Engine {
             if !timer_events.is_empty() {
                 let definition_id = self.objects[idx].definition_id.clone();
                 let object_id = self.objects[idx].id;
-                let definition = self
-                    .definitions
-                    .get(&definition_id)
-                    .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
                 let global_view = self.global_effects.clone();
-                let object = &mut self.objects[idx];
-                let global_cmds = Self::run_effect_events_for_object(
-                    definition,
-                    object_id,
-                    object,
-                    timer_events,
-                    global_view,
-                )?;
+                let rng_state = self.rng.clone();
+                let (global_cmds, new_rng) = {
+                    let definition = self
+                        .definitions
+                        .get(&definition_id)
+                        .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let object = &mut self.objects[idx];
+                    Self::run_effect_events_for_object(
+                        definition,
+                        rng_state,
+                        object_id,
+                        object,
+                        timer_events,
+                        global_view,
+                    )?
+                };
+                self.rng = new_rng;
                 if !global_cmds.is_empty() {
                     self.apply_global_effect_commands(&global_cmds);
                 }
@@ -1446,7 +1471,8 @@ impl Engine {
             let state_snapshot = self.objects[idx].state.clone();
             let random = self.next_random_i32();
 
-            let command = {
+            let rng_state = self.rng.clone();
+            let (command, new_rng) = {
                 let definition = self
                     .definitions
                     .get(&definition_id)
@@ -1456,9 +1482,11 @@ impl Engine {
                     object_id,
                     frame,
                     random,
+                    rng_state,
                     &self.global_effects,
                 )?
             };
+            self.rng = new_rng;
 
             let CommandBatch {
                 delta,
@@ -1503,13 +1531,16 @@ impl Engine {
                     .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
                 let global_view = self.global_effects.clone();
                 let object = &mut self.objects[idx];
-                let global_cmds = Self::run_effect_events_for_object(
+                let rng_state = self.rng.clone();
+                let (global_cmds, new_rng) = Self::run_effect_events_for_object(
                     definition,
+                    rng_state,
                     object_id,
                     object,
                     effect_events,
                     global_view,
                 )?;
+                self.rng = new_rng;
                 if !global_cmds.is_empty() {
                     self.apply_global_effect_commands(&global_cmds);
                 }
@@ -1723,13 +1754,14 @@ impl Engine {
 
     fn run_effect_events_for_object(
         definition: &Definition,
+        mut rng: ChaCha8Rng,
         object_id: ObjectId,
         object: &mut Object,
         events: Vec<EffectEvent>,
         mut global_view: Vec<EffectState>,
-    ) -> Result<Vec<EffectCommand>, EngineError> {
+    ) -> Result<(Vec<EffectCommand>, ChaCha8Rng), EngineError> {
         if events.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), rng));
         }
 
         let mut queue: VecDeque<EffectEvent> = VecDeque::from(events);
@@ -1738,17 +1770,19 @@ impl Engine {
 
         while let Some(event) = queue.pop_front() {
             let snapshot_for_call = state_snapshot.clone();
-            let mut outcome = match event.kind {
+            let (mut outcome, new_rng) = match event.kind {
                 EffectEventKind::Started => definition.call_effect_start(
                     &snapshot_for_call,
                     object_id,
                     &event.effect,
+                    rng,
                     &global_view,
                 )?,
                 EffectEventKind::Timer => definition.call_effect_timer(
                     &snapshot_for_call,
                     object_id,
                     &event.effect,
+                    rng,
                     &global_view,
                 )?,
                 EffectEventKind::Stopped(reason) => definition.call_effect_stop(
@@ -1756,9 +1790,11 @@ impl Engine {
                     object_id,
                     &event.effect,
                     reason,
+                    rng,
                     &global_view,
                 )?,
             };
+            rng = new_rng;
 
             if !outcome.object.is_empty() {
                 let mut generated = object.apply_effect_commands(&outcome.object);
@@ -1774,7 +1810,7 @@ impl Engine {
             }
         }
 
-        Ok(global_commands)
+        Ok((global_commands, rng))
     }
 
     fn apply_landscape(&self, state: &mut ObjectState) {
@@ -1956,20 +1992,31 @@ impl Engine {
             .unwrap_or(false)
         {
             let random = self.next_random_i32();
-            let CommandBatch {
-                delta,
-                spawns,
-                destroy,
-                commands,
-                effects,
-                global_effects,
-            } = {
+            let rng_state = self.rng.clone();
+            let (
+                CommandBatch {
+                    delta,
+                    spawns,
+                    destroy,
+                    commands,
+                    effects,
+                    global_effects,
+                },
+                new_rng,
+            ) = {
                 let definition = self
                     .definitions
                     .get(&definition_id)
                     .expect("definition must exist");
-                definition.call_initialize(&object.state, id, random, &self.global_effects)?
+                definition.call_initialize(
+                    &object.state,
+                    id,
+                    random,
+                    rng_state,
+                    &self.global_effects,
+                )?
             };
+            self.rng = new_rng;
             if destroy {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition_id.clone(),
@@ -1996,13 +2043,16 @@ impl Engine {
                 .get(&definition_id)
                 .expect("definition must exist");
             let global_view = self.global_effects.clone();
-            let global_cmds = Self::run_effect_events_for_object(
+            let rng_state = self.rng.clone();
+            let (global_cmds, new_rng) = Self::run_effect_events_for_object(
                 definition,
+                rng_state,
                 id,
                 &mut object,
                 effect_events,
                 global_view,
             )?;
+            self.rng = new_rng;
             if !global_cmds.is_empty() {
                 self.apply_global_effect_commands(&global_cmds);
             }
@@ -2904,6 +2954,18 @@ mod tests {
     }
     "#;
 
+    const RANDOM_HELPER_SCRIPT: &str = r#"
+    global func Initialize(state, random)
+    {
+        return nil;
+    }
+
+    global func Step(state, frame, random)
+    {
+        return { energy = Random(10) };
+    }
+    "#;
+
     const PROCEDURE_MOVEMENT_SCRIPT: &str = r#"
     global func Initialize(state, random)
     {
@@ -3051,6 +3113,37 @@ mod tests {
         engine.tick().expect("first tick succeeds");
 
         assert!(engine.global_effects().is_empty());
+    }
+
+    #[test]
+    fn host_random_consumes_engine_rng() {
+        let definition = Definition::from_script("RandomUser", "Random User", RANDOM_HELPER_SCRIPT)
+            .expect("script compiles");
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("RandomUser"))
+            .expect("spawn succeeds");
+
+        let mut expected_rng = ChaCha8Rng::seed_from_u64(0);
+        let _ = expected_rng.gen::<i32>(); // Initialize random draw
+        let _ = expected_rng.gen::<i32>(); // First tick random parameter
+        let first_expected = expected_rng.gen_range(0..10);
+
+        let first_tick = engine.tick().expect("first tick succeeds");
+        let object = first_tick.object(id).expect("object present");
+        assert_eq!(object.energy, first_expected);
+
+        let _ = expected_rng.gen::<i32>(); // Second tick random parameter
+        let second_expected = expected_rng.gen_range(0..10);
+
+        let second_tick = engine.tick().expect("second tick succeeds");
+        let object = second_tick.object(id).expect("object present");
+        assert_eq!(object.energy, second_expected);
     }
 
     #[test]
