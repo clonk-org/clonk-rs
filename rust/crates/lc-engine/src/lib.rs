@@ -158,15 +158,24 @@ pub struct EnvironmentSettings {
     pub wind_period: u32,
     #[serde(default)]
     pub temperature: i32,
+    #[serde(default)]
+    pub time_of_day: u16,
+    #[serde(default)]
+    pub time_speed: i16,
 }
 
 impl EnvironmentSettings {
+    pub const TIME_CYCLE: u16 = 2400;
+    const MAX_TIME_SPEED: i16 = 120;
+
     pub const fn new(wind: i32) -> Self {
         Self {
             wind,
             wind_variation: 0,
             wind_period: 0,
             temperature: 0,
+            time_of_day: 0,
+            time_speed: 0,
         }
     }
 
@@ -186,6 +195,33 @@ impl EnvironmentSettings {
         self
     }
 
+    pub fn with_time_of_day(mut self, time_of_day: i32) -> Self {
+        self.time_of_day = Self::normalize_time_of_day(time_of_day);
+        self
+    }
+
+    pub fn with_time_speed(mut self, time_speed: i32) -> Self {
+        self.time_speed = Self::clamp_time_speed(time_speed);
+        self
+    }
+
+    pub fn advance_frame(&mut self) {
+        if self.time_speed == 0 {
+            return;
+        }
+        let next = (i32::from(self.time_of_day) + i32::from(self.time_speed))
+            .rem_euclid(i32::from(Self::TIME_CYCLE));
+        self.time_of_day = next as u16;
+    }
+
+    pub fn time_of_day(&self) -> u16 {
+        self.time_of_day
+    }
+
+    pub fn time_speed(&self) -> i16 {
+        self.time_speed
+    }
+
     pub fn wind_force(&self, frame: u64) -> i32 {
         if self.wind_variation == 0 || self.wind_period == 0 {
             return self.wind;
@@ -203,6 +239,16 @@ impl EnvironmentSettings {
         if wind_force != 0 {
             velocity.x = velocity.x.saturating_add(wind_force);
         }
+    }
+
+    fn normalize_time_of_day(time_of_day: i32) -> u16 {
+        let cycle = i32::from(Self::TIME_CYCLE);
+        time_of_day.rem_euclid(cycle) as u16
+    }
+
+    fn clamp_time_speed(time_speed: i32) -> i16 {
+        let max = i32::from(Self::MAX_TIME_SPEED);
+        time_speed.clamp(-max, max) as i16
     }
 }
 
@@ -1040,6 +1086,7 @@ impl Engine {
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
         self.frame += 1;
         let frame = self.frame;
+        self.environment.advance_frame();
         let mut spawn_requests = Vec::new();
         let landscape_for_commands = self.landscape.clone();
         for idx in 0..self.objects.len() {
@@ -2652,6 +2699,24 @@ mod tests {
         let default_period = EnvironmentSettings::new(1).with_wind_variation(3, 0);
         assert_eq!(default_period.wind_variation, 3);
         assert_eq!(default_period.wind_period, 2);
+    }
+
+    #[test]
+    fn environment_time_advances_each_tick() {
+        let mut engine = Engine::with_seed(7);
+        engine.set_environment(
+            EnvironmentSettings::new(0)
+                .with_time_of_day(2300)
+                .with_time_speed(75),
+        );
+
+        assert_eq!(engine.environment().time_of_day, 2300);
+
+        engine.tick().expect("first tick succeeds");
+        assert_eq!(engine.environment().time_of_day, 2375);
+
+        engine.tick().expect("second tick succeeds");
+        assert_eq!(engine.environment().time_of_day, 50);
     }
 
     #[test]

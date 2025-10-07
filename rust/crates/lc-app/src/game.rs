@@ -118,6 +118,8 @@ pub struct EnvironmentSummary {
     pub wind_period: u32,
     pub temperature: i32,
     pub current_wind: i32,
+    pub time_of_day: u16,
+    pub time_speed: i16,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -538,6 +540,8 @@ impl DemoGame {
             wind_period: environment_settings.wind_period,
             temperature: environment_settings.temperature,
             current_wind: environment_settings.wind_force(self.engine.frame()),
+            time_of_day: environment_settings.time_of_day(),
+            time_speed: environment_settings.time_speed(),
         };
         Ok(GameSummary {
             ticks: executed_ticks,

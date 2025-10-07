@@ -439,6 +439,10 @@ struct EnvironmentManifest {
     wind_period: Option<u32>,
     #[serde(default)]
     temperature: Option<i32>,
+    #[serde(default)]
+    time_of_day: Option<i32>,
+    #[serde(default)]
+    time_speed: Option<i32>,
 }
 
 impl EnvironmentManifest {
@@ -450,6 +454,12 @@ impl EnvironmentManifest {
         }
         if let Some(temperature) = self.temperature {
             settings = settings.with_temperature(temperature);
+        }
+        if let Some(time_of_day) = self.time_of_day {
+            settings = settings.with_time_of_day(time_of_day);
+        }
+        if let Some(time_speed) = self.time_speed {
+            settings = settings.with_time_speed(time_speed);
         }
         settings
     }
@@ -758,6 +768,45 @@ global func Step(state, frame, random)
         assert_eq!(configured.wind_variation, 6);
         assert_eq!(configured.wind_period, 180);
         assert_eq!(configured.temperature, -15);
+        assert_eq!(configured.time_of_day, 0);
+        assert_eq!(configured.time_speed, 0);
+    }
+
+    #[test]
+    fn loads_environment_time_settings() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Mover", "script": "scripts/mover.aul" }
+            ],
+            "environment": {
+                "wind": 1,
+                "time_of_day": -45,
+                "time_speed": 400
+            },
+            "initial_objects": [
+                { "definition": "Mover" }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let environment = scenario.environment().expect("environment present");
+        assert_eq!(environment.wind, 1);
+        assert_eq!(environment.time_of_day, 2355);
+        assert_eq!(environment.time_speed, 120);
+
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let configured = engine.environment();
+        assert_eq!(configured.wind, 1);
+        assert_eq!(configured.time_of_day, 2355);
+        assert_eq!(configured.time_speed, 120);
     }
 
     #[test]

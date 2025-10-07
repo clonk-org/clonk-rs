@@ -100,12 +100,14 @@ fn print_summary(summary: &GameSummary) {
         summary.max_horizontal_speed
     );
     println!(
-        "Environment: wind {} (base {} +/- {} period {} temperature {})",
+        "Environment: wind {} (base {} +/- {} period {} temperature {} time {} speed {})",
         summary.environment.current_wind,
         summary.environment.base_wind,
         summary.environment.wind_variation,
         summary.environment.wind_period,
-        summary.environment.temperature
+        summary.environment.temperature,
+        summary.environment.time_of_day,
+        summary.environment.time_speed
     );
     println!("Frames simulated: {}", summary.ticks);
     println!("Ground contacts: {}", summary.ground_hits);
