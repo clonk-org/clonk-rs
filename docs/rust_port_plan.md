@@ -8,6 +8,7 @@
 - A JSON-backed scenario loader now registers definitions, landscapes, and initial spawns so `lc-app` can bootstrap from external scenario bundles.
 - `lc-app` now replays scripted control packets and uses `lc-engine::apply_object_update` to steer the demo object, and an interactive terminal mode captures live keyboard input for the demo bouncer.
 - The demo viewport now scrolls horizontally across loaded landscapes and keeps the focus object in view so larger scenarios are observable inside the harness.
+- Object snapshots now surface each object's action name and phase, scripts can request action transitions, and the C++ validation bridge records the same metadata so playback parity covers basic action state changes.
 
 ## Rust Workspace Scope
 - `lc-core`, `lc-resources`, `lc-script`, `lc-engine`, `lc-graphics`, `lc-audio`, `lc-network`, `lc-gui`, `lc-platform`, and `lc-app` provide demo-friendly utilities, parsers, in-memory surfaces, a toy physics loop, and basic networking abstractions.
@@ -17,10 +18,11 @@
 ## Integration with the C++ Build
 - `CMakeLists.txt` keeps all Rust bridges behind opt-in switches (`USE_RUST_CONFIG`, `USE_RUST_GROUP_VALIDATION`, `USE_RUST_ENGINE_VALIDATION`, `USE_RUST_GUI_VALIDATION`). These default to `OFF` and only add validators plus static libraries when explicitly enabled.
 - The validation bridges (`src/rust/RustConfigBridge.cpp`, `RustGroupBridge.cpp`, `RustEngineBridge.cpp`, `RustGuiBridge.cpp`) consume Rust FFI helpers to compare C++ output with Rust expectations or to dump JSON recordings. They do not replace runtime logic.
+- Engine validation snapshots now forward the current action name and phase alongside position, velocity, and energy so mismatches surface divergences in object state machines even when behaviour otherwise aligns.
 - No executable target links Rust crates as authoritative gameplay systems; the production binary continues to depend on the C++ implementations.
 
 ## Component Parity Assessment
-- **Simulation / Object System:** `lc-engine` models position/velocity/energy for scripted objects, applies configurable gravity and vertical speed caps each tick, and clamps control updates through that physics layer. A basic JSON scenario loader can register definitions, initial objects, landscapes, and now optional physics overrides, and the `apply_object_update` hook lets scripted or live terminal control streams adjust demo objects. The C++ object status machine, action procs, vertices, effects, command queues, crew ownership, and full scenario/environment management are still absent.
+- **Simulation / Object System:** `lc-engine` models position/velocity/energy for scripted objects, applies configurable gravity and vertical speed caps each tick, and clamps control updates through that physics layer. Action name/phase pairs advance every tick, can be overridden from AUL commands or spawn metadata, and flow through recordings/FFI so Rust↔C++ comparisons include rudimentary action state. A basic JSON scenario loader can register definitions, initial objects, landscapes, and now optional physics overrides, and the `apply_object_update` hook lets scripted or live terminal control streams adjust demo objects. The C++ object status machine, action procs, vertices, effects, command queues, crew ownership, and full scenario/environment management are still absent.
 - **Script VM:** `lc-script` parses and executes a subset of AUL with arithmetic, control flow, arrays, and proplists. Engine-call bindings, callback dispatch tables, effect lifecycles, and synchronization with the C++ object model are absent.
 - **Graphics:** `lc-graphics` works on CPU-resident RGBA surfaces and hash snapshots. It lacks texture streaming, OpenGL/WGL/SDL integration, blitting catalogs, shader management, viewport compositing, and render thread orchestration present in `StdGL*`.
 - **Audio:** `lc-audio` offers a software mixer with optional CPAL output for limited channel playback. The SDL_mixer-based backend, streaming music, positional audio, resampler choices, and sound bank handling from `C4AudioSystem` are not ported.
@@ -36,7 +38,7 @@
 - `lc-app` can replay a scripted control sequence or accept live terminal input to drive the demo object through the control hook.
 
 ## Major Gaps to Reach Behavior Parity
-- Recreate the complete C4 object lifecycle, including action system, physics integration beyond the new baseline gravity/velocity caps, robust scenario/environment management beyond the current JSON loader, and player control/GUI pathways that match the shipping UI; savegame compatibility and synchronous serialization remain open.
+- Recreate the complete C4 object lifecycle, including the full action procedure system, physics integration beyond the new baseline gravity/velocity caps, robust scenario/environment management beyond the current JSON loader, and player control/GUI pathways that match the shipping UI; savegame compatibility and synchronous serialization remain open. (Action name/phase tracking now exists as a minimal scaffold, but command queues, effect stacks, animation graphs, and serialization are still outstanding.)
 - Port AUL runtime features: effect handlers, engine call map, proplist semantics, debugging, and compatibility behaviors relied upon by shipped scripts.
 - Implement rendering and audio backends that match the SDL/OpenGL pipeline and mixer behavior across all supported platforms.
 - Mirror GUI subsystems (dialogs, HUD, console, editor) and integrate them with input, networking, and engine state.

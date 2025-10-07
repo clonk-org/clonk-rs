@@ -13,7 +13,11 @@
           "x": 3,
           "y": -3
         },
-        "energy": 84
+        "energy": 84,
+        "action": {
+          "name": "Idle",
+          "phase": 1
+        }
       }
     ]
   },
@@ -31,7 +35,11 @@
           "x": 3,
           "y": -2
         },
-        "energy": 83
+        "energy": 83,
+        "action": {
+          "name": "Idle",
+          "phase": 2
+        }
       }
     ]
   },
@@ -49,7 +57,11 @@
           "x": 3,
           "y": -1
         },
-        "energy": 82
+        "energy": 82,
+        "action": {
+          "name": "Idle",
+          "phase": 3
+        }
       },
       {
         "id": 2,
@@ -62,7 +74,11 @@
           "x": 0,
           "y": 0
         },
-        "energy": 25
+        "energy": 25,
+        "action": {
+          "name": "Idle",
+          "phase": 0
+        }
       }
     ]
   },
@@ -80,7 +96,11 @@
           "x": 3,
           "y": 0
         },
-        "energy": 81
+        "energy": 81,
+        "action": {
+          "name": "Idle",
+          "phase": 4
+        }
       },
       {
         "id": 2,
@@ -93,7 +113,11 @@
           "x": 0,
           "y": 1
         },
-        "energy": 24
+        "energy": 24,
+        "action": {
+          "name": "Idle",
+          "phase": 1
+        }
       }
     ]
   },
@@ -111,7 +135,11 @@
           "x": 3,
           "y": 1
         },
-        "energy": 80
+        "energy": 80,
+        "action": {
+          "name": "Idle",
+          "phase": 5
+        }
       },
       {
         "id": 2,
@@ -124,7 +152,11 @@
           "x": 0,
           "y": 2
         },
-        "energy": 23
+        "energy": 23,
+        "action": {
+          "name": "Idle",
+          "phase": 2
+        }
       }
     ]
   },

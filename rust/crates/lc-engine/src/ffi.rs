@@ -1,4 +1,7 @@
-use crate::{ObjectId, ObjectSnapshot, Playback, Recorder, Recording, SimulationSnapshot, Vector2};
+use crate::{
+    ActionState, ObjectId, ObjectSnapshot, Playback, Recorder, Recording, SimulationSnapshot,
+    Vector2,
+};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
@@ -13,6 +16,8 @@ pub struct LcEngineObjectSnapshot {
     pub velocity_x: i32,
     pub velocity_y: i32,
     pub energy: i32,
+    pub action_name: *const c_char,
+    pub action_phase: i32,
 }
 
 pub struct RecorderHandle {
@@ -58,12 +63,25 @@ unsafe fn make_snapshot(
                     .into_owned(),
             }
         };
+        let action_name = if entry.action_name.is_null() {
+            String::from("Idle")
+        } else {
+            match CStr::from_ptr(entry.action_name).to_str() {
+                Ok(value) => value.to_string(),
+                Err(_) => CStr::from_ptr(entry.action_name)
+                    .to_string_lossy()
+                    .into_owned(),
+            }
+        };
+        let mut action = ActionState::new(action_name);
+        action.phase = entry.action_phase;
         snapshots.push(ObjectSnapshot {
             id: ObjectId::new(entry.id),
             definition_id,
             position: Vector2::new(entry.position_x, entry.position_y),
             velocity: Vector2::new(entry.velocity_x, entry.velocity_y),
             energy: entry.energy,
+            action,
         });
     }
     snapshots.sort_by_key(|object| object.id);

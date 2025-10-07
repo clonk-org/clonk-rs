@@ -18,6 +18,8 @@ typedef struct LcEngineObjectSnapshot {
     int32_t velocity_x;
     int32_t velocity_y;
     int32_t energy;
+    const char *action_name;
+    int32_t action_phase;
 } LcEngineObjectSnapshot;
 
 LcEngineRecorderHandle *lc_engine_recorder_new(void);

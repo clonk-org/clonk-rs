@@ -1,9 +1,11 @@
+mod action;
 pub mod ffi;
 pub mod fixtures;
 mod landscape;
 mod record;
 pub mod scenario;
 
+pub use action::{ActionState, ActionUpdate};
 pub use landscape::{CollisionResolution, Landscape, LandscapeError};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
@@ -115,6 +117,7 @@ pub struct ObjectState {
     pub position: Vector2,
     pub velocity: Vector2,
     pub energy: i32,
+    pub action: ActionState,
 }
 
 impl ObjectState {
@@ -128,6 +131,9 @@ impl ObjectState {
         if let Some(energy) = delta.energy {
             self.energy = energy;
         }
+        if let Some(action) = &delta.action {
+            self.action.apply_update(action);
+        }
     }
 }
 
@@ -136,6 +142,7 @@ struct ObjectDelta {
     position: Option<Vector2>,
     velocity: Option<Vector2>,
     energy: Option<i32>,
+    action: Option<ActionUpdate>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -143,6 +150,7 @@ pub struct ObjectUpdate {
     pub position: Option<Vector2>,
     pub velocity: Option<Vector2>,
     pub energy: Option<i32>,
+    pub action: Option<ActionUpdate>,
 }
 
 impl ObjectUpdate {
@@ -162,6 +170,25 @@ impl ObjectUpdate {
 
     pub fn with_energy(mut self, energy: i32) -> Self {
         self.energy = Some(energy);
+        self
+    }
+
+    pub fn with_action(mut self, name: impl Into<String>) -> Self {
+        let mut update = self.action.unwrap_or_default();
+        update.set_name(name);
+        self.action = Some(update);
+        self
+    }
+
+    pub fn with_action_phase(mut self, phase: i32) -> Self {
+        let mut update = self.action.unwrap_or_default();
+        update.set_phase(phase);
+        self.action = Some(update);
+        self
+    }
+
+    pub fn with_action_update(mut self, update: ActionUpdate) -> Self {
+        self.action = Some(update);
         self
     }
 }
@@ -195,6 +222,7 @@ impl Object {
             position: self.state.position,
             velocity: self.state.velocity,
             energy: self.state.energy,
+            action: self.state.action.clone(),
         }
     }
 }
@@ -228,6 +256,7 @@ pub struct SpawnConfig {
     pub position: Vector2,
     pub velocity: Vector2,
     pub energy: i32,
+    pub action: Option<ActionState>,
 }
 
 impl SpawnConfig {
@@ -237,6 +266,7 @@ impl SpawnConfig {
             position: Vector2::ZERO,
             velocity: Vector2::ZERO,
             energy: 0,
+            action: None,
         }
     }
 
@@ -254,6 +284,11 @@ impl SpawnConfig {
         self.energy = energy;
         self
     }
+
+    pub fn with_action(mut self, action: ActionState) -> Self {
+        self.action = Some(action);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +298,8 @@ pub struct ObjectSnapshot {
     pub position: Vector2,
     pub velocity: Vector2,
     pub energy: i32,
+    #[serde(default)]
+    pub action: ActionState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -457,6 +494,10 @@ impl Engine {
         let frame = self.frame;
         let mut spawn_requests = Vec::new();
         for idx in 0..self.objects.len() {
+            {
+                let object = &mut self.objects[idx];
+                object.state.action.advance();
+            }
             self.apply_physics_at_index(idx);
             {
                 let object = &mut self.objects[idx];
@@ -522,6 +563,9 @@ impl Engine {
         }
         if let Some(energy) = update.energy {
             object.state.energy = energy;
+        }
+        if let Some(action) = &update.action {
+            object.state.action.apply_update(action);
         }
 
         self.physics.clamp_velocity(&mut object.state.velocity);
@@ -598,19 +642,27 @@ impl Engine {
         &mut self,
         config: SpawnConfig,
     ) -> Result<(ObjectId, Vec<SpawnConfig>), EngineError> {
-        let def_id = config.definition_id.clone();
-        if !self.definitions.contains_key(&def_id) {
-            return Err(EngineError::UnknownDefinition(def_id));
+        let SpawnConfig {
+            definition_id,
+            position,
+            velocity,
+            energy,
+            action,
+        } = config;
+
+        if !self.definitions.contains_key(&definition_id) {
+            return Err(EngineError::UnknownDefinition(definition_id));
         }
 
         let id = self.next_object_id();
         let mut object = Object::new(
             id,
-            config.definition_id.clone(),
+            definition_id.clone(),
             ObjectState {
-                position: config.position,
-                velocity: config.velocity,
-                energy: config.energy,
+                position,
+                velocity,
+                energy,
+                action: action.unwrap_or_default(),
             },
         );
 
@@ -619,7 +671,7 @@ impl Engine {
         let mut additional_spawns = Vec::new();
         if self
             .definitions
-            .get(&config.definition_id)
+            .get(&definition_id)
             .map(|definition| definition.has_initialize)
             .unwrap_or(false)
         {
@@ -627,13 +679,13 @@ impl Engine {
             let command = {
                 let definition = self
                     .definitions
-                    .get(&config.definition_id)
+                    .get(&definition_id)
                     .expect("definition must exist");
                 definition.call_initialize(&object.state, id, random)?
             };
             if command.destroy {
                 return Err(EngineError::InvalidScriptOutput {
-                    definition: config.definition_id.clone(),
+                    definition: definition_id.clone(),
                     function: "Initialize",
                     detail: "Initialize may not destroy the object".into(),
                 });
@@ -666,7 +718,7 @@ impl Engine {
 }
 
 fn build_state_value(definition_id: &str, object_id: ObjectId, state: &ObjectState) -> Value {
-    let mut map = HashMap::with_capacity(5);
+    let mut map = HashMap::with_capacity(6);
     map.insert(
         "definition".into(),
         Value::String(definition_id.to_string()),
@@ -675,6 +727,10 @@ fn build_state_value(definition_id: &str, object_id: ObjectId, state: &ObjectSta
     map.insert("position".into(), state.position.to_value());
     map.insert("velocity".into(), state.velocity.to_value());
     map.insert("energy".into(), Value::Int(state.energy));
+    let mut action = HashMap::with_capacity(2);
+    action.insert("name".into(), Value::String(state.action.name.clone()));
+    action.insert("phase".into(), Value::Int(state.action.phase));
+    map.insert("action".into(), Value::Proplist(action));
     Value::Proplist(map)
 }
 
@@ -719,6 +775,16 @@ fn parse_command_from_proplist(
             "energy" => {
                 batch.delta.energy = Some(value_to_int(definition, function, value)?);
             }
+            "action" => {
+                let update = value_to_action(definition, function, value)?;
+                if let Some(update) = update {
+                    ensure_action_delta(&mut batch.delta).merge(update);
+                }
+            }
+            "action_phase" => {
+                let phase = value_to_int(definition, function, value)?;
+                ensure_action_delta(&mut batch.delta).set_phase(phase);
+            }
             "destroy" => {
                 batch.destroy = value.as_bool();
             }
@@ -737,6 +803,67 @@ fn parse_command_from_proplist(
         }
     }
     Ok(batch)
+}
+
+fn ensure_action_delta(delta: &mut ObjectDelta) -> &mut ActionUpdate {
+    delta.action.get_or_insert_with(ActionUpdate::default)
+}
+
+fn value_to_action(
+    definition: &str,
+    function: &'static str,
+    value: Value,
+) -> Result<Option<ActionUpdate>, EngineError> {
+    match value {
+        Value::Nil => Ok(None),
+        Value::String(name) => Ok(Some(ActionUpdate::default().with_name(name))),
+        Value::Proplist(map) => parse_action_update(definition, function, map).map(Some),
+        other => Err(EngineError::InvalidScriptOutput {
+            definition: definition.to_string(),
+            function,
+            detail: format!(
+                "expected string, proplist, or nil for action, got {}",
+                other.type_name()
+            ),
+        }),
+    }
+}
+
+fn parse_action_update(
+    definition: &str,
+    function: &'static str,
+    map: HashMap<String, Value>,
+) -> Result<ActionUpdate, EngineError> {
+    let mut update = ActionUpdate::default();
+    for (key, value) in map.into_iter() {
+        match key.as_str() {
+            "name" => match value {
+                Value::String(name) => update.set_name(name),
+                other => {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: definition.to_string(),
+                        function,
+                        detail: format!(
+                            "expected string for action.name, got {}",
+                            other.type_name()
+                        ),
+                    })
+                }
+            },
+            "phase" => {
+                let phase = value_to_int(definition, function, value)?;
+                update.set_phase(phase);
+            }
+            other => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function,
+                    detail: format!("unexpected key `{other}` in action proplist"),
+                });
+            }
+        }
+    }
+    Ok(update)
 }
 
 fn value_to_vector(
@@ -852,11 +979,31 @@ fn value_to_spawns(
             None => 0,
         };
 
+        let mut action_state = ActionState::default();
+        if let Some(value) = map.get("action") {
+            if let Some(update) = value_to_action(definition, function, value.clone())? {
+                action_state.apply_update(&update);
+            }
+        }
+        if let Some(value) = map.get("action_phase") {
+            let phase = value_to_int(definition, function, value.clone())?;
+            let mut update = ActionUpdate::default();
+            update.set_phase(phase);
+            action_state.apply_update(&update);
+        }
+
+        let action_override = if action_state == ActionState::default() {
+            None
+        } else {
+            Some(action_state)
+        };
+
         spawns.push(SpawnConfig {
             definition_id,
             position,
             velocity,
             energy,
+            action: action_override,
         });
     }
 
@@ -906,6 +1053,49 @@ mod tests {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.position, Vector2::new(3, 3));
         assert_eq!(object.velocity, Vector2::new(3, 2));
+    }
+
+    #[test]
+    fn tracks_action_state_changes() {
+        let source = r#"
+        global func Initialize(state, random) {
+            return { action = "Walk" };
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 1) {
+                return { action = { name = "Jump", phase = 3 } };
+            }
+            return nil;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        let definition =
+            Definition::from_script("Actor", "Actor", source).expect("script compiles");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine
+            .object_snapshot(id)
+            .expect("object snapshot available");
+        assert_eq!(snapshot.action.name, "Walk");
+        assert_eq!(snapshot.action.phase, 0);
+
+        let snapshot = engine.tick().expect("first tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Jump");
+        assert_eq!(object.action.phase, 3);
+
+        let snapshot = engine.tick().expect("second tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Jump");
+        assert_eq!(object.action.phase, 4);
     }
 
     #[test]

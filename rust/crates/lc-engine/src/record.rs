@@ -203,6 +203,18 @@ fn describe_snapshot_mismatch(
                         id, expected_obj.energy, actual_obj.energy
                     ));
                 }
+                if expected_obj.action.name != actual_obj.action.name {
+                    problems.push(format!(
+                        "object {} action expected {}, got {}",
+                        id, expected_obj.action.name, actual_obj.action.name
+                    ));
+                }
+                if expected_obj.action.phase != actual_obj.action.phase {
+                    problems.push(format!(
+                        "object {} action phase expected {}, got {}",
+                        id, expected_obj.action.phase, actual_obj.action.phase
+                    ));
+                }
             }
             None => problems.push(format!("missing object {}", id)),
         }
@@ -230,7 +242,7 @@ impl fmt::Display for Recording {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ObjectSnapshot, SimulationSnapshot, Vector2};
+    use crate::{ActionState, ObjectSnapshot, SimulationSnapshot, Vector2};
 
     fn make_snapshot(frame: u64, energy: i32) -> SimulationSnapshot {
         SimulationSnapshot {
@@ -241,6 +253,7 @@ mod tests {
                 position: Vector2::new(1, 2),
                 velocity: Vector2::new(0, 0),
                 energy,
+                action: ActionState::default(),
             }],
         }
     }

@@ -45,6 +45,7 @@ using RustStringPtr = std::unique_ptr<char, decltype(&lc_engine_string_free)>;
 struct SnapshotEntry {
     LcEngineObjectSnapshot snapshot{};
     std::string definition;
+    std::string action;
 };
 
 struct SnapshotBuffer {
@@ -94,6 +95,9 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
         entry.snapshot.velocity_x = fixtoi(object->xdir);
         entry.snapshot.velocity_y = fixtoi(object->ydir);
         entry.snapshot.energy = object->Energy;
+        entry.action = object->Action.Name;
+        entry.snapshot.action_name = entry.action.c_str();
+        entry.snapshot.action_phase = object->Action.Phase;
         buffer.entries.push_back(std::move(entry));
     }
 
@@ -104,6 +108,7 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
     buffer.raw.reserve(buffer.entries.size());
     for (auto &entry : buffer.entries) {
         entry.snapshot.definition_id = entry.definition.c_str();
+        entry.snapshot.action_name = entry.action.c_str();
         buffer.raw.push_back(entry.snapshot);
     }
 
