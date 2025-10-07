@@ -39,14 +39,17 @@ impl EffectState {
         self
     }
 
-    pub fn advance_tick(&mut self) {
+    pub fn advance_tick(&mut self) -> bool {
         if self.interval <= 0 {
             self.timer = self.timer.saturating_add(1);
-            return;
+            return true;
         }
         self.timer += 1;
         if self.timer >= self.interval {
             self.timer = 0;
+            true
+        } else {
+            false
         }
     }
 }
@@ -71,5 +74,49 @@ impl EffectCommand {
 
     pub fn remove(name: impl Into<String>) -> Self {
         Self::Remove { name: name.into() }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectStopReason {
+    Removed,
+    Cleared,
+    Destroyed,
+    Replaced,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectEventKind {
+    Started,
+    Timer,
+    Stopped(EffectStopReason),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectEvent {
+    pub effect: EffectState,
+    pub kind: EffectEventKind,
+}
+
+impl EffectEvent {
+    pub fn started(effect: EffectState) -> Self {
+        Self {
+            effect,
+            kind: EffectEventKind::Started,
+        }
+    }
+
+    pub fn timer(effect: EffectState) -> Self {
+        Self {
+            effect,
+            kind: EffectEventKind::Timer,
+        }
+    }
+
+    pub fn stopped(effect: EffectState, reason: EffectStopReason) -> Self {
+        Self {
+            effect,
+            kind: EffectEventKind::Stopped(reason),
+        }
     }
 }

@@ -12,12 +12,12 @@ pub use landscape::{CollisionResolution, Landscape, LandscapeError};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
 
-use effect::EffectCommand;
+use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::ops::AddAssign;
 
-use lc_script::{Engine as ScriptEngine, ScriptError, Value};
+use lc_script::{DebuggerHooks, Engine as ScriptEngine, ScriptError, Value};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -280,6 +280,7 @@ struct Object {
 struct CommandQueueOutcome {
     spawns: Vec<SpawnConfig>,
     destroy: bool,
+    effect_events: Vec<EffectEvent>,
 }
 
 impl Object {
@@ -293,8 +294,12 @@ impl Object {
         }
     }
 
-    fn mark_destroyed(&mut self) {
+    fn mark_destroyed(&mut self) -> Vec<EffectEvent> {
+        if self.destroyed {
+            return Vec::new();
+        }
         self.destroyed = true;
+        self.drain_effects_with_reason(EffectStopReason::Destroyed)
     }
 
     fn snapshot(&self) -> ObjectSnapshot {
@@ -309,49 +314,81 @@ impl Object {
         }
     }
 
-    fn apply_effect_commands(&mut self, commands: &[EffectCommand]) {
+    fn apply_effect_commands(&mut self, commands: &[EffectCommand]) -> Vec<EffectEvent> {
+        let mut events = Vec::new();
         for command in commands {
             match command {
-                EffectCommand::Add(effect) => self.insert_effect(effect.clone()),
-                EffectCommand::Remove { name } => {
-                    self.state.effects.retain(|existing| existing.name != *name);
+                EffectCommand::Add(effect) => {
+                    let (inserted, replaced) = self.insert_effect(effect.clone());
+                    if let Some(replaced) = replaced {
+                        events.push(EffectEvent::stopped(replaced, EffectStopReason::Replaced));
+                    }
+                    events.push(EffectEvent::started(inserted));
                 }
-                EffectCommand::Clear => self.state.effects.clear(),
+                EffectCommand::Remove { name } => {
+                    if let Some(removed) = self.remove_effect(name) {
+                        events.push(EffectEvent::stopped(removed, EffectStopReason::Removed));
+                    }
+                }
+                EffectCommand::Clear => {
+                    events.extend(self.drain_effects_with_reason(EffectStopReason::Cleared));
+                }
             }
         }
+        events
     }
 
-    fn insert_effect(&mut self, mut effect: EffectState) {
+    fn insert_effect(&mut self, mut effect: EffectState) -> (EffectState, Option<EffectState>) {
         if effect.interval <= 0 {
             effect.interval = 1;
         }
         if effect.timer < 0 {
             effect.timer = 0;
         }
-        if effect.timer >= effect.interval {
+        if effect.interval > 0 && effect.timer >= effect.interval {
             effect.timer %= effect.interval;
         }
-        if let Some(pos) = self
+        let replaced = self
             .state
             .effects
             .iter()
             .position(|existing| existing.name == effect.name)
-        {
-            self.state.effects.remove(pos);
-        }
+            .map(|pos| self.state.effects.remove(pos));
         let mut insert_pos = 0;
         while insert_pos < self.state.effects.len()
             && self.state.effects[insert_pos].priority > effect.priority
         {
             insert_pos += 1;
         }
+        let inserted = effect.clone();
         self.state.effects.insert(insert_pos, effect);
+        (inserted, replaced)
     }
 
-    fn tick_effects(&mut self) {
+    fn remove_effect(&mut self, name: &str) -> Option<EffectState> {
+        self.state
+            .effects
+            .iter()
+            .position(|existing| existing.name == name)
+            .map(|index| self.state.effects.remove(index))
+    }
+
+    fn drain_effects_with_reason(&mut self, reason: EffectStopReason) -> Vec<EffectEvent> {
+        self.state
+            .effects
+            .drain(..)
+            .map(|effect| EffectEvent::stopped(effect, reason))
+            .collect()
+    }
+
+    fn tick_effects(&mut self) -> Vec<EffectEvent> {
+        let mut events = Vec::new();
         for effect in &mut self.state.effects {
-            effect.advance_tick();
+            if effect.advance_tick() {
+                events.push(EffectEvent::timer(effect.clone()));
+            }
         }
+        events
     }
 
     fn enqueue_commands<I>(&mut self, commands: I)
@@ -384,11 +421,14 @@ impl Object {
             let command = self.command_queue.pop_front().expect("front exists");
             let delta: ObjectDelta = command.update.into();
             self.state.apply_delta(&delta);
-            self.apply_effect_commands(&command.effects);
+            let mut effect_events = self.apply_effect_commands(&command.effects);
             physics.clamp_velocity(&mut self.state.velocity);
             if command.destroy {
-                self.mark_destroyed();
+                effect_events.extend(self.mark_destroyed());
                 outcome.destroy = true;
+            }
+            if !effect_events.is_empty() {
+                outcome.effect_events.extend(effect_events);
             }
             if !command.spawns.is_empty() {
                 outcome.spawns.extend(command.spawns);
@@ -543,6 +583,10 @@ impl Definition {
         &self.name
     }
 
+    pub fn set_debugger_hooks(&mut self, hooks: DebuggerHooks) {
+        self.script.set_debugger_hooks(hooks);
+    }
+
     fn call_initialize(
         &self,
         state: &ObjectState,
@@ -596,6 +640,76 @@ impl Definition {
                 source,
             })?;
         parse_command(&self.id, "Step", result)
+    }
+
+    fn call_effect_start(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        effect: &EffectState,
+    ) -> Result<(), EngineError> {
+        self.dispatch_effect_callback(state, object_id, effect, "Start", "FxStart", Vec::new())
+    }
+
+    fn call_effect_timer(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        effect: &EffectState,
+    ) -> Result<(), EngineError> {
+        self.dispatch_effect_callback(
+            state,
+            object_id,
+            effect,
+            "Timer",
+            "FxTimer",
+            vec![Value::Int(effect.timer)],
+        )
+    }
+
+    fn call_effect_stop(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        effect: &EffectState,
+        reason: EffectStopReason,
+    ) -> Result<(), EngineError> {
+        self.dispatch_effect_callback(
+            state,
+            object_id,
+            effect,
+            "Stop",
+            "FxStop",
+            vec![effect_stop_reason_value(reason)],
+        )
+    }
+
+    fn dispatch_effect_callback(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        effect: &EffectState,
+        event: &'static str,
+        function_label: &'static str,
+        mut extras: Vec<Value>,
+    ) -> Result<(), EngineError> {
+        if !self.script.has_effect_callback(&effect.name, event) {
+            return Ok(());
+        }
+
+        let mut args = Vec::with_capacity(2 + extras.len());
+        args.push(build_state_value(&self.id, object_id, state));
+        args.push(build_effect_value(effect));
+        args.append(&mut extras);
+
+        self.script
+            .call_effect_callback(&effect.name, event, &args)
+            .map(|_| ())
+            .map_err(|source| EngineError::Script {
+                definition: format!("{}::{}", self.id, effect.name),
+                function: function_label,
+                source,
+            })
     }
 }
 
@@ -683,24 +797,51 @@ impl Engine {
         let mut spawn_requests = Vec::new();
         let landscape_for_commands = self.landscape.clone();
         for idx in 0..self.objects.len() {
-            let outcome = {
-                let object = &mut self.objects[idx];
-                object.execute_command_queue(&self.physics, landscape_for_commands.as_ref())
+            let (queued_spawns, queue_destroy, queue_events) = {
+                let outcome = {
+                    let object = &mut self.objects[idx];
+                    object.execute_command_queue(&self.physics, landscape_for_commands.as_ref())
+                };
+                (outcome.spawns, outcome.destroy, outcome.effect_events)
             };
-            let CommandQueueOutcome {
-                spawns: queued_spawns,
-                destroy: queue_destroy,
-            } = outcome;
+
+            if !queue_events.is_empty() {
+                let definition_id = self.objects[idx].definition_id.clone();
+                let object_id = self.objects[idx].id;
+                let state_snapshot = self.objects[idx].state.clone();
+                self.dispatch_effect_events(
+                    &definition_id,
+                    object_id,
+                    &state_snapshot,
+                    queue_events,
+                )?;
+            }
+
             if !queued_spawns.is_empty() {
                 spawn_requests.extend(queued_spawns);
             }
+
             if queue_destroy || self.objects[idx].destroyed {
                 continue;
             }
-            {
+
+            let timer_events = {
                 let object = &mut self.objects[idx];
-                object.tick_effects();
+                object.tick_effects()
+            };
+
+            if !timer_events.is_empty() {
+                let definition_id = self.objects[idx].definition_id.clone();
+                let object_id = self.objects[idx].id;
+                let state_snapshot = self.objects[idx].state.clone();
+                self.dispatch_effect_events(
+                    &definition_id,
+                    object_id,
+                    &state_snapshot,
+                    timer_events,
+                )?;
             }
+
             {
                 let object = &mut self.objects[idx];
                 object.state.action.advance();
@@ -734,18 +875,35 @@ impl Engine {
                 effects,
             } = command;
 
+            let mut effect_events = Vec::new();
             {
                 let object = &mut self.objects[idx];
                 object.state.apply_delta(&delta);
-                object.apply_effect_commands(&effects);
+                let mut applied = object.apply_effect_commands(&effects);
+                effect_events.append(&mut applied);
                 self.physics.clamp_velocity(&mut object.state.velocity);
                 if destroy {
-                    object.mark_destroyed();
+                    effect_events.extend(object.mark_destroyed());
                 }
                 if !commands.is_empty() {
                     object.enqueue_commands(commands);
                 }
             }
+
+            if !effect_events.is_empty() {
+                let state_snapshot = self.objects[idx].state.clone();
+                self.dispatch_effect_events(
+                    &definition_id,
+                    object_id,
+                    &state_snapshot,
+                    effect_events,
+                )?;
+            }
+
+            if self.objects[idx].destroyed {
+                continue;
+            }
+
             self.apply_landscape_at_index(idx);
             spawn_requests.extend(spawns.into_iter());
         }
@@ -831,6 +989,39 @@ impl Engine {
         }
     }
 
+    fn dispatch_effect_events(
+        &self,
+        definition_id: &str,
+        object_id: ObjectId,
+        state: &ObjectState,
+        events: Vec<EffectEvent>,
+    ) -> Result<(), EngineError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let definition = self
+            .definitions
+            .get(definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.to_string()))?;
+
+        for event in events {
+            match event.kind {
+                EffectEventKind::Started => {
+                    definition.call_effect_start(state, object_id, &event.effect)?;
+                }
+                EffectEventKind::Timer => {
+                    definition.call_effect_timer(state, object_id, &event.effect)?;
+                }
+                EffectEventKind::Stopped(reason) => {
+                    definition.call_effect_stop(state, object_id, &event.effect, reason)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn apply_landscape(&self, state: &mut ObjectState) {
         if let Some(landscape) = &self.landscape {
             let resolution = landscape.resolve_collision(state.position, state.velocity);
@@ -910,6 +1101,7 @@ impl Engine {
         self.physics.clamp_velocity(&mut object.state.velocity);
 
         let mut additional_spawns = Vec::new();
+        let mut effect_events = Vec::new();
         if self
             .definitions
             .get(&definition_id)
@@ -938,12 +1130,17 @@ impl Engine {
                 });
             }
             object.state.apply_delta(&delta);
-            object.apply_effect_commands(&effects);
+            let mut applied = object.apply_effect_commands(&effects);
+            effect_events.append(&mut applied);
             self.physics.clamp_velocity(&mut object.state.velocity);
             if !commands.is_empty() {
                 object.enqueue_commands(commands);
             }
             additional_spawns = spawns;
+        }
+
+        if !effect_events.is_empty() {
+            self.dispatch_effect_events(&definition_id, id, &object.state, effect_events)?;
         }
 
         self.apply_landscape(&mut object.state);
@@ -996,6 +1193,25 @@ fn build_state_value(definition_id: &str, object_id: ObjectId, state: &ObjectSta
         .collect();
     map.insert("effects".into(), Value::Array(effects));
     Value::Proplist(map)
+}
+
+fn build_effect_value(effect: &EffectState) -> Value {
+    let mut props = HashMap::with_capacity(4);
+    props.insert("name".into(), Value::String(effect.name.clone()));
+    props.insert("priority".into(), Value::Int(effect.priority));
+    props.insert("interval".into(), Value::Int(effect.interval));
+    props.insert("timer".into(), Value::Int(effect.timer));
+    Value::Proplist(props)
+}
+
+fn effect_stop_reason_value(reason: EffectStopReason) -> Value {
+    let label = match reason {
+        EffectStopReason::Removed => "removed",
+        EffectStopReason::Cleared => "cleared",
+        EffectStopReason::Destroyed => "destroyed",
+        EffectStopReason::Replaced => "replaced",
+    };
+    Value::String(label.to_string())
 }
 
 fn truncate_to_i32(value: u64) -> i32 {
@@ -1578,6 +1794,7 @@ fn value_to_effect_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn build_definition() -> Definition {
         let source = r#"
@@ -1867,6 +2084,77 @@ mod tests {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.effects.len(), 1);
         assert_eq!(object.effects[0].name, "Queued");
+    }
+
+    #[test]
+    fn effect_callbacks_fire_across_lifecycle_events() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Pulse", interval = 2 } ] };
+        }
+
+        global func FxPulseStart(state, effect) {
+            return nil;
+        }
+
+        global func FxPulseTimer(state, effect, timer) {
+            return nil;
+        }
+
+        global func FxPulseStop(state, effect, reason) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 3) {
+                return { effects = [ { op = "remove", name = "Pulse" } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        let first = engine.tick().expect("first tick succeeds");
+        let object = first.object(id).expect("object present");
+        assert!(object.effects.iter().any(|effect| effect.name == "Pulse"));
+
+        let second = engine.tick().expect("second tick succeeds");
+        let object = second.object(id).expect("object present");
+        assert!(object.effects.iter().any(|effect| effect.name == "Pulse"));
+
+        let third = engine.tick().expect("third tick succeeds");
+        let object = third.object(id).expect("object present");
+        assert!(object.effects.is_empty());
+
+        let calls = call_log.lock().unwrap().clone();
+        let start_calls = calls.iter().filter(|name| *name == "FxPulseStart").count();
+        let timer_calls = calls.iter().filter(|name| *name == "FxPulseTimer").count();
+        let stop_calls = calls.iter().filter(|name| *name == "FxPulseStop").count();
+
+        assert_eq!(start_calls, 1);
+        assert!(timer_calls >= 1);
+        assert_eq!(stop_calls, 1);
     }
 
     #[test]
