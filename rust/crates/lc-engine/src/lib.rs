@@ -7,7 +7,7 @@ mod landscape;
 mod record;
 pub mod scenario;
 
-pub use action::{ActionLibrary, ActionSpec, ActionState, ActionUpdate};
+pub use action::{ActionLibrary, ActionProcedure, ActionSpec, ActionState, ActionUpdate};
 pub use effect::EffectState;
 pub use landscape::{CollisionResolution, Landscape, LandscapeError};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
@@ -809,7 +809,7 @@ impl Definition {
             return Ok(CommandBatch::default());
         }
         let args = [
-            build_state_value(&self.id, object_id, state),
+            build_state_value(&self.id, object_id, state, &self.action_library),
             Value::Int(random),
         ];
         let (result, host_effects) =
@@ -842,7 +842,7 @@ impl Definition {
             frame as i32
         };
         let args = [
-            build_state_value(&self.id, object_id, state),
+            build_state_value(&self.id, object_id, state, &self.action_library),
             Value::Int(frame_value),
             Value::Int(random),
         ];
@@ -916,7 +916,12 @@ impl Definition {
         }
 
         let mut args = Vec::with_capacity(2 + extras.len());
-        args.push(build_state_value(&self.id, object_id, state));
+        args.push(build_state_value(
+            &self.id,
+            object_id,
+            state,
+            &self.action_library,
+        ));
         args.push(build_effect_value(effect));
         args.append(&mut extras);
 
@@ -1365,13 +1370,35 @@ impl Engine {
     }
 
     fn apply_physics_at_index(&mut self, idx: usize) {
-        if let Some(object) = self.objects.get_mut(idx) {
-            let new_vy = object.state.velocity.y.saturating_add(self.physics.gravity);
-            object.state.velocity.y = new_vy;
+        if idx >= self.objects.len() {
+            return;
+        }
+
+        let (procedure, gravity_component) = {
+            let object = &self.objects[idx];
+            let procedure = self
+                .definitions
+                .get(&object.definition_id)
+                .map(|definition| {
+                    definition
+                        .action_library()
+                        .procedure_for_action(&object.state.action.name)
+                })
+                .unwrap_or_default();
+            let gravity = procedure.gravity_component(self.physics.gravity);
+            (procedure, gravity)
+        };
+
+        let object = &mut self.objects[idx];
+        object.state.velocity.y = object.state.velocity.y.saturating_add(gravity_component);
+        if procedure.allows_wind() {
             self.environment
                 .apply_to_velocity(&mut object.state.velocity, self.frame);
-            self.physics.clamp_velocity(&mut object.state.velocity);
         }
+        if procedure.locks_vertical_velocity() {
+            object.state.velocity.y = 0;
+        }
+        self.physics.clamp_velocity(&mut object.state.velocity);
     }
 
     fn apply_landscape_at_index(&mut self, idx: usize) {
@@ -1520,7 +1547,12 @@ impl Engine {
     }
 }
 
-fn build_state_value(definition_id: &str, object_id: ObjectId, state: &ObjectState) -> Value {
+fn build_state_value(
+    definition_id: &str,
+    object_id: ObjectId,
+    state: &ObjectState,
+    library: &ActionLibrary,
+) -> Value {
     let mut map = HashMap::with_capacity(8);
     map.insert(
         "definition".into(),
@@ -1532,9 +1564,12 @@ fn build_state_value(definition_id: &str, object_id: ObjectId, state: &ObjectSta
     map.insert("energy".into(), Value::Int(state.energy));
     map.insert("owner".into(), Value::Int(state.owner));
     map.insert("crew_member".into(), Value::Bool(state.crew_member));
-    let mut action = HashMap::with_capacity(2);
+    let mut action = HashMap::with_capacity(3);
     action.insert("name".into(), Value::String(state.action.name.clone()));
     action.insert("phase".into(), Value::Int(state.action.phase));
+    if let Some(procedure) = library.procedure_name_for_action(&state.action.name) {
+        action.insert("procedure".into(), Value::String(procedure.to_string()));
+    }
     map.insert("action".into(), Value::Proplist(action));
     let effects: Vec<_> = state
         .effects
@@ -2264,6 +2299,34 @@ mod tests {
     }
     "#;
 
+    const PROCEDURE_STATE_SCRIPT: &str = r#"
+    global func Initialize(state, random)
+    {
+        if (state.action && state.action.procedure == "flight")
+        {
+            return { energy = 7 };
+        }
+        return { energy = -1 };
+    }
+
+    global func Step(state, frame, random)
+    {
+        return nil;
+    }
+    "#;
+
+    const PROCEDURE_MOVEMENT_SCRIPT: &str = r#"
+    global func Initialize(state, random)
+    {
+        return nil;
+    }
+
+    global func Step(state, frame, random)
+    {
+        return nil;
+    }
+    "#;
+
     fn build_definition() -> Definition {
         let source = r#"
         global func Initialize(state, random) {
@@ -2376,6 +2439,97 @@ mod tests {
         let second_tick = engine.tick().expect("second tick succeeds");
         let object = second_tick.object(id).expect("object present");
         assert!(object.effects.is_empty());
+    }
+
+    #[test]
+    fn action_procedure_surfaces_in_state_value() {
+        let mut definition =
+            Definition::from_script("Airborne", "Airborne", PROCEDURE_STATE_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Fly".to_string(),
+            ActionSpec::default().with_procedure("flight"),
+        );
+        definition.configure_actions(Some("Fly".to_string()), actions);
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Airborne"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.object_snapshot(id).expect("snapshot available");
+        assert_eq!(snapshot.energy, 7);
+    }
+
+    #[test]
+    fn flight_procedure_suppresses_gravity_and_wind() {
+        let mut definition = Definition::from_script("Glider", "Glider", PROCEDURE_MOVEMENT_SCRIPT)
+            .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Fly".to_string(),
+            ActionSpec::default().with_procedure("flight"),
+        );
+        definition.configure_actions(Some("Fly".to_string()), actions);
+
+        let mut engine = Engine::with_seed(1);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let physics = PhysicsSettings::checked(4, 12, -20)
+            .expect("physics settings valid")
+            .with_max_horizontal_speed(24)
+            .expect("horizontal speed valid");
+        engine.set_physics(physics);
+        engine.set_environment(EnvironmentSettings::new(5));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Glider"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity.y, 0);
+        assert_eq!(object.velocity.x, 0);
+    }
+
+    #[test]
+    fn float_procedure_reduces_gravity_pull() {
+        let mut definition =
+            Definition::from_script("Balloon", "Balloon", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Float".to_string(),
+            ActionSpec::default().with_procedure("float"),
+        );
+        definition.configure_actions(Some("Float".to_string()), actions);
+
+        let mut engine = Engine::with_seed(2);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let physics = PhysicsSettings::checked(6, 20, -30)
+            .expect("physics settings valid")
+            .with_max_horizontal_speed(20)
+            .expect("horizontal speed valid");
+        engine.set_physics(physics);
+        engine.set_environment(EnvironmentSettings::new(0));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Balloon"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity.y, 3);
     }
 
     #[test]

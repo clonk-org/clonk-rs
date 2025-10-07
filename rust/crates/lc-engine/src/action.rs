@@ -10,11 +10,17 @@ pub struct ActionSpec {
     pub length: Option<u32>,
     #[serde(default)]
     pub next: Option<String>,
+    #[serde(default)]
+    pub procedure: Option<String>,
 }
 
 impl ActionSpec {
     pub fn new(length: Option<u32>, next: Option<String>) -> Self {
-        Self { length, next }
+        Self {
+            length,
+            next,
+            procedure: None,
+        }
     }
 
     pub fn with_length(mut self, length: u32) -> Self {
@@ -26,6 +32,11 @@ impl ActionSpec {
         self.next = Some(next.into());
         self
     }
+
+    pub fn with_procedure(mut self, procedure: impl Into<String>) -> Self {
+        self.procedure = Some(procedure.into());
+        self
+    }
 }
 
 impl Default for ActionSpec {
@@ -33,7 +44,77 @@ impl Default for ActionSpec {
         Self {
             length: None,
             next: None,
+            procedure: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionProcedure {
+    Undefined,
+    Walk,
+    Float,
+    Flight,
+    Hang,
+    Swim,
+    Other,
+}
+
+impl ActionProcedure {
+    pub fn from_name(name: &str) -> Self {
+        if name.eq_ignore_ascii_case("walk") {
+            ActionProcedure::Walk
+        } else if name.eq_ignore_ascii_case("float") {
+            ActionProcedure::Float
+        } else if name.eq_ignore_ascii_case("flight") {
+            ActionProcedure::Flight
+        } else if name.eq_ignore_ascii_case("hang") {
+            ActionProcedure::Hang
+        } else if name.eq_ignore_ascii_case("swim") {
+            ActionProcedure::Swim
+        } else {
+            ActionProcedure::Other
+        }
+    }
+
+    pub fn gravity_component(self, base_gravity: i32) -> i32 {
+        match self {
+            ActionProcedure::Undefined | ActionProcedure::Walk | ActionProcedure::Other => {
+                base_gravity
+            }
+            ActionProcedure::Float | ActionProcedure::Swim => {
+                let mut magnitude = base_gravity.abs();
+                if magnitude > 0 {
+                    magnitude = (magnitude + 1) / 2;
+                    if magnitude == 0 {
+                        magnitude = 1;
+                    }
+                }
+                if base_gravity < 0 {
+                    -magnitude
+                } else {
+                    magnitude
+                }
+            }
+            ActionProcedure::Flight | ActionProcedure::Hang => 0,
+        }
+    }
+
+    pub fn allows_wind(self) -> bool {
+        match self {
+            ActionProcedure::Flight | ActionProcedure::Hang => false,
+            _ => true,
+        }
+    }
+
+    pub fn locks_vertical_velocity(self) -> bool {
+        matches!(self, ActionProcedure::Hang)
+    }
+}
+
+impl Default for ActionProcedure {
+    fn default() -> Self {
+        ActionProcedure::Undefined
     }
 }
 
@@ -81,6 +162,20 @@ impl ActionLibrary {
         } else {
             state.advance();
         }
+    }
+
+    pub fn procedure_for_action(&self, action: &str) -> ActionProcedure {
+        self.specs
+            .get(action)
+            .and_then(|spec| spec.procedure.as_deref())
+            .map(ActionProcedure::from_name)
+            .unwrap_or_default()
+    }
+
+    pub fn procedure_name_for_action(&self, action: &str) -> Option<&str> {
+        self.specs
+            .get(action)
+            .and_then(|spec| spec.procedure.as_deref())
     }
 
     fn advance_with_spec(state: &mut ActionState, spec: &ActionSpec, library: &ActionLibrary) {
