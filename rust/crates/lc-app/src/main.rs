@@ -32,6 +32,10 @@ struct Cli {
     /// Suppress the human-readable summary on stdout
     #[arg(long = "quiet")]
     quiet: bool,
+
+    /// Enable live keyboard controls during the demo run
+    #[arg(long = "interactive")]
+    interactive: bool,
 }
 
 fn main() {
@@ -50,6 +54,7 @@ fn run_with_cli(cli: Cli) -> GameResult<()> {
     let mut game = DemoGame::new(DemoGameOptions {
         config_path: cli.config.clone(),
         scenario_path: cli.scenario.clone(),
+        interactive: cli.interactive,
     })?;
     let ticks = cli.ticks.unwrap_or_else(|| game.configured_ticks());
     let summary = game.run(ticks)?;
@@ -118,6 +123,7 @@ mod tests {
         assert_eq!(cli.ticks, Some(42));
         assert!(cli.quiet);
         assert!(cli.scenario.is_none());
+        assert!(!cli.interactive);
     }
 
     #[test]
@@ -125,6 +131,7 @@ mod tests {
         let cli = Cli::parse_from(["lc-app", "--scenario", "test_scenario", "--quiet"]);
         assert_eq!(cli.scenario, Some(PathBuf::from("test_scenario")));
         assert!(cli.quiet);
+        assert!(!cli.interactive);
     }
 
     #[test]
@@ -142,6 +149,7 @@ mod tests {
             scenario: None,
             summary_json: Some(path.clone()),
             quiet: true,
+            interactive: false,
         };
 
         run_with_cli(cli).expect("cli run succeeds");

@@ -1,8 +1,14 @@
 use std::f32::consts::PI;
-use std::io::Cursor;
+use std::io::{stdout, Cursor};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    execute, terminal,
+};
 use lc_audio::{AudioSystem, SoundHandle};
 use lc_core::std_config::Config;
 use lc_engine::{
@@ -27,6 +33,7 @@ const SURFACE_HEIGHT: u32 = 360;
 const MIX_CHANNELS: usize = 8;
 const HORIZONTAL_SPEED: i32 = 6;
 const JUMP_VELOCITY: i32 = -18;
+const TICK_DURATION_MS: u64 = 16;
 
 pub type GameResult<T> = Result<T, GameError>;
 
@@ -58,6 +65,8 @@ pub enum GameError {
     SummaryOutput(std::io::Error),
     #[error("summary serialization error: {0}")]
     SummarySerialize(#[from] serde_json::Error),
+    #[error("input error: {0}")]
+    Input(String),
 }
 
 pub struct DemoGame {
@@ -79,12 +88,14 @@ pub struct DemoGame {
     bounce_sound: SoundHandle,
     control: ControlCoordinator,
     lobby: Lobby,
+    control_mode: ControlMode,
 }
 
 #[derive(Debug, Clone)]
 pub struct DemoGameOptions {
     pub config_path: Option<PathBuf>,
     pub scenario_path: Option<PathBuf>,
+    pub interactive: bool,
 }
 
 impl Default for DemoGameOptions {
@@ -92,6 +103,7 @@ impl Default for DemoGameOptions {
         Self {
             config_path: None,
             scenario_path: None,
+            interactive: false,
         }
     }
 }
@@ -124,6 +136,156 @@ impl ControlPayload {
             horizontal: 0,
             jump: false,
         }
+    }
+}
+
+enum ControlMode {
+    Scripted,
+    Interactive(InteractiveInput),
+}
+
+impl ControlMode {
+    fn next_payload(&mut self, tick: u32) -> GameResult<Option<ControlPayload>> {
+        match self {
+            ControlMode::Scripted => Ok(Some(scripted_control_for_tick(tick))),
+            ControlMode::Interactive(input) => {
+                input.capture_events(Duration::from_millis(TICK_DURATION_MS))?;
+                if input.exit_requested() {
+                    Ok(None)
+                } else {
+                    Ok(Some(input.current_payload()))
+                }
+            }
+        }
+    }
+
+    fn teardown(&mut self) {
+        if let ControlMode::Interactive(input) = self {
+            input.teardown();
+        }
+    }
+}
+
+struct InteractiveInput {
+    left_held: bool,
+    right_held: bool,
+    jump_held: bool,
+    exit_requested: bool,
+    raw_mode: bool,
+    cursor_hidden: bool,
+}
+
+impl InteractiveInput {
+    fn new() -> GameResult<Self> {
+        terminal::enable_raw_mode().map_err(|err| GameError::Input(err.to_string()))?;
+        let mut stdout = stdout();
+        execute!(stdout, cursor::Hide).map_err(|err| GameError::Input(err.to_string()))?;
+        Ok(Self {
+            left_held: false,
+            right_held: false,
+            jump_held: false,
+            exit_requested: false,
+            raw_mode: true,
+            cursor_hidden: true,
+        })
+    }
+
+    fn capture_events(&mut self, duration: Duration) -> GameResult<()> {
+        let start = Instant::now();
+        let mut remaining = duration;
+
+        while event::poll(remaining).map_err(|err| GameError::Input(err.to_string()))? {
+            let event = event::read().map_err(|err| GameError::Input(err.to_string()))?;
+            self.handle_event(event);
+
+            let elapsed = start.elapsed();
+            if elapsed >= duration {
+                break;
+            }
+            remaining = duration - elapsed;
+        }
+
+        Ok(())
+    }
+
+    fn handle_event(&mut self, event: Event) {
+        if let Event::Key(key) = event {
+            self.handle_key_event(key);
+        }
+    }
+
+    fn handle_key_event(&mut self, key: KeyEvent) {
+        let is_press = matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat);
+        let is_release = matches!(key.kind, KeyEventKind::Release);
+
+        match key.code {
+            KeyCode::Left | KeyCode::Char('a') | KeyCode::Char('A') => {
+                if is_press {
+                    self.left_held = true;
+                } else if is_release {
+                    self.left_held = false;
+                }
+            }
+            KeyCode::Right | KeyCode::Char('d') | KeyCode::Char('D') => {
+                if is_press {
+                    self.right_held = true;
+                } else if is_release {
+                    self.right_held = false;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('W') | KeyCode::Char(' ') => {
+                if is_press {
+                    self.jump_held = true;
+                } else if is_release {
+                    self.jump_held = false;
+                }
+            }
+            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                if is_press {
+                    self.exit_requested = true;
+                }
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                if is_press && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.exit_requested = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn current_payload(&self) -> ControlPayload {
+        let horizontal = match (self.left_held, self.right_held) {
+            (true, true) | (false, false) => 0,
+            (true, false) => -1,
+            (false, true) => 1,
+        };
+        ControlPayload {
+            horizontal,
+            jump: self.jump_held,
+        }
+    }
+
+    fn exit_requested(&self) -> bool {
+        self.exit_requested
+    }
+
+    fn teardown(&mut self) {
+        if self.raw_mode {
+            let _ = terminal::disable_raw_mode();
+            self.raw_mode = false;
+        }
+        if self.cursor_hidden {
+            let mut stdout = stdout();
+            let _ = execute!(stdout, cursor::Show);
+            self.cursor_hidden = false;
+        }
+    }
+}
+
+impl Drop for InteractiveInput {
+    fn drop(&mut self) {
+        self.teardown();
     }
 }
 
@@ -213,6 +375,12 @@ impl DemoGame {
         lobby.settings_mut().scenario = Some(scenario_name.clone());
         lobby.settings_mut().script_hash = Some("demo".to_string());
 
+        let control_mode = if options.interactive {
+            ControlMode::Interactive(InteractiveInput::new()?)
+        } else {
+            ControlMode::Scripted
+        };
+
         let system_group = Group::open(paths.system_group_path())?;
         let system_entry_count = system_group.entries()?.len();
         let system_version = system_group
@@ -251,6 +419,7 @@ impl DemoGame {
             bounce_sound,
             control,
             lobby,
+            control_mode,
         })
     }
 
@@ -266,11 +435,15 @@ impl DemoGame {
         let mut was_grounded = false;
         let mut current_control = ControlPayload::neutral();
 
-        for tick in 0..ticks {
-            let scripted_control = scripted_control_for_tick(tick);
-            let payload = encode_control_payload(&scripted_control)?;
+        let mut executed_ticks = 0u32;
+        while executed_ticks < ticks {
+            let tick = executed_ticks;
+            let Some(control_payload) = self.control_mode.next_payload(tick)? else {
+                break;
+            };
+            let payload = encode_control_payload(&control_payload)?;
             let packet = ControlPacket::builder(LOCAL_CLIENT_ID, tick as u32)
-                .timestamp_ms((tick as u64) * 16)
+                .timestamp_ms((tick as u64) * TICK_DURATION_MS)
                 .payload(payload);
             let outcome = self.control.ingest(packet)?;
             ready_batches += outcome.ready.len() as u32;
@@ -312,11 +485,14 @@ impl DemoGame {
 
             hasher.update_surface(&self.surface);
             last_snapshot = Some(snapshot);
+            executed_ticks += 1;
         }
+
+        self.control_mode.teardown();
 
         let final_snapshot = last_snapshot.unwrap_or_else(|| self.engine.snapshot());
         Ok(GameSummary {
-            ticks,
+            ticks: executed_ticks,
             ground_hits,
             ready_batches,
             surface_hash: hasher.finish(),
