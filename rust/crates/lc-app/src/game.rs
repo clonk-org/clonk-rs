@@ -128,6 +128,7 @@ pub struct GameSummary {
     pub gravity: i32,
     pub max_fall_speed: i32,
     pub max_rise_speed: i32,
+    pub wind: i32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -516,6 +517,7 @@ impl DemoGame {
 
         let final_snapshot = last_snapshot.unwrap_or_else(|| self.engine.snapshot());
         let physics = self.engine.physics();
+        let environment = self.engine.environment();
         Ok(GameSummary {
             ticks: executed_ticks,
             ground_hits,
@@ -532,6 +534,7 @@ impl DemoGame {
             gravity: physics.gravity,
             max_fall_speed: physics.max_fall_speed,
             max_rise_speed: physics.max_rise_speed,
+            wind: environment.wind,
         })
     }
 

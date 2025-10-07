@@ -118,6 +118,29 @@ impl Default for PhysicsSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentSettings {
+    pub wind: i32,
+}
+
+impl EnvironmentSettings {
+    pub const fn new(wind: i32) -> Self {
+        Self { wind }
+    }
+
+    fn apply_to_velocity(&self, velocity: &mut Vector2) {
+        if self.wind != 0 {
+            velocity.x = velocity.x.saturating_add(self.wind);
+        }
+    }
+}
+
+impl Default for EnvironmentSettings {
+    fn default() -> Self {
+        Self { wind: 0 }
+    }
+}
+
 fn default_owner() -> i32 {
     OWNER_NONE
 }
@@ -595,6 +618,7 @@ pub struct PersistedObject {
 pub struct EngineState {
     pub frame: u64,
     pub physics: PhysicsSettings,
+    pub environment: EnvironmentSettings,
     pub next_object_id: u64,
     #[serde(default)]
     pub landscape: Option<Landscape>,
@@ -811,6 +835,7 @@ pub struct Engine {
     frame: u64,
     landscape: Option<Landscape>,
     physics: PhysicsSettings,
+    environment: EnvironmentSettings,
 }
 
 impl Engine {
@@ -827,6 +852,7 @@ impl Engine {
             frame: 0,
             landscape: None,
             physics: PhysicsSettings::default(),
+            environment: EnvironmentSettings::default(),
         }
     }
 
@@ -855,6 +881,14 @@ impl Engine {
         for object in &mut self.objects {
             self.physics.clamp_velocity(&mut object.state.velocity);
         }
+    }
+
+    pub fn environment(&self) -> EnvironmentSettings {
+        self.environment
+    }
+
+    pub fn set_environment(&mut self, environment: EnvironmentSettings) {
+        self.environment = environment;
     }
 
     pub fn register_definition(&mut self, definition: Definition) -> Result<(), EngineError> {
@@ -1093,6 +1127,7 @@ impl Engine {
         EngineState {
             frame: self.frame,
             physics: self.physics,
+            environment: self.environment,
             next_object_id: self.next_object_id,
             landscape: self.landscape.clone(),
             objects,
@@ -1114,6 +1149,7 @@ impl Engine {
 
         self.frame = state.frame;
         self.physics = state.physics;
+        self.environment = state.environment;
         self.landscape = state.landscape.clone();
         self.rng = state.rng.clone();
         self.objects.clear();
@@ -1194,6 +1230,8 @@ impl Engine {
         if let Some(object) = self.objects.get_mut(idx) {
             let new_vy = object.state.velocity.y.saturating_add(self.physics.gravity);
             object.state.velocity.y = new_vy;
+            self.environment
+                .apply_to_velocity(&mut object.state.velocity);
             self.physics.clamp_velocity(&mut object.state.velocity);
         }
     }
@@ -2088,6 +2126,43 @@ mod tests {
     }
 
     #[test]
+    fn applies_environment_wind_to_velocity() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+        let mut engine = Engine::with_seed(42);
+        engine
+            .register_definition(Definition::from_script("Drift", "Drift", script).unwrap())
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Drift")
+                    .with_position(Vector2::new(0, 0))
+                    .with_velocity(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+
+        engine.set_environment(EnvironmentSettings::new(2));
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::new(2, 1));
+        assert_eq!(object.position, Vector2::new(2, 1));
+
+        let snapshot = engine.tick().expect("second tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::new(4, 2));
+        assert_eq!(object.position, Vector2::new(6, 3));
+    }
+
+    #[test]
     fn spawn_object_tracks_owner() {
         let mut engine = Engine::with_seed(99);
         engine
@@ -2659,6 +2734,7 @@ mod tests {
         let mut engine = Engine::with_seed(0xBAD_F00D);
         engine.set_physics(PhysicsSettings::new(2, 9, -6));
         engine.set_landscape(Landscape::flat(128, 15));
+        engine.set_environment(EnvironmentSettings::new(-4));
 
         let definition = Definition::from_script("Stateful", "Stateful", STATEFUL_SCRIPT)?;
         engine.register_definition(definition)?;
@@ -2693,6 +2769,7 @@ mod tests {
         let _ = engine.tick()?;
 
         let state = engine.capture_state();
+        assert_eq!(state.environment, EnvironmentSettings::new(-4));
         let serialized = serde_json::to_string(&state).expect("state serializes");
         let decoded: EngineState =
             serde_json::from_str(&serialized).expect("state round-trips via JSON");
@@ -2700,11 +2777,13 @@ mod tests {
         let mut restored = Engine::with_seed(123);
         restored.set_physics(PhysicsSettings::new(5, 11, -8));
         restored.set_landscape(Landscape::flat(64, 9));
+        restored.set_environment(EnvironmentSettings::new(9));
         let definition = Definition::from_script("Stateful", "Stateful", STATEFUL_SCRIPT)?;
         restored.register_definition(definition)?;
         restored.restore_state(&decoded)?;
 
         assert_eq!(restored.physics(), state.physics);
+        assert_eq!(restored.environment(), state.environment);
         assert_eq!(restored.landscape(), state.landscape.as_ref());
         assert_eq!(engine.snapshot(), restored.snapshot());
 

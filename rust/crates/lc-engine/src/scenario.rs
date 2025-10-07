@@ -6,8 +6,8 @@ use lc_resources::{Group, GroupError};
 use serde::Deserialize;
 
 use crate::{
-    action::ActionSpec, ActionState, Definition, EffectState, Engine, EngineError, Landscape,
-    ObjectId, PhysicsSettings, SpawnConfig, Vector2,
+    action::ActionSpec, ActionState, Definition, EffectState, Engine, EngineError,
+    EnvironmentSettings, Landscape, ObjectId, PhysicsSettings, SpawnConfig, Vector2,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +59,7 @@ pub struct Scenario {
     initial_spawns: Vec<SpawnConfig>,
     landscape: Option<Landscape>,
     physics: Option<PhysicsSettings>,
+    environment: Option<EnvironmentSettings>,
 }
 
 impl Scenario {
@@ -101,6 +102,10 @@ impl Scenario {
         self.physics
     }
 
+    pub fn environment(&self) -> Option<EnvironmentSettings> {
+        self.environment
+    }
+
     pub fn apply(&self, engine: &mut Engine) -> Result<Vec<ObjectId>, ScenarioError> {
         if let Some(landscape) = &self.landscape {
             engine.set_landscape(landscape.clone());
@@ -111,6 +116,8 @@ impl Scenario {
         if let Some(physics) = self.physics {
             engine.set_physics(physics);
         }
+
+        engine.set_environment(self.environment.unwrap_or_default());
 
         for definition in &self.definitions {
             let name = definition.name.as_deref().unwrap_or(&definition.id);
@@ -236,6 +243,7 @@ impl Scenario {
             Some(spec) => Some(spec.into_settings()?),
             None => None,
         };
+        let environment = manifest.environment.map(EnvironmentManifest::into_settings);
         let ground_height_hint = manifest.ground_height.or_else(|| {
             landscape
                 .as_ref()
@@ -250,6 +258,7 @@ impl Scenario {
             initial_spawns: spawns,
             landscape,
             physics,
+            environment,
         })
     }
 }
@@ -270,6 +279,8 @@ struct ScenarioManifest {
     landscape: Option<LandscapeManifest>,
     #[serde(default)]
     physics: Option<PhysicsManifest>,
+    #[serde(default)]
+    environment: Option<EnvironmentManifest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -382,6 +393,18 @@ impl PhysicsManifest {
 
         PhysicsSettings::checked(gravity, max_fall_speed, max_rise_speed)
             .map_err(|detail| ScenarioError::InvalidPhysics(detail.to_string()))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct EnvironmentManifest {
+    #[serde(default)]
+    wind: Option<i32>,
+}
+
+impl EnvironmentManifest {
+    fn into_settings(self) -> EnvironmentSettings {
+        EnvironmentSettings::new(self.wind.unwrap_or(0))
     }
 }
 
@@ -606,6 +629,68 @@ global func Step(state, frame, random)
         assert_eq!(configured.gravity, 2);
         assert_eq!(configured.max_fall_speed, 8);
         assert_eq!(configured.max_rise_speed, -10);
+    }
+
+    #[test]
+    fn loads_environment_settings_and_applies_to_engine() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Mover", "script": "scripts/mover.aul" }
+            ],
+            "environment": {
+                "wind": -3
+            },
+            "initial_objects": [
+                { "definition": "Mover" }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let environment = scenario.environment().expect("environment present");
+        assert_eq!(environment.wind, -3);
+
+        let mut engine = Engine::with_seed(0);
+        let created = scenario.apply(&mut engine).expect("scenario applies");
+        assert_eq!(created.len(), 1);
+
+        let configured = engine.environment();
+        assert_eq!(configured.wind, -3);
+    }
+
+    #[test]
+    fn scenario_without_environment_resets_engine_to_default() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Mover", "script": "scripts/mover.aul" }
+            ],
+            "initial_objects": [
+                { "definition": "Mover" }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        assert!(scenario.environment().is_none());
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_environment(EnvironmentSettings::new(5));
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let configured = engine.environment();
+        assert_eq!(configured, EnvironmentSettings::default());
     }
 
     #[test]
