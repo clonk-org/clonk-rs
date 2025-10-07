@@ -15,7 +15,7 @@ pub use scenario::{Scenario, ScenarioError};
 
 use compat::EffectContextOutcome;
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::ops::AddAssign;
 
@@ -443,6 +443,104 @@ impl QueuedCommand {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct CrewSelection {
+    selected: Vec<ObjectId>,
+    cursor: Option<ObjectId>,
+}
+
+impl CrewSelection {
+    fn select(&mut self, id: ObjectId) {
+        if !self.selected.contains(&id) {
+            self.selected.push(id);
+        }
+        if self.cursor.is_none() {
+            self.cursor = Some(id);
+        }
+    }
+
+    fn deselect(&mut self, id: ObjectId) {
+        let mut removed = false;
+        self.selected.retain(|candidate| {
+            if *candidate == id {
+                removed = true;
+                false
+            } else {
+                true
+            }
+        });
+        if self.cursor == Some(id) {
+            if removed {
+                self.cursor = self.selected.last().copied();
+            } else if !self.selected.contains(&id) {
+                self.cursor = self.selected.last().copied();
+            }
+        }
+        if self.selected.is_empty() {
+            self.cursor = None;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.selected.clear();
+        self.cursor = None;
+    }
+
+    fn prune(&mut self, alive: &HashSet<ObjectId>) {
+        self.selected.retain(|id| alive.contains(id));
+        if let Some(cursor) = self.cursor {
+            if !alive.contains(&cursor) {
+                self.cursor = self.selected.last().copied();
+            }
+        }
+        if self.selected.is_empty() {
+            self.cursor = None;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.selected.is_empty() && self.cursor.is_none()
+    }
+
+    fn cursor(&self) -> Option<ObjectId> {
+        self.cursor
+    }
+
+    fn selected(&self) -> &[ObjectId] {
+        &self.selected
+    }
+
+    fn set_cursor(&mut self, cursor: Option<ObjectId>) {
+        self.cursor = cursor;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CrewSelectionState {
+    #[serde(default)]
+    pub selected: Vec<ObjectId>,
+    #[serde(default)]
+    pub cursor: Option<ObjectId>,
+}
+
+impl From<&CrewSelection> for CrewSelectionState {
+    fn from(selection: &CrewSelection) -> Self {
+        Self {
+            selected: selection.selected.clone(),
+            cursor: selection.cursor,
+        }
+    }
+}
+
+impl From<CrewSelectionState> for CrewSelection {
+    fn from(state: CrewSelectionState) -> Self {
+        Self {
+            selected: state.selected,
+            cursor: state.cursor,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Object {
     id: ObjectId,
@@ -637,6 +735,8 @@ pub enum EngineError {
     UnknownDefinition(String),
     #[error("unknown object `{0}`")]
     UnknownObject(ObjectId),
+    #[error("crew selection error for owner {owner}: {detail}")]
+    CrewSelection { owner: i32, detail: String },
     #[error("script error in {function} of `{definition}`")]
     Script {
         definition: String,
@@ -769,6 +869,8 @@ pub struct EngineState {
     pub landscape: Option<Landscape>,
     #[serde(default)]
     pub objects: Vec<PersistedObject>,
+    #[serde(default)]
+    pub crew_selection: HashMap<i32, CrewSelectionState>,
     #[serde(default)]
     pub global_effects: Vec<EffectState>,
     pub rng: ChaCha8Rng,
@@ -1039,6 +1141,7 @@ pub struct Engine {
     physics: PhysicsSettings,
     environment: EnvironmentSettings,
     global_effects: Vec<EffectState>,
+    crew_selection: HashMap<i32, CrewSelection>,
 }
 
 impl Engine {
@@ -1057,6 +1160,7 @@ impl Engine {
             physics: PhysicsSettings::default(),
             environment: EnvironmentSettings::default(),
             global_effects: Vec::new(),
+            crew_selection: HashMap::new(),
         }
     }
 
@@ -1103,6 +1207,118 @@ impl Engine {
             .collect()
     }
 
+    pub fn selected_crew(&self, owner: i32) -> Vec<ObjectId> {
+        self.crew_selection
+            .get(&owner)
+            .map(|selection| selection.selected().to_vec())
+            .unwrap_or_default()
+    }
+
+    pub fn crew_cursor(&self, owner: i32) -> Option<ObjectId> {
+        self.crew_selection
+            .get(&owner)
+            .and_then(|selection| selection.cursor())
+    }
+
+    pub fn select_crew<I>(&mut self, owner: i32, crew: I) -> Result<(), EngineError>
+    where
+        I: IntoIterator<Item = ObjectId>,
+    {
+        let mut validated = Vec::new();
+        for id in crew {
+            let object = self
+                .objects
+                .iter()
+                .find(|object| object.id == id)
+                .ok_or(EngineError::UnknownObject(id))?;
+            if object.state.owner != owner {
+                return Err(EngineError::CrewSelection {
+                    owner,
+                    detail: format!("object {} is owned by {}", id, object.state.owner),
+                });
+            }
+            if !object.state.crew_member {
+                return Err(EngineError::CrewSelection {
+                    owner,
+                    detail: format!("object {} is not a crew member", id),
+                });
+            }
+            validated.push(id);
+        }
+
+        if validated.is_empty() {
+            return Ok(());
+        }
+
+        let selection = self.crew_selection.entry(owner).or_default();
+        for id in validated {
+            selection.select(id);
+        }
+        Ok(())
+    }
+
+    pub fn deselect_crew<I>(&mut self, owner: i32, crew: I)
+    where
+        I: IntoIterator<Item = ObjectId>,
+    {
+        if let Some(selection) = self.crew_selection.get_mut(&owner) {
+            for id in crew {
+                selection.deselect(id);
+            }
+            if selection.is_empty() {
+                self.crew_selection.remove(&owner);
+            }
+        }
+    }
+
+    pub fn clear_crew_selection(&mut self, owner: i32) {
+        if let Some(selection) = self.crew_selection.get_mut(&owner) {
+            selection.clear();
+        }
+        self.crew_selection.remove(&owner);
+    }
+
+    pub fn set_crew_cursor(
+        &mut self,
+        owner: i32,
+        cursor: Option<ObjectId>,
+    ) -> Result<(), EngineError> {
+        match cursor {
+            Some(id) => {
+                let object = self
+                    .objects
+                    .iter()
+                    .find(|object| object.id == id)
+                    .ok_or(EngineError::UnknownObject(id))?;
+                if object.state.owner != owner {
+                    return Err(EngineError::CrewSelection {
+                        owner,
+                        detail: format!("object {} is owned by {}", id, object.state.owner),
+                    });
+                }
+                if !object.state.crew_member {
+                    return Err(EngineError::CrewSelection {
+                        owner,
+                        detail: format!("object {} is not a crew member", id),
+                    });
+                }
+                let selection = self.crew_selection.entry(owner).or_default();
+                selection.select(id);
+                selection.set_cursor(Some(id));
+            }
+            None => {
+                if let Some(selection) = self.crew_selection.get_mut(&owner) {
+                    selection.set_cursor(None);
+                    if selection.selected().is_empty() {
+                        self.crew_selection.remove(&owner);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn global_effects(&self) -> &[EffectState] {
         &self.global_effects
     }
@@ -1130,13 +1346,26 @@ impl Engine {
         self.tick_global_effects();
         let landscape_for_commands = self.landscape.clone();
         for idx in 0..self.objects.len() {
-            let (queued_spawns, queue_destroy, queue_events) = {
-                let outcome = {
-                    let object = &mut self.objects[idx];
-                    object.execute_command_queue(&self.physics, landscape_for_commands.as_ref())
-                };
-                (outcome.spawns, outcome.destroy, outcome.effect_events)
+            let (
+                queued_spawns,
+                queue_destroy,
+                queue_events,
+                (object_id, previous_owner, new_owner, new_crew),
+            ) = {
+                let object = &mut self.objects[idx];
+                let previous_owner = object.state.owner;
+                let outcome =
+                    object.execute_command_queue(&self.physics, landscape_for_commands.as_ref());
+                let new_owner = object.state.owner;
+                let new_crew = object.state.crew_member;
+                (
+                    outcome.spawns,
+                    outcome.destroy,
+                    outcome.effect_events,
+                    (object.id, previous_owner, new_owner, new_crew),
+                )
             };
+            self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
 
             if !queue_events.is_empty() {
                 let definition_id = self.objects[idx].definition_id.clone();
@@ -1241,8 +1470,9 @@ impl Engine {
             } = command;
 
             let mut effect_events = Vec::new();
-            {
+            let (object_id, previous_owner, new_owner, new_crew) = {
                 let object = &mut self.objects[idx];
+                let previous_owner = object.state.owner;
                 object.state.apply_delta(&delta);
                 let mut applied = object.apply_effect_commands(&effects);
                 effect_events.append(&mut applied);
@@ -1253,7 +1483,14 @@ impl Engine {
                 if !commands.is_empty() {
                     object.enqueue_commands(commands);
                 }
-            }
+                (
+                    object.id,
+                    previous_owner,
+                    object.state.owner,
+                    object.state.crew_member,
+                )
+            };
+            self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
 
             if !global_effects.is_empty() {
                 self.apply_global_effect_commands(&global_effects);
@@ -1287,6 +1524,7 @@ impl Engine {
         }
 
         self.objects.retain(|object| !object.destroyed);
+        self.prune_selection();
         self.process_spawn_queue(spawn_requests)?;
         Ok(self.snapshot())
     }
@@ -1304,41 +1542,64 @@ impl Engine {
         update: ObjectUpdate,
     ) -> Result<(), EngineError> {
         let landscape = self.landscape.clone();
-        let object = self
+        let index = self
             .objects
-            .iter_mut()
-            .find(|object| object.id == id)
+            .iter()
+            .position(|object| object.id == id)
             .ok_or(EngineError::UnknownObject(id))?;
 
-        if let Some(position) = update.position {
-            object.state.position = position;
-        }
-        if let Some(velocity) = update.velocity {
-            object.state.velocity = velocity;
-        }
-        if let Some(energy) = update.energy {
-            object.state.energy = energy;
-        }
-        if let Some(action) = &update.action {
-            object.state.action.apply_update(action);
-        }
-        if let Some(owner) = update.owner {
-            object.state.owner = owner;
-        }
-        if let Some(crew_member) = update.crew_member {
-            object.state.crew_member = crew_member;
-        }
+        let ObjectUpdate {
+            position,
+            velocity,
+            energy,
+            action,
+            owner,
+            crew_member,
+        } = update;
 
-        self.physics.clamp_velocity(&mut object.state.velocity);
+        let (object_id, previous_owner, new_owner, new_crew) = {
+            let object = &mut self.objects[index];
+            let previous_owner = object.state.owner;
 
-        if let Some(landscape) = landscape.as_ref() {
-            let resolution =
-                landscape.resolve_collision(object.state.position, object.state.velocity);
-            if resolution.collided {
-                object.state.position = resolution.position;
-                object.state.velocity = resolution.velocity;
+            if let Some(position) = position {
+                object.state.position = position;
             }
-        }
+            if let Some(velocity) = velocity {
+                object.state.velocity = velocity;
+            }
+            if let Some(energy) = energy {
+                object.state.energy = energy;
+            }
+            if let Some(action) = action {
+                object.state.action.apply_update(&action);
+            }
+            if let Some(owner) = owner {
+                object.state.owner = owner;
+            }
+            if let Some(crew_member) = crew_member {
+                object.state.crew_member = crew_member;
+            }
+
+            self.physics.clamp_velocity(&mut object.state.velocity);
+
+            if let Some(landscape) = landscape.as_ref() {
+                let resolution =
+                    landscape.resolve_collision(object.state.position, object.state.velocity);
+                if resolution.collided {
+                    object.state.position = resolution.position;
+                    object.state.velocity = resolution.velocity;
+                }
+            }
+
+            (
+                object.id,
+                previous_owner,
+                object.state.owner,
+                object.state.crew_member,
+            )
+        };
+
+        self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
 
         Ok(())
     }
@@ -1384,6 +1645,12 @@ impl Engine {
             })
             .collect();
 
+        let crew_selection = self
+            .crew_selection
+            .iter()
+            .map(|(&owner, selection)| (owner, CrewSelectionState::from(selection)))
+            .collect();
+
         EngineState {
             frame: self.frame,
             physics: self.physics,
@@ -1391,6 +1658,7 @@ impl Engine {
             next_object_id: self.next_object_id,
             landscape: self.landscape.clone(),
             objects,
+            crew_selection,
             global_effects: self.global_effects.clone(),
             rng: self.rng.clone(),
         }
@@ -1415,6 +1683,11 @@ impl Engine {
         self.rng = state.rng.clone();
         self.objects.clear();
         self.global_effects = state.global_effects.clone();
+        self.crew_selection = state
+            .crew_selection
+            .iter()
+            .map(|(&owner, selection)| (owner, CrewSelection::from(selection.clone())))
+            .collect();
 
         for persisted in &state.objects {
             let snapshot = &persisted.snapshot;
@@ -1442,6 +1715,8 @@ impl Engine {
             .max()
             .unwrap_or(0);
         self.next_object_id = state.next_object_id.max(highest_id + 1);
+
+        self.prune_selection();
 
         Ok(())
     }
@@ -1510,6 +1785,47 @@ impl Engine {
                 state.velocity = resolution.velocity;
             }
         }
+    }
+
+    fn update_selection_for_state_change(
+        &mut self,
+        object_id: ObjectId,
+        previous_owner: i32,
+        new_owner: i32,
+        new_crew_member: bool,
+    ) {
+        if previous_owner != new_owner {
+            self.remove_from_selection(previous_owner, object_id);
+        }
+        if !new_crew_member {
+            self.remove_from_selection(new_owner, object_id);
+        }
+    }
+
+    fn remove_from_selection(&mut self, owner: i32, object_id: ObjectId) {
+        if let Some(selection) = self.crew_selection.get_mut(&owner) {
+            selection.deselect(object_id);
+            if selection.is_empty() {
+                self.crew_selection.remove(&owner);
+            }
+        }
+    }
+
+    fn prune_selection(&mut self) {
+        if self.crew_selection.is_empty() {
+            return;
+        }
+
+        let alive: HashSet<ObjectId> = self
+            .objects
+            .iter()
+            .filter(|object| object.state.crew_member)
+            .map(|object| object.id)
+            .collect();
+        self.crew_selection.retain(|_, selection| {
+            selection.prune(&alive);
+            !selection.is_empty()
+        });
     }
 
     fn apply_physics_at_index(&mut self, idx: usize) {
@@ -2972,6 +3288,199 @@ mod tests {
 
         assert_eq!(engine.crew_members(2), vec![crew_owner_two]);
         assert!(engine.crew_members(3).is_empty());
+    }
+
+    #[test]
+    fn select_crew_tracks_selection_and_cursor() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let first = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+        let second = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+
+        engine
+            .select_crew(1, vec![first])
+            .expect("selection succeeds");
+
+        assert_eq!(engine.selected_crew(1), vec![first]);
+        assert_eq!(engine.crew_cursor(1), Some(first));
+
+        engine
+            .select_crew(1, vec![second])
+            .expect("second selection succeeds");
+
+        let mut selected = engine.selected_crew(1);
+        selected.sort_by_key(|id| id.as_u64());
+        assert_eq!(selected, vec![first, second]);
+        assert_eq!(engine.crew_cursor(1), Some(first));
+    }
+
+    #[test]
+    fn deselect_crew_updates_cursor() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let first = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+        let second = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+
+        engine
+            .select_crew(1, vec![first, second])
+            .expect("selection succeeds");
+
+        engine.deselect_crew(1, vec![first]);
+        assert_eq!(engine.selected_crew(1), vec![second]);
+        assert_eq!(engine.crew_cursor(1), Some(second));
+
+        engine.deselect_crew(1, vec![second]);
+        assert!(engine.selected_crew(1).is_empty());
+        assert_eq!(engine.crew_cursor(1), None);
+    }
+
+    #[test]
+    fn set_cursor_promotes_selection() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let first = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+        let second = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+
+        engine
+            .select_crew(1, vec![first])
+            .expect("selection succeeds");
+
+        engine
+            .set_crew_cursor(1, Some(second))
+            .expect("cursor assignment succeeds");
+
+        let mut selected = engine.selected_crew(1);
+        selected.sort_by_key(|id| id.as_u64());
+        assert_eq!(selected, vec![first, second]);
+        assert_eq!(engine.crew_cursor(1), Some(second));
+    }
+
+    #[test]
+    fn select_crew_rejects_wrong_owner() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let owned = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+        let other_owner = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(2))
+            .expect("spawn succeeds");
+
+        engine
+            .select_crew(1, vec![owned])
+            .expect("selection succeeds");
+
+        let error = engine
+            .select_crew(1, vec![other_owner])
+            .expect_err("selection should fail");
+        match error {
+            EngineError::CrewSelection { owner, detail } => {
+                assert_eq!(owner, 1);
+                assert!(detail.contains("owned by"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selection_pruned_after_object_destroyed() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let crew = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+
+        engine
+            .select_crew(1, vec![crew])
+            .expect("selection succeeds");
+
+        engine
+            .queue_object_command(
+                crew,
+                QueuedCommand::immediate(ObjectUpdate::new()).with_destroy(true),
+            )
+            .expect("queue succeeds");
+
+        engine.tick().expect("tick succeeds");
+
+        assert!(engine.selected_crew(1).is_empty());
+        assert_eq!(engine.crew_cursor(1), None);
+    }
+
+    #[test]
+    fn capture_state_preserves_crew_selection() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let first = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+        let second = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+
+        engine
+            .select_crew(1, vec![first, second])
+            .expect("selection succeeds");
+        engine
+            .set_crew_cursor(1, Some(second))
+            .expect("cursor assignment succeeds");
+
+        let state = engine.capture_state();
+
+        let mut restored = Engine::with_seed(5);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        restored
+            .register_definition(definition)
+            .expect("definition registers");
+        restored.restore_state(&state).expect("restore succeeds");
+
+        let mut restored_selected = restored.selected_crew(1);
+        restored_selected.sort_by_key(|id| id.as_u64());
+        assert_eq!(restored_selected, vec![first, second]);
+        assert_eq!(restored.crew_cursor(1), Some(second));
     }
 
     #[test]
