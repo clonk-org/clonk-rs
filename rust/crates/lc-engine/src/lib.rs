@@ -25,6 +25,8 @@ use thiserror::Error;
 
 pub type DefinitionId = String;
 
+pub const OWNER_NONE: i32 = -1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ObjectId(u64);
 
@@ -116,6 +118,10 @@ impl Default for PhysicsSettings {
     }
 }
 
+fn default_owner() -> i32 {
+    OWNER_NONE
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectState {
     pub position: Vector2,
@@ -123,6 +129,8 @@ pub struct ObjectState {
     pub energy: i32,
     pub action: ActionState,
     pub effects: Vec<EffectState>,
+    #[serde(default = "default_owner")]
+    pub owner: i32,
 }
 
 impl ObjectState {
@@ -139,6 +147,9 @@ impl ObjectState {
         if let Some(action) = &delta.action {
             self.action.apply_update(action);
         }
+        if let Some(owner) = delta.owner {
+            self.owner = owner;
+        }
     }
 }
 
@@ -148,6 +159,7 @@ struct ObjectDelta {
     velocity: Option<Vector2>,
     energy: Option<i32>,
     action: Option<ActionUpdate>,
+    owner: Option<i32>,
 }
 
 impl From<ObjectUpdate> for ObjectDelta {
@@ -157,6 +169,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             velocity: update.velocity,
             energy: update.energy,
             action: update.action,
+            owner: update.owner,
         }
     }
 }
@@ -167,6 +180,8 @@ pub struct ObjectUpdate {
     pub velocity: Option<Vector2>,
     pub energy: Option<i32>,
     pub action: Option<ActionUpdate>,
+    #[serde(default)]
+    pub owner: Option<i32>,
 }
 
 impl ObjectUpdate {
@@ -205,6 +220,11 @@ impl ObjectUpdate {
 
     pub fn with_action_update(mut self, update: ActionUpdate) -> Self {
         self.action = Some(update);
+        self
+    }
+
+    pub fn with_owner(mut self, owner: i32) -> Self {
+        self.owner = Some(owner);
         self
     }
 }
@@ -312,6 +332,7 @@ impl Object {
             energy: self.state.energy,
             action: self.state.action.clone(),
             effects: self.state.effects.clone(),
+            owner: self.state.owner,
         }
     }
 
@@ -482,6 +503,7 @@ pub struct SpawnConfig {
     pub velocity: Vector2,
     pub energy: i32,
     pub action: Option<ActionState>,
+    pub owner: i32,
 }
 
 impl SpawnConfig {
@@ -492,6 +514,7 @@ impl SpawnConfig {
             velocity: Vector2::ZERO,
             energy: 0,
             action: None,
+            owner: OWNER_NONE,
         }
     }
 
@@ -514,6 +537,11 @@ impl SpawnConfig {
         self.action = Some(action);
         self
     }
+
+    pub fn with_owner(mut self, owner: i32) -> Self {
+        self.owner = owner;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -527,6 +555,8 @@ pub struct ObjectSnapshot {
     pub action: ActionState,
     #[serde(default)]
     pub effects: Vec<EffectState>,
+    #[serde(default = "default_owner")]
+    pub owner: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -964,6 +994,9 @@ impl Engine {
         if let Some(action) = &update.action {
             object.state.action.apply_update(action);
         }
+        if let Some(owner) = update.owner {
+            object.state.owner = owner;
+        }
 
         self.physics.clamp_velocity(&mut object.state.velocity);
 
@@ -1058,6 +1091,7 @@ impl Engine {
                     energy: snapshot.energy,
                     action: snapshot.action.clone(),
                     effects: snapshot.effects.clone(),
+                    owner: snapshot.owner,
                 },
             );
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
@@ -1165,6 +1199,7 @@ impl Engine {
             velocity,
             energy,
             action,
+            owner,
         } = config;
 
         if !self.definitions.contains_key(&definition_id) {
@@ -1181,6 +1216,7 @@ impl Engine {
                 energy,
                 action: action.unwrap_or_default(),
                 effects: Vec::new(),
+                owner,
             },
         );
 
@@ -1252,7 +1288,7 @@ impl Engine {
 }
 
 fn build_state_value(definition_id: &str, object_id: ObjectId, state: &ObjectState) -> Value {
-    let mut map = HashMap::with_capacity(7);
+    let mut map = HashMap::with_capacity(8);
     map.insert(
         "definition".into(),
         Value::String(definition_id.to_string()),
@@ -1261,6 +1297,7 @@ fn build_state_value(definition_id: &str, object_id: ObjectId, state: &ObjectSta
     map.insert("position".into(), state.position.to_value());
     map.insert("velocity".into(), state.velocity.to_value());
     map.insert("energy".into(), Value::Int(state.energy));
+    map.insert("owner".into(), Value::Int(state.owner));
     let mut action = HashMap::with_capacity(2);
     action.insert("name".into(), Value::String(state.action.name.clone()));
     action.insert("phase".into(), Value::Int(state.action.phase));
@@ -1340,6 +1377,9 @@ fn parse_command_from_proplist(
             }
             "energy" => {
                 batch.delta.energy = Some(value_to_int(definition, function, value)?);
+            }
+            "owner" => {
+                batch.delta.owner = Some(value_to_int(definition, function, value)?);
             }
             "action" => {
                 let update = value_to_action(definition, function, value)?;
@@ -1573,6 +1613,10 @@ fn value_to_spawns(
             Some(value) => value_to_int(definition, function, value.clone())?,
             None => 0,
         };
+        let owner = match map.get("owner") {
+            Some(value) => value_to_int(definition, function, value.clone())?,
+            None => OWNER_NONE,
+        };
 
         let mut action_state = ActionState::default();
         if let Some(value) = map.get("action") {
@@ -1599,6 +1643,7 @@ fn value_to_spawns(
             velocity,
             energy,
             action: action_override,
+            owner,
         });
     }
 
@@ -1673,6 +1718,9 @@ fn value_to_commands(
                 "action_phase" => {
                     let phase = value_to_int(definition, function, value)?;
                     ensure_action_update(&mut update).set_phase(phase);
+                }
+                "owner" => {
+                    update.owner = Some(value_to_int(definition, function, value)?);
                 }
                 "effects" => {
                     effects.extend(value_to_effect_commands(definition, function, value)?);
@@ -1948,6 +1996,25 @@ mod tests {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.position, Vector2::new(3, 3));
         assert_eq!(object.velocity, Vector2::new(3, 2));
+    }
+
+    #[test]
+    fn spawn_object_tracks_owner() {
+        let mut engine = Engine::with_seed(99);
+        engine
+            .register_definition(build_definition())
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_position(Vector2::new(0, 0))
+                    .with_owner(2),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.object_snapshot(id).expect("snapshot available");
+        assert_eq!(snapshot.owner, 2);
     }
 
     #[test]
@@ -2366,11 +2433,17 @@ mod tests {
             .expect("spawn succeeds");
 
         engine
-            .apply_object_update(id, ObjectUpdate::new().with_velocity(Vector2::new(5, -3)))
+            .apply_object_update(
+                id,
+                ObjectUpdate::new()
+                    .with_velocity(Vector2::new(5, -3))
+                    .with_owner(7),
+            )
             .expect("update applies");
 
         let snapshot = engine.object_snapshot(id).expect("object snapshot");
         assert_eq!(snapshot.velocity, Vector2::new(5, -3));
+        assert_eq!(snapshot.owner, 7);
     }
 
     #[test]

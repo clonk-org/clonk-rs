@@ -24,6 +24,7 @@ pub struct LcEngineObjectSnapshot {
     pub velocity_x: i32,
     pub velocity_y: i32,
     pub energy: i32,
+    pub owner: i32,
     pub action_name: *const c_char,
     pub action_phase: i32,
     pub effects: *const LcEngineEffectSnapshot,
@@ -118,6 +119,7 @@ unsafe fn make_snapshot(
             position: Vector2::new(entry.position_x, entry.position_y),
             velocity: Vector2::new(entry.velocity_x, entry.velocity_y),
             energy: entry.energy,
+            owner: entry.owner,
             action,
             effects,
         });
@@ -333,6 +335,7 @@ mod tests {
             velocity_x: -1,
             velocity_y: 2,
             energy: 95,
+            owner: -1,
             action_name: action.as_ptr(),
             action_phase: 3,
             effects: &effect_snapshot,
@@ -345,6 +348,7 @@ mod tests {
         assert_eq!(snapshot.objects.len(), 1);
         let recorded = &snapshot.objects[0];
         assert_eq!(recorded.effects.len(), 1);
+        assert_eq!(recorded.owner, -1);
 
         let effect = &recorded.effects[0];
         assert_eq!(effect.name, "FxFire");

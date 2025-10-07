@@ -172,6 +172,9 @@ impl Scenario {
             if let Some(energy) = object.energy {
                 spawn = spawn.with_energy(energy);
             }
+            if let Some(owner) = object.owner {
+                spawn = spawn.with_owner(owner);
+            }
             spawns.push(spawn);
         }
 
@@ -236,6 +239,8 @@ struct ObjectManifest {
     velocity: Option<[i32; 2]>,
     #[serde(default)]
     energy: Option<i32>,
+    #[serde(default)]
+    owner: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]

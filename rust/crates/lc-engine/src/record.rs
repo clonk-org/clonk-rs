@@ -203,6 +203,12 @@ fn describe_snapshot_mismatch(
                         id, expected_obj.energy, actual_obj.energy
                     ));
                 }
+                if expected_obj.owner != actual_obj.owner {
+                    problems.push(format!(
+                        "object {} owner expected {}, got {}",
+                        id, expected_obj.owner, actual_obj.owner
+                    ));
+                }
                 if expected_obj.action.name != actual_obj.action.name {
                     problems.push(format!(
                         "object {} action expected {}, got {}",
@@ -245,7 +251,7 @@ impl fmt::Display for Recording {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ActionState, ObjectSnapshot, SimulationSnapshot, Vector2};
+    use crate::{ActionState, ObjectSnapshot, SimulationSnapshot, Vector2, OWNER_NONE};
 
     fn make_snapshot(frame: u64, energy: i32) -> SimulationSnapshot {
         SimulationSnapshot {
@@ -258,6 +264,7 @@ mod tests {
                 energy,
                 action: ActionState::default(),
                 effects: Vec::new(),
+                owner: OWNER_NONE,
             }],
         }
     }
