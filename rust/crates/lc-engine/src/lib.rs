@@ -213,6 +213,8 @@ pub struct QueuedCommand {
     pub delay: u32,
     pub update: ObjectUpdate,
     pub effects: Vec<EffectCommand>,
+    pub destroy: bool,
+    pub spawns: Vec<SpawnConfig>,
 }
 
 impl QueuedCommand {
@@ -221,6 +223,8 @@ impl QueuedCommand {
             delay,
             update,
             effects: Vec::new(),
+            destroy: false,
+            spawns: Vec::new(),
         }
     }
 
@@ -229,6 +233,8 @@ impl QueuedCommand {
             delay: 0,
             update,
             effects: Vec::new(),
+            destroy: false,
+            spawns: Vec::new(),
         }
     }
 
@@ -239,6 +245,16 @@ impl QueuedCommand {
 
     pub fn with_effects(mut self, effects: Vec<EffectCommand>) -> Self {
         self.effects = effects;
+        self
+    }
+
+    pub fn with_destroy(mut self, destroy: bool) -> Self {
+        self.destroy = destroy;
+        self
+    }
+
+    pub fn with_spawns(mut self, spawns: Vec<SpawnConfig>) -> Self {
+        self.spawns = spawns;
         self
     }
 
@@ -258,6 +274,12 @@ struct Object {
     state: ObjectState,
     destroyed: bool,
     command_queue: VecDeque<QueuedCommand>,
+}
+
+#[derive(Debug, Default)]
+struct CommandQueueOutcome {
+    spawns: Vec<SpawnConfig>,
+    destroy: bool,
 }
 
 impl Object {
@@ -339,7 +361,12 @@ impl Object {
         self.command_queue.extend(commands);
     }
 
-    fn execute_command_queue(&mut self, physics: &PhysicsSettings, landscape: Option<&Landscape>) {
+    fn execute_command_queue(
+        &mut self,
+        physics: &PhysicsSettings,
+        landscape: Option<&Landscape>,
+    ) -> CommandQueueOutcome {
+        let mut outcome = CommandQueueOutcome::default();
         loop {
             let execute_now = match self.command_queue.front_mut() {
                 Some(command) if command.delay == 0 => true,
@@ -359,6 +386,13 @@ impl Object {
             self.state.apply_delta(&delta);
             self.apply_effect_commands(&command.effects);
             physics.clamp_velocity(&mut self.state.velocity);
+            if command.destroy {
+                self.mark_destroyed();
+                outcome.destroy = true;
+            }
+            if !command.spawns.is_empty() {
+                outcome.spawns.extend(command.spawns);
+            }
             if let Some(landscape) = landscape {
                 let resolution =
                     landscape.resolve_collision(self.state.position, self.state.velocity);
@@ -367,7 +401,13 @@ impl Object {
                     self.state.velocity = resolution.velocity;
                 }
             }
+
+            if outcome.destroy {
+                self.command_queue.clear();
+                break;
+            }
         }
+        outcome
     }
 }
 
@@ -643,9 +683,19 @@ impl Engine {
         let mut spawn_requests = Vec::new();
         let landscape_for_commands = self.landscape.clone();
         for idx in 0..self.objects.len() {
-            {
+            let outcome = {
                 let object = &mut self.objects[idx];
-                object.execute_command_queue(&self.physics, landscape_for_commands.as_ref());
+                object.execute_command_queue(&self.physics, landscape_for_commands.as_ref())
+            };
+            let CommandQueueOutcome {
+                spawns: queued_spawns,
+                destroy: queue_destroy,
+            } = outcome;
+            if !queued_spawns.is_empty() {
+                spawn_requests.extend(queued_spawns);
+            }
+            if queue_destroy || self.objects[idx].destroyed {
+                continue;
             }
             {
                 let object = &mut self.objects[idx];
@@ -1146,6 +1196,21 @@ fn value_to_int(
     }
 }
 
+fn value_to_bool(
+    definition: &str,
+    function: &'static str,
+    value: Value,
+) -> Result<bool, EngineError> {
+    match value {
+        Value::Bool(v) => Ok(v),
+        other => Err(EngineError::InvalidScriptOutput {
+            definition: definition.to_string(),
+            function,
+            detail: format!("expected bool, got {}", other.type_name()),
+        }),
+    }
+}
+
 fn value_to_spawns(
     definition: &str,
     function: &'static str,
@@ -1273,6 +1338,8 @@ fn value_to_commands(
         let mut delay: Option<u32> = None;
         let mut update = ObjectUpdate::default();
         let mut effects = Vec::new();
+        let mut destroy = false;
+        let mut spawns = Vec::new();
 
         for (key, value) in map.into_iter() {
             match key.as_str() {
@@ -1308,6 +1375,12 @@ fn value_to_commands(
                 "effects" => {
                     effects.extend(value_to_effect_commands(definition, function, value)?);
                 }
+                "destroy" => {
+                    destroy = value_to_bool(definition, function, value)?;
+                }
+                "spawn" => {
+                    spawns.extend(value_to_spawns(definition, function, value)?);
+                }
                 other => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
@@ -1318,7 +1391,12 @@ fn value_to_commands(
             }
         }
 
-        commands.push(QueuedCommand::new(delay.unwrap_or(0), update).with_effects(effects));
+        commands.push(
+            QueuedCommand::new(delay.unwrap_or(0), update)
+                .with_effects(effects)
+                .with_spawns(spawns)
+                .with_destroy(destroy),
+        );
     }
 
     Ok(commands)
@@ -1789,6 +1867,46 @@ mod tests {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.effects.len(), 1);
         assert_eq!(object.effects[0].name, "Queued");
+    }
+
+    #[test]
+    fn queued_commands_can_spawn_and_destroy() {
+        let mut engine = Engine::with_seed(42);
+        let definition = Definition::from_script(
+            "Dummy",
+            "Dummy",
+            "global func Step(state, frame, random) { return nil; }",
+        )
+        .expect("script compiles");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Dummy"))
+            .expect("spawn succeeds");
+
+        let command = QueuedCommand::immediate(ObjectUpdate::default())
+            .with_delay(1)
+            .with_destroy(true)
+            .with_spawns(vec![
+                SpawnConfig::new("Dummy").with_position(Vector2::new(5, 5))
+            ]);
+        engine
+            .queue_object_command(id, command)
+            .expect("queue succeeds");
+
+        let snapshot = engine.tick().expect("first tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(snapshot.objects.len(), 1);
+        assert_eq!(object.id, id);
+
+        let snapshot = engine.tick().expect("second tick succeeds");
+        assert!(snapshot.object(id).is_none());
+        assert_eq!(snapshot.objects.len(), 1);
+        let new_object = &snapshot.objects[0];
+        assert_ne!(new_object.id, id);
+        assert_eq!(new_object.definition_id, "Dummy");
+        assert_eq!(new_object.position, Vector2::new(5, 5));
     }
 
     #[test]
