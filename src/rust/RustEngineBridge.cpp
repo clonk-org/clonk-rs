@@ -9,6 +9,7 @@
 #include <C4Log.h>
 #include <C4Object.h>
 #include <C4ObjectList.h>
+#include <C4Effects.h>
 
 #include <Fixed.h>
 
@@ -46,6 +47,8 @@ struct SnapshotEntry {
     LcEngineObjectSnapshot snapshot{};
     std::string definition;
     std::string action;
+    std::vector<LcEngineEffectSnapshot> effects;
+    std::vector<std::string> effect_names;
 };
 
 struct SnapshotBuffer {
@@ -98,6 +101,41 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
         entry.action = object->Action.Name;
         entry.snapshot.action_name = entry.action.c_str();
         entry.snapshot.action_phase = object->Action.Phase;
+
+        if (object->pEffects) {
+            size_t effect_count = 0;
+            for (C4Effect *effect = object->pEffects; effect; effect = effect->pNext) {
+                if (effect->IsDead()) {
+                    continue;
+                }
+                ++effect_count;
+            }
+
+            if (effect_count > 0) {
+                entry.effect_names.reserve(effect_count);
+                entry.effects.resize(effect_count);
+
+                size_t index = 0;
+                for (C4Effect *effect = object->pEffects; effect; effect = effect->pNext) {
+                    if (effect->IsDead()) {
+                        continue;
+                    }
+
+                    entry.effect_names.emplace_back(effect->Name);
+
+                    LcEngineEffectSnapshot effect_snapshot{};
+                    effect_snapshot.priority = effect->iPriority;
+                    effect_snapshot.interval = effect->iIntervall;
+                    effect_snapshot.timer = effect->iTime;
+                    entry.effects[index] = effect_snapshot;
+                    ++index;
+                }
+
+                for (size_t i = 0; i < entry.effects.size(); ++i) {
+                    entry.effects[i].name = entry.effect_names[i].c_str();
+                }
+            }
+        }
         buffer.entries.push_back(std::move(entry));
     }
 
@@ -109,6 +147,8 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
     for (auto &entry : buffer.entries) {
         entry.snapshot.definition_id = entry.definition.c_str();
         entry.snapshot.action_name = entry.action.c_str();
+        entry.snapshot.effects = entry.effects.empty() ? nullptr : entry.effects.data();
+        entry.snapshot.effect_count = entry.effects.size();
         buffer.raw.push_back(entry.snapshot);
     }
 

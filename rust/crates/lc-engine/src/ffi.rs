@@ -306,3 +306,50 @@ pub extern "C" fn lc_engine_string_free(value: *mut c_char) {
         drop(CString::from_raw(value));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    #[test]
+    fn make_snapshot_collects_effects() {
+        let effect_name = CString::new("FxFire").unwrap();
+        let definition = CString::new("Clonk").unwrap();
+        let action = CString::new("Walk").unwrap();
+
+        let effect_snapshot = LcEngineEffectSnapshot {
+            name: effect_name.as_ptr(),
+            priority: 100,
+            interval: 2,
+            timer: 1,
+        };
+
+        let object = LcEngineObjectSnapshot {
+            id: 42,
+            definition_id: definition.as_ptr(),
+            position_x: 10,
+            position_y: 20,
+            velocity_x: -1,
+            velocity_y: 2,
+            energy: 95,
+            action_name: action.as_ptr(),
+            action_phase: 3,
+            effects: &effect_snapshot,
+            effect_count: 1,
+        };
+
+        let snapshot =
+            unsafe { make_snapshot(5, &object, 1) }.expect("snapshot should deserialize");
+
+        assert_eq!(snapshot.objects.len(), 1);
+        let recorded = &snapshot.objects[0];
+        assert_eq!(recorded.effects.len(), 1);
+
+        let effect = &recorded.effects[0];
+        assert_eq!(effect.name, "FxFire");
+        assert_eq!(effect.priority, 100);
+        assert_eq!(effect.interval, 2);
+        assert_eq!(effect.timer, 1);
+    }
+}
