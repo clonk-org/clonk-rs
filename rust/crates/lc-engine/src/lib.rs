@@ -6,7 +6,7 @@ mod landscape;
 mod record;
 pub mod scenario;
 
-pub use action::{ActionState, ActionUpdate};
+pub use action::{ActionLibrary, ActionSpec, ActionState, ActionUpdate};
 pub use effect::EffectState;
 pub use landscape::{CollisionResolution, Landscape, LandscapeError};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
@@ -596,6 +596,7 @@ pub struct Definition {
     script: ScriptEngine,
     has_initialize: bool,
     has_step: bool,
+    action_library: ActionLibrary,
 }
 
 impl Definition {
@@ -622,6 +623,7 @@ impl Definition {
             script,
             has_initialize,
             has_step,
+            action_library: ActionLibrary::default(),
         })
     }
 
@@ -635,6 +637,22 @@ impl Definition {
 
     pub fn set_debugger_hooks(&mut self, hooks: DebuggerHooks) {
         self.script.set_debugger_hooks(hooks);
+    }
+
+    pub fn configure_actions(
+        &mut self,
+        default_action: Option<String>,
+        specs: HashMap<String, ActionSpec>,
+    ) {
+        self.action_library = ActionLibrary::new(default_action, specs);
+    }
+
+    pub fn action_library(&self) -> &ActionLibrary {
+        &self.action_library
+    }
+
+    pub fn default_action_state(&self) -> ActionState {
+        ActionState::new(self.action_library.default_action())
     }
 
     fn call_initialize(
@@ -892,9 +910,17 @@ impl Engine {
                 )?;
             }
 
+            let definition_id = self.objects[idx].definition_id.clone();
+            let action_library = {
+                let definition = self
+                    .definitions
+                    .get(&definition_id)
+                    .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                definition.action_library().clone()
+            };
             {
                 let object = &mut self.objects[idx];
-                object.state.action.advance();
+                object.state.action.advance_with_library(&action_library);
             }
             self.apply_physics_at_index(idx);
             {
@@ -905,7 +931,6 @@ impl Engine {
             self.apply_landscape_at_index(idx);
 
             let object_id = self.objects[idx].id;
-            let definition_id = self.objects[idx].definition_id.clone();
             let state_snapshot = self.objects[idx].state.clone();
             let random = self.next_random_i32();
 
@@ -1202,9 +1227,14 @@ impl Engine {
             owner,
         } = config;
 
-        if !self.definitions.contains_key(&definition_id) {
-            return Err(EngineError::UnknownDefinition(definition_id));
-        }
+        let definition_ref = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let initial_action = match action {
+            Some(state) => state,
+            None => definition_ref.default_action_state(),
+        };
 
         let id = self.next_object_id();
         let mut object = Object::new(
@@ -1214,7 +1244,7 @@ impl Engine {
                 position,
                 velocity,
                 energy,
-                action: action.unwrap_or_default(),
+                action: initial_action,
                 effects: Vec::new(),
                 owner,
             },
@@ -1928,6 +1958,7 @@ fn value_to_effect_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     const STATEFUL_SCRIPT: &str = r#"
@@ -1969,6 +2000,43 @@ mod tests {
         }
         "#;
         Definition::from_script("Test", "Test", source).expect("script compiles")
+    }
+
+    #[test]
+    fn advances_actions_using_definition_map() {
+        let mut definition = build_definition();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default().with_length(2).with_next("Idle"),
+        );
+        actions.insert("Idle".to_string(), ActionSpec::default().with_length(1));
+        definition.configure_actions(Some("Walk".to_string()), actions);
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Test"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine
+            .object_snapshot(id)
+            .expect("object snapshot available");
+        assert_eq!(snapshot.action.name, "Walk");
+        assert_eq!(snapshot.action.phase, 0);
+
+        let snapshot = engine.tick().expect("first tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Walk");
+        assert_eq!(object.action.phase, 1);
+
+        let snapshot = engine.tick().expect("second tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Idle");
+        assert_eq!(object.action.phase, 0);
     }
 
     #[test]

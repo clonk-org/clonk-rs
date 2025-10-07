@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -6,7 +6,8 @@ use lc_resources::{Group, GroupError};
 use serde::Deserialize;
 
 use crate::{
-    Definition, Engine, EngineError, Landscape, ObjectId, PhysicsSettings, SpawnConfig, Vector2,
+    action::ActionSpec, Definition, Engine, EngineError, Landscape, ObjectId, PhysicsSettings,
+    SpawnConfig, Vector2,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -40,6 +41,13 @@ struct ScenarioDefinition {
     id: String,
     name: Option<String>,
     script: String,
+    actions: Option<DefinitionActions>,
+}
+
+#[derive(Debug, Clone)]
+struct DefinitionActions {
+    default_action: Option<String>,
+    specs: HashMap<String, ActionSpec>,
 }
 
 #[derive(Debug)]
@@ -106,7 +114,10 @@ impl Scenario {
 
         for definition in &self.definitions {
             let name = definition.name.as_deref().unwrap_or(&definition.id);
-            let compiled = Definition::from_script(&definition.id, name, &definition.script)?;
+            let mut compiled = Definition::from_script(&definition.id, name, &definition.script)?;
+            if let Some(actions) = &definition.actions {
+                compiled.configure_actions(actions.default_action.clone(), actions.specs.clone());
+            }
             engine.register_definition(compiled)?;
         }
 
@@ -126,33 +137,52 @@ impl Scenario {
         let mut seen_ids = HashSet::new();
         let mut definitions = Vec::with_capacity(manifest.definitions.len());
         for definition in manifest.definitions {
-            if !seen_ids.insert(definition.id.clone()) {
-                return Err(ScenarioError::DuplicateDefinition(definition.id));
+            let DefinitionManifest {
+                id,
+                name,
+                script,
+                default_action,
+                actions,
+            } = definition;
+
+            if !seen_ids.insert(id.clone()) {
+                return Err(ScenarioError::DuplicateDefinition(id));
             }
 
-            let script_bytes = match group.read_file(Path::new(&definition.script)) {
+            let script_path = Path::new(&script);
+            let script_bytes = match group.read_file(script_path) {
                 Ok(bytes) => bytes,
                 Err(GroupError::EntryNotFound(_)) => {
                     return Err(ScenarioError::MissingScript {
-                        path: PathBuf::from(&definition.script),
+                        path: PathBuf::from(script_path),
                     })
                 }
                 Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
                     return Err(ScenarioError::MissingScript {
-                        path: PathBuf::from(&definition.script),
+                        path: PathBuf::from(script_path),
                     })
                 }
                 Err(error) => return Err(ScenarioError::Resources(error)),
             };
-            let script =
+            let script_source =
                 String::from_utf8(script_bytes).map_err(|_| ScenarioError::ScriptEncoding {
-                    path: PathBuf::from(&definition.script),
+                    path: PathBuf::from(script_path),
                 })?;
 
+            let actions = if actions.is_empty() && default_action.is_none() {
+                None
+            } else {
+                Some(DefinitionActions {
+                    default_action,
+                    specs: actions,
+                })
+            };
+
             definitions.push(ScenarioDefinition {
-                id: definition.id,
-                name: definition.name,
-                script,
+                id,
+                name,
+                script: script_source,
+                actions,
             });
         }
 
@@ -228,6 +258,10 @@ struct DefinitionManifest {
     #[serde(default)]
     name: Option<String>,
     script: String,
+    #[serde(default)]
+    default_action: Option<String>,
+    #[serde(default)]
+    actions: HashMap<String, ActionSpec>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -341,6 +375,52 @@ global func Step(state, frame, random)
         let landscape = engine.landscape().expect("landscape set");
         assert_eq!(landscape.surface_height(0), Some(42));
         assert!(scenario.physics().is_none());
+    }
+
+    #[test]
+    fn applies_action_configuration_from_manifest() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                {
+                    "id": "Mover",
+                    "script": "scripts/mover.aul",
+                    "default_action": "Walk",
+                    "actions": {
+                        "Walk": { "length": 2, "next": "Idle" },
+                        "Idle": { "length": 1 }
+                    }
+                }
+            ],
+            "initial_objects": [
+                { "definition": "Mover" }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let mut engine = Engine::with_seed(5);
+        let created = scenario.apply(&mut engine).expect("scenario applies");
+        let id = created[0];
+
+        let initial = engine.object_snapshot(id).expect("object snapshot");
+        assert_eq!(initial.action.name, "Walk");
+        assert_eq!(initial.action.phase, 0);
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Walk");
+        assert_eq!(object.action.phase, 1);
+
+        let snapshot = engine.tick().expect("second tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Idle");
+        assert_eq!(object.action.phase, 0);
     }
 
     #[test]

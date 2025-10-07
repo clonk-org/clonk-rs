@@ -1,4 +1,127 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+const DEFAULT_ACTION_NAME: &str = "Idle";
+
+/// Configuration for how an action should advance and transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionSpec {
+    #[serde(default)]
+    pub length: Option<u32>,
+    #[serde(default)]
+    pub next: Option<String>,
+}
+
+impl ActionSpec {
+    pub fn new(length: Option<u32>, next: Option<String>) -> Self {
+        Self { length, next }
+    }
+
+    pub fn with_length(mut self, length: u32) -> Self {
+        self.length = Some(length);
+        self
+    }
+
+    pub fn with_next(mut self, next: impl Into<String>) -> Self {
+        self.next = Some(next.into());
+        self
+    }
+}
+
+impl Default for ActionSpec {
+    fn default() -> Self {
+        Self {
+            length: None,
+            next: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionLibrary {
+    default: String,
+    specs: HashMap<String, ActionSpec>,
+}
+
+impl ActionLibrary {
+    pub fn new(default_action: Option<String>, mut specs: HashMap<String, ActionSpec>) -> Self {
+        let default = default_action
+            .or_else(|| {
+                if specs.contains_key(DEFAULT_ACTION_NAME) {
+                    Some(DEFAULT_ACTION_NAME.to_string())
+                } else {
+                    None
+                }
+            })
+            .or_else(|| specs.keys().next().cloned())
+            .unwrap_or_else(|| DEFAULT_ACTION_NAME.to_string());
+
+        if !specs.contains_key(&default) {
+            specs.insert(default.clone(), ActionSpec::default());
+        }
+
+        Self { default, specs }
+    }
+
+    pub fn default_action(&self) -> &str {
+        &self.default
+    }
+
+    pub fn contains(&self, action: &str) -> bool {
+        self.specs.contains_key(action)
+    }
+
+    pub fn specs(&self) -> &HashMap<String, ActionSpec> {
+        &self.specs
+    }
+
+    pub fn advance_state(&self, state: &mut ActionState) {
+        if let Some(spec) = self.specs.get(&state.name) {
+            Self::advance_with_spec(state, spec, self)
+        } else {
+            state.advance();
+        }
+    }
+
+    fn advance_with_spec(state: &mut ActionState, spec: &ActionSpec, library: &ActionLibrary) {
+        if let Some(length) = spec.length {
+            if length == 0 {
+                Self::transition(state, spec, library);
+                return;
+            }
+
+            let next_phase = state.phase.saturating_add(1);
+            if next_phase >= length as i32 {
+                Self::transition(state, spec, library);
+                return;
+            }
+
+            state.phase = next_phase;
+        } else {
+            state.advance();
+        }
+    }
+
+    fn transition(state: &mut ActionState, spec: &ActionSpec, library: &ActionLibrary) {
+        let next_name = spec.next.as_deref().unwrap_or(&state.name);
+        let resolved = if library.contains(next_name) {
+            next_name
+        } else {
+            library.default_action()
+        };
+
+        if resolved != state.name {
+            state.name = resolved.to_string();
+        }
+        state.phase = 0;
+    }
+}
+
+impl Default for ActionLibrary {
+    fn default() -> Self {
+        Self::new(None, HashMap::new())
+    }
+}
 
 /// Minimal representation of an object's current action state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +142,10 @@ impl ActionState {
         if self.phase < i32::MAX {
             self.phase += 1;
         }
+    }
+
+    pub fn advance_with_library(&mut self, library: &ActionLibrary) {
+        library.advance_state(self);
     }
 
     pub fn reset_phase(&mut self) {
