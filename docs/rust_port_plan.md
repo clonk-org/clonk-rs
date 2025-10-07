@@ -4,6 +4,7 @@
 - The Rust workspace delivers a standalone demo stack (`lc-app`) and validation harnesses, but it is **not** a drop-in replacement for the shipping C++ runtime.
 - Rust crates currently mirror only narrow slices of the engine, script VM, GUI, audio, graphics, and networking systems to support deterministic tests and exploratory tooling.
 - LegacyClonk still compiles and runs its gameplay, UI, rendering, audio, and networking through the original C++ code paths; Rust code is wired in behind optional validation flags.
+- A JSON-backed scenario loader now registers definitions, landscapes, and initial spawns so `lc-app` can bootstrap from external scenario bundles.
 
 ## Rust Workspace Scope
 - `lc-core`, `lc-resources`, `lc-script`, `lc-engine`, `lc-graphics`, `lc-audio`, `lc-network`, `lc-gui`, `lc-platform`, and `lc-app` provide demo-friendly utilities, parsers, in-memory surfaces, a toy physics loop, and basic networking abstractions.
@@ -16,7 +17,7 @@
 - No executable target links Rust crates as authoritative gameplay systems; the production binary continues to depend on the C++ implementations.
 
 ## Component Parity Assessment
-- **Simulation / Object System:** `lc-engine` models position/velocity/energy for scripted objects and a flat landscape. There is no support for the C++ object status machine, action procs, vertices, effects, command queues, crew ownership, or scenario definition loading.
+- **Simulation / Object System:** `lc-engine` models position/velocity/energy for scripted objects and a flat landscape. A basic JSON scenario loader can register definitions and initial objects, but the C++ object status machine, action procs, vertices, effects, command queues, crew ownership, and full scenario/environment management are still absent.
 - **Script VM:** `lc-script` parses and executes a subset of AUL with arithmetic, control flow, arrays, and proplists. Engine-call bindings, callback dispatch tables, effect lifecycles, and synchronization with the C++ object model are absent.
 - **Graphics:** `lc-graphics` works on CPU-resident RGBA surfaces and hash snapshots. It lacks texture streaming, OpenGL/WGL/SDL integration, blitting catalogs, shader management, viewport compositing, and render thread orchestration present in `StdGL*`.
 - **Audio:** `lc-audio` offers a software mixer with optional CPAL output for limited channel playback. The SDL_mixer-based backend, streaming music, positional audio, resampler choices, and sound bank handling from `C4AudioSystem` are not ported.
@@ -31,7 +32,7 @@
 - Group and GUI validators serve as optional smoke tests during development. They are not enabled in release builds and do not gate asset loading.
 
 ## Major Gaps to Reach Behavior Parity
-- Recreate the complete C4 object lifecycle, including action system, physics integration, scenario/environment management, player control, and serialization.
+- Recreate the complete C4 object lifecycle, including action system, physics integration, robust scenario/environment management beyond the simple JSON loader, player control, and serialization.
 - Port AUL runtime features: effect handlers, engine call map, proplist semantics, debugging, and compatibility behaviors relied upon by shipped scripts.
 - Implement rendering and audio backends that match the SDL/OpenGL pipeline and mixer behavior across all supported platforms.
 - Mirror GUI subsystems (dialogs, HUD, console, editor) and integrate them with input, networking, and engine state.

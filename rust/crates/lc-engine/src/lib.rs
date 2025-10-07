@@ -2,9 +2,11 @@ pub mod ffi;
 pub mod fixtures;
 mod landscape;
 mod record;
+pub mod scenario;
 
 pub use landscape::{CollisionResolution, Landscape, LandscapeError};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
+pub use scenario::{Scenario, ScenarioError};
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;

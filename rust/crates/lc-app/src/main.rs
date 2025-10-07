@@ -21,6 +21,10 @@ struct Cli {
     #[arg(long = "config", value_name = "PATH")]
     config: Option<PathBuf>,
 
+    /// Load a scenario directory or packed group for the demo
+    #[arg(long = "scenario", value_name = "PATH")]
+    scenario: Option<PathBuf>,
+
     /// Write the run summary as JSON to the given path
     #[arg(long = "summary-json", value_name = "PATH")]
     summary_json: Option<PathBuf>,
@@ -45,6 +49,7 @@ fn run() -> GameResult<()> {
 fn run_with_cli(cli: Cli) -> GameResult<()> {
     let mut game = DemoGame::new(DemoGameOptions {
         config_path: cli.config.clone(),
+        scenario_path: cli.scenario.clone(),
     })?;
     let ticks = cli.ticks.unwrap_or_else(|| game.configured_ticks());
     let summary = game.run(ticks)?;
@@ -112,6 +117,14 @@ mod tests {
         let cli = Cli::parse_from(["lc-app", "--ticks", "42", "--quiet"]);
         assert_eq!(cli.ticks, Some(42));
         assert!(cli.quiet);
+        assert!(cli.scenario.is_none());
+    }
+
+    #[test]
+    fn cli_accepts_scenario_path() {
+        let cli = Cli::parse_from(["lc-app", "--scenario", "test_scenario", "--quiet"]);
+        assert_eq!(cli.scenario, Some(PathBuf::from("test_scenario")));
+        assert!(cli.quiet);
     }
 
     #[test]
@@ -126,6 +139,7 @@ mod tests {
         let cli = Cli {
             ticks: Some(4),
             config: None,
+            scenario: None,
             summary_json: Some(path.clone()),
             quiet: true,
         };

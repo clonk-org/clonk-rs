@@ -752,10 +752,12 @@ name = "lc-engine"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "lc-resources",
  "lc-script",
  "rand",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

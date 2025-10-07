@@ -6,8 +6,8 @@ use std::str::FromStr;
 use lc_audio::{AudioSystem, SoundHandle};
 use lc_core::std_config::Config;
 use lc_engine::{
-    Definition, Engine, EngineError, Landscape, ObjectId, ObjectSnapshot, SimulationSnapshot,
-    SpawnConfig, Vector2,
+    Definition, Engine, EngineError, Landscape, ObjectId, ObjectSnapshot, Scenario, ScenarioError,
+    SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_graphics::{Color, PixelFormat, SnapshotHasher, Surface};
 use lc_gui::{
@@ -46,6 +46,10 @@ pub enum GameError {
     Network(#[from] ControlError),
     #[error("lobby error: {0}")]
     Lobby(#[from] LobbyError),
+    #[error("scenario error: {0}")]
+    Scenario(#[from] ScenarioError),
+    #[error("scenario did not spawn any objects")]
+    ScenarioNoObjects,
     #[error("summary output error: {0}")]
     SummaryOutput(std::io::Error),
     #[error("summary serialization error: {0}")]
@@ -76,11 +80,15 @@ pub struct DemoGame {
 #[derive(Debug, Clone)]
 pub struct DemoGameOptions {
     pub config_path: Option<PathBuf>,
+    pub scenario_path: Option<PathBuf>,
 }
 
 impl Default for DemoGameOptions {
     fn default() -> Self {
-        Self { config_path: None }
+        Self {
+            config_path: None,
+            scenario_path: None,
+        }
     }
 }
 
@@ -103,29 +111,64 @@ pub struct GameSummary {
 impl DemoGame {
     pub fn new(options: DemoGameOptions) -> GameResult<Self> {
         let config = load_demo_config(options.config_path.as_deref())?;
-        let configured_ticks = parse_config_value::<u32>(&config, "ticks").unwrap_or(180);
-        let ground_height = parse_config_value::<i32>(&config, "ground_height").unwrap_or(220);
+        let mut configured_ticks = parse_config_value::<u32>(&config, "ticks").unwrap_or(180);
+        let mut ground_height = parse_config_value::<i32>(&config, "ground_height").unwrap_or(220);
         let spawn_x = parse_config_value::<i32>(&config, "spawn_x").unwrap_or(64);
         let spawn_y = parse_config_value::<i32>(&config, "spawn_y").unwrap_or(48);
         let spawn_vx = parse_config_value::<i32>(&config, "spawn_velocity_x").unwrap_or(3);
         let spawn_vy = parse_config_value::<i32>(&config, "spawn_velocity_y").unwrap_or(0);
-        let scenario_name = config
+        let mut scenario_name = config
             .get_in(Some("Game"), "scenario_name")
             .map(|value| value.to_string())
             .unwrap_or_else(|| "Rust Demo Bounce".to_string());
-        let scenario_label = format!("SCENARIO {}", sanitize_label(&scenario_name));
+
+        let scenario = if let Some(path) = options.scenario_path.as_deref() {
+            Some(Scenario::load_from_path(path)?)
+        } else {
+            None
+        };
 
         let paths = AppPaths::discover()?;
         let mut engine = Engine::with_seed(12345);
-        let definition = Definition::from_script("DemoBouncer", "Demo Bouncer", DEMO_SCRIPT)?;
-        engine.register_definition(definition)?;
-        engine.set_landscape(Landscape::flat(2048, ground_height));
-        let object_id = engine.spawn_object(
-            SpawnConfig::new("DemoBouncer")
-                .with_position(Vector2::new(spawn_x, spawn_y))
-                .with_velocity(Vector2::new(spawn_vx, spawn_vy))
-                .with_energy(100),
-        )?;
+        let object_id = if let Some(scenario) = scenario.as_ref() {
+            if let Some(ticks) = scenario.configured_ticks() {
+                configured_ticks = ticks;
+            }
+            if let Some(height) = scenario.ground_height_hint() {
+                ground_height = height;
+            }
+            let created = scenario.apply(&mut engine)?;
+            if engine.landscape().is_none() {
+                engine.set_landscape(Landscape::flat(2048, ground_height));
+            }
+            let fallback_name = options
+                .scenario_path
+                .as_ref()
+                .and_then(|path| path.file_stem())
+                .and_then(|stem| stem.to_str())
+                .map(|value| value.to_string());
+            scenario_name = scenario
+                .name()
+                .map(|value| value.to_string())
+                .or(fallback_name)
+                .unwrap_or(scenario_name);
+
+            created
+                .first()
+                .copied()
+                .ok_or(GameError::ScenarioNoObjects)?
+        } else {
+            let definition = Definition::from_script("DemoBouncer", "Demo Bouncer", DEMO_SCRIPT)?;
+            engine.register_definition(definition)?;
+            engine.set_landscape(Landscape::flat(2048, ground_height));
+            engine.spawn_object(
+                SpawnConfig::new("DemoBouncer")
+                    .with_position(Vector2::new(spawn_x, spawn_y))
+                    .with_velocity(Vector2::new(spawn_vx, spawn_vy))
+                    .with_energy(100),
+            )?
+        };
+        let scenario_label = format!("SCENARIO {}", sanitize_label(&scenario_name));
 
         let mut gui = Gui::new();
         let root = gui.root();

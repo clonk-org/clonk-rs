@@ -25,9 +25,7 @@ fn bench_script_execution(c: &mut Criterion) {
         b.iter(|| {
             let iterations = black_box(128);
             let args = [Value::Int(iterations)];
-            let result = engine
-                .call("SumLoop", &args)
-                .expect("script call succeeds");
+            let result = engine.call("SumLoop", &args).expect("script call succeeds");
             black_box(result);
         });
     });
