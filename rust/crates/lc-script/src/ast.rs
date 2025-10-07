@@ -26,7 +26,7 @@ pub enum Stmt {
         init: Option<Expr>,
     },
     Assignment {
-        name: String,
+        target: AssignmentTarget,
         value: Expr,
     },
     Return(Option<Expr>),
@@ -41,6 +41,12 @@ pub enum Stmt {
         body: Vec<Stmt>,
     },
     Block(Vec<Stmt>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssignmentTarget {
+    Variable(String),
+    Property(Box<AssignmentTarget>, String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

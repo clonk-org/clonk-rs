@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, Expr, Function, Script, Stmt, UnaryOp};
+use crate::ast::{AssignmentTarget, BinaryOp, Expr, Function, Script, Stmt, UnaryOp};
 use crate::error::ParseError;
 use crate::lexer::Lexer;
 use crate::token::{Keyword, Symbol, Token, TokenKind};
@@ -157,20 +157,32 @@ impl<'a> Parser<'a> {
     fn parse_assignment_or_expr(&mut self) -> Result<Stmt, ParseError> {
         let expr = self.parse_expression()?;
         if let Some(eq_token) = self.consume_if_symbol(Symbol::Equal)? {
+            let target = self.expression_to_assignment_target(expr, &eq_token)?;
             let value = self.parse_expression()?;
             self.expect_symbol(Symbol::Semicolon, "expected ';' after assignment")?;
-            if let Expr::Variable(name) = expr {
-                Ok(Stmt::Assignment { name, value })
-            } else {
-                Err(ParseError::new(
-                    "invalid assignment target",
-                    eq_token.line,
-                    eq_token.column,
-                ))
-            }
+            Ok(Stmt::Assignment { target, value })
         } else {
             self.expect_symbol(Symbol::Semicolon, "expected ';' after expression")?;
             Ok(Stmt::Expr(expr))
+        }
+    }
+
+    fn expression_to_assignment_target(
+        &self,
+        expr: Expr,
+        eq_token: &Token,
+    ) -> Result<AssignmentTarget, ParseError> {
+        match expr {
+            Expr::Variable(name) => Ok(AssignmentTarget::Variable(name)),
+            Expr::Property(base, name) => {
+                let base_target = self.expression_to_assignment_target(*base, eq_token)?;
+                Ok(AssignmentTarget::Property(Box::new(base_target), name))
+            }
+            _ => Err(ParseError::new(
+                "invalid assignment target",
+                eq_token.line,
+                eq_token.column,
+            )),
         }
     }
 

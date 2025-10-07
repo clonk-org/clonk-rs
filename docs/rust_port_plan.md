@@ -14,6 +14,7 @@
 - Scenario manifests now provide per-scenario environment settings; configuring wind feeds into the physics loop so horizontal drift matches manifest expectations, and applying a scenario resets the environment to avoid bleed-through between runs.
 - Engine objects now track prioritized effect stacks with per-frame timers; scripts and queued commands can add, remove, or clear effects, snapshots plus FFI exports include the same metadata for validation, and the engine now dispatches `Fx*Start`, `Fx*Timer`, and `Fx*Stop` callbacks so scripts can react to lifecycle events.
 - The AUL runtime now exposes a host function registry so Rust subsystems can publish native helpers to scripts, completing the foundational engine call map and piping debugger hooks through those callbacks.
+- The AUL runtime now supports assigning to proplist properties (including nested entries), so script-side mutation semantics match the baseline expectations of C4-style proplists.
 - Engine objects now carry owner identifiers across scenario manifests, runtime snapshots, command queues, and the C++ validation bridge so crew ownership mismatches are detectable in recordings and parity checks.
 - Engine state snapshots can now be exported and restored via a serializable `EngineState`, enabling deterministic save/resume flows for validation harnesses and future savegame experiments.
 
@@ -47,7 +48,7 @@
 
 ## Major Gaps to Reach Behavior Parity
 - Recreate the complete C4 object lifecycle, including the full action procedure system, physics integration beyond the new baseline gravity/velocity caps, scenario/environment management that extends past the new wind support in the JSON loader, and player control/GUI pathways that match the shipping UI; cross-runtime savegame formats and animation graphs remain open. Owner ids now propagate through the Rust engine, but higher-level crew/crew-member orchestration that the C++ runtime provides is still missing. (Action name/phase tracking, manifest-driven action maps with length/next transitions, environment manifests can now drive basic wind, effect stacks now exist as minimal scaffolds, scenario manifests can seed initial action phases and effect stacks per spawn, the command queue now covers deferred state updates and queued spawn/destroy requests, effect lifecycle callbacks now fire for start/timer/stop events, and the new `EngineState` serialization restores deterministic engine state even though a production-ready save pipeline and animation graphs are still missing.)
-- Port AUL runtime features: effect handlers, proplist semantics, debugging, and compatibility behaviors relied upon by shipped scripts (host-call bridging now exists, but effect/compat layers are still incomplete).
+- Port AUL runtime features: round out effect handlers and compatibility behaviors relied upon by shipped scripts (host-call bridging and proplist property assignment now exist, but effect/compat layers are still incomplete).
 - Implement rendering and audio backends that match the SDL/OpenGL pipeline and mixer behavior across all supported platforms.
 - Mirror GUI subsystems (dialogs, HUD, console, editor) and integrate them with input, networking, and engine state.
 - Rebuild multiplayer networking (TCP/UDP transports, reference server, lobby flow, download management, UPnP) with deterministic equivalence.

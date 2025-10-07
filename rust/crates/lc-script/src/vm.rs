@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::{BinaryOp, Expr, Function, Stmt, UnaryOp};
+use crate::ast::{AssignmentTarget, BinaryOp, Expr, Function, Stmt, UnaryOp};
 use crate::debugger::DebuggerHooks;
 use crate::engine::HostFunction;
 use crate::error::RuntimeError;
@@ -135,9 +135,9 @@ impl<'a> Vm<'a> {
                 env.define(name, value);
                 Ok(ControlFlow::Continue)
             }
-            Stmt::Assignment { name, value } => {
+            Stmt::Assignment { target, value } => {
                 let evaluated = self.evaluate(value, env, depth)?;
-                env.assign(name, evaluated)?;
+                self.assign_target(env, target, evaluated)?;
                 Ok(ControlFlow::Continue)
             }
             Stmt::Return(expr) => {
@@ -461,6 +461,56 @@ impl<'a> Vm<'a> {
                 "cannot access property '{name}' on value of type {}",
                 other.type_name()
             ))),
+        }
+    }
+
+    fn assign_target(
+        &self,
+        env: &mut Environment,
+        target: &AssignmentTarget,
+        value: Value,
+    ) -> Result<(), RuntimeError> {
+        match target {
+            AssignmentTarget::Variable(name) => env.assign(name, value),
+            AssignmentTarget::Property(base, property) => {
+                let base_value = self.assignment_target_value(env, base)?;
+                let mut entries = match base_value {
+                    Value::Proplist(entries) => entries,
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "cannot assign property '{property}' on value of type {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                entries.insert(property.clone(), value);
+                self.assign_target(env, base, Value::Proplist(entries))
+            }
+        }
+    }
+
+    fn assignment_target_value(
+        &self,
+        env: &mut Environment,
+        target: &AssignmentTarget,
+    ) -> Result<Value, RuntimeError> {
+        match target {
+            AssignmentTarget::Variable(name) => env
+                .get(name)
+                .cloned()
+                .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'"))),
+            AssignmentTarget::Property(base, property) => {
+                let container = self.assignment_target_value(env, base)?;
+                match container {
+                    Value::Proplist(entries) => {
+                        Ok(entries.get(property).cloned().unwrap_or(Value::Nil))
+                    }
+                    other => Err(RuntimeError::new(format!(
+                        "cannot access property '{property}' on value of type {}",
+                        other.type_name()
+                    ))),
+                }
+            }
         }
     }
 }

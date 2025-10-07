@@ -213,6 +213,43 @@ fn supports_proplists_and_nested_access() {
 }
 
 #[test]
+fn assigns_to_proplist_properties() {
+    let mut engine = Engine::new();
+    load_script(
+        &mut engine,
+        r#"
+        global func Mutate() {
+            var data = { foo = 1, nested = { value = 2 } };
+            data.foo = data.foo + 41;
+            data.nested.value = data.foo - 36;
+            data.new_field = 3;
+            return data.foo + data.nested.value + data.new_field;
+        }
+        "#,
+    );
+
+    let result = engine.call("Mutate", &[]).expect("call succeeds");
+    assert_eq!(result, Value::Int(51));
+}
+
+#[test]
+fn property_assignment_reports_type_errors() {
+    let mut engine = Engine::new();
+    load_script(
+        &mut engine,
+        r#"
+        global func BadAssign() {
+            var value = 5;
+            value.foo = 1;
+        }
+        "#,
+    );
+
+    let error = engine.call("BadAssign", &[]).unwrap_err();
+    assert!(format!("{error}").contains("cannot assign property 'foo'"));
+}
+
+#[test]
 fn effect_callbacks_dispatch_via_engine_helper() {
     let mut engine = Engine::new();
     load_script(
