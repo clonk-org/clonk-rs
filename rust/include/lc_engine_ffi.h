@@ -10,6 +10,13 @@ extern "C" {
 typedef struct LcEngineRecorderHandle LcEngineRecorderHandle;
 typedef struct LcEnginePlaybackHandle LcEnginePlaybackHandle;
 
+typedef struct LcEngineEffectSnapshot {
+    const char *name;
+    int32_t priority;
+    int32_t interval;
+    int32_t timer;
+} LcEngineEffectSnapshot;
+
 typedef struct LcEngineObjectSnapshot {
     uint64_t id;
     const char *definition_id;
@@ -20,6 +27,8 @@ typedef struct LcEngineObjectSnapshot {
     int32_t energy;
     const char *action_name;
     int32_t action_phase;
+    const LcEngineEffectSnapshot *effects;
+    size_t effect_count;
 } LcEngineObjectSnapshot;
 
 LcEngineRecorderHandle *lc_engine_recorder_new(void);

@@ -1,4 +1,5 @@
 mod action;
+mod effect;
 pub mod ffi;
 pub mod fixtures;
 mod landscape;
@@ -6,10 +7,12 @@ mod record;
 pub mod scenario;
 
 pub use action::{ActionState, ActionUpdate};
+pub use effect::EffectState;
 pub use landscape::{CollisionResolution, Landscape, LandscapeError};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
 
+use effect::EffectCommand;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::ops::AddAssign;
@@ -118,6 +121,7 @@ pub struct ObjectState {
     pub velocity: Vector2,
     pub energy: i32,
     pub action: ActionState,
+    pub effects: Vec<EffectState>,
 }
 
 impl ObjectState {
@@ -208,15 +212,24 @@ impl ObjectUpdate {
 pub struct QueuedCommand {
     pub delay: u32,
     pub update: ObjectUpdate,
+    pub effects: Vec<EffectCommand>,
 }
 
 impl QueuedCommand {
     pub fn new(delay: u32, update: ObjectUpdate) -> Self {
-        Self { delay, update }
+        Self {
+            delay,
+            update,
+            effects: Vec::new(),
+        }
     }
 
     pub fn immediate(update: ObjectUpdate) -> Self {
-        Self { delay: 0, update }
+        Self {
+            delay: 0,
+            update,
+            effects: Vec::new(),
+        }
     }
 
     pub fn with_delay(mut self, delay: u32) -> Self {
@@ -224,8 +237,17 @@ impl QueuedCommand {
         self
     }
 
+    pub fn with_effects(mut self, effects: Vec<EffectCommand>) -> Self {
+        self.effects = effects;
+        self
+    }
+
     pub fn update(&self) -> &ObjectUpdate {
         &self.update
+    }
+
+    pub fn effects(&self) -> &[EffectCommand] {
+        &self.effects
     }
 }
 
@@ -261,6 +283,52 @@ impl Object {
             velocity: self.state.velocity,
             energy: self.state.energy,
             action: self.state.action.clone(),
+            effects: self.state.effects.clone(),
+        }
+    }
+
+    fn apply_effect_commands(&mut self, commands: &[EffectCommand]) {
+        for command in commands {
+            match command {
+                EffectCommand::Add(effect) => self.insert_effect(effect.clone()),
+                EffectCommand::Remove { name } => {
+                    self.state.effects.retain(|existing| existing.name != *name);
+                }
+                EffectCommand::Clear => self.state.effects.clear(),
+            }
+        }
+    }
+
+    fn insert_effect(&mut self, mut effect: EffectState) {
+        if effect.interval <= 0 {
+            effect.interval = 1;
+        }
+        if effect.timer < 0 {
+            effect.timer = 0;
+        }
+        if effect.timer >= effect.interval {
+            effect.timer %= effect.interval;
+        }
+        if let Some(pos) = self
+            .state
+            .effects
+            .iter()
+            .position(|existing| existing.name == effect.name)
+        {
+            self.state.effects.remove(pos);
+        }
+        let mut insert_pos = 0;
+        while insert_pos < self.state.effects.len()
+            && self.state.effects[insert_pos].priority > effect.priority
+        {
+            insert_pos += 1;
+        }
+        self.state.effects.insert(insert_pos, effect);
+    }
+
+    fn tick_effects(&mut self) {
+        for effect in &mut self.state.effects {
+            effect.advance_tick();
         }
     }
 
@@ -289,6 +357,7 @@ impl Object {
             let command = self.command_queue.pop_front().expect("front exists");
             let delta: ObjectDelta = command.update.into();
             self.state.apply_delta(&delta);
+            self.apply_effect_commands(&command.effects);
             physics.clamp_velocity(&mut self.state.velocity);
             if let Some(landscape) = landscape {
                 let resolution =
@@ -375,6 +444,8 @@ pub struct ObjectSnapshot {
     pub energy: i32,
     #[serde(default)]
     pub action: ActionState,
+    #[serde(default)]
+    pub effects: Vec<EffectState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,6 +565,7 @@ struct CommandBatch {
     spawns: Vec<SpawnConfig>,
     destroy: bool,
     commands: Vec<QueuedCommand>,
+    effects: Vec<EffectCommand>,
 }
 
 pub struct Engine {
@@ -577,6 +649,10 @@ impl Engine {
             }
             {
                 let object = &mut self.objects[idx];
+                object.tick_effects();
+            }
+            {
+                let object = &mut self.objects[idx];
                 object.state.action.advance();
             }
             self.apply_physics_at_index(idx);
@@ -605,11 +681,13 @@ impl Engine {
                 spawns,
                 destroy,
                 commands,
+                effects,
             } = command;
 
             {
                 let object = &mut self.objects[idx];
                 object.state.apply_delta(&delta);
+                object.apply_effect_commands(&effects);
                 self.physics.clamp_velocity(&mut object.state.velocity);
                 if destroy {
                     object.mark_destroyed();
@@ -775,6 +853,7 @@ impl Engine {
                 velocity,
                 energy,
                 action: action.unwrap_or_default(),
+                effects: Vec::new(),
             },
         );
 
@@ -793,6 +872,7 @@ impl Engine {
                 spawns,
                 destroy,
                 commands,
+                effects,
             } = {
                 let definition = self
                     .definitions
@@ -808,6 +888,7 @@ impl Engine {
                 });
             }
             object.state.apply_delta(&delta);
+            object.apply_effect_commands(&effects);
             self.physics.clamp_velocity(&mut object.state.velocity);
             if !commands.is_empty() {
                 object.enqueue_commands(commands);
@@ -838,7 +919,7 @@ impl Engine {
 }
 
 fn build_state_value(definition_id: &str, object_id: ObjectId, state: &ObjectState) -> Value {
-    let mut map = HashMap::with_capacity(6);
+    let mut map = HashMap::with_capacity(7);
     map.insert(
         "definition".into(),
         Value::String(definition_id.to_string()),
@@ -851,6 +932,19 @@ fn build_state_value(definition_id: &str, object_id: ObjectId, state: &ObjectSta
     action.insert("name".into(), Value::String(state.action.name.clone()));
     action.insert("phase".into(), Value::Int(state.action.phase));
     map.insert("action".into(), Value::Proplist(action));
+    let effects: Vec<_> = state
+        .effects
+        .iter()
+        .map(|effect| {
+            let mut props = HashMap::with_capacity(4);
+            props.insert("name".into(), Value::String(effect.name.clone()));
+            props.insert("priority".into(), Value::Int(effect.priority));
+            props.insert("interval".into(), Value::Int(effect.interval));
+            props.insert("timer".into(), Value::Int(effect.timer));
+            Value::Proplist(props)
+        })
+        .collect();
+    map.insert("effects".into(), Value::Array(effects));
     Value::Proplist(map)
 }
 
@@ -917,6 +1011,11 @@ fn parse_command_from_proplist(
                 batch
                     .commands
                     .extend(value_to_commands(definition, function, value)?);
+            }
+            "effects" => {
+                batch
+                    .effects
+                    .extend(value_to_effect_commands(definition, function, value)?);
             }
             other => {
                 return Err(EngineError::InvalidScriptOutput {
@@ -1173,6 +1272,7 @@ fn value_to_commands(
 
         let mut delay: Option<u32> = None;
         let mut update = ObjectUpdate::default();
+        let mut effects = Vec::new();
 
         for (key, value) in map.into_iter() {
             match key.as_str() {
@@ -1205,6 +1305,9 @@ fn value_to_commands(
                     let phase = value_to_int(definition, function, value)?;
                     ensure_action_update(&mut update).set_phase(phase);
                 }
+                "effects" => {
+                    effects.extend(value_to_effect_commands(definition, function, value)?);
+                }
                 other => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
@@ -1215,7 +1318,180 @@ fn value_to_commands(
             }
         }
 
-        commands.push(QueuedCommand::new(delay.unwrap_or(0), update));
+        commands.push(QueuedCommand::new(delay.unwrap_or(0), update).with_effects(effects));
+    }
+
+    Ok(commands)
+}
+
+fn value_to_effect_commands(
+    definition: &str,
+    function: &'static str,
+    value: Value,
+) -> Result<Vec<EffectCommand>, EngineError> {
+    let entries = match value {
+        Value::Array(values) => values,
+        Value::Nil => return Ok(Vec::new()),
+        other => {
+            return Err(EngineError::InvalidScriptOutput {
+                definition: definition.to_string(),
+                function,
+                detail: format!("expected array for effects, got {}", other.type_name()),
+            })
+        }
+    };
+
+    let mut commands = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let mut map = match entry {
+            Value::Proplist(map) => map,
+            other => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function,
+                    detail: format!("effect entry must be proplist, got {}", other.type_name()),
+                })
+            }
+        };
+
+        let op = match map.remove("op") {
+            Some(Value::String(op)) => op,
+            Some(other) => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function,
+                    detail: format!("effects.op must be string, got {}", other.type_name()),
+                })
+            }
+            None => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function,
+                    detail: "effect entry missing `op`".into(),
+                })
+            }
+        };
+
+        match op.as_str() {
+            "add" => {
+                let name_value =
+                    map.remove("name")
+                        .ok_or_else(|| EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: "effect add entry missing `name`".into(),
+                        })?;
+                let name = match name_value {
+                    Value::String(name) => name,
+                    other => {
+                        return Err(EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: format!(
+                                "effect name must be string, got {}",
+                                other.type_name()
+                            ),
+                        })
+                    }
+                };
+
+                let priority = match map.remove("priority") {
+                    Some(value) => value_to_int(definition, function, value)?,
+                    None => 100,
+                };
+
+                let interval = match map.remove("interval") {
+                    Some(value) => {
+                        let interval = value_to_int(definition, function, value)?;
+                        if interval <= 0 {
+                            return Err(EngineError::InvalidScriptOutput {
+                                definition: definition.to_string(),
+                                function,
+                                detail: "effect interval must be > 0".into(),
+                            });
+                        }
+                        interval
+                    }
+                    None => 1,
+                };
+
+                let timer = match map.remove("timer") {
+                    Some(value) => {
+                        let timer = value_to_int(definition, function, value)?;
+                        if timer < 0 {
+                            return Err(EngineError::InvalidScriptOutput {
+                                definition: definition.to_string(),
+                                function,
+                                detail: "effect timer must be >= 0".into(),
+                            });
+                        }
+                        timer
+                    }
+                    None => 0,
+                };
+
+                if let Some((key, _)) = map.into_iter().next() {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: definition.to_string(),
+                        function,
+                        detail: format!("unexpected key `{}` in effect add entry", key),
+                    });
+                }
+
+                let effect = EffectState::new(name)
+                    .with_priority(priority)
+                    .with_interval(interval)
+                    .with_timer(timer);
+                commands.push(EffectCommand::add(effect));
+            }
+            "remove" => {
+                let name_value =
+                    map.remove("name")
+                        .ok_or_else(|| EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: "effect remove entry missing `name`".into(),
+                        })?;
+                let name = match name_value {
+                    Value::String(name) => name,
+                    other => {
+                        return Err(EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: format!(
+                                "effect name must be string, got {}",
+                                other.type_name()
+                            ),
+                        })
+                    }
+                };
+                if let Some((key, _)) = map.into_iter().next() {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: definition.to_string(),
+                        function,
+                        detail: format!("unexpected key `{}` in effect remove entry", key),
+                    });
+                }
+                commands.push(EffectCommand::remove(name));
+            }
+            "clear" => {
+                if let Some((key, _)) = map.into_iter().next() {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: definition.to_string(),
+                        function,
+                        detail: format!("unexpected key `{}` in effect clear entry", key),
+                    });
+                }
+                commands.push(EffectCommand::Clear);
+            }
+            other => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function,
+                    detail: format!("unsupported effect op `{}`", other),
+                });
+            }
+        }
     }
 
     Ok(commands)
@@ -1420,6 +1696,99 @@ mod tests {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.position, Vector2::new(4, 5));
         assert_eq!(object.velocity, Vector2::new(0, 0));
+    }
+
+    #[test]
+    fn applies_effect_stack_operations() {
+        let source = r#"
+        global func Initialize(state, random) {
+            return {
+                effects = [
+                    { op = "add", name = "Heal", priority = 150, interval = 2 }
+                ]
+            };
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 1) {
+                return {
+                    effects = [
+                        { op = "add", name = "Boost", priority = 50, interval = 3, timer = 1 }
+                    ]
+                };
+            }
+            if (frame == 2) {
+                return { effects = [ { op = "remove", name = "Heal" } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(0);
+        let definition =
+            Definition::from_script("Actor", "Actor", source).expect("script compiles");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.object_snapshot(id).expect("snapshot available");
+        assert_eq!(snapshot.effects.len(), 1);
+        assert_eq!(snapshot.effects[0].name, "Heal");
+        assert_eq!(snapshot.effects[0].priority, 150);
+        assert_eq!(snapshot.effects[0].interval, 2);
+        assert_eq!(snapshot.effects[0].timer, 0);
+
+        let snapshot = engine.tick().expect("first tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.effects.len(), 2);
+        assert_eq!(object.effects[0].name, "Heal");
+        assert_eq!(object.effects[0].timer, 1);
+        assert_eq!(object.effects[1].name, "Boost");
+        assert_eq!(object.effects[1].timer, 1);
+
+        let snapshot = engine.tick().expect("second tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.effects.len(), 1);
+        assert_eq!(object.effects[0].name, "Boost");
+        assert_eq!(object.effects[0].priority, 50);
+        assert_eq!(object.effects[0].timer, 2);
+    }
+
+    #[test]
+    fn queued_commands_apply_effect_changes() {
+        let mut engine = Engine::with_seed(1);
+        let definition = Definition::from_script(
+            "Dummy",
+            "Dummy",
+            "global func Step(state, frame, random) { return nil; }",
+        )
+        .expect("script compiles");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Dummy"))
+            .expect("spawn succeeds");
+
+        let command = QueuedCommand::immediate(ObjectUpdate::default())
+            .with_delay(1)
+            .with_effects(vec![EffectCommand::add(EffectState::new("Queued"))]);
+        engine
+            .queue_object_command(id, command)
+            .expect("queue succeeds");
+
+        let snapshot = engine.tick().expect("first tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert!(object.effects.is_empty());
+
+        let snapshot = engine.tick().expect("second tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.effects.len(), 1);
+        assert_eq!(object.effects[0].name, "Queued");
     }
 
     #[test]

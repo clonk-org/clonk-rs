@@ -1,11 +1,19 @@
 use crate::{
-    ActionState, ObjectId, ObjectSnapshot, Playback, Recorder, Recording, SimulationSnapshot,
-    Vector2,
+    ActionState, EffectState, ObjectId, ObjectSnapshot, Playback, Recorder, Recording,
+    SimulationSnapshot, Vector2,
 };
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 use std::slice;
+
+#[repr(C)]
+pub struct LcEngineEffectSnapshot {
+    pub name: *const c_char,
+    pub priority: i32,
+    pub interval: i32,
+    pub timer: i32,
+}
 
 #[repr(C)]
 pub struct LcEngineObjectSnapshot {
@@ -18,6 +26,8 @@ pub struct LcEngineObjectSnapshot {
     pub energy: i32,
     pub action_name: *const c_char,
     pub action_phase: i32,
+    pub effects: *const LcEngineEffectSnapshot,
+    pub effect_count: usize,
 }
 
 pub struct RecorderHandle {
@@ -75,6 +85,33 @@ unsafe fn make_snapshot(
         };
         let mut action = ActionState::new(action_name);
         action.phase = entry.action_phase;
+
+        let effects_slice: &[LcEngineEffectSnapshot] = if entry.effect_count == 0 {
+            &[]
+        } else if entry.effects.is_null() {
+            return None;
+        } else {
+            slice::from_raw_parts(entry.effects, entry.effect_count)
+        };
+        let mut effects = Vec::with_capacity(effects_slice.len());
+        for effect_entry in effects_slice {
+            let effect_name = if effect_entry.name.is_null() {
+                String::new()
+            } else {
+                match CStr::from_ptr(effect_entry.name).to_str() {
+                    Ok(value) => value.to_string(),
+                    Err(_) => CStr::from_ptr(effect_entry.name)
+                        .to_string_lossy()
+                        .into_owned(),
+                }
+            };
+            let effect = EffectState::new(effect_name)
+                .with_priority(effect_entry.priority)
+                .with_interval(effect_entry.interval)
+                .with_timer(effect_entry.timer);
+            effects.push(effect);
+        }
+
         snapshots.push(ObjectSnapshot {
             id: ObjectId::new(entry.id),
             definition_id,
@@ -82,6 +119,7 @@ unsafe fn make_snapshot(
             velocity: Vector2::new(entry.velocity_x, entry.velocity_y),
             energy: entry.energy,
             action,
+            effects,
         });
     }
     snapshots.sort_by_key(|object| object.id);

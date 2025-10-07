@@ -10,6 +10,7 @@
 - Objects can now queue deterministic state updates via an `lc-engine` command queue that executes pending updates before each physics step, so scripts and host tooling can stage future motion or action transitions.
 - The demo viewport now scrolls horizontally across loaded landscapes and keeps the focus object in view so larger scenarios are observable inside the harness.
 - Object snapshots now surface each object's action name and phase, scripts can request action transitions, and the C++ validation bridge records the same metadata so playback parity covers basic action state changes.
+- Engine objects now track prioritized effect stacks with per-frame timers; scripts and queued commands can add, remove, or clear effects, and snapshots plus FFI exports include the same metadata for validation.
 
 ## Rust Workspace Scope
 - `lc-core`, `lc-resources`, `lc-script`, `lc-engine`, `lc-graphics`, `lc-audio`, `lc-network`, `lc-gui`, `lc-platform`, and `lc-app` provide demo-friendly utilities, parsers, in-memory surfaces, a toy physics loop, and basic networking abstractions.
@@ -20,6 +21,7 @@
 - `CMakeLists.txt` keeps all Rust bridges behind opt-in switches (`USE_RUST_CONFIG`, `USE_RUST_GROUP_VALIDATION`, `USE_RUST_ENGINE_VALIDATION`, `USE_RUST_GUI_VALIDATION`). These default to `OFF` and only add validators plus static libraries when explicitly enabled.
 - The validation bridges (`src/rust/RustConfigBridge.cpp`, `RustGroupBridge.cpp`, `RustEngineBridge.cpp`, `RustGuiBridge.cpp`) consume Rust FFI helpers to compare C++ output with Rust expectations or to dump JSON recordings. They do not replace runtime logic.
 - Engine validation snapshots now forward the current action name and phase alongside position, velocity, and energy so mismatches surface divergences in object state machines even when behaviour otherwise aligns.
+- Engine validation snapshots and FFI exports now surface each object's effect stack (names, priorities, intervals, timers), though the C++ bridge still populates empty stacks until native effects are mirrored.
 - No executable target links Rust crates as authoritative gameplay systems; the production binary continues to depend on the C++ implementations.
 
 ## Component Parity Assessment
@@ -39,7 +41,7 @@
 - `lc-app` can replay a scripted control sequence or accept live terminal input to drive the demo object through the control hook.
 
 ## Major Gaps to Reach Behavior Parity
-- Recreate the complete C4 object lifecycle, including the full action procedure system, physics integration beyond the new baseline gravity/velocity caps, robust scenario/environment management beyond the current JSON loader, and player control/GUI pathways that match the shipping UI; savegame compatibility and synchronous serialization remain open. (Action name/phase tracking now exists as a minimal scaffold, and the new command queue only covers deferred state updates; effect stacks, animation graphs, and serialization are still outstanding.)
+- Recreate the complete C4 object lifecycle, including the full action procedure system, physics integration beyond the new baseline gravity/velocity caps, robust scenario/environment management beyond the current JSON loader, and player control/GUI pathways that match the shipping UI; savegame compatibility and synchronous serialization remain open. (Action name/phase tracking and effect stacks now exist as minimal scaffolds, the command queue still only covers deferred state updates, and animation graphs plus serialization remain outstanding while C++ parity has yet to feed native effect data back into the bridge.)
 - Port AUL runtime features: effect handlers, engine call map, proplist semantics, debugging, and compatibility behaviors relied upon by shipped scripts.
 - Implement rendering and audio backends that match the SDL/OpenGL pipeline and mixer behavior across all supported platforms.
 - Mirror GUI subsystems (dialogs, HUD, console, editor) and integrate them with input, networking, and engine state.

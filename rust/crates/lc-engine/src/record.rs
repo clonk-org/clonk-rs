@@ -215,6 +215,9 @@ fn describe_snapshot_mismatch(
                         id, expected_obj.action.phase, actual_obj.action.phase
                     ));
                 }
+                if expected_obj.effects != actual_obj.effects {
+                    problems.push(format!("object {} effects differed", id));
+                }
             }
             None => problems.push(format!("missing object {}", id)),
         }
@@ -254,6 +257,7 @@ mod tests {
                 velocity: Vector2::new(0, 0),
                 energy,
                 action: ActionState::default(),
+                effects: Vec::new(),
             }],
         }
     }
