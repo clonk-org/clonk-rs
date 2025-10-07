@@ -48,6 +48,59 @@ impl fmt::Display for ObjectId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CrewRole(String);
+
+impl CrewRole {
+    pub fn new(role: impl Into<String>) -> Self {
+        Self(role.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for CrewRole {
+    fn from(role: &str) -> Self {
+        Self::new(role)
+    }
+}
+
+impl From<String> for CrewRole {
+    fn from(role: String) -> Self {
+        Self::new(role)
+    }
+}
+
+impl fmt::Display for CrewRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CrewCommandTarget {
+    Cursor,
+    Selection,
+    Role(CrewRole),
+}
+
+impl CrewCommandTarget {
+    pub const fn cursor() -> Self {
+        Self::Cursor
+    }
+
+    pub const fn selection() -> Self {
+        Self::Selection
+    }
+
+    pub fn role(role: impl Into<CrewRole>) -> Self {
+        Self::Role(role.into())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vector2 {
     pub x: i32,
@@ -737,6 +790,8 @@ pub enum EngineError {
     UnknownObject(ObjectId),
     #[error("crew selection error for owner {owner}: {detail}")]
     CrewSelection { owner: i32, detail: String },
+    #[error("crew role error for owner {owner}: {detail}")]
+    CrewRole { owner: i32, detail: String },
     #[error("script error in {function} of `{definition}`")]
     Script {
         definition: String,
@@ -871,6 +926,8 @@ pub struct EngineState {
     pub objects: Vec<PersistedObject>,
     #[serde(default)]
     pub crew_selection: HashMap<i32, CrewSelectionState>,
+    #[serde(default)]
+    pub crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
     #[serde(default)]
     pub global_effects: Vec<EffectState>,
     #[serde(default)]
@@ -1161,6 +1218,7 @@ pub struct Engine {
     environment: EnvironmentSettings,
     global_effects: Vec<EffectState>,
     crew_selection: HashMap<i32, CrewSelection>,
+    crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
     known_crew_owners: HashSet<i32>,
     eliminated_crew_owners: HashSet<i32>,
 }
@@ -1182,6 +1240,7 @@ impl Engine {
             environment: EnvironmentSettings::default(),
             global_effects: Vec::new(),
             crew_selection: HashMap::new(),
+            crew_roles: HashMap::new(),
             known_crew_owners: HashSet::new(),
             eliminated_crew_owners: HashSet::new(),
         }
@@ -1349,6 +1408,87 @@ impl Engine {
             }
         }
 
+        Ok(())
+    }
+
+    pub fn set_crew_role(
+        &mut self,
+        owner: i32,
+        object_id: ObjectId,
+        role: CrewRole,
+    ) -> Result<(), EngineError> {
+        if role.as_str().trim().is_empty() {
+            return Err(EngineError::CrewRole {
+                owner,
+                detail: "role name must not be empty".to_string(),
+            });
+        }
+
+        let object = self
+            .objects
+            .iter()
+            .find(|object| object.id == object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
+        if object.state.owner != owner {
+            return Err(EngineError::CrewRole {
+                owner,
+                detail: format!("object {} is owned by {}", object_id, object.state.owner),
+            });
+        }
+        if !object.state.crew_member {
+            return Err(EngineError::CrewRole {
+                owner,
+                detail: format!("object {} is not a crew member", object_id),
+            });
+        }
+
+        self.crew_roles
+            .entry(owner)
+            .or_default()
+            .insert(object_id, role);
+        Ok(())
+    }
+
+    pub fn crew_role(&self, owner: i32, object_id: ObjectId) -> Option<&CrewRole> {
+        self.crew_roles
+            .get(&owner)
+            .and_then(|roles| roles.get(&object_id))
+    }
+
+    pub fn crew_role_assignments(&self, owner: i32) -> HashMap<ObjectId, CrewRole> {
+        self.crew_roles.get(&owner).cloned().unwrap_or_default()
+    }
+
+    pub fn clear_crew_role(&mut self, owner: i32, object_id: ObjectId) {
+        if let Some(assignments) = self.crew_roles.get_mut(&owner) {
+            assignments.remove(&object_id);
+            if assignments.is_empty() {
+                self.crew_roles.remove(&owner);
+            }
+        }
+    }
+
+    pub fn clear_roles_for_owner(&mut self, owner: i32) {
+        self.crew_roles.remove(&owner);
+    }
+
+    pub fn apply_command(
+        &mut self,
+        owner: i32,
+        target: CrewCommandTarget,
+        update: ObjectUpdate,
+    ) -> Result<(), EngineError> {
+        self.prune_roles();
+        let mut recipients = self.resolve_command_targets(owner, &target);
+        if recipients.is_empty() {
+            return Ok(());
+        }
+
+        recipients.sort_by_key(|id| id.as_u64());
+        recipients.dedup();
+        for object_id in recipients {
+            self.apply_object_update(object_id, update.clone())?;
+        }
         Ok(())
     }
 
@@ -1703,6 +1843,12 @@ impl Engine {
             .map(|(&owner, selection)| (owner, CrewSelectionState::from(selection)))
             .collect();
 
+        let crew_roles = self
+            .crew_roles
+            .iter()
+            .map(|(&owner, roles)| (owner, roles.clone()))
+            .collect();
+
         let mut known_crew_owners: Vec<_> = self.known_crew_owners.iter().cloned().collect();
         known_crew_owners.sort_unstable();
         let mut eliminated_crew_owners: Vec<_> =
@@ -1717,6 +1863,7 @@ impl Engine {
             landscape: self.landscape.clone(),
             objects,
             crew_selection,
+            crew_roles,
             global_effects: self.global_effects.clone(),
             known_crew_owners,
             eliminated_crew_owners,
@@ -1768,6 +1915,24 @@ impl Engine {
             self.objects.push(object);
         }
 
+        self.crew_roles = state
+            .crew_roles
+            .iter()
+            .map(|(&owner, roles)| {
+                let mut filtered = HashMap::new();
+                for (&object_id, role) in roles {
+                    if let Some(object) = self.objects.iter().find(|object| object.id == object_id)
+                    {
+                        if object.state.crew_member && object.state.owner == owner {
+                            filtered.insert(object_id, role.clone());
+                        }
+                    }
+                }
+                (owner, filtered)
+            })
+            .filter(|(_, roles)| !roles.is_empty())
+            .collect();
+
         self.known_crew_owners = state.known_crew_owners.iter().cloned().collect();
         self.eliminated_crew_owners = state.eliminated_crew_owners.iter().cloned().collect();
 
@@ -1779,6 +1944,7 @@ impl Engine {
             .unwrap_or(0);
         self.next_object_id = state.next_object_id.max(highest_id + 1);
 
+        self.prune_roles();
         self.prune_selection();
         self.refresh_elimination_state();
 
@@ -1865,9 +2031,11 @@ impl Engine {
     ) {
         if previous_owner != new_owner {
             self.remove_from_selection(previous_owner, object_id);
+            self.remove_from_roles(previous_owner, object_id);
         }
         if !new_crew_member {
             self.remove_from_selection(new_owner, object_id);
+            self.remove_from_roles(new_owner, object_id);
         }
     }
 
@@ -1880,7 +2048,17 @@ impl Engine {
         }
     }
 
+    fn remove_from_roles(&mut self, owner: i32, object_id: ObjectId) {
+        if let Some(assignments) = self.crew_roles.get_mut(&owner) {
+            assignments.remove(&object_id);
+            if assignments.is_empty() {
+                self.crew_roles.remove(&owner);
+            }
+        }
+    }
+
     fn prune_selection(&mut self) {
+        self.prune_roles();
         if self.crew_selection.is_empty() {
             return;
         }
@@ -1895,6 +2073,50 @@ impl Engine {
             selection.prune(&alive);
             !selection.is_empty()
         });
+    }
+
+    fn prune_roles(&mut self) {
+        if self.crew_roles.is_empty() {
+            return;
+        }
+
+        let mut valid = HashMap::new();
+        for object in &self.objects {
+            if object.state.crew_member {
+                valid.insert(object.id, object.state.owner);
+            }
+        }
+
+        self.crew_roles.retain(|owner, assignments| {
+            assignments.retain(|object_id, _| match valid.get(object_id) {
+                Some(current_owner) if *current_owner == *owner => true,
+                _ => false,
+            });
+            !assignments.is_empty()
+        });
+    }
+
+    fn resolve_command_targets(&self, owner: i32, target: &CrewCommandTarget) -> Vec<ObjectId> {
+        match target {
+            CrewCommandTarget::Cursor => self.crew_cursor(owner).into_iter().collect(),
+            CrewCommandTarget::Selection => self.selected_crew(owner),
+            CrewCommandTarget::Role(role) => self
+                .crew_roles
+                .get(&owner)
+                .map(|assignments| {
+                    assignments
+                        .iter()
+                        .filter_map(|(&object_id, assigned)| {
+                            if assigned == role {
+                                Some(object_id)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
     }
 
     fn refresh_elimination_state(&mut self) {
@@ -3595,6 +3817,136 @@ mod tests {
 
         assert!(engine.selected_crew(1).is_empty());
         assert_eq!(engine.crew_cursor(1), None);
+    }
+
+    #[test]
+    fn crew_role_assignment_requires_valid_owner() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let owned = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+        let other_owner = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(2))
+            .expect("spawn succeeds");
+
+        engine
+            .set_crew_role(1, owned, CrewRole::from("builder"))
+            .expect("role assignment succeeds");
+
+        let error = engine
+            .set_crew_role(1, other_owner, CrewRole::from("builder"))
+            .expect_err("assignment should fail");
+        match error {
+            EngineError::CrewRole { owner, detail } => {
+                assert_eq!(owner, 1);
+                assert!(detail.contains("owned"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn crew_roles_removed_when_object_destroyed() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let crew = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+
+        engine
+            .set_crew_role(1, crew, CrewRole::from("scout"))
+            .expect("role assignment succeeds");
+
+        engine
+            .queue_object_command(
+                crew,
+                QueuedCommand::immediate(ObjectUpdate::new()).with_destroy(true),
+            )
+            .expect("queue succeeds");
+
+        engine.tick().expect("tick succeeds");
+
+        assert!(engine.crew_role_assignments(1).is_empty());
+    }
+
+    #[test]
+    fn apply_command_targets_role_assignments() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let first = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+        let second = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+
+        engine
+            .set_crew_role(1, first, CrewRole::from("builder"))
+            .expect("role assignment succeeds");
+        engine
+            .set_crew_role(1, second, CrewRole::from("builder"))
+            .expect("role assignment succeeds");
+
+        engine
+            .apply_command(
+                1,
+                CrewCommandTarget::role("builder"),
+                ObjectUpdate::new().with_energy(42),
+            )
+            .expect("command routes");
+
+        assert_eq!(engine.object_snapshot(first).unwrap().energy, 42);
+        assert_eq!(engine.object_snapshot(second).unwrap().energy, 42);
+    }
+
+    #[test]
+    fn capture_state_preserves_crew_roles() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let crew = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+
+        engine
+            .set_crew_role(1, crew, CrewRole::from("pilot"))
+            .expect("role assignment succeeds");
+
+        let state = engine.capture_state();
+
+        let mut restored = Engine::with_seed(0);
+        let mut restored_definition = build_definition();
+        restored_definition.set_crew_member(true);
+        restored
+            .register_definition(restored_definition)
+            .expect("definition registers");
+        restored.restore_state(&state).expect("state restores");
+
+        let assignments = restored.crew_role_assignments(1);
+        assert_eq!(
+            assignments.get(&crew).map(|role| role.as_str()),
+            Some("pilot")
+        );
     }
 
     #[test]

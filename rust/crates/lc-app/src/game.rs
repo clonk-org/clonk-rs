@@ -12,8 +12,9 @@ use crossterm::{
 use lc_audio::{AudioSystem, SoundHandle};
 use lc_core::std_config::Config;
 use lc_engine::{
-    Definition, Engine, EngineError, Landscape, ObjectId, ObjectSnapshot, ObjectUpdate,
-    PhysicsSettings, Scenario, ScenarioError, SimulationSnapshot, SpawnConfig, Vector2,
+    CrewCommandTarget, CrewRole, Definition, Engine, EngineError, Landscape, ObjectId,
+    ObjectSnapshot, ObjectUpdate, PhysicsSettings, Scenario, ScenarioError, SimulationSnapshot,
+    SpawnConfig, Vector2,
 };
 use lc_graphics::{Color, PixelFormat, SnapshotHasher, Surface};
 use lc_gui::{
@@ -388,6 +389,28 @@ impl DemoGame {
             .map(|landscape| landscape.width() as i32)
             .unwrap_or(SURFACE_WIDTH as i32);
 
+        let owner_id = LOCAL_CLIENT_ID as i32;
+        let snapshot = engine
+            .object_snapshot(object_id)
+            .ok_or(GameError::Engine(EngineError::UnknownObject(object_id)))?;
+        let mut update = ObjectUpdate::new();
+        let mut needs_update = false;
+        if snapshot.owner != owner_id {
+            update = update.with_owner(owner_id);
+            needs_update = true;
+        }
+        if !snapshot.crew_member {
+            update = update.with_crew_member(true);
+            needs_update = true;
+        }
+        if needs_update {
+            engine.apply_object_update(object_id, update)?;
+        }
+
+        engine.set_crew_role(owner_id, object_id, CrewRole::from("demo-bouncer"))?;
+        engine.select_crew(owner_id, [object_id])?;
+        engine.set_crew_cursor(owner_id, Some(object_id))?;
+
         let mut gui = Gui::new();
         let root = gui.root();
         let title_label = gui.add_label(root, &scenario_label);
@@ -616,8 +639,11 @@ impl DemoGame {
             velocity.y = JUMP_VELOCITY;
         }
 
-        self.engine
-            .apply_object_update(self.object_id, ObjectUpdate::new().with_velocity(velocity))?;
+        self.engine.apply_command(
+            LOCAL_CLIENT_ID as i32,
+            CrewCommandTarget::role("demo-bouncer"),
+            ObjectUpdate::new().with_velocity(velocity),
+        )?;
 
         Ok(())
     }
