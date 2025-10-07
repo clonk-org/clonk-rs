@@ -12,8 +12,8 @@ use crossterm::{
 use lc_audio::{AudioSystem, SoundHandle};
 use lc_core::std_config::Config;
 use lc_engine::{
-    Definition, Engine, EngineError, Landscape, ObjectId, ObjectSnapshot, ObjectUpdate, Scenario,
-    ScenarioError, SimulationSnapshot, SpawnConfig, Vector2,
+    Definition, Engine, EngineError, Landscape, ObjectId, ObjectSnapshot, ObjectUpdate,
+    PhysicsSettings, Scenario, ScenarioError, SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_graphics::{Color, PixelFormat, SnapshotHasher, Surface};
 use lc_gui::{
@@ -122,6 +122,9 @@ pub struct GameSummary {
     pub user_data_dir: PathBuf,
     pub logs_dir: PathBuf,
     pub cache_dir: PathBuf,
+    pub gravity: i32,
+    pub max_fall_speed: i32,
+    pub max_rise_speed: i32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -302,6 +305,15 @@ impl DemoGame {
             .get_in(Some("Game"), "scenario_name")
             .map(|value| value.to_string())
             .unwrap_or_else(|| "Rust Demo Bounce".to_string());
+        let default_physics = PhysicsSettings::default();
+        let gravity =
+            parse_config_value::<i32>(&config, "gravity").unwrap_or(default_physics.gravity);
+        let max_fall_speed = parse_config_value::<i32>(&config, "max_fall_speed")
+            .unwrap_or(default_physics.max_fall_speed);
+        let max_rise_speed = parse_config_value::<i32>(&config, "max_rise_speed")
+            .unwrap_or(default_physics.max_rise_speed);
+        let base_physics = PhysicsSettings::checked(gravity, max_fall_speed, max_rise_speed)
+            .map_err(|detail| GameError::Input(detail.to_string()))?;
 
         let scenario = if let Some(path) = options.scenario_path.as_deref() {
             Some(Scenario::load_from_path(path)?)
@@ -311,6 +323,7 @@ impl DemoGame {
 
         let paths = AppPaths::discover()?;
         let mut engine = Engine::with_seed(12345);
+        engine.set_physics(base_physics);
         let object_id = if let Some(scenario) = scenario.as_ref() {
             if let Some(ticks) = scenario.configured_ticks() {
                 configured_ticks = ticks;
@@ -491,6 +504,7 @@ impl DemoGame {
         self.control_mode.teardown();
 
         let final_snapshot = last_snapshot.unwrap_or_else(|| self.engine.snapshot());
+        let physics = self.engine.physics();
         Ok(GameSummary {
             ticks: executed_ticks,
             ground_hits,
@@ -504,6 +518,9 @@ impl DemoGame {
             user_data_dir: self.paths.user_data_dir().to_path_buf(),
             logs_dir: self.paths.logs_dir().to_path_buf(),
             cache_dir: self.paths.cache_dir().to_path_buf(),
+            gravity: physics.gravity,
+            max_fall_speed: physics.max_fall_speed,
+            max_rise_speed: physics.max_rise_speed,
         })
     }
 

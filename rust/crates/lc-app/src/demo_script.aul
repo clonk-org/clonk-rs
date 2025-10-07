@@ -6,8 +6,8 @@ global func Initialize(state, random) {
 
 global func Step(state, frame, random) {
     var vx = state.velocity[0];
-    var vy = state.velocity[1] + 1;
-    if (state.position[1] >= 215) {
+    var vy = state.velocity[1];
+    if (state.position[1] >= 215 && vy >= 0) {
         vy = -15;
     }
     if (vy > 12) {

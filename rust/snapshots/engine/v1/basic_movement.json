@@ -6,8 +6,8 @@
         "id": 1,
         "definition_id": "Mover",
         "position": {
-          "x": -4,
-          "y": -7
+          "x": -7,
+          "y": -3
         },
         "velocity": {
           "x": 3,
@@ -24,8 +24,8 @@
         "id": 1,
         "definition_id": "Mover",
         "position": {
-          "x": 2,
-          "y": -12
+          "x": -4,
+          "y": -5
         },
         "velocity": {
           "x": 3,
@@ -42,8 +42,8 @@
         "id": 1,
         "definition_id": "Mover",
         "position": {
-          "x": 8,
-          "y": -15
+          "x": -1,
+          "y": -6
         },
         "velocity": {
           "x": 3,
@@ -55,7 +55,7 @@
         "id": 2,
         "definition_id": "Mover",
         "position": {
-          "x": 3,
+          "x": -6,
           "y": 0
         },
         "velocity": {
@@ -73,8 +73,8 @@
         "id": 1,
         "definition_id": "Mover",
         "position": {
-          "x": 14,
-          "y": -16
+          "x": 2,
+          "y": -6
         },
         "velocity": {
           "x": 3,
@@ -86,7 +86,7 @@
         "id": 2,
         "definition_id": "Mover",
         "position": {
-          "x": 3,
+          "x": -6,
           "y": 1
         },
         "velocity": {
@@ -104,8 +104,8 @@
         "id": 1,
         "definition_id": "Mover",
         "position": {
-          "x": 20,
-          "y": -15
+          "x": 5,
+          "y": -5
         },
         "velocity": {
           "x": 3,
@@ -117,8 +117,8 @@
         "id": 2,
         "definition_id": "Mover",
         "position": {
-          "x": 3,
-          "y": 4
+          "x": -6,
+          "y": 3
         },
         "velocity": {
           "x": 0,

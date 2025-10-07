@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use lc_resources::{Group, GroupError};
 use serde::Deserialize;
 
-use crate::{Definition, Engine, EngineError, Landscape, ObjectId, SpawnConfig, Vector2};
+use crate::{
+    Definition, Engine, EngineError, Landscape, ObjectId, PhysicsSettings, SpawnConfig, Vector2,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScenarioError {
@@ -27,6 +29,8 @@ pub enum ScenarioError {
     InvalidLandscape(String),
     #[error("scenario did not declare any object definitions")]
     NoDefinitions,
+    #[error("invalid physics settings: {0}")]
+    InvalidPhysics(String),
     #[error("engine error while applying scenario: {0}")]
     Engine(#[from] EngineError),
 }
@@ -46,6 +50,7 @@ pub struct Scenario {
     definitions: Vec<ScenarioDefinition>,
     initial_spawns: Vec<SpawnConfig>,
     landscape: Option<Landscape>,
+    physics: Option<PhysicsSettings>,
 }
 
 impl Scenario {
@@ -84,11 +89,19 @@ impl Scenario {
         !self.initial_spawns.is_empty()
     }
 
+    pub fn physics(&self) -> Option<PhysicsSettings> {
+        self.physics
+    }
+
     pub fn apply(&self, engine: &mut Engine) -> Result<Vec<ObjectId>, ScenarioError> {
         if let Some(landscape) = &self.landscape {
             engine.set_landscape(landscape.clone());
         } else {
             engine.clear_landscape();
+        }
+
+        if let Some(physics) = self.physics {
+            engine.set_physics(physics);
         }
 
         for definition in &self.definitions {
@@ -166,6 +179,10 @@ impl Scenario {
             Some(spec) => Some(spec.into_landscape()?),
             None => None,
         };
+        let physics = match manifest.physics {
+            Some(spec) => Some(spec.into_settings()?),
+            None => None,
+        };
         let ground_height_hint = manifest.ground_height.or_else(|| {
             landscape
                 .as_ref()
@@ -179,6 +196,7 @@ impl Scenario {
             definitions,
             initial_spawns: spawns,
             landscape,
+            physics,
         })
     }
 }
@@ -197,6 +215,8 @@ struct ScenarioManifest {
     initial_objects: Vec<ObjectManifest>,
     #[serde(default)]
     landscape: Option<LandscapeManifest>,
+    #[serde(default)]
+    physics: Option<PhysicsManifest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,6 +252,28 @@ impl LandscapeManifest {
             LandscapeManifest::HeightMap { width, heights } => Landscape::new(width, heights)
                 .map_err(|error| ScenarioError::InvalidLandscape(error.to_string())),
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PhysicsManifest {
+    #[serde(default)]
+    gravity: Option<i32>,
+    #[serde(default)]
+    max_fall_speed: Option<i32>,
+    #[serde(default)]
+    max_rise_speed: Option<i32>,
+}
+
+impl PhysicsManifest {
+    fn into_settings(self) -> Result<PhysicsSettings, ScenarioError> {
+        let defaults = PhysicsSettings::default();
+        let gravity = self.gravity.unwrap_or(defaults.gravity);
+        let max_fall_speed = self.max_fall_speed.unwrap_or(defaults.max_fall_speed);
+        let max_rise_speed = self.max_rise_speed.unwrap_or(defaults.max_rise_speed);
+
+        PhysicsSettings::checked(gravity, max_fall_speed, max_rise_speed)
+            .map_err(|detail| ScenarioError::InvalidPhysics(detail.to_string()))
     }
 }
 
@@ -293,6 +335,7 @@ global func Step(state, frame, random)
 
         let landscape = engine.landscape().expect("landscape set");
         assert_eq!(landscape.surface_height(0), Some(42));
+        assert!(scenario.physics().is_none());
     }
 
     #[test]
@@ -325,5 +368,68 @@ global func Step(state, frame, random)
         let dir = tempdir().expect("tempdir");
         let error = Scenario::load_from_path(dir.path()).expect_err("scenario fails");
         assert!(matches!(error, ScenarioError::ManifestMissing));
+    }
+
+    #[test]
+    fn loads_physics_overrides() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Mover", "script": "scripts/mover.aul" }
+            ],
+            "physics": {
+                "gravity": 2,
+                "max_fall_speed": 8,
+                "max_rise_speed": -10
+            }
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let physics = scenario.physics().expect("physics present");
+        assert_eq!(physics.gravity, 2);
+        assert_eq!(physics.max_fall_speed, 8);
+        assert_eq!(physics.max_rise_speed, -10);
+
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let configured = engine.physics();
+        assert_eq!(configured.gravity, 2);
+        assert_eq!(configured.max_fall_speed, 8);
+        assert_eq!(configured.max_rise_speed, -10);
+    }
+
+    #[test]
+    fn physics_validation_rejects_invalid_limits() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Mover", "script": "scripts/mover.aul" }
+            ],
+            "physics": {
+                "gravity": 1,
+                "max_fall_speed": 4,
+                "max_rise_speed": 6
+            }
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let error = Scenario::load_from_path(dir.path()).expect_err("scenario fails");
+        match error {
+            ScenarioError::InvalidPhysics(detail) => {
+                assert!(detail.contains("max_rise_speed"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

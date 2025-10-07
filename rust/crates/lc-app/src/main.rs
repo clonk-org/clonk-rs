@@ -92,6 +92,10 @@ fn print_summary(summary: &GameSummary) {
     println!("User data dir: {}", summary.user_data_dir.display());
     println!("Logs dir: {}", summary.logs_dir.display());
     println!("Cache dir: {}", summary.cache_dir.display());
+    println!(
+        "Physics: gravity {} max_fall {} max_rise {}",
+        summary.gravity, summary.max_fall_speed, summary.max_rise_speed
+    );
     println!("Frames simulated: {}", summary.ticks);
     println!("Ground contacts: {}", summary.ground_hits);
     println!("Control ready batches: {}", summary.ready_batches);

@@ -8,34 +8,30 @@ global func Initialize(state, random)
 
 global func Step(state, frame, random)
 {
-    var new_vy = state.velocity[1] + 1;
-    var new_y = state.position[1] + new_vy;
-    if (new_y > 30)
+    var new_vy = state.velocity[1];
+    if (state.position[1] >= 30 && new_vy >= 0)
     {
-        new_y = 30;
         new_vy = -4;
     }
-
-    var new_x = state.position[0] + state.velocity[0];
 
     var spawn_list = nil;
     if (frame == 3)
     {
         spawn_list = [
-            { definition = "Mover", position = [new_x - 5, 0], velocity = [0, 0], energy = 20 }
+            { definition = "Mover", position = [state.position[0] - 5, 0], velocity = [0, 0], energy = 20 }
         ];
     }
 
-    var should_destroy = false;
-    if (frame >= 6)
+    var should_destroy = frame >= 6;
+    var next_energy = state.energy - 1;
+    if (next_energy < 0)
     {
-        should_destroy = true;
+        next_energy = 0;
     }
 
     return {
-        position = [new_x, new_y],
         velocity = [state.velocity[0], new_vy],
-        energy = state.energy - 1,
+        energy = next_energy,
         spawn = spawn_list,
         destroy = should_destroy,
     };

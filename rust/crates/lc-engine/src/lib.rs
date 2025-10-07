@@ -63,6 +63,53 @@ impl AddAssign<Vector2> for Vector2 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicsSettings {
+    pub gravity: i32,
+    pub max_fall_speed: i32,
+    pub max_rise_speed: i32,
+}
+
+impl PhysicsSettings {
+    pub const fn new(gravity: i32, max_fall_speed: i32, max_rise_speed: i32) -> Self {
+        Self {
+            gravity,
+            max_fall_speed,
+            max_rise_speed,
+        }
+    }
+
+    pub fn checked(
+        gravity: i32,
+        max_fall_speed: i32,
+        max_rise_speed: i32,
+    ) -> Result<Self, &'static str> {
+        if max_rise_speed > max_fall_speed {
+            return Err("max_rise_speed must be <= max_fall_speed");
+        }
+        Ok(Self::new(gravity, max_fall_speed, max_rise_speed))
+    }
+
+    fn clamp_velocity(&self, velocity: &mut Vector2) {
+        if velocity.y > self.max_fall_speed {
+            velocity.y = self.max_fall_speed;
+        }
+        if velocity.y < self.max_rise_speed {
+            velocity.y = self.max_rise_speed;
+        }
+    }
+}
+
+impl Default for PhysicsSettings {
+    fn default() -> Self {
+        Self {
+            gravity: 1,
+            max_fall_speed: 12,
+            max_rise_speed: -20,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectState {
     pub position: Vector2,
@@ -343,6 +390,7 @@ pub struct Engine {
     rng: SmallRng,
     frame: u64,
     landscape: Option<Landscape>,
+    physics: PhysicsSettings,
 }
 
 impl Engine {
@@ -358,6 +406,7 @@ impl Engine {
             rng: SmallRng::seed_from_u64(seed),
             frame: 0,
             landscape: None,
+            physics: PhysicsSettings::default(),
         }
     }
 
@@ -375,6 +424,17 @@ impl Engine {
 
     pub fn landscape(&self) -> Option<&Landscape> {
         self.landscape.as_ref()
+    }
+
+    pub fn physics(&self) -> PhysicsSettings {
+        self.physics
+    }
+
+    pub fn set_physics(&mut self, physics: PhysicsSettings) {
+        self.physics = physics;
+        for object in &mut self.objects {
+            self.physics.clamp_velocity(&mut object.state.velocity);
+        }
     }
 
     pub fn register_definition(&mut self, definition: Definition) -> Result<(), EngineError> {
@@ -397,6 +457,7 @@ impl Engine {
         let frame = self.frame;
         let mut spawn_requests = Vec::new();
         for idx in 0..self.objects.len() {
+            self.apply_physics_at_index(idx);
             {
                 let object = &mut self.objects[idx];
                 object.state.position += object.state.velocity;
@@ -420,6 +481,7 @@ impl Engine {
             {
                 let object = &mut self.objects[idx];
                 object.state.apply_delta(&command.delta);
+                self.physics.clamp_velocity(&mut object.state.velocity);
                 if command.destroy {
                     object.mark_destroyed();
                 }
@@ -462,6 +524,8 @@ impl Engine {
             object.state.energy = energy;
         }
 
+        self.physics.clamp_velocity(&mut object.state.velocity);
+
         if let Some(landscape) = landscape.as_ref() {
             let resolution =
                 landscape.resolve_collision(object.state.position, object.state.velocity);
@@ -490,6 +554,14 @@ impl Engine {
                 state.position = resolution.position;
                 state.velocity = resolution.velocity;
             }
+        }
+    }
+
+    fn apply_physics_at_index(&mut self, idx: usize) {
+        if let Some(object) = self.objects.get_mut(idx) {
+            let new_vy = object.state.velocity.y.saturating_add(self.physics.gravity);
+            object.state.velocity.y = new_vy;
+            self.physics.clamp_velocity(&mut object.state.velocity);
         }
     }
 
@@ -542,6 +614,8 @@ impl Engine {
             },
         );
 
+        self.physics.clamp_velocity(&mut object.state.velocity);
+
         let mut additional_spawns = Vec::new();
         if self
             .definitions
@@ -565,6 +639,7 @@ impl Engine {
                 });
             }
             object.state.apply_delta(&command.delta);
+            self.physics.clamp_velocity(&mut object.state.velocity);
             additional_spawns = command.spawns;
         }
 
@@ -824,13 +899,13 @@ mod tests {
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.position, Vector2::new(1, 0));
-        assert_eq!(object.velocity, Vector2::new(2, 0));
+        assert_eq!(object.position, Vector2::new(1, 1));
+        assert_eq!(object.velocity, Vector2::new(2, 1));
 
         let snapshot = engine.tick().expect("second tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.position, Vector2::new(3, 0));
-        assert_eq!(object.velocity, Vector2::new(3, 0));
+        assert_eq!(object.position, Vector2::new(3, 3));
+        assert_eq!(object.velocity, Vector2::new(3, 2));
     }
 
     #[test]
@@ -862,7 +937,7 @@ mod tests {
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.position, Vector2::new(0, 0));
+        assert_eq!(object.position, Vector2::new(0, 1));
         assert_eq!(object.energy, 42);
         assert_eq!(snapshot.objects.len(), 2, "spawned child should exist");
 
@@ -871,7 +946,7 @@ mod tests {
             .iter()
             .find(|obj| obj.id != id)
             .expect("child object present");
-        assert_eq!(spawned.position, Vector2::new(5, 0));
+        assert_eq!(spawned.position, Vector2::new(5, 1));
         assert_eq!(spawned.energy, 42);
     }
 
@@ -1019,5 +1094,27 @@ mod tests {
             EngineError::UnknownObject(id) => assert_eq!(id.as_u64(), 999),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn custom_physics_settings_affect_integration() {
+        let mut engine = Engine::with_seed(42);
+        engine
+            .register_definition(build_definition())
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(2, 6, -8));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_position(Vector2::new(0, 0))
+                    .with_velocity(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity.y, 2);
+        assert_eq!(object.position.y, 2);
     }
 }
