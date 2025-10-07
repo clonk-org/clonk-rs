@@ -225,6 +225,8 @@ pub struct ObjectState {
     pub effects: Vec<EffectState>,
     #[serde(default = "default_owner")]
     pub owner: i32,
+    #[serde(default)]
+    pub crew_member: bool,
 }
 
 impl ObjectState {
@@ -244,6 +246,9 @@ impl ObjectState {
         if let Some(owner) = delta.owner {
             self.owner = owner;
         }
+        if let Some(crew_member) = delta.crew_member {
+            self.crew_member = crew_member;
+        }
     }
 }
 
@@ -254,6 +259,7 @@ struct ObjectDelta {
     energy: Option<i32>,
     action: Option<ActionUpdate>,
     owner: Option<i32>,
+    crew_member: Option<bool>,
 }
 
 impl From<ObjectUpdate> for ObjectDelta {
@@ -264,6 +270,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             energy: update.energy,
             action: update.action,
             owner: update.owner,
+            crew_member: update.crew_member,
         }
     }
 }
@@ -276,6 +283,8 @@ pub struct ObjectUpdate {
     pub action: Option<ActionUpdate>,
     #[serde(default)]
     pub owner: Option<i32>,
+    #[serde(default)]
+    pub crew_member: Option<bool>,
 }
 
 impl ObjectUpdate {
@@ -319,6 +328,11 @@ impl ObjectUpdate {
 
     pub fn with_owner(mut self, owner: i32) -> Self {
         self.owner = Some(owner);
+        self
+    }
+
+    pub fn with_crew_member(mut self, crew_member: bool) -> Self {
+        self.crew_member = Some(crew_member);
         self
     }
 }
@@ -427,6 +441,7 @@ impl Object {
             action: self.state.action.clone(),
             effects: self.state.effects.clone(),
             owner: self.state.owner,
+            crew_member: self.state.crew_member,
         }
     }
 
@@ -600,6 +615,8 @@ pub struct SpawnConfig {
     #[serde(default)]
     pub effects: Vec<EffectState>,
     pub owner: i32,
+    #[serde(default)]
+    pub crew_member: Option<bool>,
 }
 
 impl SpawnConfig {
@@ -612,6 +629,7 @@ impl SpawnConfig {
             action: None,
             effects: Vec::new(),
             owner: OWNER_NONE,
+            crew_member: None,
         }
     }
 
@@ -649,6 +667,11 @@ impl SpawnConfig {
         self.owner = owner;
         self
     }
+
+    pub fn with_crew_member(mut self, crew_member: bool) -> Self {
+        self.crew_member = Some(crew_member);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -664,6 +687,8 @@ pub struct ObjectSnapshot {
     pub effects: Vec<EffectState>,
     #[serde(default = "default_owner")]
     pub owner: i32,
+    #[serde(default)]
+    pub crew_member: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -705,6 +730,7 @@ pub struct Definition {
     has_initialize: bool,
     has_step: bool,
     action_library: ActionLibrary,
+    crew_member: bool,
 }
 
 impl Definition {
@@ -733,6 +759,7 @@ impl Definition {
             has_initialize,
             has_step,
             action_library: ActionLibrary::default(),
+            crew_member: false,
         })
     }
 
@@ -762,6 +789,14 @@ impl Definition {
 
     pub fn default_action_state(&self) -> ActionState {
         ActionState::new(self.action_library.default_action())
+    }
+
+    pub fn is_crew(&self) -> bool {
+        self.crew_member
+    }
+
+    pub fn set_crew_member(&mut self, crew_member: bool) {
+        self.crew_member = crew_member;
     }
 
     fn call_initialize(
@@ -974,6 +1009,14 @@ impl Engine {
         self.environment = environment;
     }
 
+    pub fn crew_members(&self, owner: i32) -> Vec<ObjectId> {
+        self.objects
+            .iter()
+            .filter(|object| object.state.crew_member && object.state.owner == owner)
+            .map(|object| object.id)
+            .collect()
+    }
+
     pub fn register_definition(&mut self, definition: Definition) -> Result<(), EngineError> {
         let id = definition.id().to_string();
         if self.definitions.contains_key(&id) {
@@ -1149,6 +1192,9 @@ impl Engine {
         if let Some(owner) = update.owner {
             object.state.owner = owner;
         }
+        if let Some(crew_member) = update.crew_member {
+            object.state.crew_member = crew_member;
+        }
 
         self.physics.clamp_velocity(&mut object.state.velocity);
 
@@ -1246,6 +1292,7 @@ impl Engine {
                     action: snapshot.action.clone(),
                     effects: snapshot.effects.clone(),
                     owner: snapshot.owner,
+                    crew_member: snapshot.crew_member,
                 },
             );
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
@@ -1368,6 +1415,7 @@ impl Engine {
             action,
             effects,
             owner,
+            crew_member,
         } = config;
 
         let definition_ref = self
@@ -1378,6 +1426,7 @@ impl Engine {
             Some(state) => state,
             None => definition_ref.default_action_state(),
         };
+        let initial_crew_member = crew_member.unwrap_or_else(|| definition_ref.is_crew());
 
         let id = self.next_object_id();
         let mut object = Object::new(
@@ -1390,6 +1439,7 @@ impl Engine {
                 action: initial_action,
                 effects: Vec::new(),
                 owner,
+                crew_member: initial_crew_member,
             },
         );
 
@@ -1481,6 +1531,7 @@ fn build_state_value(definition_id: &str, object_id: ObjectId, state: &ObjectSta
     map.insert("velocity".into(), state.velocity.to_value());
     map.insert("energy".into(), Value::Int(state.energy));
     map.insert("owner".into(), Value::Int(state.owner));
+    map.insert("crew_member".into(), Value::Bool(state.crew_member));
     let mut action = HashMap::with_capacity(2);
     action.insert("name".into(), Value::String(state.action.name.clone()));
     action.insert("phase".into(), Value::Int(state.action.phase));
@@ -1820,15 +1871,26 @@ fn value_to_spawns(
             Some(action_state)
         };
 
-        spawns.push(SpawnConfig {
-            definition_id,
-            position,
-            velocity,
-            energy,
-            action: action_override,
-            effects: Vec::new(),
-            owner,
-        });
+        let crew_member = match map.get("crew_member") {
+            Some(value) => Some(value_to_bool(definition, function, value.clone())?),
+            None => None,
+        };
+
+        let mut spawn = SpawnConfig::new(definition_id.clone())
+            .with_position(position)
+            .with_velocity(velocity)
+            .with_energy(energy)
+            .with_owner(owner);
+
+        if let Some(action_state) = action_override {
+            spawn = spawn.with_action(action_state);
+        }
+
+        if let Some(crew_member) = crew_member {
+            spawn = spawn.with_crew_member(crew_member);
+        }
+
+        spawns.push(spawn);
     }
 
     Ok(spawns)
@@ -2411,6 +2473,37 @@ mod tests {
 
         let snapshot = engine.object_snapshot(id).expect("snapshot available");
         assert_eq!(snapshot.owner, 2);
+    }
+
+    #[test]
+    fn crew_members_enumerates_owned_crew() {
+        let mut engine = Engine::with_seed(0);
+        let mut definition = build_definition();
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let crew_owner_one = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .expect("spawn succeeds");
+        let crew_owner_two = engine
+            .spawn_object(SpawnConfig::new("Test").with_owner(2))
+            .expect("spawn succeeds");
+        engine
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_owner(1)
+                    .with_crew_member(false),
+            )
+            .expect("spawn succeeds");
+
+        let mut owner_one_members = engine.crew_members(1);
+        owner_one_members.sort_by_key(|id| id.as_u64());
+        assert_eq!(owner_one_members, vec![crew_owner_one]);
+
+        assert_eq!(engine.crew_members(2), vec![crew_owner_two]);
+        assert!(engine.crew_members(3).is_empty());
     }
 
     #[test]

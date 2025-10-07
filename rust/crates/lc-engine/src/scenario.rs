@@ -42,6 +42,7 @@ struct ScenarioDefinition {
     name: Option<String>,
     script: String,
     actions: Option<DefinitionActions>,
+    crew_member: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +126,7 @@ impl Scenario {
             if let Some(actions) = &definition.actions {
                 compiled.configure_actions(actions.default_action.clone(), actions.specs.clone());
             }
+            compiled.set_crew_member(definition.crew_member);
             engine.register_definition(compiled)?;
         }
 
@@ -150,6 +152,7 @@ impl Scenario {
                 script,
                 default_action,
                 actions,
+                crew_member,
             } = definition;
 
             if !seen_ids.insert(id.clone()) {
@@ -190,6 +193,7 @@ impl Scenario {
                 name,
                 script: script_source,
                 actions,
+                crew_member,
             });
         }
 
@@ -207,6 +211,7 @@ impl Scenario {
                 owner,
                 action,
                 effects,
+                crew_member,
             } = object;
 
             let mut spawn = SpawnConfig::new(definition.clone());
@@ -231,6 +236,20 @@ impl Scenario {
                     .map(EffectManifest::into_state)
                     .collect();
                 spawn = spawn.with_effects(effect_states);
+            }
+            let default_crew = definitions
+                .iter()
+                .find(|candidate| candidate.id == definition)
+                .map(|definition| definition.crew_member)
+                .unwrap_or(false);
+            match crew_member {
+                Some(value) => {
+                    spawn = spawn.with_crew_member(value);
+                }
+                None if default_crew => {
+                    spawn = spawn.with_crew_member(true);
+                }
+                None => {}
             }
             spawns.push(spawn);
         }
@@ -293,6 +312,8 @@ struct DefinitionManifest {
     default_action: Option<String>,
     #[serde(default)]
     actions: HashMap<String, ActionSpec>,
+    #[serde(default)]
+    crew_member: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -310,6 +331,8 @@ struct ObjectManifest {
     action: Option<ActionManifest>,
     #[serde(default)]
     effects: Vec<EffectManifest>,
+    #[serde(default)]
+    crew_member: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -764,6 +787,43 @@ global func Step(state, frame, random)
 
         let configured = engine.environment();
         assert_eq!(configured, EnvironmentSettings::default());
+    }
+
+    #[test]
+    fn scenario_tracks_crew_member_flags() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Crew", "script": "scripts/crew.aul", "crew_member": true }
+            ],
+            "initial_objects": [
+                { "definition": "Crew", "owner": 1 },
+                { "definition": "Crew", "owner": 2, "crew_member": false }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/crew.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        let created = scenario.apply(&mut engine).expect("scenario applies");
+
+        assert_eq!(created.len(), 2);
+        let first = engine
+            .object_snapshot(created[0])
+            .expect("first object snapshot");
+        assert!(first.crew_member);
+        assert_eq!(first.owner, 1);
+
+        let second = engine
+            .object_snapshot(created[1])
+            .expect("second object snapshot");
+        assert!(!second.crew_member);
+        assert_eq!(second.owner, 2);
     }
 
     #[test]

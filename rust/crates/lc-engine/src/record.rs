@@ -209,6 +209,12 @@ fn describe_snapshot_mismatch(
                         id, expected_obj.owner, actual_obj.owner
                     ));
                 }
+                if expected_obj.crew_member != actual_obj.crew_member {
+                    problems.push(format!(
+                        "object {} crew_member expected {}, got {}",
+                        id, expected_obj.crew_member, actual_obj.crew_member
+                    ));
+                }
                 if expected_obj.action.name != actual_obj.action.name {
                     problems.push(format!(
                         "object {} action expected {}, got {}",
@@ -265,6 +271,7 @@ mod tests {
                 action: ActionState::default(),
                 effects: Vec::new(),
                 owner: OWNER_NONE,
+                crew_member: false,
             }],
         }
     }

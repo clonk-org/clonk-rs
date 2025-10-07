@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +27,7 @@ typedef struct LcEngineObjectSnapshot {
     int32_t velocity_y;
     int32_t energy;
     int32_t owner;
+    bool crew_member;
     const char *action_name;
     int32_t action_phase;
     const LcEngineEffectSnapshot *effects;

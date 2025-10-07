@@ -99,6 +99,7 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
         entry.snapshot.velocity_y = fixtoi(object->ydir);
         entry.snapshot.energy = object->Energy;
         entry.snapshot.owner = static_cast<int32_t>(object->Owner);
+        entry.snapshot.crew_member = (object->OCF & OCF_CrewMember) != 0;
         entry.action = object->Action.Name;
         entry.snapshot.action_name = entry.action.c_str();
         entry.snapshot.action_phase = object->Action.Phase;
