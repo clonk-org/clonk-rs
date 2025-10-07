@@ -400,11 +400,25 @@ impl PhysicsManifest {
 struct EnvironmentManifest {
     #[serde(default)]
     wind: Option<i32>,
+    #[serde(default)]
+    wind_variation: Option<i32>,
+    #[serde(default)]
+    wind_period: Option<u32>,
+    #[serde(default)]
+    temperature: Option<i32>,
 }
 
 impl EnvironmentManifest {
     fn into_settings(self) -> EnvironmentSettings {
-        EnvironmentSettings::new(self.wind.unwrap_or(0))
+        let mut settings = EnvironmentSettings::new(self.wind.unwrap_or(0));
+        if let Some(variation) = self.wind_variation {
+            let period = self.wind_period.unwrap_or(120);
+            settings = settings.with_wind_variation(variation, period);
+        }
+        if let Some(temperature) = self.temperature {
+            settings = settings.with_temperature(temperature);
+        }
+        settings
     }
 }
 
@@ -655,6 +669,9 @@ global func Step(state, frame, random)
         let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
         let environment = scenario.environment().expect("environment present");
         assert_eq!(environment.wind, -3);
+        assert_eq!(environment.wind_variation, 0);
+        assert_eq!(environment.wind_period, 0);
+        assert_eq!(environment.temperature, 0);
 
         let mut engine = Engine::with_seed(0);
         let created = scenario.apply(&mut engine).expect("scenario applies");
@@ -662,6 +679,49 @@ global func Step(state, frame, random)
 
         let configured = engine.environment();
         assert_eq!(configured.wind, -3);
+        assert_eq!(configured.wind_variation, 0);
+        assert_eq!(configured.wind_period, 0);
+        assert_eq!(configured.temperature, 0);
+    }
+
+    #[test]
+    fn loads_environment_variation_and_temperature() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Mover", "script": "scripts/mover.aul" }
+            ],
+            "environment": {
+                "wind": 4,
+                "wind_variation": -6,
+                "wind_period": 180,
+                "temperature": -15
+            },
+            "initial_objects": [
+                { "definition": "Mover" }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let environment = scenario.environment().expect("environment present");
+        assert_eq!(environment.wind, 4);
+        assert_eq!(environment.wind_variation, 6);
+        assert_eq!(environment.wind_period, 180);
+        assert_eq!(environment.temperature, -15);
+
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let configured = engine.environment();
+        assert_eq!(configured.wind, 4);
+        assert_eq!(configured.wind_variation, 6);
+        assert_eq!(configured.wind_period, 180);
+        assert_eq!(configured.temperature, -15);
     }
 
     #[test]

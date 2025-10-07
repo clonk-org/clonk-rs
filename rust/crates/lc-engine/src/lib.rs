@@ -121,23 +121,63 @@ impl Default for PhysicsSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentSettings {
     pub wind: i32,
+    #[serde(default)]
+    pub wind_variation: i32,
+    #[serde(default)]
+    pub wind_period: u32,
+    #[serde(default)]
+    pub temperature: i32,
 }
 
 impl EnvironmentSettings {
     pub const fn new(wind: i32) -> Self {
-        Self { wind }
+        Self {
+            wind,
+            wind_variation: 0,
+            wind_period: 0,
+            temperature: 0,
+        }
     }
 
-    fn apply_to_velocity(&self, velocity: &mut Vector2) {
-        if self.wind != 0 {
-            velocity.x = velocity.x.saturating_add(self.wind);
+    pub fn with_wind_variation(mut self, variation: i32, period: u32) -> Self {
+        if variation == 0 {
+            self.wind_variation = 0;
+            self.wind_period = 0;
+            return self;
+        }
+        self.wind_variation = variation.abs();
+        self.wind_period = period.max(2);
+        self
+    }
+
+    pub fn with_temperature(mut self, temperature: i32) -> Self {
+        self.temperature = temperature;
+        self
+    }
+
+    pub fn wind_force(&self, frame: u64) -> i32 {
+        if self.wind_variation == 0 || self.wind_period == 0 {
+            return self.wind;
+        }
+
+        let period = self.wind_period as f32;
+        let phase = (frame % self.wind_period as u64) as f32 / period;
+        let angle = phase * core::f32::consts::TAU;
+        let delta = (self.wind_variation as f32 * angle.sin()).round() as i32;
+        self.wind.saturating_add(delta)
+    }
+
+    fn apply_to_velocity(&self, velocity: &mut Vector2, frame: u64) {
+        let wind_force = self.wind_force(frame);
+        if wind_force != 0 {
+            velocity.x = velocity.x.saturating_add(wind_force);
         }
     }
 }
 
 impl Default for EnvironmentSettings {
     fn default() -> Self {
-        Self { wind: 0 }
+        Self::new(0)
     }
 }
 
@@ -1231,7 +1271,7 @@ impl Engine {
             let new_vy = object.state.velocity.y.saturating_add(self.physics.gravity);
             object.state.velocity.y = new_vy;
             self.environment
-                .apply_to_velocity(&mut object.state.velocity);
+                .apply_to_velocity(&mut object.state.velocity, self.frame);
             self.physics.clamp_velocity(&mut object.state.velocity);
         }
     }
@@ -2160,6 +2200,20 @@ mod tests {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity, Vector2::new(4, 2));
         assert_eq!(object.position, Vector2::new(6, 3));
+    }
+
+    #[test]
+    fn wind_force_respects_variation_and_period() {
+        let settings = EnvironmentSettings::new(2).with_wind_variation(4, 4);
+        assert_eq!(settings.wind_force(0), 2);
+        assert_eq!(settings.wind_force(1), 6);
+        assert_eq!(settings.wind_force(2), 2);
+        assert_eq!(settings.wind_force(3), -2);
+        assert_eq!(settings.wind_force(4), 2);
+
+        let default_period = EnvironmentSettings::new(1).with_wind_variation(3, 0);
+        assert_eq!(default_period.wind_variation, 3);
+        assert_eq!(default_period.wind_period, 2);
     }
 
     #[test]

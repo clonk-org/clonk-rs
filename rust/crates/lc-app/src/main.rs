@@ -96,7 +96,14 @@ fn print_summary(summary: &GameSummary) {
         "Physics: gravity {} max_fall {} max_rise {}",
         summary.gravity, summary.max_fall_speed, summary.max_rise_speed
     );
-    println!("Environment: wind {}", summary.wind);
+    println!(
+        "Environment: wind {} (base {} +/- {} period {} temperature {})",
+        summary.environment.current_wind,
+        summary.environment.base_wind,
+        summary.environment.wind_variation,
+        summary.environment.wind_period,
+        summary.environment.temperature
+    );
     println!("Frames simulated: {}", summary.ticks);
     println!("Ground contacts: {}", summary.ground_hits);
     println!("Control ready batches: {}", summary.ready_batches);

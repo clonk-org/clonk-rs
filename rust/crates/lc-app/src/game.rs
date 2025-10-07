@@ -112,6 +112,15 @@ impl Default for DemoGameOptions {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct EnvironmentSummary {
+    pub base_wind: i32,
+    pub wind_variation: i32,
+    pub wind_period: u32,
+    pub temperature: i32,
+    pub current_wind: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct GameSummary {
     pub ticks: u32,
     pub ground_hits: u32,
@@ -128,7 +137,7 @@ pub struct GameSummary {
     pub gravity: i32,
     pub max_fall_speed: i32,
     pub max_rise_speed: i32,
-    pub wind: i32,
+    pub environment: EnvironmentSummary,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -517,7 +526,14 @@ impl DemoGame {
 
         let final_snapshot = last_snapshot.unwrap_or_else(|| self.engine.snapshot());
         let physics = self.engine.physics();
-        let environment = self.engine.environment();
+        let environment_settings = self.engine.environment();
+        let environment = EnvironmentSummary {
+            base_wind: environment_settings.wind,
+            wind_variation: environment_settings.wind_variation,
+            wind_period: environment_settings.wind_period,
+            temperature: environment_settings.temperature,
+            current_wind: environment_settings.wind_force(self.engine.frame()),
+        };
         Ok(GameSummary {
             ticks: executed_ticks,
             ground_hits,
@@ -534,7 +550,7 @@ impl DemoGame {
             gravity: physics.gravity,
             max_fall_speed: physics.max_fall_speed,
             max_rise_speed: physics.max_rise_speed,
-            wind: environment.wind,
+            environment,
         })
     }
 
