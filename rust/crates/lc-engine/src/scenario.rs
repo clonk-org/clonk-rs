@@ -6,8 +6,8 @@ use lc_resources::{Group, GroupError};
 use serde::Deserialize;
 
 use crate::{
-    action::ActionSpec, Definition, Engine, EngineError, Landscape, ObjectId, PhysicsSettings,
-    SpawnConfig, Vector2,
+    action::ActionSpec, ActionState, Definition, EffectState, Engine, EngineError, Landscape,
+    ObjectId, PhysicsSettings, SpawnConfig, Vector2,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -192,18 +192,38 @@ impl Scenario {
                 return Err(ScenarioError::UnknownDefinition(object.definition));
             }
 
-            let mut spawn = SpawnConfig::new(object.definition.clone());
-            if let Some(position) = object.position {
+            let ObjectManifest {
+                definition,
+                position,
+                velocity,
+                energy,
+                owner,
+                action,
+                effects,
+            } = object;
+
+            let mut spawn = SpawnConfig::new(definition.clone());
+            if let Some(position) = position {
                 spawn = spawn.with_position(Vector2::new(position[0], position[1]));
             }
-            if let Some(velocity) = object.velocity {
+            if let Some(velocity) = velocity {
                 spawn = spawn.with_velocity(Vector2::new(velocity[0], velocity[1]));
             }
-            if let Some(energy) = object.energy {
+            if let Some(energy) = energy {
                 spawn = spawn.with_energy(energy);
             }
-            if let Some(owner) = object.owner {
+            if let Some(owner) = owner {
                 spawn = spawn.with_owner(owner);
+            }
+            if let Some(action) = action {
+                spawn = spawn.with_action(action.into_state());
+            }
+            if !effects.is_empty() {
+                let effect_states = effects
+                    .into_iter()
+                    .map(EffectManifest::into_state)
+                    .collect();
+                spawn = spawn.with_effects(effect_states);
             }
             spawns.push(spawn);
         }
@@ -275,6 +295,55 @@ struct ObjectManifest {
     energy: Option<i32>,
     #[serde(default)]
     owner: Option<i32>,
+    #[serde(default)]
+    action: Option<ActionManifest>,
+    #[serde(default)]
+    effects: Vec<EffectManifest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActionManifest {
+    name: String,
+    #[serde(default)]
+    phase: Option<i32>,
+}
+
+impl ActionManifest {
+    fn into_state(self) -> ActionState {
+        let mut state = ActionState::new(self.name);
+        if let Some(phase) = self.phase {
+            state.phase = phase;
+        }
+        state
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct EffectManifest {
+    name: String,
+    #[serde(default = "EffectManifest::default_priority")]
+    priority: i32,
+    #[serde(default = "EffectManifest::default_interval")]
+    interval: i32,
+    #[serde(default)]
+    timer: i32,
+}
+
+impl EffectManifest {
+    fn default_priority() -> i32 {
+        100
+    }
+
+    fn default_interval() -> i32 {
+        1
+    }
+
+    fn into_state(self) -> EffectState {
+        EffectState::new(self.name)
+            .with_priority(self.priority)
+            .with_interval(self.interval)
+            .with_timer(self.timer)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -421,6 +490,56 @@ global func Step(state, frame, random)
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.action.name, "Idle");
         assert_eq!(object.action.phase, 0);
+    }
+
+    #[test]
+    fn seeds_initial_action_and_effects_from_manifest() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                {
+                    "id": "Mover",
+                    "script": "scripts/mover.aul",
+                    "default_action": "Idle",
+                    "actions": {
+                        "Idle": { "length": 1 },
+                        "Walk": { "length": 5, "next": "Idle" }
+                    }
+                }
+            ],
+            "initial_objects": [
+                {
+                    "definition": "Mover",
+                    "action": { "name": "Walk", "phase": 3 },
+                    "effects": [
+                        { "name": "Intoxicated", "priority": 150, "interval": 3, "timer": 5 }
+                    ]
+                }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        let created = scenario.apply(&mut engine).expect("scenario applies");
+        assert_eq!(created.len(), 1);
+
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.objects.len(), 1);
+        let object = &snapshot.objects[0];
+        assert_eq!(object.action.name, "Walk");
+        assert_eq!(object.action.phase, 3);
+        assert_eq!(object.effects.len(), 1);
+        let effect = &object.effects[0];
+        assert_eq!(effect.name, "Intoxicated");
+        assert_eq!(effect.priority, 150);
+        assert_eq!(effect.interval, 3);
+        assert_eq!(effect.timer, 2);
     }
 
     #[test]

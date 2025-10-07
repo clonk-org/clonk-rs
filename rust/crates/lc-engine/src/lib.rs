@@ -503,6 +503,8 @@ pub struct SpawnConfig {
     pub velocity: Vector2,
     pub energy: i32,
     pub action: Option<ActionState>,
+    #[serde(default)]
+    pub effects: Vec<EffectState>,
     pub owner: i32,
 }
 
@@ -514,6 +516,7 @@ impl SpawnConfig {
             velocity: Vector2::ZERO,
             energy: 0,
             action: None,
+            effects: Vec::new(),
             owner: OWNER_NONE,
         }
     }
@@ -535,6 +538,16 @@ impl SpawnConfig {
 
     pub fn with_action(mut self, action: ActionState) -> Self {
         self.action = Some(action);
+        self
+    }
+
+    pub fn with_effects(mut self, effects: Vec<EffectState>) -> Self {
+        self.effects = effects;
+        self
+    }
+
+    pub fn add_effect(mut self, effect: EffectState) -> Self {
+        self.effects.push(effect);
         self
     }
 
@@ -1224,6 +1237,7 @@ impl Engine {
             velocity,
             energy,
             action,
+            effects,
             owner,
         } = config;
 
@@ -1250,10 +1264,16 @@ impl Engine {
             },
         );
 
+        let mut effect_events = Vec::new();
+        if !effects.is_empty() {
+            let commands: Vec<_> = effects.into_iter().map(EffectCommand::Add).collect();
+            let mut initial_events = object.apply_effect_commands(&commands);
+            effect_events.append(&mut initial_events);
+        }
+
         self.physics.clamp_velocity(&mut object.state.velocity);
 
         let mut additional_spawns = Vec::new();
-        let mut effect_events = Vec::new();
         if self
             .definitions
             .get(&definition_id)
@@ -1673,6 +1693,7 @@ fn value_to_spawns(
             velocity,
             energy,
             action: action_override,
+            effects: Vec::new(),
             owner,
         });
     }
