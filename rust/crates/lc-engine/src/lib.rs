@@ -145,6 +145,17 @@ struct ObjectDelta {
     action: Option<ActionUpdate>,
 }
 
+impl From<ObjectUpdate> for ObjectDelta {
+    fn from(update: ObjectUpdate) -> Self {
+        Self {
+            position: update.position,
+            velocity: update.velocity,
+            energy: update.energy,
+            action: update.action,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectUpdate {
     pub position: Option<Vector2>,
@@ -193,12 +204,38 @@ impl ObjectUpdate {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedCommand {
+    pub delay: u32,
+    pub update: ObjectUpdate,
+}
+
+impl QueuedCommand {
+    pub fn new(delay: u32, update: ObjectUpdate) -> Self {
+        Self { delay, update }
+    }
+
+    pub fn immediate(update: ObjectUpdate) -> Self {
+        Self { delay: 0, update }
+    }
+
+    pub fn with_delay(mut self, delay: u32) -> Self {
+        self.delay = delay;
+        self
+    }
+
+    pub fn update(&self) -> &ObjectUpdate {
+        &self.update
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Object {
     id: ObjectId,
     definition_id: DefinitionId,
     state: ObjectState,
     destroyed: bool,
+    command_queue: VecDeque<QueuedCommand>,
 }
 
 impl Object {
@@ -208,6 +245,7 @@ impl Object {
             definition_id,
             state,
             destroyed: false,
+            command_queue: VecDeque::new(),
         }
     }
 
@@ -223,6 +261,43 @@ impl Object {
             velocity: self.state.velocity,
             energy: self.state.energy,
             action: self.state.action.clone(),
+        }
+    }
+
+    fn enqueue_commands<I>(&mut self, commands: I)
+    where
+        I: IntoIterator<Item = QueuedCommand>,
+    {
+        self.command_queue.extend(commands);
+    }
+
+    fn execute_command_queue(&mut self, physics: &PhysicsSettings, landscape: Option<&Landscape>) {
+        loop {
+            let execute_now = match self.command_queue.front_mut() {
+                Some(command) if command.delay == 0 => true,
+                Some(command) => {
+                    command.delay -= 1;
+                    false
+                }
+                None => break,
+            };
+
+            if !execute_now {
+                break;
+            }
+
+            let command = self.command_queue.pop_front().expect("front exists");
+            let delta: ObjectDelta = command.update.into();
+            self.state.apply_delta(&delta);
+            physics.clamp_velocity(&mut self.state.velocity);
+            if let Some(landscape) = landscape {
+                let resolution =
+                    landscape.resolve_collision(self.state.position, self.state.velocity);
+                if resolution.collided {
+                    self.state.position = resolution.position;
+                    self.state.velocity = resolution.velocity;
+                }
+            }
         }
     }
 }
@@ -418,6 +493,7 @@ struct CommandBatch {
     delta: ObjectDelta,
     spawns: Vec<SpawnConfig>,
     destroy: bool,
+    commands: Vec<QueuedCommand>,
 }
 
 pub struct Engine {
@@ -493,7 +569,12 @@ impl Engine {
         self.frame += 1;
         let frame = self.frame;
         let mut spawn_requests = Vec::new();
+        let landscape_for_commands = self.landscape.clone();
         for idx in 0..self.objects.len() {
+            {
+                let object = &mut self.objects[idx];
+                object.execute_command_queue(&self.physics, landscape_for_commands.as_ref());
+            }
             {
                 let object = &mut self.objects[idx];
                 object.state.action.advance();
@@ -519,16 +600,26 @@ impl Engine {
                 definition.call_step(&state_snapshot, object_id, frame, random)?
             };
 
+            let CommandBatch {
+                delta,
+                spawns,
+                destroy,
+                commands,
+            } = command;
+
             {
                 let object = &mut self.objects[idx];
-                object.state.apply_delta(&command.delta);
+                object.state.apply_delta(&delta);
                 self.physics.clamp_velocity(&mut object.state.velocity);
-                if command.destroy {
+                if destroy {
                     object.mark_destroyed();
+                }
+                if !commands.is_empty() {
+                    object.enqueue_commands(commands);
                 }
             }
             self.apply_landscape_at_index(idx);
-            spawn_requests.extend(command.spawns.into_iter());
+            spawn_requests.extend(spawns.into_iter());
         }
 
         self.objects.retain(|object| !object.destroyed);
@@ -579,6 +670,27 @@ impl Engine {
             }
         }
 
+        Ok(())
+    }
+
+    pub fn queue_object_command(
+        &mut self,
+        id: ObjectId,
+        command: QueuedCommand,
+    ) -> Result<(), EngineError> {
+        self.queue_object_commands(id, std::iter::once(command))
+    }
+
+    pub fn queue_object_commands<I>(&mut self, id: ObjectId, commands: I) -> Result<(), EngineError>
+    where
+        I: IntoIterator<Item = QueuedCommand>,
+    {
+        let object = self
+            .objects
+            .iter_mut()
+            .find(|object| object.id == id)
+            .ok_or(EngineError::UnknownObject(id))?;
+        object.enqueue_commands(commands);
         Ok(())
     }
 
@@ -676,23 +788,31 @@ impl Engine {
             .unwrap_or(false)
         {
             let random = self.next_random_i32();
-            let command = {
+            let CommandBatch {
+                delta,
+                spawns,
+                destroy,
+                commands,
+            } = {
                 let definition = self
                     .definitions
                     .get(&definition_id)
                     .expect("definition must exist");
                 definition.call_initialize(&object.state, id, random)?
             };
-            if command.destroy {
+            if destroy {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition_id.clone(),
                     function: "Initialize",
                     detail: "Initialize may not destroy the object".into(),
                 });
             }
-            object.state.apply_delta(&command.delta);
+            object.state.apply_delta(&delta);
             self.physics.clamp_velocity(&mut object.state.velocity);
-            additional_spawns = command.spawns;
+            if !commands.is_empty() {
+                object.enqueue_commands(commands);
+            }
+            additional_spawns = spawns;
         }
 
         self.apply_landscape(&mut object.state);
@@ -793,6 +913,11 @@ fn parse_command_from_proplist(
                     .spawns
                     .extend(value_to_spawns(definition, function, value)?);
             }
+            "commands" => {
+                batch
+                    .commands
+                    .extend(value_to_commands(definition, function, value)?);
+            }
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
@@ -807,6 +932,10 @@ fn parse_command_from_proplist(
 
 fn ensure_action_delta(delta: &mut ObjectDelta) -> &mut ActionUpdate {
     delta.action.get_or_insert_with(ActionUpdate::default)
+}
+
+fn ensure_action_update(update: &mut ObjectUpdate) -> &mut ActionUpdate {
+    update.action.get_or_insert_with(ActionUpdate::default)
 }
 
 fn value_to_action(
@@ -1008,6 +1137,88 @@ fn value_to_spawns(
     }
 
     Ok(spawns)
+}
+
+fn value_to_commands(
+    definition: &str,
+    function: &'static str,
+    value: Value,
+) -> Result<Vec<QueuedCommand>, EngineError> {
+    let array = match value {
+        Value::Array(values) => values,
+        other => {
+            return Err(EngineError::InvalidScriptOutput {
+                definition: definition.to_string(),
+                function,
+                detail: format!("expected array for commands, got {}", other.type_name()),
+            })
+        }
+    };
+
+    let mut commands = Vec::with_capacity(array.len());
+    for value in array {
+        let map = match value {
+            Value::Proplist(map) => map,
+            other => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function,
+                    detail: format!(
+                        "expected proplist for command entry, got {}",
+                        other.type_name()
+                    ),
+                })
+            }
+        };
+
+        let mut delay: Option<u32> = None;
+        let mut update = ObjectUpdate::default();
+
+        for (key, value) in map.into_iter() {
+            match key.as_str() {
+                "delay" => {
+                    let raw_delay = value_to_int(definition, function, value)?;
+                    if raw_delay < 0 {
+                        return Err(EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: "delay must be >= 0".into(),
+                        });
+                    }
+                    delay = Some(raw_delay as u32);
+                }
+                "position" => {
+                    update.position = Some(value_to_vector(definition, function, value)?);
+                }
+                "velocity" => {
+                    update.velocity = Some(value_to_vector(definition, function, value)?);
+                }
+                "energy" => {
+                    update.energy = Some(value_to_int(definition, function, value)?);
+                }
+                "action" => {
+                    if let Some(action) = value_to_action(definition, function, value)? {
+                        ensure_action_update(&mut update).merge(action);
+                    }
+                }
+                "action_phase" => {
+                    let phase = value_to_int(definition, function, value)?;
+                    ensure_action_update(&mut update).set_phase(phase);
+                }
+                other => {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: definition.to_string(),
+                        function,
+                        detail: format!("unexpected key `{other}` in command entry"),
+                    });
+                }
+            }
+        }
+
+        commands.push(QueuedCommand::new(delay.unwrap_or(0), update));
+    }
+
+    Ok(commands)
 }
 
 #[cfg(test)]
@@ -1306,5 +1517,90 @@ mod tests {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity.y, 2);
         assert_eq!(object.position.y, 2);
+    }
+
+    #[test]
+    fn queued_commands_apply_on_next_tick() {
+        let script = r#"
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(9);
+        engine
+            .register_definition(Definition::from_script("Actor", "Actor", script).unwrap())
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Actor")
+                    .with_position(Vector2::new(0, 0))
+                    .with_velocity(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+
+        engine
+            .queue_object_command(
+                id,
+                QueuedCommand::immediate(
+                    ObjectUpdate::new()
+                        .with_velocity(Vector2::new(3, -5))
+                        .with_action("Jump"),
+                ),
+            )
+            .expect("command enqueues");
+
+        let snapshot = engine.tick().expect("first tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Jump");
+        assert_eq!(object.velocity, Vector2::new(3, -4));
+        assert_eq!(object.position, Vector2::new(3, -4));
+
+        let snapshot = engine.tick().expect("second tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.position, Vector2::new(6, -7));
+    }
+
+    #[test]
+    fn step_script_can_enqueue_commands() {
+        let script = r#"
+        global func Step(state, frame, random) {
+            if (frame == 1) {
+                return {
+                    commands = [
+                        { velocity = [5, 0] },
+                        { delay = 1, action = { name = "Slide", phase = 0 } }
+                    ]
+                };
+            }
+            return nil;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(Definition::from_script("Actor", "Actor", script).unwrap())
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Actor")
+                    .with_position(Vector2::new(0, 0))
+                    .with_velocity(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+
+        let first = engine.tick().expect("first tick succeeds");
+        let object = first.object(id).expect("object present");
+        assert_eq!(object.velocity.x, 0);
+
+        let second = engine.tick().expect("second tick succeeds");
+        let object = second.object(id).expect("object present");
+        assert_eq!(object.velocity.x, 5);
+
+        let third = engine.tick().expect("third tick succeeds");
+        let object = third.object(id).expect("object present");
+        assert_eq!(object.action.name, "Slide");
     }
 }
