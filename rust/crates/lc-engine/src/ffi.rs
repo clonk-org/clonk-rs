@@ -130,6 +130,7 @@ unsafe fn make_snapshot(
     Some(SimulationSnapshot {
         frame,
         objects: snapshots,
+        global_effects: Vec::new(),
     })
 }
 

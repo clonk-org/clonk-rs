@@ -273,6 +273,7 @@ mod tests {
                 owner: OWNER_NONE,
                 crew_member: false,
             }],
+            global_effects: Vec::new(),
         }
     }
 
