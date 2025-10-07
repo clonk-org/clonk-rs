@@ -1,102 +1,44 @@
-# LegacyClonk Rust Port Plan
+# LegacyClonk Rust Port Evaluation
 
-## 1. Existing Architecture Snapshot
-- **Core runtime:** `Std*` utility classes, file I/O, threading (`StdApp`, `StdBuf`, `StdThread*`, etc.) under `src/Std*.{h,cpp}` and `src/C4*` foundation headers.
-- **Game engine:** Simulation, scenario management, object system (`C4Game*`, `C4Object*`, `C4Def*`, `C4Script*`).
-- **Scripting VM:** AUL parser/executor (`C4Aul*`) with bytecode interpreter and debugging support.
-- **Graphics stack:** OpenGL/SDL surfaces, texture handling, and GUI (`C4GraphicsSystem`, `StdGL*`, `C4Gui*`).
-- **Audio:** SDL2_mixer abstraction (`C4AudioSystem*`).
-- **Networking:** P2P control + lobby (`C4Network*`, `C4GameControlNetwork`, miniupnpc integration).
-- **Platform glue:** `StdAppWin32.cpp`, `StdAppUnix.cpp`, `StdSdlSubSystem.cpp`, macOS Objective-C++ shim.
-- **Tooling/tests:** Catch2 harness in `tests/`, build coordinated by CMake including third-party deps (SDL2, OpenGL, CURL, fmt, Freetype, Iconv, JPEG/PNG, OpenSSL, miniupnpc, X11, Zlib).
+## Summary
+- The Rust workspace delivers a standalone demo stack (`lc-app`) and validation harnesses, but it is **not** a drop-in replacement for the shipping C++ runtime.
+- Rust crates currently mirror only narrow slices of the engine, script VM, GUI, audio, graphics, and networking systems to support deterministic tests and exploratory tooling.
+- LegacyClonk still compiles and runs its gameplay, UI, rendering, audio, and networking through the original C++ code paths; Rust code is wired in behind optional validation flags.
 
-## 2. Target Rust Workspace Structure
-Use a Cargo workspace with layered crates to isolate concerns and allow incremental porting/testing.
+## Rust Workspace Scope
+- `lc-core`, `lc-resources`, `lc-script`, `lc-engine`, `lc-graphics`, `lc-audio`, `lc-network`, `lc-gui`, `lc-platform`, and `lc-app` provide demo-friendly utilities, parsers, in-memory surfaces, a toy physics loop, and basic networking abstractions.
+- `lc-app` drives a self-contained bounce simulation with a bundled AUL script and synthetic audio/graphics output; there is no scenario loading, viewport management, or player control integration.
+- `rust/include` exposes FFI headers so the C++ codebase can record/play back engine snapshots or cross-check groups/GUI layouts when the matching `USE_RUST_*` option is enabled.
 
-```
-legacyclonk-rs/
-├── Cargo.toml (workspace)
-├── crates/
-│   ├── lc-core/          # memory management, math, platform-agnostic utilities (Std* replacements)
-│   ├── lc-resources/     # group/file handling, compression, virtual filesystem
-│   ├── lc-script/        # AUL parser, bytecode, debugging hooks
-│   ├── lc-engine/        # gameplay, simulation loop, objects/definitions
-│   ├── lc-graphics/      # rendering, facet/surface abstractions
-│   ├── lc-audio/         # audio backend abstraction (cpal/rodio wrappers)
-│   ├── lc-network/       # control stream, lobby, HTTP, UPnP
-│   ├── lc-gui/           # in-game editor, dialogs, toast notifications
-│   ├── lc-platform/      # platform-specific bootstrap (winit/sdl glue, fs helpers)
-│   └── lc-app/           # final binary; parity with `LegacyClonk` launcher
-└── tools/
-    └── migration-scripts # optional transpilation helpers/tests
-```
+## Integration with the C++ Build
+- `CMakeLists.txt` keeps all Rust bridges behind opt-in switches (`USE_RUST_CONFIG`, `USE_RUST_GROUP_VALIDATION`, `USE_RUST_ENGINE_VALIDATION`, `USE_RUST_GUI_VALIDATION`). These default to `OFF` and only add validators plus static libraries when explicitly enabled.
+- The validation bridges (`src/rust/RustConfigBridge.cpp`, `RustGroupBridge.cpp`, `RustEngineBridge.cpp`, `RustGuiBridge.cpp`) consume Rust FFI helpers to compare C++ output with Rust expectations or to dump JSON recordings. They do not replace runtime logic.
+- No executable target links Rust crates as authoritative gameplay systems; the production binary continues to depend on the C++ implementations.
 
-Each crate exposes FFI-safe boundaries to ease testing and permit staged migration from the C++ runner if needed.
+## Component Parity Assessment
+- **Simulation / Object System:** `lc-engine` models position/velocity/energy for scripted objects and a flat landscape. There is no support for the C++ object status machine, action procs, vertices, effects, command queues, crew ownership, or scenario definition loading.
+- **Script VM:** `lc-script` parses and executes a subset of AUL with arithmetic, control flow, arrays, and proplists. Engine-call bindings, callback dispatch tables, effect lifecycles, and synchronization with the C++ object model are absent.
+- **Graphics:** `lc-graphics` works on CPU-resident RGBA surfaces and hash snapshots. It lacks texture streaming, OpenGL/WGL/SDL integration, blitting catalogs, shader management, viewport compositing, and render thread orchestration present in `StdGL*`.
+- **Audio:** `lc-audio` offers a software mixer with optional CPAL output for limited channel playback. The SDL_mixer-based backend, streaming music, positional audio, resampler choices, and sound bank handling from `C4AudioSystem` are not ported.
+- **GUI:** `lc-gui` implements a small immediate-mode layout system plus a scenario browser widget. It does not cover the extensive control hierarchy, themes, dialogs, game menus, or input focus logic provided by `C4GUI`.
+- **Networking:** `lc-network` covers control packet ordering, a thin lobby model, and decoding of a handful of TCP frame types. Full peer discovery, host migration, HTTP reference handling, UPnP, league integration, and flexible transport backends from `C4Network2` remain in C++.
+- **Resources & IO:** `lc-resources` can open groups and enumerate files, useful for validation. Features such as incremental writes, child group mutation, symbol lookup, and tight integration with scenario loading are missing.
+- **Core utilities:** `lc-core` includes Rust mirrors for some `Std*` helpers (`StdBuf`, `StdConfig`, scheduler, sync primitives). Many legacy-specific behaviors (platform message loops, window management, legacy threading quirks) stay in the original code.
+- **Platform bootstrap:** `lc-platform` only resolves application directories; it does not replace `StdApp*` entry points or SDL/winit startup glue.
 
-## 3. Mapping Highlights
-- `StdBuf`, `StdStrBuf`, `StdFile`, `StdSync`, `StdScheduler` → `lc-core` (leverage `Vec<u8>`, `String`, `std::sync` while preserving semantics like reference/view vs owned buffers using enum wrappers).
-- `C4Group`, `C4Folder`, `CStdFile` → `lc-resources` (use `flate2`, `zip`, `tar` crates as replacements for custom compression logic, ensure deterministic ordering).
-- `C4Aul*` → `lc-script` (Rust parser combinators + bytecode VM using enums/structs; consider `logos`/`lalrpop` or custom parser to replicate grammar).
-- `C4Game*`, `C4Object`, `C4Def` → `lc-engine` (entity management with ECS-like data structures; maintain deterministic fixed-step update loop identical to original).
-- `StdGL*`, `C4Graphics*`, `C4Surface*` → `lc-graphics` (target `wgpu`/`glow` depending on parity requirements; provide compatibility layer for original fixed pipeline expectations).
-- `C4AudioSystem*` → `lc-audio` (wrap SDL2_mixer parity via `sdl2` crate initially, then abstract to cross-platform backend).
-- `C4Network*`, `C4GameControlNetwork`, `C4HTTPClient` → `lc-network` (use `tokio`/`async-std` for async networking but keep deterministic message ordering; replicate miniupnpc using `igd` crate).
-- `C4Gui*`, `C4Startup*`, dialogs → `lc-gui` (port to Rust immediate-mode GUI using `egui`/custom; ensure identical layout by mirroring original widget tree data).
-- Platform entry points (`C4Application`, `StdApp*`, `C4WinMain`, `StdGtkWindow`, `StdSDLWindow`) → `lc-platform` (runtime directory/env discovery + FFI surface) and `lc-app` crates, with `winit`-backed bootstrap planned per OS.
+## Current Usage Patterns
+- Engine parity is evaluated by recording C++ snapshots and comparing them to Rust playback baselines. Failing comparisons raise warnings but do not stop the game.
+- Group and GUI validators serve as optional smoke tests during development. They are not enabled in release builds and do not gate asset loading.
 
-## 4. Porting Strategy
-1. **Foundation pass** – replicate low-level utilities (`lc-core`) with comprehensive unit tests derived from existing C++ behavior (use golden tests where available).
-   - [x] `StdBuf`, `StdStrBuf`, `StdFile`, `StdConfig`, `StdMarkup` implemented and under test in `lc-core`.
-   - [x] `StdSync` ported via `lc-core::std_sync` (reentrant critical sections, manual/auto reset events, shared lock + callback) with concurrency-focused tests.
-   - [x] `StdScheduler` implemented with poll-based fd/event handling and cooperative thread runner; Windows path now mirrors this via native wait-handle integration rather than the temporary condvar fallback.
-2. **Resource & IO layer** – port `C4Group` stack to ensure game data loads. Provide FFI layer to call Rust from existing C++ for verification during transition.
-   - [x] `lc-resources::Group` handles directory and packed groups, including header unscrambling, with regression tests covering synthetic archives.
-   - [x] Exposed `lc_group_*` C ABI for opening groups, enumerating entries, and reading files so legacy C++ can validate Rust outputs.
-   - [x] Tied the Rust `lc_group_*` FFI into the legacy loader via the optional `USE_RUST_GROUP_VALIDATION` flag, running metadata parity checks against every on-disk group open.
-3. **Scripting VM** – port AUL parser/executor; validate against existing script test suite and game scenarios.
-- [x] Introduced `lc-script` crate with lexer, parser, and interpreter for function calls, conditionals, loops, recursion, and string/int arithmetic plus unit coverage.
-- [x] Added ergonomic Rust `Engine` API and initial C FFI bindings to allow legacy runtime validation calls.
-- [x] Expanded language support with array/proplist literals, indexed/property access, effect callback dispatch helpers, debugger hooks, and an automated parity harness covering canonical AUL scenarios.
-4. **Engine loop & objects** – migrate game simulation in slices (definitions, object control, landscape handling), comparing frame-by-frame outputs against the C++ build using deterministic seeds.
-   - [x] Added `lc-engine` crate implementing deterministic tick loop, definition registration, script-driven object updates, spawn queue handling, and parity-focused unit tests.
-   - [x] Integrate terrain/landscape handling and record/playback harness against the C++ loop for broader parity.
-     - Added a `Landscape` module with collision resolution, ensured engine spawns/ticks clamp objects to terrain, and covered the path with unit tests.
-     - Introduced a JSON recorder/playback harness backed by serde, exported FFI bindings, and hooked `C4Game` through a new `USE_RUST_ENGINE_VALIDATION` bridge so legacy runs can stream frames for Rust comparison or recording.
-5. **Rendering & audio** – implement wrapper surfaces and audio mixers; rely on original assets to cross-check rendering results (image snapshots via integration tests).
-   - [x] Established `lc-graphics` crate with RGBA surface abstraction, alpha-aware blitting, deterministic snapshot hashing, and `lc_surface_*` FFI hooks for legacy parity checks.
-   - [x] Implemented `lc-audio` crate mirroring SDL2_mixer semantics with Rust backends (decoded WAV/OGG/MP3 support via hound/lewton/minimp3, deterministic software mixer with channel callbacks, CPAL output with null fallback, FFI handles for sounds/music/channels, and parity-oriented unit tests).
-6. **Networking** – port control streams and lobby after engine parity to avoid divergence; use integration tests between Rust/C++ builds to confirm protocol compatibility.
-- [x] Added `lc-network` crate with a deterministic control coordinator handling backlog limits, re-request generation, client removal, and ready batch aggregation plus dedicated unit tests mirroring `C4GameControlNetwork` semantics.
-- [x] Implemented Rust lobby state management (host election, readiness tracking, player vs observer capacity) with parity-focused tests.
-- [x] Introduce async transport layer bindings and protocol compatibility checks against the C++ build.
-  - Implemented a `tokio`-based `ControlTransport` that understands LegacyClonk TCP framing, encodes/decodes control/control-request/control-pkt/exec-sync messages, and verifies the varint/protocol layout against recorded C++ frame samples in new network tests.
-7. **UI/editor** – migrate GUI components last once core engine validated.
-   - [x] Exposed `lc-gui` layout/event/render via FFI and the `RustGuiBridge` C++ wrapper behind the `USE_RUST_GUI_VALIDATION` flag so legacy dialogs can validate Rust output.
-   - [x] Port scenario browser/editor panels to the Rust UI and replace remaining `C4Gui*` widgets.
-     - Introduced a `ScenarioBrowser` UI module in `lc-gui` with selectable scenario listings, contextual detail panels, and action buttons wired through the existing event system, plus coverage via unit tests.
-8. **Final integration** – remove C++ harness, produce final Rust binary, update tooling/tests, ensure packaging scripts replaced (cargo xtask).
-   - [x] Added the `lc-app` workspace crate that stitches engine, resources, GUI, audio, and networking layers into a deterministic headless binary with CLI controls.
-   - [x] Wired configuration + system metadata loading from `planet/System.c4g`, synthesized audio/graphics output, and introduced smoke tests for the integrated app.
-   - [x] Implemented the `lc-platform` crate for install/user/cache/log directory discovery with C ABI helpers and updated `lc-app` to rely on the runtime-detected `System.c4g` path instead of hard-coded manifests.
-   - [x] Replaced the ad-hoc shell packaging scripts with `cargo xtask package`, which builds the release `lc-app` binary and assembles a distributable archive under `rust/target/dist/legacyclonk-rs.zip` including game assets and licensing files.
-   - [x] Hardened the `lc-app` CLI using `clap`, adding documented `--ticks`, `--config <path>`, `--summary-json <path>`, and `--quiet` flags (with tests) so scripted parity runs can override the bundled demo config and capture structured output alongside the improved `--help`/`--version` UX.
+## Major Gaps to Reach Behavior Parity
+- Recreate the complete C4 object lifecycle, including action system, physics integration, scenario/environment management, player control, and serialization.
+- Port AUL runtime features: effect handlers, engine call map, proplist semantics, debugging, and compatibility behaviors relied upon by shipped scripts.
+- Implement rendering and audio backends that match the SDL/OpenGL pipeline and mixer behavior across all supported platforms.
+- Mirror GUI subsystems (dialogs, HUD, console, editor) and integrate them with input, networking, and engine state.
+- Rebuild multiplayer networking (TCP/UDP transports, reference server, lobby flow, download management, UPnP) with deterministic equivalence.
+- Provide platform entry points, resource loaders, and tooling parity so the Rust workspace can launch real scenarios instead of the demo harness.
 
-## 5. Testing & Validation
-- [x] Mirror existing Catch2 tests with `cargo test`; translate fixtures (language pack fixture now covered via `lc-core` integration test parsing `planet/System.c4g/LanguageUS.txt`).
-- [x] Build deterministic comparison harness to record authoritative outputs from C++ build and check Rust port (`snapshots/` stored per version).
-  - Added `cargo xtask engine-snapshots record|verify` to manage JSON baselines under `rust/snapshots/engine/v1` and a parity test that replays them through `lc-engine::Playback`.
-  - Baseline seeded with the deterministic `basic_movement` scenario; refresh by running the C++ build with `LC_RUST_ENGINE_RECORD=<path>` or via the xtask helper.
-- Continuous integration: use `cargo fmt`, `cargo clippy`, OS-specific integration tests via GitHub Actions/CI equivalent.
-- [x] Performance regressions tracked via Criterion benchmarks for hotspots (script execution, landscape updates) under `lc-script/benches/script_execution.rs` and `lc-engine/benches/engine_tick.rs`.
-
-## 6. Tooling & Automation Ideas
-- Source-to-source assistance: write `clang`-based extractor to emit annotated AST -> Rust skeletons for manual filling.
-- Create bridging layer (`cxx` crate) for temporary calls into remaining C++ when performing incremental migration to maintain runnable builds throughout port.
-- Leverage `bindgen` to wrap remaining C++ until port complete, enabling stepwise replacement.
-
-## 7. Risks / Open Questions
-- Precise reproduction of undefined behaviors relied upon in legacy C++ (must audit and encode in tests).
-- Rendering parity with legacy fixed pipeline OpenGL when moving to modern Rust graphics stack.
-- Multithreading semantics of `StdScheduler`/`StdThreadPool` vs Rust's safety guarantees—requires careful mapping and possibly unsafe code.
-- Script engine intricacies, including debugger hooks and platform-specific quirks.
-- Large surface area of UI/editor code (GTK/Win32/SDL) needing new cross-platform approach.
+## Recommendations
+- Treat the Rust code as validation/helper infrastructure until feature-complete replacements exist for each subsystem.
+- Prioritize a detailed migration plan per subsystem with measurable parity tests (engine recordings, script smoke tests, rendering output comparisons, network session captures).
+- Expand documentation to track ownership, required features, and blockers for each domain before attempting to switch production builds to Rust.
