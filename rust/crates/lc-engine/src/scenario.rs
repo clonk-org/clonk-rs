@@ -382,6 +382,8 @@ struct PhysicsManifest {
     max_fall_speed: Option<i32>,
     #[serde(default)]
     max_rise_speed: Option<i32>,
+    #[serde(default)]
+    max_horizontal_speed: Option<i32>,
 }
 
 impl PhysicsManifest {
@@ -391,8 +393,16 @@ impl PhysicsManifest {
         let max_fall_speed = self.max_fall_speed.unwrap_or(defaults.max_fall_speed);
         let max_rise_speed = self.max_rise_speed.unwrap_or(defaults.max_rise_speed);
 
-        PhysicsSettings::checked(gravity, max_fall_speed, max_rise_speed)
-            .map_err(|detail| ScenarioError::InvalidPhysics(detail.to_string()))
+        let settings = PhysicsSettings::checked(gravity, max_fall_speed, max_rise_speed)
+            .map_err(|detail| ScenarioError::InvalidPhysics(detail.to_string()))?;
+
+        if let Some(max_horizontal_speed) = self.max_horizontal_speed {
+            return settings
+                .with_max_horizontal_speed(max_horizontal_speed)
+                .map_err(|detail| ScenarioError::InvalidPhysics(detail.to_string()));
+        }
+
+        Ok(settings)
     }
 }
 
@@ -622,7 +632,8 @@ global func Step(state, frame, random)
             "physics": {
                 "gravity": 2,
                 "max_fall_speed": 8,
-                "max_rise_speed": -10
+                "max_rise_speed": -10,
+                "max_horizontal_speed": 7
             }
         }
         "#;
@@ -636,6 +647,7 @@ global func Step(state, frame, random)
         assert_eq!(physics.gravity, 2);
         assert_eq!(physics.max_fall_speed, 8);
         assert_eq!(physics.max_rise_speed, -10);
+        assert_eq!(physics.max_horizontal_speed, 7);
 
         let mut engine = Engine::with_seed(0);
         scenario.apply(&mut engine).expect("scenario applies");
@@ -643,6 +655,7 @@ global func Step(state, frame, random)
         assert_eq!(configured.gravity, 2);
         assert_eq!(configured.max_fall_speed, 8);
         assert_eq!(configured.max_rise_speed, -10);
+        assert_eq!(configured.max_horizontal_speed, 7);
     }
 
     #[test]
@@ -777,6 +790,33 @@ global func Step(state, frame, random)
         match error {
             ScenarioError::InvalidPhysics(detail) => {
                 assert!(detail.contains("max_rise_speed"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn physics_validation_rejects_negative_horizontal_speed() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Mover", "script": "scripts/mover.aul" }
+            ],
+            "physics": {
+                "max_horizontal_speed": -1
+            }
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let error = Scenario::load_from_path(dir.path()).expect_err("scenario fails");
+        match error {
+            ScenarioError::InvalidPhysics(detail) => {
+                assert!(detail.contains("max_horizontal_speed"));
             }
             other => panic!("unexpected error: {other:?}"),
         }

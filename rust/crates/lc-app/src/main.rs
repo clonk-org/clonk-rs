@@ -93,8 +93,11 @@ fn print_summary(summary: &GameSummary) {
     println!("Logs dir: {}", summary.logs_dir.display());
     println!("Cache dir: {}", summary.cache_dir.display());
     println!(
-        "Physics: gravity {} max_fall {} max_rise {}",
-        summary.gravity, summary.max_fall_speed, summary.max_rise_speed
+        "Physics: gravity {} max_fall {} max_rise {} max_horizontal {}",
+        summary.gravity,
+        summary.max_fall_speed,
+        summary.max_rise_speed,
+        summary.max_horizontal_speed
     );
     println!(
         "Environment: wind {} (base {} +/- {} period {} temperature {})",

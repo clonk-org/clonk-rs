@@ -137,6 +137,7 @@ pub struct GameSummary {
     pub gravity: i32,
     pub max_fall_speed: i32,
     pub max_rise_speed: i32,
+    pub max_horizontal_speed: i32,
     pub environment: EnvironmentSummary,
 }
 
@@ -325,7 +326,11 @@ impl DemoGame {
             .unwrap_or(default_physics.max_fall_speed);
         let max_rise_speed = parse_config_value::<i32>(&config, "max_rise_speed")
             .unwrap_or(default_physics.max_rise_speed);
+        let max_horizontal_speed = parse_config_value::<i32>(&config, "max_horizontal_speed")
+            .unwrap_or(default_physics.max_horizontal_speed);
         let base_physics = PhysicsSettings::checked(gravity, max_fall_speed, max_rise_speed)
+            .map_err(|detail| GameError::Input(detail.to_string()))?
+            .with_max_horizontal_speed(max_horizontal_speed)
             .map_err(|detail| GameError::Input(detail.to_string()))?;
 
         let scenario = if let Some(path) = options.scenario_path.as_deref() {
@@ -550,6 +555,7 @@ impl DemoGame {
             gravity: physics.gravity,
             max_fall_speed: physics.max_fall_speed,
             max_rise_speed: physics.max_rise_speed,
+            max_horizontal_speed: physics.max_horizontal_speed,
             environment,
         })
     }
@@ -890,5 +896,9 @@ mod tests {
         assert_eq!(summary.ticks, 8);
         assert!(summary.surface_hash != 0);
         assert!(!summary.final_snapshot.objects.is_empty());
+        assert_eq!(
+            summary.max_horizontal_speed,
+            PhysicsSettings::default().max_horizontal_speed
+        );
     }
 }

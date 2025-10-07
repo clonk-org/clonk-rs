@@ -76,14 +76,19 @@ pub struct PhysicsSettings {
     pub gravity: i32,
     pub max_fall_speed: i32,
     pub max_rise_speed: i32,
+    #[serde(default = "PhysicsSettings::default_max_horizontal_speed")]
+    pub max_horizontal_speed: i32,
 }
 
 impl PhysicsSettings {
+    pub const DEFAULT_MAX_HORIZONTAL_SPEED: i32 = 12;
+
     pub const fn new(gravity: i32, max_fall_speed: i32, max_rise_speed: i32) -> Self {
         Self {
             gravity,
             max_fall_speed,
             max_rise_speed,
+            max_horizontal_speed: Self::DEFAULT_MAX_HORIZONTAL_SPEED,
         }
     }
 
@@ -98,12 +103,36 @@ impl PhysicsSettings {
         Ok(Self::new(gravity, max_fall_speed, max_rise_speed))
     }
 
+    pub fn with_max_horizontal_speed(
+        self,
+        max_horizontal_speed: i32,
+    ) -> Result<Self, &'static str> {
+        if max_horizontal_speed < 0 {
+            return Err("max_horizontal_speed must be >= 0");
+        }
+        Ok(Self {
+            max_horizontal_speed,
+            ..self
+        })
+    }
+
+    const fn default_max_horizontal_speed() -> i32 {
+        Self::DEFAULT_MAX_HORIZONTAL_SPEED
+    }
+
     fn clamp_velocity(&self, velocity: &mut Vector2) {
         if velocity.y > self.max_fall_speed {
             velocity.y = self.max_fall_speed;
         }
         if velocity.y < self.max_rise_speed {
             velocity.y = self.max_rise_speed;
+        }
+        let max_horizontal = self.max_horizontal_speed.max(0);
+        if velocity.x > max_horizontal {
+            velocity.x = max_horizontal;
+        }
+        if velocity.x < -max_horizontal {
+            velocity.x = -max_horizontal;
         }
     }
 }
@@ -114,6 +143,7 @@ impl Default for PhysicsSettings {
             gravity: 1,
             max_fall_speed: 12,
             max_rise_speed: -20,
+            max_horizontal_speed: Self::DEFAULT_MAX_HORIZONTAL_SPEED,
         }
     }
 }
@@ -2696,6 +2726,50 @@ mod tests {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity.y, 2);
         assert_eq!(object.position.y, 2);
+    }
+
+    #[test]
+    fn physics_clamps_horizontal_velocity() {
+        let mut engine = Engine::with_seed(7);
+        let definition = Definition::from_script(
+            "Actor",
+            "Actor",
+            r#"
+            global func Initialize(state, random) { return nil; }
+            global func Step(state, frame, random) { return nil; }
+            "#,
+        )
+        .expect("script compiles");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let physics = PhysicsSettings::checked(1, 12, -20)
+            .expect("physics valid")
+            .with_max_horizontal_speed(4)
+            .expect("horizontal speed valid");
+        engine.set_physics(physics);
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Actor")
+                    .with_position(Vector2::new(0, 0))
+                    .with_velocity(Vector2::new(20, 0)),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.object_snapshot(id).expect("object snapshot");
+        assert_eq!(snapshot.velocity.x, 4);
+
+        engine
+            .apply_object_update(id, ObjectUpdate::new().with_velocity(Vector2::new(-9, 0)))
+            .expect("update applies");
+
+        let snapshot = engine.object_snapshot(id).expect("object snapshot");
+        assert_eq!(snapshot.velocity.x, -4);
+
+        let tick_snapshot = engine.tick().expect("tick succeeds");
+        let object = tick_snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity.x, -4);
     }
 
     #[test]
