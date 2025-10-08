@@ -30,6 +30,12 @@ pub enum ScenarioError {
     DuplicateDefinition(String),
     #[error("initial object references unknown definition `{0}`")]
     UnknownDefinition(String),
+    #[error("initial object handle `{0}` is duplicated")]
+    DuplicateHandle(String),
+    #[error("initial object references unknown container handle `{0}`")]
+    UnknownContainerHandle(String),
+    #[error("container dependency cycle detected for handle `{0}`")]
+    ContainerDependencyCycle(String),
     #[error("invalid landscape specification: {0}")]
     InvalidLandscape(String),
     #[error("scenario did not declare any object definitions")]
@@ -55,13 +61,20 @@ struct DefinitionActions {
     specs: HashMap<String, ActionSpec>,
 }
 
+#[derive(Debug, Clone)]
+struct ScenarioSpawn {
+    handle: Option<String>,
+    container_handle: Option<String>,
+    config: SpawnConfig,
+}
+
 #[derive(Debug)]
 pub struct Scenario {
     name: Option<String>,
     ticks: Option<u32>,
     ground_height_hint: Option<i32>,
     definitions: Vec<ScenarioDefinition>,
-    initial_spawns: Vec<SpawnConfig>,
+    initial_spawns: Vec<ScenarioSpawn>,
     landscape: Option<Landscape>,
     physics: Option<PhysicsSettings>,
     environment: Option<EnvironmentSettings>,
@@ -134,10 +147,53 @@ impl Scenario {
             engine.register_definition(compiled)?;
         }
 
-        let mut created = Vec::with_capacity(self.initial_spawns.len());
-        for spawn in &self.initial_spawns {
-            let id = engine.spawn_object(spawn.clone())?;
-            created.push(id);
+        let mut pending = self.initial_spawns.clone();
+        let mut handles: HashMap<String, ObjectId> = HashMap::new();
+        let mut created = Vec::with_capacity(pending.len());
+
+        while !pending.is_empty() {
+            let mut progress = false;
+            let mut idx = 0;
+            while idx < pending.len() {
+                let ready = match &pending[idx].container_handle {
+                    Some(handle) => handles.contains_key(handle),
+                    None => true,
+                };
+
+                if !ready {
+                    idx += 1;
+                    continue;
+                }
+
+                let mut config = pending[idx].config.clone();
+                if let Some(handle) = &pending[idx].container_handle {
+                    let container = *handles
+                        .get(handle)
+                        .ok_or_else(|| ScenarioError::UnknownContainerHandle(handle.clone()))?;
+                    config = config.with_container(container);
+                }
+
+                let id = engine.spawn_object(config)?;
+                if let Some(handle) = &pending[idx].handle {
+                    if handles.contains_key(handle) {
+                        return Err(ScenarioError::DuplicateHandle(handle.clone()));
+                    }
+                    handles.insert(handle.clone(), id);
+                }
+                created.push(id);
+                pending.remove(idx);
+                progress = true;
+                break;
+            }
+
+            if !progress {
+                let culprit = pending
+                    .first()
+                    .and_then(|spawn| spawn.container_handle.clone())
+                    .or_else(|| pending.first().and_then(|spawn| spawn.handle.clone()))
+                    .unwrap_or_default();
+                return Err(ScenarioError::ContainerDependencyCycle(culprit));
+            }
         }
         Ok(created)
     }
@@ -202,6 +258,7 @@ impl Scenario {
         }
 
         let mut spawns = Vec::with_capacity(manifest.initial_objects.len());
+        let mut handles = HashSet::new();
         for object in manifest.initial_objects {
             if !seen_ids.contains(&object.definition) {
                 return Err(ScenarioError::UnknownDefinition(object.definition));
@@ -217,6 +274,8 @@ impl Scenario {
                 effects,
                 crew_member,
                 status,
+                handle,
+                container,
             } = object;
 
             let mut spawn = SpawnConfig::new(definition.clone());
@@ -259,7 +318,38 @@ impl Scenario {
             if let Some(status) = status {
                 spawn = spawn.with_status(status.into());
             }
-            spawns.push(spawn);
+
+            let handle = handle
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty());
+            if let Some(handle) = handle.as_ref() {
+                if !handles.insert(handle.clone()) {
+                    return Err(ScenarioError::DuplicateHandle(handle.clone()));
+                }
+            }
+
+            let container_handle = container
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty());
+
+            spawns.push(ScenarioSpawn {
+                handle,
+                container_handle,
+                config: spawn,
+            });
+        }
+
+        for spawn in &spawns {
+            if let Some(container) = &spawn.container_handle {
+                if !handles.contains(container) {
+                    return Err(ScenarioError::UnknownContainerHandle(container.clone()));
+                }
+                if let Some(handle) = &spawn.handle {
+                    if handle == container {
+                        return Err(ScenarioError::ContainerDependencyCycle(handle.clone()));
+                    }
+                }
+            }
         }
 
         let landscape = match manifest.landscape {
@@ -343,6 +433,10 @@ struct ObjectManifest {
     crew_member: Option<bool>,
     #[serde(default)]
     status: Option<ObjectStatusSpec>,
+    #[serde(default)]
+    handle: Option<String>,
+    #[serde(default)]
+    container: Option<String>,
 }
 
 #[derive(Debug)]
@@ -886,6 +980,106 @@ global func Step(state, frame, random)
         let object = ticked.object(id).expect("object present");
         assert_eq!(object.status, ObjectStatus::Inactive);
         assert_eq!(object.action.phase, initial_phase);
+    }
+
+    #[test]
+    fn spawns_contents_with_container_handles() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Chest", "script": "scripts/chest.aul" },
+                { "id": "Gem", "script": "scripts/gem.aul" }
+            ],
+            "initial_objects": [
+                { "definition": "Chest", "handle": "store" },
+                { "definition": "Gem", "container": "store" }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/chest.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::write(dir.path().join("scripts/gem.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        let created = scenario.apply(&mut engine).expect("scenario applies");
+        assert_eq!(created.len(), 2);
+
+        let snapshot = engine.snapshot();
+        let chest = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "Chest")
+            .expect("chest present");
+        let gem = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "Gem")
+            .expect("gem present");
+        assert_eq!(gem.container, Some(chest.id));
+        assert!(chest.contents.contains(&gem.id));
+    }
+
+    #[test]
+    fn errors_on_unknown_container_handle() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Chest", "script": "scripts/chest.aul" },
+                { "id": "Gem", "script": "scripts/gem.aul" }
+            ],
+            "initial_objects": [
+                { "definition": "Gem", "container": "missing" }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/chest.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::write(dir.path().join("scripts/gem.aul"), TEST_SCRIPT).expect("write script");
+
+        let error = Scenario::load_from_path(dir.path()).expect_err("scenario fails");
+        match error {
+            ScenarioError::UnknownContainerHandle(handle) => assert_eq!(handle, "missing"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn container_cycles_error_when_applying() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Crate", "script": "scripts/crate.aul" },
+                { "id": "Barrel", "script": "scripts/barrel.aul" }
+            ],
+            "initial_objects": [
+                { "definition": "Crate", "handle": "crate", "container": "barrel" },
+                { "definition": "Barrel", "handle": "barrel", "container": "crate" }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/crate.aul"), TEST_SCRIPT).expect("write script");
+        std::fs::write(dir.path().join("scripts/barrel.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        let error = scenario.apply(&mut engine).expect_err("apply fails");
+        match error {
+            ScenarioError::ContainerDependencyCycle(handle) => {
+                assert!(handle == "crate" || handle == "barrel")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
