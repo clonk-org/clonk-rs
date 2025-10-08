@@ -5314,6 +5314,78 @@ mod tests {
     }
 
     #[test]
+    fn swim_procedure_reduces_gravity_and_blocks_wind() {
+        let mut definition =
+            Definition::from_script("Swimmer", "Swimmer", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Swim".to_string(),
+            ActionSpec::default().with_procedure("swim"),
+        );
+        definition.configure_actions(Some("Swim".to_string()), actions);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let physics = PhysicsSettings::checked(6, 20, -30)
+            .expect("physics settings valid")
+            .with_max_horizontal_speed(20)
+            .expect("horizontal speed valid");
+        engine.set_physics(physics);
+        engine.set_environment(EnvironmentSettings::new(5));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Swimmer"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity.y, 3);
+        assert_eq!(object.velocity.x, 0);
+    }
+
+    #[test]
+    fn hang_procedure_locks_vertical_velocity() {
+        let mut definition =
+            Definition::from_script("Clinger", "Clinger", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Hang".to_string(),
+            ActionSpec::default().with_procedure("hang"),
+        );
+        definition.configure_actions(Some("Hang".to_string()), actions);
+
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let physics = PhysicsSettings::checked(6, 20, -30)
+            .expect("physics settings valid")
+            .with_max_horizontal_speed(20)
+            .expect("horizontal speed valid");
+        engine.set_physics(physics);
+        engine.set_environment(EnvironmentSettings::new(4));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Clinger")
+                    .with_velocity(Vector2::new(1, 5))
+                    .with_position(Vector2::new(0, 0)),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity.y, 0);
+        assert_eq!(object.velocity.x, 1);
+    }
+
+    #[test]
     fn applies_velocity_changes_from_step_callback() {
         let mut engine = Engine::with_seed(123);
         engine

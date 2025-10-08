@@ -120,31 +120,50 @@ pub enum ActionProcedure {
     Flight,
     Hang,
     Swim,
+    Kneel,
+    Scale,
+    Dig,
+    Throw,
+    Bridge,
+    Build,
+    Push,
+    Chop,
+    Lift,
+    Attach,
+    Fight,
+    Connect,
+    Pull,
     Other,
 }
 
 impl ActionProcedure {
     pub fn from_name(name: &str) -> Self {
-        if name.eq_ignore_ascii_case("walk") {
-            ActionProcedure::Walk
-        } else if name.eq_ignore_ascii_case("float") {
-            ActionProcedure::Float
-        } else if name.eq_ignore_ascii_case("flight") {
-            ActionProcedure::Flight
-        } else if name.eq_ignore_ascii_case("hang") {
-            ActionProcedure::Hang
-        } else if name.eq_ignore_ascii_case("swim") {
-            ActionProcedure::Swim
-        } else {
-            ActionProcedure::Other
+        let lower = name.to_ascii_lowercase();
+        match lower.as_str() {
+            "walk" => ActionProcedure::Walk,
+            "float" => ActionProcedure::Float,
+            "flight" => ActionProcedure::Flight,
+            "hang" | "hangle" => ActionProcedure::Hang,
+            "swim" => ActionProcedure::Swim,
+            "kneel" => ActionProcedure::Kneel,
+            "scale" => ActionProcedure::Scale,
+            "dig" => ActionProcedure::Dig,
+            "throw" => ActionProcedure::Throw,
+            "bridge" => ActionProcedure::Bridge,
+            "build" => ActionProcedure::Build,
+            "push" => ActionProcedure::Push,
+            "chop" => ActionProcedure::Chop,
+            "lift" => ActionProcedure::Lift,
+            "attach" => ActionProcedure::Attach,
+            "fight" => ActionProcedure::Fight,
+            "connect" => ActionProcedure::Connect,
+            "pull" => ActionProcedure::Pull,
+            _ => ActionProcedure::Other,
         }
     }
 
     pub fn gravity_component(self, base_gravity: i32) -> i32 {
         match self {
-            ActionProcedure::Undefined | ActionProcedure::Walk | ActionProcedure::Other => {
-                base_gravity
-            }
             ActionProcedure::Float | ActionProcedure::Swim => {
                 let mut magnitude = base_gravity.abs();
                 if magnitude > 0 {
@@ -159,19 +178,37 @@ impl ActionProcedure {
                     magnitude
                 }
             }
-            ActionProcedure::Flight | ActionProcedure::Hang => 0,
+            ActionProcedure::Flight | ActionProcedure::Hang | ActionProcedure::Attach => 0,
+            ActionProcedure::Undefined
+            | ActionProcedure::Walk
+            | ActionProcedure::Kneel
+            | ActionProcedure::Scale
+            | ActionProcedure::Dig
+            | ActionProcedure::Throw
+            | ActionProcedure::Bridge
+            | ActionProcedure::Build
+            | ActionProcedure::Push
+            | ActionProcedure::Chop
+            | ActionProcedure::Lift
+            | ActionProcedure::Fight
+            | ActionProcedure::Connect
+            | ActionProcedure::Pull
+            | ActionProcedure::Other => base_gravity,
         }
     }
 
     pub fn allows_wind(self) -> bool {
         match self {
-            ActionProcedure::Flight | ActionProcedure::Hang => false,
+            ActionProcedure::Flight
+            | ActionProcedure::Hang
+            | ActionProcedure::Attach
+            | ActionProcedure::Swim => false,
             _ => true,
         }
     }
 
     pub fn locks_vertical_velocity(self) -> bool {
-        matches!(self, ActionProcedure::Hang)
+        matches!(self, ActionProcedure::Hang | ActionProcedure::Attach)
     }
 }
 
