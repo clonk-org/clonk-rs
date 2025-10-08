@@ -552,6 +552,8 @@ struct EnvironmentManifest {
     time_of_day: Option<i32>,
     #[serde(default)]
     time_speed: Option<i32>,
+    #[serde(default)]
+    precipitation: Option<i32>,
 }
 
 impl EnvironmentManifest {
@@ -581,6 +583,9 @@ impl EnvironmentManifest {
         }
         if let Some(time_speed) = self.time_speed {
             settings = settings.with_time_speed(time_speed);
+        }
+        if let Some(precipitation) = self.precipitation {
+            settings = settings.with_precipitation(precipitation);
         }
         settings
     }
@@ -881,6 +886,7 @@ global func Step(state, frame, random)
         assert_eq!(environment.wind_variation, 0);
         assert_eq!(environment.wind_period, 0);
         assert_eq!(environment.temperature, 0);
+        assert_eq!(environment.precipitation, 0);
 
         let mut engine = Engine::with_seed(0);
         let created = scenario.apply(&mut engine).expect("scenario applies");
@@ -891,6 +897,7 @@ global func Step(state, frame, random)
         assert_eq!(configured.wind_variation, 0);
         assert_eq!(configured.wind_period, 0);
         assert_eq!(configured.temperature, 0);
+        assert_eq!(configured.precipitation, 0);
     }
 
     #[test]
@@ -923,6 +930,7 @@ global func Step(state, frame, random)
         assert_eq!(environment.wind_variation, 6);
         assert_eq!(environment.wind_period, 180);
         assert_eq!(environment.temperature, -15);
+        assert_eq!(environment.precipitation, 0);
 
         let mut engine = Engine::with_seed(0);
         scenario.apply(&mut engine).expect("scenario applies");
@@ -933,6 +941,7 @@ global func Step(state, frame, random)
         assert_eq!(configured.temperature, -15);
         assert_eq!(configured.time_of_day, 0);
         assert_eq!(configured.time_speed, 0);
+        assert_eq!(configured.precipitation, 0);
     }
 
     #[test]
@@ -968,6 +977,7 @@ global func Step(state, frame, random)
         assert_eq!(environment.temperature_variation, 6);
         assert_eq!(environment.temperature_period, 120);
         assert_eq!(environment.temperature_phase, 30);
+        assert_eq!(environment.precipitation, 0);
 
         let mut engine = Engine::with_seed(0);
         scenario.apply(&mut engine).expect("scenario applies");
@@ -977,6 +987,7 @@ global func Step(state, frame, random)
         assert_eq!(configured.temperature_variation, 6);
         assert_eq!(configured.temperature_period, 120);
         assert_eq!(configured.temperature_phase, 30);
+        assert_eq!(configured.precipitation, 0);
     }
 
     #[test]
@@ -1007,6 +1018,7 @@ global func Step(state, frame, random)
         assert_eq!(environment.wind, 1);
         assert_eq!(environment.time_of_day, 2355);
         assert_eq!(environment.time_speed, 120);
+        assert_eq!(environment.precipitation, 0);
 
         let mut engine = Engine::with_seed(0);
         scenario.apply(&mut engine).expect("scenario applies");
@@ -1014,6 +1026,41 @@ global func Step(state, frame, random)
         assert_eq!(configured.wind, 1);
         assert_eq!(configured.time_of_day, 2355);
         assert_eq!(configured.time_speed, 120);
+        assert_eq!(configured.precipitation, 0);
+    }
+
+    #[test]
+    fn loads_environment_precipitation_with_clamping() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Mover", "script": "scripts/mover.aul" }
+            ],
+            "environment": {
+                "wind": 2,
+                "precipitation": 140
+            },
+            "initial_objects": [
+                { "definition": "Mover" }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let environment = scenario.environment().expect("environment present");
+        assert_eq!(environment.wind, 2);
+        assert_eq!(environment.precipitation, 100);
+
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let configured = engine.environment();
+        assert_eq!(configured.wind, 2);
+        assert_eq!(configured.precipitation, 100);
     }
 
     #[test]

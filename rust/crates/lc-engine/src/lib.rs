@@ -268,6 +268,8 @@ pub struct EnvironmentSettings {
     pub time_of_day: u16,
     #[serde(default)]
     pub time_speed: i16,
+    #[serde(default)]
+    pub precipitation: i32,
 }
 
 impl EnvironmentSettings {
@@ -286,6 +288,7 @@ impl EnvironmentSettings {
             temperature_phase: 0,
             time_of_day: 0,
             time_speed: 0,
+            precipitation: 0,
         }
     }
 
@@ -340,6 +343,12 @@ impl EnvironmentSettings {
         self
     }
 
+    pub fn with_precipitation(mut self, precipitation: i32) -> Self {
+        let clamped = precipitation.clamp(-100, 100);
+        self.precipitation = clamped;
+        self
+    }
+
     pub fn ambient_temperature(&self, frame: u64) -> i32 {
         let base = self.temperature.saturating_add(self.climate);
         if self.temperature_variation == 0 || self.temperature_period == 0 {
@@ -374,6 +383,10 @@ impl EnvironmentSettings {
 
     pub fn time_speed(&self) -> i16 {
         self.time_speed
+    }
+
+    pub fn precipitation(&self) -> i32 {
+        self.precipitation
     }
 
     pub fn wind_force(&self, frame: u64) -> i32 {
@@ -417,6 +430,8 @@ pub struct EnvironmentFrame {
     pub settings: EnvironmentSettings,
     pub wind_force: i32,
     pub ambient_temperature: i32,
+    #[serde(default)]
+    pub precipitation: i32,
 }
 
 impl Default for EnvironmentFrame {
@@ -425,6 +440,7 @@ impl Default for EnvironmentFrame {
             settings: EnvironmentSettings::default(),
             wind_force: 0,
             ambient_temperature: 0,
+            precipitation: 0,
         }
     }
 }
@@ -886,16 +902,10 @@ impl Object {
                     }
                     events.push(EffectEvent::started(inserted));
                 }
-                EffectCommand::Remove {
-                    name,
-                    no_callbacks,
-                } => {
+                EffectCommand::Remove { name, no_callbacks } => {
                     if let Some(removed) = self.remove_effect(name) {
                         if !no_callbacks {
-                            events.push(EffectEvent::stopped(
-                                removed,
-                                EffectStopReason::Removed,
-                            ));
+                            events.push(EffectEvent::stopped(removed, EffectStopReason::Removed));
                         }
                     }
                 }
@@ -2652,6 +2662,7 @@ impl Engine {
             settings: self.environment,
             wind_force: self.environment.wind_force(self.frame),
             ambient_temperature: self.environment.ambient_temperature(self.frame),
+            precipitation: self.environment.precipitation(),
         };
         SimulationSnapshot {
             frame: self.frame,
@@ -4937,7 +4948,8 @@ mod tests {
             .with_climate(-4)
             .with_temperature_cycle(6, 16, 5)
             .with_time_of_day(900)
-            .with_time_speed(30);
+            .with_time_speed(30)
+            .with_precipitation(-45);
         engine.set_environment(environment);
 
         let snapshot = engine.snapshot();
@@ -4946,6 +4958,10 @@ mod tests {
         assert_eq!(
             snapshot.environment.ambient_temperature,
             environment.ambient_temperature(0)
+        );
+        assert_eq!(
+            snapshot.environment.precipitation,
+            environment.precipitation()
         );
     }
 
@@ -4965,6 +4981,18 @@ mod tests {
 
         engine.tick().expect("second tick succeeds");
         assert_eq!(engine.environment().time_of_day, 50);
+    }
+
+    #[test]
+    fn precipitation_clamps_to_range() {
+        let wet = EnvironmentSettings::new(0).with_precipitation(140);
+        assert_eq!(wet.precipitation(), 100);
+
+        let balanced = EnvironmentSettings::new(0).with_precipitation(42);
+        assert_eq!(balanced.precipitation(), 42);
+
+        let dry = EnvironmentSettings::new(0).with_precipitation(-180);
+        assert_eq!(dry.precipitation(), -100);
     }
 
     #[test]

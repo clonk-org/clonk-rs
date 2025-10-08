@@ -130,6 +130,7 @@ pub struct EnvironmentSummary {
     pub current_wind: i32,
     pub time_of_day: u16,
     pub time_speed: i16,
+    pub precipitation: i32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -617,6 +618,7 @@ impl DemoGame {
             current_wind: environment_settings.wind_force(self.engine.frame()),
             time_of_day: environment_settings.time_of_day(),
             time_speed: environment_settings.time_speed(),
+            precipitation: environment_settings.precipitation(),
         };
         Ok(GameSummary {
             ticks: executed_ticks,
@@ -666,14 +668,16 @@ impl DemoGame {
         );
         let ambient_display = environment.ambient_temperature.clamp(-99, 99);
         let wind_display = environment.wind_force.clamp(-99, 99);
+        let precip_display = environment.precipitation.clamp(-99, 99);
         let status_text = format!(
-            "READY {:02}OF{:02} GROUND {:02} BATCH {:03} TEMP {:+03} WIND {:+03}",
+            "READY {:02}OF{:02} GROUND {:02} BATCH {:03} TEMP {:+03} WIND {:+03} PREC {:+03}",
             ready_players.min(99),
             total_participants.min(99),
             ground_hits.min(99),
             ready_batches.min(999),
             ambient_display,
             wind_display,
+            precip_display,
         );
 
         self.gui
@@ -708,6 +712,7 @@ impl DemoGame {
     fn draw_frame(&mut self, snapshot: &SimulationSnapshot) {
         let sky = Self::sky_color_for_temperature(snapshot.environment.ambient_temperature);
         self.surface.fill(sky);
+        self.draw_precipitation(snapshot.environment.precipitation, snapshot.frame);
         self.draw_ground(snapshot.environment.ambient_temperature);
         self.draw_objects(snapshot);
         self.draw_gui_overlay();
@@ -728,6 +733,45 @@ impl DemoGame {
             let ground_screen = ground_screen as u32;
             for y in ground_screen..SURFACE_HEIGHT {
                 let _ = self.surface.set_pixel(screen_x, y, ground_color);
+            }
+        }
+    }
+
+    fn draw_precipitation(&mut self, precipitation: i32, frame: u64) {
+        if precipitation == 0 {
+            return;
+        }
+
+        if precipitation > 0 {
+            let intensity = precipitation.clamp(0, 100) as usize;
+            let streaks = intensity.saturating_mul(3).max(12);
+            for idx in 0..streaks {
+                let offset = frame as usize * 11 + idx * 17;
+                let x = ((idx * 53 + offset) % SURFACE_WIDTH as usize) as u32;
+                let base_y = (offset % SURFACE_HEIGHT as usize) as i32;
+                for step in 0..4 {
+                    let y = base_y - step;
+                    if y < 0 {
+                        continue;
+                    }
+                    let color = Color::new(148, 176, 220, 160);
+                    let _ = self.surface.set_pixel(x, y as u32, color);
+                }
+            }
+        } else {
+            let dryness = precipitation.saturating_neg().clamp(0, 100) as usize;
+            let shimmer_count = dryness.saturating_mul(2).max(8);
+            for idx in 0..shimmer_count {
+                let offset = frame as usize * 5 + idx * 23;
+                let x = ((idx * 67 + offset) % SURFACE_WIDTH as usize) as u32;
+                let band = offset % 6;
+                let y = SURFACE_HEIGHT.saturating_sub(1 + band as u32);
+                let color = if band % 2 == 0 {
+                    Color::new(212, 180, 88, 200)
+                } else {
+                    Color::new(176, 132, 64, 180)
+                };
+                let _ = self.surface.set_pixel(x, y, color);
             }
         }
     }
