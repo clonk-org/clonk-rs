@@ -17,6 +17,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("AddEffect", add_effect);
     script.register_host_function("RemoveEffect", remove_effect);
     script.register_host_function("GetEffect", get_effect);
+    script.register_host_function("GetEffectCount", get_effect_count);
     script.register_host_function("Random", random);
 }
 
@@ -472,6 +473,70 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     Ok(Value::Nil)
+}
+
+fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 2 {
+        return Err(RuntimeError::new(
+            "GetEffectCount expects at least 2 arguments: name and state",
+        ));
+    }
+
+    let name_filter = match &args[0] {
+        Value::String(name) if !name.is_empty() => Some(name.as_str()),
+        Value::String(_) | Value::Nil => None,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "GetEffectCount: expected string or nil for name, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let scope = determine_scope_from_state(&args[1])?;
+    let effects = match snapshot_effects_from_context(scope) {
+        Some(effects) => effects,
+        None => match scope {
+            EffectScope::Object => extract_effects_from_state(&args[1])?,
+            EffectScope::Global => Vec::new(),
+        },
+    };
+
+    let max_priority = match args.get(2) {
+        Some(Value::Int(value)) if *value >= 0 => Some(*value),
+        Some(Value::Int(_)) => {
+            return Err(RuntimeError::new(
+                "GetEffectCount: max priority must be >= 0 when provided",
+            ))
+        }
+        Some(Value::Nil) | None => None,
+        Some(other) => {
+            return Err(RuntimeError::new(format!(
+                "GetEffectCount: expected int for max priority, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let count = effects
+        .iter()
+        .filter(|effect| {
+            if let Some(filter) = name_filter {
+                if effect.name != filter {
+                    return false;
+                }
+            }
+            if let Some(limit) = max_priority {
+                if effect.priority.abs() > limit {
+                    return false;
+                }
+            }
+            true
+        })
+        .count();
+
+    let count = i32::try_from(count).unwrap_or(i32::MAX);
+    Ok(Value::Int(count))
 }
 
 fn random(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -943,6 +1008,69 @@ mod tests {
         });
         let value = result.expect("GetEffect command id succeeds");
         assert_eq!(value, Value::String("BARL".into()));
+    }
+
+    #[test]
+    fn get_effect_count_filters_by_name_and_priority() {
+        let state = empty_state();
+        let (result, _) = with_effect_context(&[], &[], || -> Result<Value, RuntimeError> {
+            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
+            add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
+            add_effect(&[Value::String("Flame".into()), state.clone(), Value::Int(50)])?;
+            get_effect_count(&[Value::Nil, state.clone()])
+        });
+        let value = result.expect("GetEffectCount succeeds");
+        assert_eq!(value, Value::Int(3));
+
+        let (result, _) = with_effect_context(&[], &[], || -> Result<Value, RuntimeError> {
+            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
+            add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
+            add_effect(&[Value::String("Flame".into()), state.clone(), Value::Int(50)])?;
+            get_effect_count(&[Value::String("Glow".into()), state.clone()])
+        });
+        let value = result.expect("GetEffectCount with name succeeds");
+        assert_eq!(value, Value::Int(1));
+
+        let (result, _) = with_effect_context(&[], &[], || -> Result<Value, RuntimeError> {
+            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
+            add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
+            add_effect(&[Value::String("Flame".into()), state.clone(), Value::Int(50)])?;
+            get_effect_count(&[Value::Nil, state.clone(), Value::Int(90)])
+        });
+        let value = result.expect("GetEffectCount with priority succeeds");
+        assert_eq!(value, Value::Int(2));
+    }
+
+    #[test]
+    fn get_effect_count_reads_state_snapshot_when_no_context() {
+        let mut glow = HashMap::new();
+        glow.insert("name".into(), Value::String("Glow".into()));
+        glow.insert("priority".into(), Value::Int(100));
+        glow.insert("interval".into(), Value::Int(1));
+        glow.insert("timer".into(), Value::Int(0));
+
+        let mut spark = HashMap::new();
+        spark.insert("name".into(), Value::String("Spark".into()));
+        spark.insert("priority".into(), Value::Int(60));
+        spark.insert("interval".into(), Value::Int(1));
+        spark.insert("timer".into(), Value::Int(0));
+
+        let state = {
+            let mut map = HashMap::new();
+            map.insert(
+                "effects".into(),
+                Value::Array(vec![Value::Proplist(glow), Value::Proplist(spark)]),
+            );
+            Value::Proplist(map)
+        };
+
+        let value = get_effect_count(&[Value::Nil, state.clone(), Value::Nil])
+            .expect("GetEffectCount without context succeeds");
+        assert_eq!(value, Value::Int(2));
+
+        let value = get_effect_count(&[Value::String("Spark".into()), state, Value::Int(50)])
+            .expect("GetEffectCount with state filter succeeds");
+        assert_eq!(value, Value::Int(0));
     }
 
     #[test]
