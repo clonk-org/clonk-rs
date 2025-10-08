@@ -4352,6 +4352,15 @@ impl Engine {
             push_handled = true;
         }
 
+        let mut pull_handled = false;
+        if matches!(procedure, ActionProcedure::Pull) {
+            if !self.apply_pull_procedure(idx, command_direction, movement_profile, &definition_id)
+            {
+                return;
+            }
+            pull_handled = true;
+        }
+
         {
             let object = &mut self.objects[idx];
             object.state.velocity.y = object.state.velocity.y.saturating_add(gravity_component);
@@ -4416,6 +4425,11 @@ impl Engine {
                         object.state.velocity = Vector2::ZERO;
                     }
                 }
+                ActionProcedure::Pull => {
+                    if !pull_handled {
+                        object.state.velocity = Vector2::ZERO;
+                    }
+                }
                 _ => {}
             }
             match procedure {
@@ -4446,6 +4460,13 @@ impl Engine {
                     }
                 }
                 ActionProcedure::Push => {
+                    if object.state.velocity.x < 0 {
+                        object.state.direction = Direction::Left;
+                    } else if object.state.velocity.x > 0 {
+                        object.state.direction = Direction::Right;
+                    }
+                }
+                ActionProcedure::Pull => {
                     if object.state.velocity.x < 0 {
                         object.state.direction = Direction::Left;
                     } else if object.state.velocity.x > 0 {
@@ -4560,6 +4581,144 @@ impl Engine {
         self.reset_action_to_default(idx, definition_id, true);
     }
 
+    fn apply_pull_procedure(
+        &mut self,
+        idx: usize,
+        command_direction: CommandDirection,
+        movement_profile: MovementProfile,
+        definition_id: &DefinitionId,
+    ) -> bool {
+        let Some(target_id) = self.objects[idx].state.action.target else {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        };
+
+        let Some(target_idx) = self.find_object_index(target_id) else {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        };
+
+        if target_idx == idx {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        let puller_container = self.objects[idx].state.container;
+        if puller_container == Some(target_id) {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        let target_removed = {
+            let target = &self.objects[target_idx];
+            target.destroyed || matches!(target.state.status, ObjectStatus::Deleted)
+        };
+        if target_removed {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        if self.objects[target_idx].state.container.is_some() {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        let walk_speed = movement_profile.walk_speed.max(0);
+        let walk_accel = movement_profile.walk_acceleration.max(0);
+
+        let puller_position = self.objects[idx].state.position;
+        let target_position = self.objects[target_idx].state.position;
+
+        let (puller_half_width, _) = Self::object_half_extents(&self.objects[idx]);
+        let (target_half_width, target_half_height) =
+            Self::object_half_extents(&self.objects[target_idx]);
+        let pull_distance = puller_half_width.saturating_add(target_half_width);
+
+        let horizontal_input = Self::horizontal_input_sign(command_direction);
+        let base_velocity = horizontal_input.saturating_mul(walk_speed);
+
+        let desired_puller_x = if horizontal_input == 0 {
+            puller_position.x
+        } else {
+            target_position
+                .x
+                .saturating_add(horizontal_input.saturating_mul(pull_distance))
+        };
+        let desired_target_x = if horizontal_input == 0 {
+            target_position.x
+        } else {
+            puller_position
+                .x
+                .saturating_sub(horizontal_input.saturating_mul(pull_distance))
+        };
+
+        let desired_target_velocity = Self::desired_pull_velocity(
+            target_position.x,
+            desired_target_x,
+            base_velocity,
+            walk_speed,
+        );
+        let desired_puller_velocity = Self::desired_pull_velocity(
+            puller_position.x,
+            desired_puller_x,
+            base_velocity,
+            walk_speed,
+        );
+
+        // Mirror C++ pull range tolerance: stay close enough to the target to keep the rope taut.
+        let range_extension = puller_half_width.saturating_sub(8).max(0) + 20;
+        let horizontal_gap_limit = target_half_width.saturating_add(range_extension);
+        let vertical_gap_limit = target_half_height.saturating_add(range_extension);
+
+        let horizontal_gap = (puller_position.x as i64 - target_position.x as i64).abs() as i32;
+        let vertical_gap = (puller_position.y as i64 - target_position.y as i64).abs() as i32;
+        if horizontal_gap > horizontal_gap_limit || vertical_gap > vertical_gap_limit {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        let speed_limit = walk_speed.saturating_mul(2).max(walk_speed);
+        let physics = self.physics;
+
+        match idx.cmp(&target_idx) {
+            std::cmp::Ordering::Less => {
+                let (first, second) = self.objects.split_at_mut(target_idx);
+                let puller = &mut first[idx];
+                let target = &mut second[0];
+                Self::update_pull_pair(
+                    puller,
+                    target,
+                    desired_puller_velocity,
+                    desired_target_velocity,
+                    speed_limit,
+                    walk_accel,
+                    physics,
+                );
+            }
+            std::cmp::Ordering::Greater => {
+                let (first, second) = self.objects.split_at_mut(idx);
+                let target = &mut first[target_idx];
+                let puller = &mut second[0];
+                Self::update_pull_pair(
+                    puller,
+                    target,
+                    desired_puller_velocity,
+                    desired_target_velocity,
+                    speed_limit,
+                    walk_accel,
+                    physics,
+                );
+            }
+            std::cmp::Ordering::Equal => {
+                // Should not happen because we guard earlier, but keep the action safe.
+                self.reset_action_to_default(idx, definition_id, true);
+                return false;
+            }
+        }
+
+        true
+    }
+
     fn apply_push_procedure(
         &mut self,
         idx: usize,
@@ -4641,6 +4800,28 @@ impl Engine {
         true
     }
 
+    fn update_pull_pair(
+        puller: &mut Object,
+        target: &mut Object,
+        desired_puller_velocity: i32,
+        desired_target_velocity: i32,
+        speed_limit: i32,
+        acceleration: i32,
+        physics: PhysicsSettings,
+    ) {
+        let accel = acceleration.max(0);
+        let new_target_velocity =
+            step_toward(target.state.velocity.x, desired_target_velocity, accel);
+        target.state.velocity.x = clamp_to_limit(new_target_velocity, speed_limit);
+        physics.clamp_velocity(&mut target.state.velocity);
+
+        let new_puller_velocity =
+            step_toward(puller.state.velocity.x, desired_puller_velocity, accel);
+        puller.state.velocity.x = clamp_to_limit(new_puller_velocity, speed_limit);
+        puller.state.velocity.y = 0;
+        physics.clamp_velocity(&mut puller.state.velocity);
+    }
+
     fn update_push_pair(
         pusher: &mut Object,
         target: &mut Object,
@@ -4674,6 +4855,57 @@ impl Engine {
         pusher.state.velocity.x = clamp_to_limit(new_pusher_velocity, push_speed);
         pusher.state.velocity.y = 0;
         physics.clamp_velocity(&mut pusher.state.velocity);
+    }
+
+    fn desired_pull_velocity(
+        current_position: i32,
+        desired_position: i32,
+        base_velocity: i32,
+        walk_speed: i32,
+    ) -> i32 {
+        let delta = desired_position.saturating_sub(current_position);
+        let correction = delta.clamp(-10, 10) / 10;
+        base_velocity + walk_speed.saturating_mul(correction)
+    }
+
+    fn object_half_extents(object: &Object) -> (i32, i32) {
+        if object.state.vertices.is_empty() {
+            // Without explicit vertex data fall back to a generous default so pull spacing stays stable.
+            return (10, 10);
+        }
+
+        let mut min_x = object.state.vertices[0].x;
+        let mut max_x = min_x;
+        let mut min_y = object.state.vertices[0].y;
+        let mut max_y = min_y;
+        for vertex in &object.state.vertices {
+            if vertex.x < min_x {
+                min_x = vertex.x;
+            }
+            if vertex.x > max_x {
+                max_x = vertex.x;
+            }
+            if vertex.y < min_y {
+                min_y = vertex.y;
+            }
+            if vertex.y > max_y {
+                max_y = vertex.y;
+            }
+        }
+
+        let width = max_x.saturating_sub(min_x);
+        let height = max_y.saturating_sub(min_y);
+        let half_width = if width <= 0 { 10 } else { (width + 1) / 2 };
+        let half_height = if height <= 0 { 10 } else { (height + 1) / 2 };
+        (half_width, half_height)
+    }
+
+    fn horizontal_input_sign(command_direction: CommandDirection) -> i32 {
+        match command_direction {
+            CommandDirection::Left | CommandDirection::UpLeft | CommandDirection::DownLeft => -1,
+            CommandDirection::Right | CommandDirection::UpRight | CommandDirection::DownRight => 1,
+            _ => 0,
+        }
     }
 
     fn apply_landscape_at_index(&mut self, idx: usize) {
@@ -7917,6 +8149,151 @@ mod tests {
         assert!(
             target_after.position.x > target_initial_position.x,
             "target should advance horizontally"
+        );
+    }
+
+    #[test]
+    fn pull_procedure_without_target_resets_to_default() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Puller", "Puller", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
+            "Pull".to_string(),
+            ActionSpec::default().with_procedure("pull"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let pull_state = ActionState::new("Pull");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Puller")
+                    .with_action(pull_state)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Idle");
+        assert_eq!(object.velocity, Vector2::ZERO);
+        assert_eq!(object.command_direction, CommandDirection::Stop);
+    }
+
+    #[test]
+    fn pull_procedure_moves_target_and_puller() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut puller_definition = Definition::from_script("Puller", "Puller", script).unwrap();
+        let mut puller_actions = HashMap::new();
+        puller_actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        puller_actions.insert(
+            "Pull".to_string(),
+            ActionSpec::default().with_procedure("pull"),
+        );
+        puller_definition.configure_actions(Some("Idle".to_string()), puller_actions);
+        puller_definition.set_movement_profile(
+            MovementProfile::default()
+                .with_walk_speed(6)
+                .with_walk_acceleration(3),
+        );
+
+        let mut target_definition = Definition::from_script("Crate", "Crate", script).unwrap();
+        let mut target_actions = HashMap::new();
+        target_actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        target_definition.configure_actions(Some("Idle".to_string()), target_actions);
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(puller_definition)
+            .expect("puller registers");
+        engine
+            .register_definition(target_definition)
+            .expect("target registers");
+
+        let vertices = vec![
+            ObjectVertex::new(-10, -10),
+            ObjectVertex::new(10, -10),
+            ObjectVertex::new(10, 10),
+            ObjectVertex::new(-10, 10),
+        ];
+
+        let target_id = engine
+            .spawn_object(
+                SpawnConfig::new("Crate")
+                    .with_position(Vector2::new(0, 0))
+                    .with_vertices(vertices.clone()),
+            )
+            .expect("target spawns");
+        let target_initial_position = engine
+            .object_snapshot(target_id)
+            .expect("target snapshot available")
+            .position;
+
+        let mut pull_state = ActionState::new("Pull");
+        pull_state.target = Some(target_id);
+
+        let puller_id = engine
+            .spawn_object(
+                SpawnConfig::new("Puller")
+                    .with_position(Vector2::new(20, 0))
+                    .with_vertices(vertices)
+                    .with_action(pull_state)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("puller spawns");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let puller = snapshot
+            .object(puller_id)
+            .expect("puller present after tick");
+        assert_eq!(puller.action.name, "Pull");
+        assert!(puller.velocity.x > 0, "puller should move forward");
+        assert_eq!(puller.direction, Direction::Right);
+
+        let target = snapshot
+            .object(target_id)
+            .expect("target present after tick");
+        assert!(target.velocity.x >= 0);
+
+        let snapshot = engine.tick().expect("second tick succeeds");
+        let target_after = snapshot
+            .object(target_id)
+            .expect("target present after second tick");
+        assert!(
+            target_after.position.x > target_initial_position.x,
+            "target should advance horizontally",
         );
     }
 
