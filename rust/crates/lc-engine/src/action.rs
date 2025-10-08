@@ -24,6 +24,8 @@ pub struct ActionSpec {
     pub end_call: Option<String>,
     #[serde(default)]
     pub abort_call: Option<String>,
+    #[serde(default)]
+    pub no_other_action: bool,
 }
 
 impl ActionSpec {
@@ -38,6 +40,7 @@ impl ActionSpec {
             start_call: None,
             end_call: None,
             abort_call: None,
+            no_other_action: false,
         }
     }
 
@@ -85,6 +88,11 @@ impl ActionSpec {
         self.abort_call = Some(abort_call.into());
         self
     }
+
+    pub fn with_no_other_action(mut self, enabled: bool) -> Self {
+        self.no_other_action = enabled;
+        self
+    }
 }
 
 impl Default for ActionSpec {
@@ -99,6 +107,7 @@ impl Default for ActionSpec {
             start_call: None,
             end_call: None,
             abort_call: None,
+            no_other_action: false,
         }
     }
 }
@@ -208,6 +217,13 @@ impl ActionLibrary {
 
     pub fn specs(&self) -> &HashMap<String, ActionSpec> {
         &self.specs
+    }
+
+    pub fn blocks_other_actions(&self, action: &str) -> bool {
+        self.specs
+            .get(action)
+            .map(|spec| spec.no_other_action)
+            .unwrap_or(false)
     }
 
     pub fn start_call_for_action(&self, action: &str) -> Option<&str> {
@@ -404,8 +420,17 @@ impl ActionState {
         }
     }
 
-    pub fn apply_update_with_library(&mut self, update: &ActionUpdate, library: &ActionLibrary) {
+    pub fn apply_update_with_library(
+        &mut self,
+        update: &ActionUpdate,
+        library: &ActionLibrary,
+    ) -> ActionUpdateResult {
         let mut resolved = update.clone();
+        if let Some(name) = resolved.name.as_ref() {
+            if !resolved.force && library.blocks_other_actions(&self.name) && name != &self.name {
+                return ActionUpdateResult::Blocked;
+            }
+        }
         if let Some(name) = resolved.name.as_ref() {
             if !library.contains(name) {
                 resolved.name = Some(library.default_action().to_string());
@@ -416,6 +441,7 @@ impl ActionState {
 
         self.apply_update(&resolved);
         self.reconcile_with_library(library);
+        ActionUpdateResult::Applied
     }
 
     pub fn reconcile_with_library(&mut self, library: &ActionLibrary) {
@@ -434,12 +460,14 @@ impl Default for ActionState {
 }
 
 /// Partial update to an object's action state.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionUpdate {
     pub name: Option<String>,
     pub phase: Option<i32>,
     #[serde(default)]
     pub ticks: Option<u32>,
+    #[serde(default = "ActionUpdate::default_force")]
+    pub force: bool,
 }
 
 impl ActionUpdate {
@@ -470,6 +498,15 @@ impl ActionUpdate {
         self.ticks = Some(ticks);
     }
 
+    pub fn with_force(mut self, force: bool) -> Self {
+        self.force = force;
+        self
+    }
+
+    pub fn set_force(&mut self, force: bool) {
+        self.force = force;
+    }
+
     pub fn merge(&mut self, other: ActionUpdate) {
         if other.name.is_some() {
             self.name = other.name;
@@ -480,5 +517,29 @@ impl ActionUpdate {
         if other.ticks.is_some() {
             self.ticks = other.ticks;
         }
+        if !other.force {
+            self.force = false;
+        }
     }
+
+    fn default_force() -> bool {
+        true
+    }
+}
+
+impl Default for ActionUpdate {
+    fn default() -> Self {
+        Self {
+            name: None,
+            phase: None,
+            ticks: None,
+            force: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionUpdateResult {
+    Applied,
+    Blocked,
 }

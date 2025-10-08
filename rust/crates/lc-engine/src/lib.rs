@@ -7,7 +7,9 @@ mod landscape;
 mod record;
 pub mod scenario;
 
-pub use action::{ActionLibrary, ActionProcedure, ActionSpec, ActionState, ActionUpdate};
+pub use action::{
+    ActionLibrary, ActionProcedure, ActionSpec, ActionState, ActionUpdate, ActionUpdateResult,
+};
 pub use effect::EffectState;
 pub use landscape::{CollisionResolution, Landscape, LandscapeError};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
@@ -536,11 +538,13 @@ impl ObjectState {
         if let Some(action) = &delta.action {
             let requested_name_change = action.name.is_some();
             let previous_action = self.action.clone();
-            self.action.apply_update_with_library(action, library);
-            action_change = Some(ActionChange {
-                previous: previous_action,
-                requested_name_change,
-            });
+            let result = self.action.apply_update_with_library(action, library);
+            if matches!(result, ActionUpdateResult::Applied) {
+                action_change = Some(ActionChange {
+                    previous: previous_action,
+                    requested_name_change,
+                });
+            }
         } else {
             self.action.reconcile_with_library(library);
         }
@@ -1555,6 +1559,8 @@ impl Definition {
                 object_id,
                 state.status,
                 &state.effects,
+                state.action.name.clone(),
+                self.action_library.clone(),
             )),
             global_effects,
             || self.script.call("Initialize", &args),
@@ -1620,6 +1626,8 @@ impl Definition {
                 object_id,
                 state.status,
                 &state.effects,
+                state.action.name.clone(),
+                self.action_library.clone(),
             )),
             global_effects,
             || self.script.call("Step", &args),
@@ -1685,6 +1693,8 @@ impl Definition {
                 object_id,
                 state.status,
                 &state.effects,
+                state.action.name.clone(),
+                self.action_library.clone(),
             )),
             global_effects,
             || self.script.call(function, &args),
@@ -1803,6 +1813,8 @@ impl Definition {
                 object_id,
                 state.status,
                 &state.effects,
+                state.action.name.clone(),
+                self.action_library.clone(),
             )),
             global_effects,
             || {
@@ -2503,11 +2515,13 @@ impl Engine {
             if let Some(action) = action {
                 let previous_action = object.state.action.clone();
                 let requested_name_change = action.name.is_some();
-                object
+                let result = object
                     .state
                     .action
                     .apply_update_with_library(&action, &action_library);
-                if requested_name_change || object.state.action.name != previous_action.name {
+                if matches!(result, ActionUpdateResult::Applied)
+                    && (requested_name_change || object.state.action.name != previous_action.name)
+                {
                     object.record_action_event(previous_action, ActionTransitionKind::Forced);
                 }
             } else {
@@ -4779,6 +4793,84 @@ mod tests {
             assert_eq!(idle_end, 0);
             assert_eq!(run_start, 1);
         }
+    }
+
+    #[test]
+    fn non_forced_action_update_respects_no_other_action() {
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        "#;
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_no_other_action(true),
+        );
+        actions.insert("Run".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine
+            .apply_object_update(
+                id,
+                ObjectUpdate::new()
+                    .with_action_update(ActionUpdate::default().with_name("Run").with_force(false)),
+            )
+            .expect("update succeeds");
+
+        let snapshot = engine
+            .object_snapshot(id)
+            .expect("object snapshot available");
+        assert_eq!(snapshot.action.name, "Idle");
+    }
+
+    #[test]
+    fn forced_action_update_overrides_no_other_action() {
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        "#;
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_no_other_action(true),
+        );
+        actions.insert("Run".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(13);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine
+            .apply_object_update(id, ObjectUpdate::new().with_action("Run"))
+            .expect("update succeeds");
+
+        let snapshot = engine
+            .object_snapshot(id)
+            .expect("object snapshot available");
+        assert_eq!(snapshot.action.name, "Run");
     }
 
     #[test]

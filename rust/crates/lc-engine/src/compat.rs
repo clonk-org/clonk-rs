@@ -4,7 +4,7 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState};
-use crate::{ActionUpdate, ObjectId, ObjectStatus, ObjectUpdate, QueuedCommand};
+use crate::{ActionLibrary, ActionUpdate, ObjectId, ObjectStatus, ObjectUpdate, QueuedCommand};
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
@@ -41,19 +41,29 @@ pub(crate) fn enter_random_context(rng: ChaCha8Rng) -> RandomContextGuard {
     })
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct HostObjectContext<'a> {
     pub id: ObjectId,
     pub status: ObjectStatus,
     pub effects: &'a [EffectState],
+    pub action_name: String,
+    pub action_library: ActionLibrary,
 }
 
 impl<'a> HostObjectContext<'a> {
-    pub fn new(id: ObjectId, status: ObjectStatus, effects: &'a [EffectState]) -> Self {
+    pub fn new(
+        id: ObjectId,
+        status: ObjectStatus,
+        effects: &'a [EffectState],
+        action_name: impl Into<String>,
+        action_library: ActionLibrary,
+    ) -> Self {
         Self {
             id,
             status,
             effects,
+            action_name: action_name.into(),
+            action_library,
         }
     }
 }
@@ -719,17 +729,26 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
 
+        let current_action = object.effective_action_name().to_string();
+        let blocks_other_actions = object.effective_blocks_other_actions();
+        if blocks_other_actions && name != current_action {
+            return Ok(Value::Bool(false));
+        }
+
         let update = object
             .pending_update
             .action
             .get_or_insert_with(ActionUpdate::default);
-        update.set_name(name);
+        update.set_name(name.clone());
+        update.set_force(false);
         if let Some(phase) = phase {
             update.set_phase(phase);
         }
         if let Some(ticks) = ticks {
             update.set_ticks(ticks);
         }
+
+        object.update_effective_action(&name);
 
         Ok(Value::Bool(true))
     })
@@ -1032,8 +1051,16 @@ struct EffectHostContext {
 
 impl EffectHostContext {
     fn new(object: Option<HostObjectContext<'_>>, global_effects: Vec<EffectState>) -> Self {
-        let object =
-            object.map(|ctx| ObjectScopeContext::new(ctx.id, ctx.status, ctx.effects.to_vec()));
+        let object = object.map(|ctx| {
+            let HostObjectContext {
+                id,
+                status,
+                effects,
+                action_name,
+                action_library,
+            } = ctx;
+            ObjectScopeContext::new(id, status, effects.to_vec(), action_library, action_name)
+        });
         let global = Some(EffectScopeContext::new(global_effects));
         Self { object, global }
     }
@@ -1213,10 +1240,20 @@ struct ObjectScopeContext {
     pending_update: ObjectUpdate,
     queued_commands: Vec<QueuedCommand>,
     destroy: bool,
+    action_library: ActionLibrary,
+    current_action_name: String,
+    current_action_blocks_other_actions: bool,
 }
 
 impl ObjectScopeContext {
-    fn new(id: ObjectId, status: ObjectStatus, effects: Vec<EffectState>) -> Self {
+    fn new(
+        id: ObjectId,
+        status: ObjectStatus,
+        effects: Vec<EffectState>,
+        action_library: ActionLibrary,
+        action_name: String,
+    ) -> Self {
+        let blocks_other_actions = action_library.blocks_other_actions(&action_name);
         Self {
             id,
             status,
@@ -1224,6 +1261,9 @@ impl ObjectScopeContext {
             pending_update: ObjectUpdate::default(),
             queued_commands: Vec::new(),
             destroy: false,
+            action_library,
+            current_action_name: action_name,
+            current_action_blocks_other_actions: blocks_other_actions,
         }
     }
 
@@ -1239,11 +1279,36 @@ impl ObjectScopeContext {
         self.status = status;
         self.pending_update.status = Some(status);
     }
+
+    fn update_effective_action(&mut self, action: &str) {
+        self.current_action_name = action.to_string();
+        self.current_action_blocks_other_actions = self.action_library.blocks_other_actions(action);
+    }
+
+    fn effective_action_name(&self) -> &str {
+        if let Some(update) = self.pending_update.action.as_ref() {
+            if let Some(name) = update.name.as_ref() {
+                return name;
+            }
+        }
+        &self.current_action_name
+    }
+
+    fn effective_blocks_other_actions(&self) -> bool {
+        if let Some(update) = self.pending_update.action.as_ref() {
+            if let Some(name) = update.name.as_ref() {
+                return self.action_library.blocks_other_actions(name);
+            }
+        }
+        self.current_action_blocks_other_actions
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ActionSpec;
+    use std::collections::HashMap;
 
     fn empty_state() -> Value {
         let mut map = HashMap::new();
@@ -1260,6 +1325,8 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 &[],
+                "Idle",
+                ActionLibrary::default(),
             )),
             &[],
             func,
@@ -1376,6 +1443,52 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn set_action_respects_no_other_action() {
+        let mut specs = HashMap::new();
+        specs.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_no_other_action(true),
+        );
+        specs.insert("Walk".to_string(), ActionSpec::default());
+        let library = ActionLibrary::new(Some("Idle".to_string()), specs);
+
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                &[],
+                "Idle",
+                library.clone(),
+            )),
+            &[],
+            || set_action(&[Value::String("Walk".into())]),
+        );
+
+        let value = result.expect("SetAction returns bool");
+        assert_eq!(value, Value::Bool(false));
+        assert!(outcome.object_update.is_none());
+
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(2),
+                ObjectStatus::Normal,
+                &[],
+                "Idle",
+                library,
+            )),
+            &[],
+            || set_action(&[Value::String("Idle".into())]),
+        );
+
+        let value = result.expect("SetAction returns bool");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("pending update exists");
+        let action = update.action.expect("action update recorded");
+        assert_eq!(action.name.as_deref(), Some("Idle"));
+        assert!(!action.force);
     }
 
     #[test]
