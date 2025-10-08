@@ -20,6 +20,45 @@ thread_local! {
     };
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct HostWorldObject {
+    pub id: ObjectId,
+    pub action_name: String,
+}
+
+impl HostWorldObject {
+    pub(crate) fn new(id: ObjectId, action_name: impl Into<String>) -> Self {
+        Self {
+            id,
+            action_name: action_name.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HostWorldContext {
+    objects: Rc<HashMap<ObjectId, HostWorldObject>>,
+}
+
+impl HostWorldContext {
+    pub(crate) fn from_objects<I>(objects: I) -> Self
+    where
+        I: IntoIterator<Item = HostWorldObject>,
+    {
+        let map = objects
+            .into_iter()
+            .map(|object| (object.id, object))
+            .collect();
+        Self {
+            objects: Rc::new(map),
+        }
+    }
+
+    pub(crate) fn get(&self, id: ObjectId) -> Option<&HostWorldObject> {
+        self.objects.get(&id)
+    }
+}
+
 const DEFAULT_MAX_ENERGY: i32 = 100;
 
 pub fn register_host_functions(script: &mut ScriptEngine) {
@@ -229,6 +268,7 @@ pub(crate) fn enter_environment_context(
 pub(crate) fn with_effect_context<F, T, E>(
     object: Option<HostObjectContext<'_>>,
     global_effects: &[EffectState],
+    world: HostWorldContext,
     func: F,
 ) -> (Result<T, E>, EffectContextOutcome)
 where
@@ -239,7 +279,11 @@ where
             cell.borrow().is_none(),
             "nested effect contexts are not supported"
         );
-        *cell.borrow_mut() = Some(EffectHostContext::new(object, global_effects.to_vec()));
+        *cell.borrow_mut() = Some(EffectHostContext::new(
+            object,
+            global_effects.to_vec(),
+            world,
+        ));
         let result = func();
         let context = cell
             .borrow_mut()
@@ -1288,16 +1332,36 @@ fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(context) => context,
             None => return Ok(Value::Nil),
         };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    let action_name = object.effective_action_name();
+                    let resolved = if action_name.is_empty() {
+                        "Idle"
+                    } else {
+                        action_name
+                    };
+                    return Ok(Value::String(resolved.to_string()));
+                }
+            }
+
+            if let Some(other) = context.world.get(target) {
+                let resolved = if other.action_name.is_empty() {
+                    "Idle"
+                } else {
+                    other.action_name.as_str()
+                };
+                return Ok(Value::String(resolved.to_string()));
+            }
+
+            return Ok(Value::Nil);
+        }
+
         let object = match context.object_context() {
             Some(object) => object,
             None => return Ok(Value::Nil),
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Nil);
-            }
-        }
 
         let action_name = object.effective_action_name();
         let resolved = if action_name.is_empty() {
@@ -1902,10 +1966,15 @@ fn parse_timer_from_int(value: i32) -> Result<i32, RuntimeError> {
 struct EffectHostContext {
     object: Option<ObjectScopeContext>,
     global: Option<EffectScopeContext>,
+    world: HostWorldContext,
 }
 
 impl EffectHostContext {
-    fn new(object: Option<HostObjectContext<'_>>, global_effects: Vec<EffectState>) -> Self {
+    fn new(
+        object: Option<HostObjectContext<'_>>,
+        global_effects: Vec<EffectState>,
+        world: HostWorldContext,
+    ) -> Self {
         let object = object.map(|ctx| {
             let HostObjectContext {
                 id,
@@ -1929,7 +1998,11 @@ impl EffectHostContext {
             )
         });
         let global = Some(EffectScopeContext::new(global_effects));
-        Self { object, global }
+        Self {
+            object,
+            global,
+            world,
+        }
     }
 
     fn scope_mut(&mut self, scope: EffectScope) -> Result<&mut EffectScopeContext, RuntimeError> {
@@ -2274,6 +2347,16 @@ mod tests {
     where
         F: FnOnce() -> Result<T, RuntimeError>,
     {
+        with_object_host_context_with_world(HostWorldContext::default(), func)
+    }
+
+    fn with_object_host_context_with_world<F, T>(
+        world: HostWorldContext,
+        func: F,
+    ) -> (Result<T, RuntimeError>, EffectContextOutcome)
+    where
+        F: FnOnce() -> Result<T, RuntimeError>,
+    {
         with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
@@ -2286,6 +2369,7 @@ mod tests {
                 CommandDirection::Stop,
             )),
             &[],
+            world,
             func,
         )
     }
@@ -2516,6 +2600,7 @@ mod tests {
                 CommandDirection::Stop,
             )),
             &[],
+            HostWorldContext::default(),
             || set_action(&[Value::String("Walk".into())]),
         );
 
@@ -2535,6 +2620,7 @@ mod tests {
                 CommandDirection::Stop,
             )),
             &[],
+            HostWorldContext::default(),
             || set_action(&[Value::String("Idle".into())]),
         );
 
@@ -2573,6 +2659,7 @@ mod tests {
                 CommandDirection::Stop,
             )),
             &[],
+            HostWorldContext::default(),
             || {
                 set_action(&[Value::String("Walk".into())])?;
                 get_action(&[])
@@ -2597,6 +2684,34 @@ mod tests {
 
         let value = result.expect("GetAction succeeds");
         assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn get_action_reads_other_object_from_world() {
+        let other = HostWorldObject::new(ObjectId::new(99), "Walk");
+        let world = HostWorldContext::from_objects(vec![other]);
+        let (result, _) = with_object_host_context_with_world(world, || {
+            let mut target = HashMap::new();
+            target.insert("id".into(), Value::Int(99));
+            get_action(&[Value::Proplist(target)])
+        });
+
+        let value = result.expect("GetAction succeeds");
+        assert_eq!(value, Value::String("Walk".into()));
+    }
+
+    #[test]
+    fn get_action_uses_world_without_context() {
+        let world =
+            HostWorldContext::from_objects(vec![HostWorldObject::new(ObjectId::new(7), "Dig")]);
+        let (result, _) = with_effect_context(None, &[], world, || {
+            let mut target = HashMap::new();
+            target.insert("id".into(), Value::Int(7));
+            get_action(&[Value::Proplist(target)])
+        });
+
+        let value = result.expect("GetAction resolves world lookup");
+        assert_eq!(value, Value::String("Dig".into()));
     }
 
     #[test]
@@ -2957,7 +3072,7 @@ mod tests {
 
     #[test]
     fn add_global_effect_records_global_command() {
-        let (result, outcome) = with_effect_context(None, &[], || {
+        let (result, outcome) = with_effect_context(None, &[], HostWorldContext::default(), || {
             add_effect(&[Value::String("Glow".into()), Value::Nil, Value::Int(120)])
         });
 
@@ -2976,15 +3091,20 @@ mod tests {
 
     #[test]
     fn global_effect_queries_use_context_view() {
-        let (result, _) = with_effect_context(None, &[], || -> Result<Value, RuntimeError> {
-            add_effect(&[Value::String("Glow".into()), Value::Nil, Value::Int(90)])?;
-            get_effect(&[
-                Value::String("Glow".into()),
-                Value::Nil,
-                Value::Int(0),
-                Value::Int(1),
-            ])
-        });
+        let (result, _) = with_effect_context(
+            None,
+            &[],
+            HostWorldContext::default(),
+            || -> Result<Value, RuntimeError> {
+                add_effect(&[Value::String("Glow".into()), Value::Nil, Value::Int(90)])?;
+                get_effect(&[
+                    Value::String("Glow".into()),
+                    Value::Nil,
+                    Value::Int(0),
+                    Value::Int(1),
+                ])
+            },
+        );
 
         let value = result.expect("GetEffect succeeds");
         assert_eq!(value, Value::String("Glow".into()));
@@ -2992,7 +3112,7 @@ mod tests {
 
     #[test]
     fn remove_global_effect_handles_missing() {
-        let (result, _) = with_effect_context(None, &[], || {
+        let (result, _) = with_effect_context(None, &[], HostWorldContext::default(), || {
             remove_effect(&[Value::Nil, Value::Nil, Value::Int(0)])
         });
 

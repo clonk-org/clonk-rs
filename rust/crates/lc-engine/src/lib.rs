@@ -17,6 +17,7 @@ pub use scenario::{Scenario, ScenarioError};
 
 use compat::{
     enter_environment_context, enter_random_context, EffectContextOutcome, EnvironmentDelta,
+    HostWorldContext, HostWorldObject,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1742,6 +1743,7 @@ impl Definition {
         global_effects: &[EffectState],
         environment: EnvironmentSettings,
         frame: u64,
+        world: HostWorldContext,
     ) -> Result<(CommandBatch, ChaCha8Rng), EngineError> {
         if !self.has_initialize {
             return Ok((CommandBatch::default(), rng));
@@ -1764,6 +1766,7 @@ impl Definition {
                 state.command_direction,
             )),
             global_effects,
+            world,
             || self.script.call("Initialize", &args),
         );
         let rng = guard.finish();
@@ -1813,6 +1816,7 @@ impl Definition {
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
         environment: EnvironmentSettings,
+        world: HostWorldContext,
     ) -> Result<(CommandBatch, ChaCha8Rng), EngineError> {
         if !self.has_step {
             return Ok((CommandBatch::default(), rng));
@@ -1841,6 +1845,7 @@ impl Definition {
                 state.command_direction,
             )),
             global_effects,
+            world,
             || self.script.call("Step", &args),
         );
         let rng = guard.finish();
@@ -1890,6 +1895,7 @@ impl Definition {
         action_name: &str,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        world: HostWorldContext,
         environment: EnvironmentSettings,
         frame: u64,
     ) -> Result<(compat::EffectContextOutcome, ChaCha8Rng), EngineError> {
@@ -1919,6 +1925,7 @@ impl Definition {
                 state.command_direction,
             )),
             global_effects,
+            world,
             || self.script.call(function, &args),
         );
         let rng = guard.finish();
@@ -1958,6 +1965,7 @@ impl Definition {
         global_effects: &[EffectState],
         environment: EnvironmentSettings,
         frame: u64,
+        world: HostWorldContext,
     ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
             state,
@@ -1970,6 +1978,7 @@ impl Definition {
             global_effects,
             environment,
             frame,
+            world,
         )
     }
 
@@ -1982,6 +1991,7 @@ impl Definition {
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
         environment: EnvironmentSettings,
+        world: HostWorldContext,
     ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
             state,
@@ -1994,6 +2004,7 @@ impl Definition {
             global_effects,
             environment,
             frame,
+            world,
         )
     }
 
@@ -2007,6 +2018,7 @@ impl Definition {
         global_effects: &[EffectState],
         environment: EnvironmentSettings,
         frame: u64,
+        world: HostWorldContext,
     ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
             state,
@@ -2019,6 +2031,7 @@ impl Definition {
             global_effects,
             environment,
             frame,
+            world,
         )
     }
 
@@ -2034,6 +2047,7 @@ impl Definition {
         global_effects: &[EffectState],
         environment: EnvironmentSettings,
         frame: u64,
+        world: HostWorldContext,
     ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
         if !self.script.has_effect_callback(&effect.name, event) {
             return Ok((EffectContextOutcome::empty(), rng));
@@ -2063,6 +2077,7 @@ impl Definition {
                 state.command_direction,
             )),
             global_effects,
+            world,
             || {
                 self.script
                     .call_effect_callback(&effect.name, event, &args)
@@ -2187,8 +2202,11 @@ impl ScenarioScript {
 
         let env_guard = enter_environment_context(environment, env_frame);
         let guard = enter_random_context(rng);
+        let world = host_world_context_from_snapshot(snapshot);
         let (result, host_effects) =
-            compat::with_effect_context(None, global_effects, || self.script.call(function, &args));
+            compat::with_effect_context(None, global_effects, world, || {
+                self.script.call(function, &args)
+            });
         let rng = guard.finish();
         let mut environment_delta = env_guard.finish();
         if let Some(delta) = host_effects.environment {
@@ -2315,6 +2333,14 @@ impl Engine {
 
     pub fn set_environment(&mut self, environment: EnvironmentSettings) {
         self.environment = environment;
+    }
+
+    fn host_world_context(&self) -> HostWorldContext {
+        HostWorldContext::from_objects(
+            self.objects
+                .iter()
+                .map(|object| HostWorldObject::new(object.id, object.state.action.name.clone())),
+        )
     }
 
     pub fn clear_scenario_script(&mut self) {
@@ -2694,6 +2720,7 @@ impl Engine {
                 let object_id = self.objects[idx].id;
                 let global_view = self.global_effects.clone();
                 let rng_state = self.rng.clone();
+                let world = self.host_world_context();
                 let (global_cmds, new_rng) = {
                     let definition = self
                         .definitions
@@ -2709,6 +2736,7 @@ impl Engine {
                         global_view,
                         &mut self.environment,
                         self.frame,
+                        world.clone(),
                     )?
                 };
                 self.rng = new_rng;
@@ -2738,6 +2766,7 @@ impl Engine {
                 let object_id = self.objects[idx].id;
                 let global_view = self.global_effects.clone();
                 let rng_state = self.rng.clone();
+                let world = self.host_world_context();
                 let (global_cmds, new_rng) = {
                     let definition = self
                         .definitions
@@ -2753,6 +2782,7 @@ impl Engine {
                         global_view,
                         &mut self.environment,
                         self.frame,
+                        world.clone(),
                     )?
                 };
                 self.rng = new_rng;
@@ -2825,6 +2855,7 @@ impl Engine {
                     rng_state,
                     &self.global_effects,
                     self.environment,
+                    self.host_world_context(),
                 )?
             };
             self.rng = new_rng;
@@ -2884,6 +2915,7 @@ impl Engine {
             if !effect_events.is_empty() {
                 let previous_container;
                 let new_container;
+                let world = self.host_world_context();
                 let global_cmds = {
                     let definition = self
                         .definitions
@@ -2902,6 +2934,7 @@ impl Engine {
                         global_view,
                         &mut self.environment,
                         self.frame,
+                        world.clone(),
                     )?;
                     self.rng = new_rng;
                     new_container = object.state.container;
@@ -3165,6 +3198,7 @@ impl Engine {
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
+        let world = self.host_world_context();
         let (outcome, new_rng) = definition.call_action_callback(
             function,
             kind,
@@ -3173,6 +3207,7 @@ impl Engine {
             action_name,
             rng_state,
             &global_view,
+            world,
             self.environment,
             self.frame,
         )?;
@@ -3274,16 +3309,21 @@ impl Engine {
                 .definitions
                 .get(definition_id)
                 .ok_or_else(|| EngineError::UnknownDefinition(definition_id.to_string()))?;
-            let (global_cmds, new_rng) = Self::run_effect_events_for_object(
-                definition,
-                rng_state,
-                object_id,
-                &mut self.objects[index],
-                effect_events,
-                global_view,
-                &mut self.environment,
-                self.frame,
-            )?;
+            let world = self.host_world_context();
+            let (global_cmds, new_rng) = {
+                let object = &mut self.objects[index];
+                Self::run_effect_events_for_object(
+                    definition,
+                    rng_state,
+                    object_id,
+                    object,
+                    effect_events,
+                    global_view,
+                    &mut self.environment,
+                    self.frame,
+                    world.clone(),
+                )?
+            };
             self.rng = new_rng;
             if !global_cmds.is_empty() {
                 self.apply_global_effect_commands(&global_cmds);
@@ -3522,6 +3562,7 @@ impl Engine {
         mut global_view: Vec<EffectState>,
         environment: &mut EnvironmentSettings,
         frame: u64,
+        world: HostWorldContext,
     ) -> Result<(Vec<EffectCommand>, ChaCha8Rng), EngineError> {
         if events.is_empty() {
             return Ok((Vec::new(), rng));
@@ -3543,6 +3584,7 @@ impl Engine {
                     &global_view,
                     current_environment,
                     frame,
+                    world.clone(),
                 )?,
                 EffectEventKind::Timer => definition.call_effect_timer(
                     &snapshot_for_call,
@@ -3552,6 +3594,7 @@ impl Engine {
                     rng,
                     &global_view,
                     current_environment,
+                    world.clone(),
                 )?,
                 EffectEventKind::Stopped(reason) => definition.call_effect_stop(
                     &snapshot_for_call,
@@ -3562,6 +3605,7 @@ impl Engine {
                     &global_view,
                     current_environment,
                     frame,
+                    world.clone(),
                 )?,
             };
             rng = new_rng;
@@ -4057,6 +4101,7 @@ impl Engine {
                     &self.global_effects,
                     self.environment,
                     self.frame,
+                    self.host_world_context(),
                 )?
             };
             self.rng = new_rng;
@@ -4097,16 +4142,20 @@ impl Engine {
             let global_view = self.global_effects.clone();
             let previous_container = object.state.container;
             let rng_state = self.rng.clone();
-            let (global_cmds, new_rng) = Self::run_effect_events_for_object(
-                definition,
-                rng_state,
-                id,
-                &mut object,
-                effect_events,
-                global_view,
-                &mut self.environment,
-                self.frame,
-            )?;
+            let world = self.host_world_context();
+            let (global_cmds, new_rng) = {
+                Self::run_effect_events_for_object(
+                    definition,
+                    rng_state,
+                    id,
+                    &mut object,
+                    effect_events,
+                    global_view,
+                    &mut self.environment,
+                    self.frame,
+                    world,
+                )?
+            };
             self.rng = new_rng;
             if !global_cmds.is_empty() {
                 self.apply_global_effect_commands(&global_cmds);
@@ -4273,6 +4322,15 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
     let effects: Vec<_> = snapshot.effects.iter().map(build_effect_value).collect();
     map.insert("effects".into(), Value::Array(effects));
     Value::Proplist(map)
+}
+
+fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldContext {
+    HostWorldContext::from_objects(
+        snapshot
+            .objects
+            .iter()
+            .map(|object| HostWorldObject::new(object.id, object.action.name.clone())),
+    )
 }
 
 fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {
