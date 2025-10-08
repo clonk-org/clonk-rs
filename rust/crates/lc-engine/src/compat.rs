@@ -20,6 +20,8 @@ thread_local! {
     };
 }
 
+const DEFAULT_MAX_ENERGY: i32 = 100;
+
 pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("AddEffect", add_effect);
     script.register_host_function("RemoveEffect", remove_effect);
@@ -29,6 +31,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetAction", set_action);
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
+    script.register_host_function("DoEnergy", do_energy);
     script.register_host_function("Random", random);
     script.register_host_function("SetWind", set_wind);
     script.register_host_function("GetWind", get_wind);
@@ -58,6 +61,7 @@ pub(crate) fn enter_random_context(rng: ChaCha8Rng) -> RandomContextGuard {
 pub(crate) struct HostObjectContext<'a> {
     pub id: ObjectId,
     pub status: ObjectStatus,
+    pub energy: i32,
     pub effects: &'a [EffectState],
     pub action_name: String,
     pub action_library: ActionLibrary,
@@ -67,6 +71,7 @@ impl<'a> HostObjectContext<'a> {
     pub fn new(
         id: ObjectId,
         status: ObjectStatus,
+        energy: i32,
         effects: &'a [EffectState],
         action_name: impl Into<String>,
         action_library: ActionLibrary,
@@ -74,6 +79,7 @@ impl<'a> HostObjectContext<'a> {
         Self {
             id,
             status,
+            energy,
             effects,
             action_name: action_name.into(),
             action_library,
@@ -982,6 +988,129 @@ fn get_climate(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "DoEnergy expects at least 1 argument: change",
+        ));
+    }
+
+    let change = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "DoEnergy: expected int or nil for change, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            Value::Int(value) if *value == 0 => {
+                index += 1;
+            }
+            Value::Int(value) if *value > 0 => {
+                target_id = Some(ObjectId::new(*value as u64));
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let mut exact = false;
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Bool(flag) => {
+                exact = *flag;
+                index += 1;
+            }
+            Value::Int(value) => {
+                exact = *value != 0;
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "DoEnergy: expected bool, int, or nil for exact flag, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Int(_) | Value::Nil => {
+                index += 1;
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "DoEnergy: expected int or nil for cause, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Int(_) | Value::Nil => {
+                index += 1;
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "DoEnergy: expected int or nil for caused by, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "DoEnergy: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("DoEnergy requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        object.adjust_energy(change, exact);
+        Ok(Value::Bool(true))
+    })
+}
+
 fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() {
         return Err(RuntimeError::new(
@@ -1480,11 +1609,19 @@ impl EffectHostContext {
             let HostObjectContext {
                 id,
                 status,
+                energy,
                 effects,
                 action_name,
                 action_library,
             } = ctx;
-            ObjectScopeContext::new(id, status, effects.to_vec(), action_library, action_name)
+            ObjectScopeContext::new(
+                id,
+                status,
+                energy,
+                effects.to_vec(),
+                action_library,
+                action_name,
+            )
         });
         let global = Some(EffectScopeContext::new(global_effects));
         Self { object, global }
@@ -1691,17 +1828,21 @@ struct ObjectScopeContext {
     action_library: ActionLibrary,
     current_action_name: String,
     current_action_blocks_other_actions: bool,
+    current_energy: i32,
+    max_energy: i32,
 }
 
 impl ObjectScopeContext {
     fn new(
         id: ObjectId,
         status: ObjectStatus,
+        energy: i32,
         effects: Vec<EffectState>,
         action_library: ActionLibrary,
         action_name: String,
     ) -> Self {
         let blocks_other_actions = action_library.blocks_other_actions(&action_name);
+        let max_energy = energy.max(DEFAULT_MAX_ENERGY);
         Self {
             id,
             status,
@@ -1712,6 +1853,8 @@ impl ObjectScopeContext {
             action_library,
             current_action_name: action_name,
             current_action_blocks_other_actions: blocks_other_actions,
+            current_energy: energy,
+            max_energy,
         }
     }
 
@@ -1750,6 +1893,30 @@ impl ObjectScopeContext {
         }
         self.current_action_blocks_other_actions
     }
+
+    fn energy(&self) -> i32 {
+        self.pending_update.energy.unwrap_or(self.current_energy)
+    }
+
+    fn set_energy(&mut self, energy: i32) {
+        self.current_energy = energy;
+        if energy > self.max_energy {
+            self.max_energy = energy;
+        }
+        self.pending_update.energy = Some(energy);
+    }
+
+    fn adjust_energy(&mut self, delta: i32, _exact: bool) -> i32 {
+        let mut next = self.energy().saturating_add(delta);
+        if next < 0 {
+            next = 0;
+        }
+        if next > self.max_energy {
+            next = self.max_energy;
+        }
+        self.set_energy(next);
+        next
+    }
 }
 
 #[cfg(test)]
@@ -1772,6 +1939,7 @@ mod tests {
             Some(HostObjectContext::new(
                 ObjectId::new(1),
                 ObjectStatus::Normal,
+                100,
                 &[],
                 "Idle",
                 ActionLibrary::default(),
@@ -1999,6 +2167,7 @@ mod tests {
             Some(HostObjectContext::new(
                 ObjectId::new(1),
                 ObjectStatus::Normal,
+                100,
                 &[],
                 "Idle",
                 library.clone(),
@@ -2015,6 +2184,7 @@ mod tests {
             Some(HostObjectContext::new(
                 ObjectId::new(2),
                 ObjectStatus::Normal,
+                100,
                 &[],
                 "Idle",
                 library,
@@ -2291,6 +2461,45 @@ mod tests {
         assert_eq!(value, Value::Int(ObjectStatus::Inactive.to_script_value()));
         let update = outcome.object_update.expect("status update present");
         assert_eq!(update.status, Some(ObjectStatus::Inactive));
+    }
+
+    #[test]
+    fn do_energy_applies_delta_and_clamps() {
+        let (result, outcome) = with_object_host_context(|| do_energy(&[Value::Int(-25)]));
+        let value = result.expect("DoEnergy returns bool");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("energy update recorded");
+        assert_eq!(update.energy, Some(75));
+
+        let (result, outcome) = with_object_host_context(|| do_energy(&[Value::Int(50)]));
+        let value = result.expect("DoEnergy returns bool");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("energy update recorded");
+        assert_eq!(update.energy, Some(100));
+    }
+
+    #[test]
+    fn do_energy_respects_target_argument() {
+        let mut target = HashMap::new();
+        target.insert("id".into(), Value::Int(99));
+        let args = [Value::Int(-10), Value::Proplist(target)];
+        let (result, outcome) = with_object_host_context(|| do_energy(&args));
+        let value = result.expect("DoEnergy returns bool");
+        assert_eq!(value, Value::Bool(false));
+        assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
+    fn do_energy_accepts_exact_flag() {
+        let args = [Value::Int(0), Value::Nil, Value::Bool(true)];
+        let (result, outcome) = with_object_host_context(|| do_energy(&args));
+        let value = result.expect("DoEnergy returns bool");
+        assert_eq!(value, Value::Bool(true));
+        assert!(outcome
+            .object_update
+            .as_ref()
+            .and_then(|update| update.energy)
+            .is_some());
     }
 
     #[test]

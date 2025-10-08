@@ -1581,6 +1581,7 @@ impl Definition {
             Some(compat::HostObjectContext::new(
                 object_id,
                 state.status,
+                state.energy,
                 &state.effects,
                 state.action.name.clone(),
                 self.action_library.clone(),
@@ -1655,6 +1656,7 @@ impl Definition {
             Some(compat::HostObjectContext::new(
                 object_id,
                 state.status,
+                state.energy,
                 &state.effects,
                 state.action.name.clone(),
                 self.action_library.clone(),
@@ -1730,6 +1732,7 @@ impl Definition {
             Some(compat::HostObjectContext::new(
                 object_id,
                 state.status,
+                state.energy,
                 &state.effects,
                 state.action.name.clone(),
                 self.action_library.clone(),
@@ -1871,6 +1874,7 @@ impl Definition {
             Some(compat::HostObjectContext::new(
                 object_id,
                 state.status,
+                state.energy,
                 &state.effects,
                 state.action.name.clone(),
                 self.action_library.clone(),
