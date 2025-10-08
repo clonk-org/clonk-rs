@@ -291,6 +291,28 @@ impl ActionState {
             self.ticks = ticks;
         }
     }
+
+    pub fn apply_update_with_library(&mut self, update: &ActionUpdate, library: &ActionLibrary) {
+        let mut resolved = update.clone();
+        if let Some(name) = resolved.name.as_ref() {
+            if !library.contains(name) {
+                resolved.name = Some(library.default_action().to_string());
+                resolved.phase = Some(0);
+                resolved.ticks = Some(0);
+            }
+        }
+
+        self.apply_update(&resolved);
+        self.reconcile_with_library(library);
+    }
+
+    pub fn reconcile_with_library(&mut self, library: &ActionLibrary) {
+        if !library.contains(&self.name) {
+            self.name = library.default_action().to_string();
+            self.phase = 0;
+            self.ticks = 0;
+        }
+    }
 }
 
 impl Default for ActionState {

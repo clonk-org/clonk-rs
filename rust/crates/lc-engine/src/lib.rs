@@ -330,7 +330,7 @@ pub struct ObjectState {
 }
 
 impl ObjectState {
-    fn apply_delta(&mut self, delta: &ObjectDelta) {
+    fn apply_delta(&mut self, delta: &ObjectDelta, library: &ActionLibrary) {
         if let Some(position) = delta.position {
             self.position = position;
         }
@@ -341,7 +341,9 @@ impl ObjectState {
             self.energy = energy;
         }
         if let Some(action) = &delta.action {
-            self.action.apply_update(action);
+            self.action.apply_update_with_library(action, library);
+        } else {
+            self.action.reconcile_with_library(library);
         }
         if let Some(owner) = delta.owner {
             self.owner = owner;
@@ -349,6 +351,8 @@ impl ObjectState {
         if let Some(crew_member) = delta.crew_member {
             self.crew_member = crew_member;
         }
+
+        self.action.reconcile_with_library(library);
     }
 }
 
@@ -738,6 +742,7 @@ impl Object {
         &mut self,
         physics: &PhysicsSettings,
         landscape: Option<&Landscape>,
+        action_library: &ActionLibrary,
     ) -> CommandQueueOutcome {
         let mut outcome = CommandQueueOutcome::default();
         loop {
@@ -756,7 +761,7 @@ impl Object {
 
             let command = self.command_queue.pop_front().expect("front exists");
             let delta: ObjectDelta = command.update.into();
-            self.state.apply_delta(&delta);
+            self.state.apply_delta(&delta, action_library);
             let mut effect_events = self.apply_effect_commands(&command.effects);
             physics.clamp_velocity(&mut self.state.velocity);
             if command.destroy {
@@ -1535,6 +1540,14 @@ impl Engine {
         self.tick_global_effects();
         let landscape_for_commands = self.landscape.clone();
         for idx in 0..self.objects.len() {
+            let definition_id = self.objects[idx].definition_id.clone();
+            let action_library = {
+                let definition = self
+                    .definitions
+                    .get(&definition_id)
+                    .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                definition.action_library().clone()
+            };
             let (
                 queued_spawns,
                 queue_destroy,
@@ -1543,8 +1556,11 @@ impl Engine {
             ) = {
                 let object = &mut self.objects[idx];
                 let previous_owner = object.state.owner;
-                let outcome =
-                    object.execute_command_queue(&self.physics, landscape_for_commands.as_ref());
+                let outcome = object.execute_command_queue(
+                    &self.physics,
+                    landscape_for_commands.as_ref(),
+                    &action_library,
+                );
                 let new_owner = object.state.owner;
                 let new_crew = object.state.crew_member;
                 (
@@ -1557,7 +1573,6 @@ impl Engine {
             self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
 
             if !queue_events.is_empty() {
-                let definition_id = self.objects[idx].definition_id.clone();
                 let object_id = self.objects[idx].id;
                 let global_view = self.global_effects.clone();
                 let rng_state = self.rng.clone();
@@ -1596,7 +1611,6 @@ impl Engine {
             };
 
             if !timer_events.is_empty() {
-                let definition_id = self.objects[idx].definition_id.clone();
                 let object_id = self.objects[idx].id;
                 let global_view = self.global_effects.clone();
                 let rng_state = self.rng.clone();
@@ -1621,14 +1635,6 @@ impl Engine {
                 }
             }
 
-            let definition_id = self.objects[idx].definition_id.clone();
-            let action_library = {
-                let definition = self
-                    .definitions
-                    .get(&definition_id)
-                    .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                definition.action_library().clone()
-            };
             {
                 let object = &mut self.objects[idx];
                 object.state.action.advance_with_library(&action_library);
@@ -1675,7 +1681,7 @@ impl Engine {
             let (object_id, previous_owner, new_owner, new_crew) = {
                 let object = &mut self.objects[idx];
                 let previous_owner = object.state.owner;
-                object.state.apply_delta(&delta);
+                object.state.apply_delta(&delta, &action_library);
                 let mut applied = object.apply_effect_commands(&effects);
                 effect_events.append(&mut applied);
                 self.physics.clamp_velocity(&mut object.state.velocity);
@@ -1763,6 +1769,15 @@ impl Engine {
             crew_member,
         } = update;
 
+        let definition_id = self.objects[index].definition_id.clone();
+        let action_library = {
+            let definition = self
+                .definitions
+                .get(&definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+            definition.action_library().clone()
+        };
+
         let (object_id, previous_owner, new_owner, new_crew) = {
             let object = &mut self.objects[index];
             let previous_owner = object.state.owner;
@@ -1777,7 +1792,12 @@ impl Engine {
                 object.state.energy = energy;
             }
             if let Some(action) = action {
-                object.state.action.apply_update(&action);
+                object
+                    .state
+                    .action
+                    .apply_update_with_library(&action, &action_library);
+            } else {
+                object.state.action.reconcile_with_library(&action_library);
             }
             if let Some(owner) = owner {
                 object.state.owner = owner;
@@ -2266,10 +2286,12 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        let initial_action = match action {
+        let action_library = definition_ref.action_library().clone();
+        let mut initial_action = match action {
             Some(state) => state,
             None => definition_ref.default_action_state(),
         };
+        initial_action.reconcile_with_library(&action_library);
         let initial_crew_member = crew_member.unwrap_or_else(|| definition_ref.is_crew());
 
         let id = self.next_object_id();
@@ -2336,7 +2358,7 @@ impl Engine {
                     detail: "Initialize may not destroy the object".into(),
                 });
             }
-            object.state.apply_delta(&delta);
+            object.state.apply_delta(&delta, &action_library);
             let mut applied = object.apply_effect_commands(&effects);
             effect_events.append(&mut applied);
             if !global_effects.is_empty() {
@@ -4207,8 +4229,12 @@ mod tests {
         "#;
 
         let mut engine = Engine::with_seed(7);
-        let definition =
+        let mut definition =
             Definition::from_script("Actor", "Actor", source).expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert("Walk".to_string(), ActionSpec::default());
+        actions.insert("Jump".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Walk".to_string()), actions);
         engine
             .register_definition(definition)
             .expect("definition registers");
@@ -4621,6 +4647,113 @@ mod tests {
     }
 
     #[test]
+    fn apply_object_update_unknown_action_falls_back_to_default() {
+        let mut definition = build_definition();
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        actions.insert("Run".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Test"))
+            .expect("spawn succeeds");
+
+        engine
+            .apply_object_update(
+                id,
+                ObjectUpdate::new()
+                    .with_action("Run")
+                    .with_action_phase(2)
+                    .with_action_ticks(5),
+            )
+            .expect("valid update applies");
+
+        let snapshot = engine.object_snapshot(id).expect("snapshot");
+        assert_eq!(snapshot.action.name, "Run");
+        assert_eq!(snapshot.action.phase, 2);
+        assert_eq!(snapshot.action.ticks, 5);
+
+        engine
+            .apply_object_update(
+                id,
+                ObjectUpdate::new()
+                    .with_action("Ghost")
+                    .with_action_phase(1)
+                    .with_action_ticks(3),
+            )
+            .expect("invalid action handled");
+
+        let snapshot = engine.object_snapshot(id).expect("snapshot");
+        assert_eq!(snapshot.action.name, "Idle");
+        assert_eq!(snapshot.action.phase, 0);
+        assert_eq!(snapshot.action.ticks, 0);
+    }
+
+    #[test]
+    fn spawn_config_unknown_action_falls_back_to_default() {
+        let mut definition = build_definition();
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(4);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let mut requested = ActionState::new("Ghost");
+        requested.phase = 3;
+        requested.ticks = 7;
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Test").with_action(requested))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.object_snapshot(id).expect("snapshot");
+        assert_eq!(snapshot.action.name, "Idle");
+        assert_eq!(snapshot.action.phase, 0);
+        assert_eq!(snapshot.action.ticks, 0);
+    }
+
+    #[test]
+    fn initialize_with_unknown_action_falls_back_to_default() {
+        let source = r#"
+        global func Initialize(state, random) {
+            return { action = "Ghost" };
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", source).expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert("Walk".to_string(), ActionSpec::default());
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Walk".to_string()), actions);
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.object_snapshot(id).expect("snapshot");
+        assert_eq!(snapshot.action.name, "Walk");
+        assert_eq!(snapshot.action.phase, 0);
+        assert_eq!(snapshot.action.ticks, 0);
+    }
+
+    #[test]
     fn apply_object_update_unknown_object_errors() {
         let mut engine = Engine::with_seed(1);
         let error = engine
@@ -4706,9 +4839,15 @@ mod tests {
         }
         "#;
 
+        let mut definition = Definition::from_script("Actor", "Actor", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        actions.insert("Jump".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
         let mut engine = Engine::with_seed(9);
         engine
-            .register_definition(Definition::from_script("Actor", "Actor", script).unwrap())
+            .register_definition(definition)
             .expect("definition registers");
 
         let id = engine
@@ -4757,9 +4896,15 @@ mod tests {
         }
         "#;
 
+        let mut definition = Definition::from_script("Actor", "Actor", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        actions.insert("Slide".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
         let mut engine = Engine::with_seed(3);
         engine
-            .register_definition(Definition::from_script("Actor", "Actor", script).unwrap())
+            .register_definition(definition)
             .expect("definition registers");
 
         let id = engine
