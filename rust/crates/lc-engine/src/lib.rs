@@ -253,6 +253,14 @@ pub struct EnvironmentSettings {
     #[serde(default)]
     pub temperature: i32,
     #[serde(default)]
+    pub climate: i32,
+    #[serde(default)]
+    pub temperature_variation: i32,
+    #[serde(default)]
+    pub temperature_period: u32,
+    #[serde(default)]
+    pub temperature_phase: u32,
+    #[serde(default)]
     pub time_of_day: u16,
     #[serde(default)]
     pub time_speed: i16,
@@ -268,6 +276,10 @@ impl EnvironmentSettings {
             wind_variation: 0,
             wind_period: 0,
             temperature: 0,
+            climate: 0,
+            temperature_variation: 0,
+            temperature_period: 0,
+            temperature_phase: 0,
             time_of_day: 0,
             time_speed: 0,
         }
@@ -289,6 +301,31 @@ impl EnvironmentSettings {
         self
     }
 
+    pub fn with_climate(mut self, climate: i32) -> Self {
+        self.climate = climate.clamp(-50, 50);
+        self
+    }
+
+    pub fn with_temperature_cycle(mut self, variation: i32, period: u32, phase: u32) -> Self {
+        if variation == 0 {
+            self.temperature_variation = 0;
+            self.temperature_period = 0;
+            self.temperature_phase = 0;
+            return self;
+        }
+
+        let amplitude = variation.abs();
+        let normalized_period = period.max(2);
+        self.temperature_variation = amplitude;
+        self.temperature_period = normalized_period;
+        self.temperature_phase = if normalized_period == 0 {
+            0
+        } else {
+            phase % normalized_period
+        };
+        self
+    }
+
     pub fn with_time_of_day(mut self, time_of_day: i32) -> Self {
         self.time_of_day = Self::normalize_time_of_day(time_of_day);
         self
@@ -297,6 +334,25 @@ impl EnvironmentSettings {
     pub fn with_time_speed(mut self, time_speed: i32) -> Self {
         self.time_speed = Self::clamp_time_speed(time_speed);
         self
+    }
+
+    pub fn ambient_temperature(&self, frame: u64) -> i32 {
+        let base = self.temperature.saturating_add(self.climate);
+        if self.temperature_variation == 0 || self.temperature_period == 0 {
+            return base;
+        }
+
+        let period = self.temperature_period as f32;
+        let frame_offset = if self.temperature_period == 0 {
+            0
+        } else {
+            (frame.wrapping_add(u64::from(self.temperature_phase)))
+                % u64::from(self.temperature_period)
+        };
+        let phase = frame_offset as f32 / period;
+        let angle = phase * core::f32::consts::TAU;
+        let delta = (self.temperature_variation as f32 * angle.cos()).round() as i32;
+        base.saturating_sub(delta)
     }
 
     pub fn advance_frame(&mut self) {
@@ -349,6 +405,23 @@ impl EnvironmentSettings {
 impl Default for EnvironmentSettings {
     fn default() -> Self {
         Self::new(0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentFrame {
+    pub settings: EnvironmentSettings,
+    pub wind_force: i32,
+    pub ambient_temperature: i32,
+}
+
+impl Default for EnvironmentFrame {
+    fn default() -> Self {
+        Self {
+            settings: EnvironmentSettings::default(),
+            wind_force: 0,
+            ambient_temperature: 0,
+        }
     }
 }
 
@@ -1121,6 +1194,8 @@ pub struct ObjectSnapshot {
 pub struct SimulationSnapshot {
     pub frame: u64,
     pub objects: Vec<ObjectSnapshot>,
+    #[serde(default)]
+    pub environment: EnvironmentFrame,
     #[serde(default)]
     pub global_effects: Vec<EffectState>,
     #[serde(default)]
@@ -2246,9 +2321,15 @@ impl Engine {
         let mut eliminated_crew_owners: Vec<_> =
             self.eliminated_crew_owners.iter().cloned().collect();
         eliminated_crew_owners.sort_unstable();
+        let environment = EnvironmentFrame {
+            settings: self.environment,
+            wind_force: self.environment.wind_force(self.frame),
+            ambient_temperature: self.environment.ambient_temperature(self.frame),
+        };
         SimulationSnapshot {
             frame: self.frame,
             objects,
+            environment,
             global_effects: self.global_effects.clone(),
             crew_selection,
             crew_roles,
@@ -4397,6 +4478,54 @@ mod tests {
         let default_period = EnvironmentSettings::new(1).with_wind_variation(3, 0);
         assert_eq!(default_period.wind_variation, 3);
         assert_eq!(default_period.wind_period, 2);
+    }
+
+    #[test]
+    fn ambient_temperature_cycles_with_climate() {
+        let settings = EnvironmentSettings::new(0)
+            .with_temperature(10)
+            .with_climate(5)
+            .with_temperature_cycle(8, 12, 3);
+
+        assert_eq!(settings.ambient_temperature(0), 15);
+        assert_eq!(settings.ambient_temperature(3), 23);
+        assert_eq!(settings.ambient_temperature(9), 7);
+    }
+
+    #[test]
+    fn ambient_temperature_resets_when_cycle_disabled() {
+        let mut settings = EnvironmentSettings::new(0)
+            .with_temperature(5)
+            .with_climate(-2)
+            .with_temperature_cycle(10, 6, 0);
+        assert_ne!(settings.ambient_temperature(1), 3);
+
+        settings = settings.with_temperature_cycle(0, 6, 0);
+        assert_eq!(settings.temperature_variation, 0);
+        assert_eq!(settings.temperature_period, 0);
+        assert_eq!(settings.temperature_phase, 0);
+        assert_eq!(settings.ambient_temperature(1), 3);
+    }
+
+    #[test]
+    fn snapshot_reports_environment_metrics() {
+        let mut engine = Engine::with_seed(15);
+        let environment = EnvironmentSettings::new(4)
+            .with_wind_variation(6, 8)
+            .with_temperature(12)
+            .with_climate(-4)
+            .with_temperature_cycle(6, 16, 5)
+            .with_time_of_day(900)
+            .with_time_speed(30);
+        engine.set_environment(environment);
+
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.environment.settings, environment);
+        assert_eq!(snapshot.environment.wind_force, environment.wind_force(0));
+        assert_eq!(
+            snapshot.environment.ambient_temperature,
+            environment.ambient_temperature(0)
+        );
     }
 
     #[test]

@@ -445,6 +445,14 @@ struct EnvironmentManifest {
     #[serde(default)]
     temperature: Option<i32>,
     #[serde(default)]
+    climate: Option<i32>,
+    #[serde(default)]
+    temperature_variation: Option<i32>,
+    #[serde(default)]
+    temperature_period: Option<u32>,
+    #[serde(default)]
+    temperature_phase: Option<u32>,
+    #[serde(default)]
     time_of_day: Option<i32>,
     #[serde(default)]
     time_speed: Option<i32>,
@@ -457,8 +465,20 @@ impl EnvironmentManifest {
             let period = self.wind_period.unwrap_or(120);
             settings = settings.with_wind_variation(variation, period);
         }
+        if let Some(climate) = self.climate {
+            settings = settings.with_climate(climate);
+        }
         if let Some(temperature) = self.temperature {
             settings = settings.with_temperature(temperature);
+        }
+        if self.temperature_variation.is_some()
+            || self.temperature_period.is_some()
+            || self.temperature_phase.is_some()
+        {
+            let variation = self.temperature_variation.unwrap_or(0);
+            let period = self.temperature_period.unwrap_or(600);
+            let phase = self.temperature_phase.unwrap_or(0);
+            settings = settings.with_temperature_cycle(variation, period, phase);
         }
         if let Some(time_of_day) = self.time_of_day {
             settings = settings.with_time_of_day(time_of_day);
@@ -775,6 +795,50 @@ global func Step(state, frame, random)
         assert_eq!(configured.temperature, -15);
         assert_eq!(configured.time_of_day, 0);
         assert_eq!(configured.time_speed, 0);
+    }
+
+    #[test]
+    fn loads_environment_climate_and_temperature_cycle() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Mover", "script": "scripts/mover.aul" }
+            ],
+            "environment": {
+                "wind": 1,
+                "climate": 8,
+                "temperature": -4,
+                "temperature_variation": 6,
+                "temperature_period": 120,
+                "temperature_phase": 30
+            },
+            "initial_objects": [
+                { "definition": "Mover" }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let environment = scenario.environment().expect("environment present");
+        assert_eq!(environment.climate, 8);
+        assert_eq!(environment.temperature, -4);
+        assert_eq!(environment.temperature_variation, 6);
+        assert_eq!(environment.temperature_period, 120);
+        assert_eq!(environment.temperature_phase, 30);
+
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let configured = engine.environment();
+        assert_eq!(configured.climate, 8);
+        assert_eq!(configured.temperature, -4);
+        assert_eq!(configured.temperature_variation, 6);
+        assert_eq!(configured.temperature_period, 120);
+        assert_eq!(configured.temperature_phase, 30);
     }
 
     #[test]

@@ -286,7 +286,8 @@ impl fmt::Display for Recording {
 mod tests {
     use super::*;
     use crate::{
-        ActionState, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2, OWNER_NONE,
+        ActionState, EnvironmentFrame, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2,
+        OWNER_NONE,
     };
 
     fn make_snapshot(frame: u64, energy: i32) -> SimulationSnapshot {
@@ -307,6 +308,7 @@ mod tests {
                 owner: OWNER_NONE,
                 crew_member: false,
             }],
+            environment: EnvironmentFrame::default(),
             global_effects: Vec::new(),
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),

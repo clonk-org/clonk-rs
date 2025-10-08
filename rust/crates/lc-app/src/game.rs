@@ -13,8 +13,8 @@ use lc_audio::{AudioSystem, SoundHandle};
 use lc_core::std_config::Config;
 use lc_engine::{
     CrewCommandTarget, CrewRole, Definition, Engine, EngineError, EngineState, EngineStateIoError,
-    Landscape, ObjectId, ObjectSnapshot, ObjectUpdate, PhysicsSettings, Scenario, ScenarioError,
-    SimulationSnapshot, SpawnConfig, Vector2,
+    EnvironmentFrame, Landscape, ObjectId, ObjectSnapshot, ObjectUpdate, PhysicsSettings, Scenario,
+    ScenarioError, SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_graphics::{Color, PixelFormat, SnapshotHasher, Surface};
 use lc_gui::{
@@ -122,6 +122,11 @@ pub struct EnvironmentSummary {
     pub wind_variation: i32,
     pub wind_period: u32,
     pub temperature: i32,
+    pub climate: i32,
+    pub temperature_variation: i32,
+    pub temperature_period: u32,
+    pub temperature_phase: u32,
+    pub ambient_temperature: i32,
     pub current_wind: i32,
     pub time_of_day: u16,
     pub time_speed: i16,
@@ -580,7 +585,13 @@ impl DemoGame {
                 self.lobby.set_ready(LOCAL_CLIENT_ID, ready_state)?;
             }
 
-            self.update_gui(tick, &object, ready_batches, ground_hits)?;
+            self.update_gui(
+                tick,
+                &object,
+                ready_batches,
+                ground_hits,
+                &snapshot.environment,
+            )?;
             self.draw_frame(&snapshot);
 
             hasher.update_surface(&self.surface);
@@ -598,6 +609,11 @@ impl DemoGame {
             wind_variation: environment_settings.wind_variation,
             wind_period: environment_settings.wind_period,
             temperature: environment_settings.temperature,
+            climate: environment_settings.climate,
+            temperature_variation: environment_settings.temperature_variation,
+            temperature_period: environment_settings.temperature_period,
+            temperature_phase: environment_settings.temperature_phase,
+            ambient_temperature: environment_settings.ambient_temperature(self.engine.frame()),
             current_wind: environment_settings.wind_force(self.engine.frame()),
             time_of_day: environment_settings.time_of_day(),
             time_speed: environment_settings.time_speed(),
@@ -629,6 +645,7 @@ impl DemoGame {
         object: &ObjectSnapshot,
         ready_batches: u32,
         ground_hits: u32,
+        environment: &EnvironmentFrame,
     ) -> GameResult<()> {
         let ready_players = self
             .lobby
@@ -647,12 +664,16 @@ impl DemoGame {
             sign_marker(object.velocity.y),
             abs_u32(object.velocity.y).min(99),
         );
+        let ambient_display = environment.ambient_temperature.clamp(-99, 99);
+        let wind_display = environment.wind_force.clamp(-99, 99);
         let status_text = format!(
-            "READY {:02}OF{:02} GROUND {:02} BATCH {:03}",
+            "READY {:02}OF{:02} GROUND {:02} BATCH {:03} TEMP {:+03} WIND {:+03}",
             ready_players.min(99),
             total_participants.min(99),
             ground_hits.min(99),
             ready_batches.min(999),
+            ambient_display,
+            wind_display,
         );
 
         self.gui
@@ -685,13 +706,15 @@ impl DemoGame {
     }
 
     fn draw_frame(&mut self, snapshot: &SimulationSnapshot) {
-        self.surface.fill(Color::opaque(10, 16, 32));
-        self.draw_ground();
+        let sky = Self::sky_color_for_temperature(snapshot.environment.ambient_temperature);
+        self.surface.fill(sky);
+        self.draw_ground(snapshot.environment.ambient_temperature);
         self.draw_objects(snapshot);
         self.draw_gui_overlay();
     }
 
-    fn draw_ground(&mut self) {
+    fn draw_ground(&mut self, ambient_temperature: i32) {
+        let ground_color = Self::ground_color_for_temperature(ambient_temperature);
         for screen_x in 0..SURFACE_WIDTH {
             let world_x = self.viewport_x + screen_x as i32;
             let ground_world = self.ground_height_at(world_x);
@@ -704,11 +727,44 @@ impl DemoGame {
             }
             let ground_screen = ground_screen as u32;
             for y in ground_screen..SURFACE_HEIGHT {
-                let _ = self
-                    .surface
-                    .set_pixel(screen_x, y, Color::opaque(28, 84, 44));
+                let _ = self.surface.set_pixel(screen_x, y, ground_color);
             }
         }
+    }
+
+    fn sky_color_for_temperature(temperature: i32) -> Color {
+        let factor = Self::temperature_factor(temperature);
+        let cold = (10, 16, 32);
+        let warm = (84, 52, 16);
+        Color::opaque(
+            Self::blend_channel(cold.0, warm.0, factor),
+            Self::blend_channel(cold.1, warm.1, factor),
+            Self::blend_channel(cold.2, warm.2, factor),
+        )
+    }
+
+    fn ground_color_for_temperature(temperature: i32) -> Color {
+        let factor = Self::temperature_factor(temperature);
+        let cold = (28, 84, 44);
+        let warm = (108, 90, 32);
+        Color::opaque(
+            Self::blend_channel(cold.0, warm.0, factor),
+            Self::blend_channel(cold.1, warm.1, factor),
+            Self::blend_channel(cold.2, warm.2, factor),
+        )
+    }
+
+    fn temperature_factor(temperature: i32) -> f32 {
+        let clamped = temperature.clamp(-50, 50);
+        (clamped as f32 + 50.0) / 100.0
+    }
+
+    fn blend_channel(cold: u8, warm: u8, factor: f32) -> u8 {
+        let factor = factor.clamp(0.0, 1.0);
+        let cold = cold as f32;
+        let warm = warm as f32;
+        let value = cold + (warm - cold) * factor;
+        value.round().clamp(0.0, 255.0) as u8
     }
 
     fn draw_objects(&mut self, snapshot: &SimulationSnapshot) {

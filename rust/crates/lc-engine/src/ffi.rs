@@ -1,6 +1,6 @@
 use crate::{
-    ActionState, CrewRole, CrewSelectionState, EffectState, ObjectId, ObjectSnapshot, ObjectStatus,
-    Playback, Recorder, Recording, SimulationSnapshot, Vector2,
+    ActionState, CrewRole, CrewSelectionState, EffectState, EnvironmentFrame, ObjectId,
+    ObjectSnapshot, ObjectStatus, Playback, Recorder, Recording, SimulationSnapshot, Vector2,
 };
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -278,6 +278,7 @@ unsafe fn make_snapshot(
     Some(SimulationSnapshot {
         frame,
         objects: snapshots,
+        environment: EnvironmentFrame::default(),
         global_effects: global_effects_vec,
         crew_selection: crew_selection_map,
         crew_roles: crew_role_map,
