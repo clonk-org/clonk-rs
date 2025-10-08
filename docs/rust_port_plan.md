@@ -45,7 +45,8 @@
 - Simulation snapshots now preserve physics settings and can be promoted into `EngineState` instances; the engine exposes `EngineState::from_snapshot` plus `Engine::restore_snapshot` so recorded frames or C++ parity captures can bootstrap deterministic Rust runs without hand-written JSON massaging.
 - Simulation snapshots now capture landscape height maps and the engine RNG state so restored runs resume with matching terrain context and deterministic random sequences.
 
-
+## Priority Focus
+- ✅ Expose the C++ `GetAction` host helper in `lc-engine` so AUL scripts can inspect current action names during Rust parity runs.
 
 ## Rust Workspace Scope
 - `lc-core`, `lc-resources`, `lc-script`, `lc-engine`, `lc-graphics`, `lc-audio`, `lc-network`, `lc-gui`, `lc-platform`, and `lc-app` provide demo-friendly utilities, parsers, in-memory surfaces, a toy physics loop, and basic networking abstractions.
@@ -77,7 +78,7 @@
 
 ## Major Gaps to Reach Behavior Parity
 - Recreate the complete C4 object lifecycle: finish procedure coverage, physics integration, scenario/environment orchestration, UI parity, and cross-runtime save flows. The engine now mirrors status transitions plus inactive-object culling, maintains container lifetimes (including handle-based container seeding from manifests), executes manifest-provided scenario scripts (Initialize/Step) to drive global orchestration, exposes CLI state load/save, enforces owner/crew bookkeeping, validates action overrides and effect stacks (including persisted effect variables), fires action callbacks, runs command queues, clamps velocity, and keeps anchored procedures (including dig wind/gravity suppression and the newly aligned push/pull/chop/fight behaviours) aligned with C++. Recent work also exposed environment host helpers so scripts can mutate wind, temperature, and climate during Rust validation runs, and `DoEnergy` now lets scripts apply bounded energy deltas through the engine; a migration path into production and broader UI parity beyond the newly keyboard-capable scenario browser are still missing.
-- Port AUL runtime features: continue rounding out effect handlers and compatibility behaviors relied upon by shipped scripts (host helpers now cover `GetEffect`/`GetEffectCount`/`AddEffect`/`RemoveEffect`/`SetAction` for both object-local and global stacks, `RemoveEffect` mirrors the `fDoNoCalls` flag from C4 to suppress `Fx*Stop`, `Random` fronts the engine RNG for determinism, command target plumbing and ID metadata now mirror the C4 API, but broader compatibility shims remain incomplete).
+- Port AUL runtime features: continue rounding out effect handlers and compatibility behaviors relied upon by shipped scripts (host helpers now cover `GetEffect`/`GetEffectCount`/`AddEffect`/`RemoveEffect`/`SetAction` for both object-local and global stacks, `RemoveEffect` mirrors the `fDoNoCalls` flag from C4 to suppress `Fx*Stop`, `Random` fronts the engine RNG for determinism, command target plumbing and ID metadata now mirror the C4 API, but broader compatibility shims remain incomplete). `GetAction` is now exported so scripts can query the active procedure name while running inside the Rust engine.
 - Implement rendering and audio backends that match the SDL/OpenGL pipeline and mixer behavior across all supported platforms.
 - Mirror GUI subsystems (dialogs, HUD, console, editor) and integrate them with input, networking, and engine state.
 - Rebuild multiplayer networking (TCP/UDP transports, reference server, lobby flow, download management, UPnP) with deterministic equivalence.

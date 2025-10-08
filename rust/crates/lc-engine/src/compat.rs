@@ -29,6 +29,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetEffectCount", get_effect_count);
     script.register_host_function("EffectVar", effect_var);
     script.register_host_function("SetAction", set_action);
+    script.register_host_function("GetAction", get_action);
     script.register_host_function("SetDir", set_dir);
     script.register_host_function("GetDir", get_dir);
     script.register_host_function("SetComDir", set_com_dir);
@@ -1251,6 +1252,60 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         object.update_effective_action(&name);
 
         Ok(Value::Bool(true))
+    })
+}
+
+fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "GetAction: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Nil);
+            }
+        }
+
+        let action_name = object.effective_action_name();
+        let resolved = if action_name.is_empty() {
+            "Idle"
+        } else {
+            action_name
+        };
+        Ok(Value::String(resolved.to_string()))
     })
 }
 
@@ -2489,6 +2544,65 @@ mod tests {
         let action = update.action.expect("action update recorded");
         assert_eq!(action.name.as_deref(), Some("Idle"));
         assert!(!action.force);
+    }
+
+    #[test]
+    fn get_action_returns_idle_by_default() {
+        let (result, outcome) = with_object_host_context(|| get_action(&[]));
+        let value = result.expect("GetAction succeeds");
+        assert_eq!(value, Value::String("Idle".into()));
+        assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
+    fn get_action_reflects_pending_update() {
+        let mut specs = HashMap::new();
+        specs.insert("Idle".to_string(), ActionSpec::default());
+        specs.insert("Walk".to_string(), ActionSpec::default());
+        let library = ActionLibrary::new(Some("Idle".to_string()), specs);
+
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                &[],
+                "Idle",
+                library,
+                Direction::Left,
+                CommandDirection::Stop,
+            )),
+            &[],
+            || {
+                set_action(&[Value::String("Walk".into())])?;
+                get_action(&[])
+            },
+        );
+
+        let value = result.expect("SetAction/GetAction succeed");
+        assert_eq!(value, Value::String("Walk".into()));
+        let update = outcome.object_update.expect("action update recorded");
+        let action = update.action.expect("action update exists");
+        assert_eq!(action.name.as_deref(), Some("Walk"));
+    }
+
+    #[test]
+    fn get_action_respects_target_filter() {
+        let (result, _) = with_object_host_context(|| {
+            let mut target = HashMap::new();
+            target.insert("id".into(), Value::Int(99));
+            let target = Value::Proplist(target);
+            get_action(&[target])
+        });
+
+        let value = result.expect("GetAction succeeds");
+        assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn get_action_returns_nil_without_context() {
+        let value = get_action(&[]).expect("GetAction succeeds without context");
+        assert_eq!(value, Value::Nil);
     }
 
     #[test]
