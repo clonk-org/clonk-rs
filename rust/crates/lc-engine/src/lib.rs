@@ -51,6 +51,43 @@ impl fmt::Display for ObjectId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ObjectStatus {
+    Deleted,
+    Normal,
+    Inactive,
+}
+
+impl ObjectStatus {
+    pub const fn is_active(self) -> bool {
+        matches!(self, ObjectStatus::Normal)
+    }
+
+    pub const fn to_script_value(self) -> i32 {
+        match self {
+            ObjectStatus::Deleted => 0,
+            ObjectStatus::Normal => 1,
+            ObjectStatus::Inactive => 2,
+        }
+    }
+
+    pub fn from_script_value(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(ObjectStatus::Deleted),
+            1 => Some(ObjectStatus::Normal),
+            2 => Some(ObjectStatus::Inactive),
+            _ => None,
+        }
+    }
+}
+
+impl Default for ObjectStatus {
+    fn default() -> Self {
+        ObjectStatus::Normal
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CrewRole(String);
@@ -326,6 +363,8 @@ pub struct ObjectState {
     pub energy: i32,
     pub action: ActionState,
     pub effects: Vec<EffectState>,
+    #[serde(default)]
+    pub status: ObjectStatus,
     #[serde(default = "default_owner")]
     pub owner: i32,
     #[serde(default)]
@@ -354,6 +393,9 @@ impl ObjectState {
         if let Some(crew_member) = delta.crew_member {
             self.crew_member = crew_member;
         }
+        if let Some(status) = delta.status {
+            self.status = status;
+        }
 
         self.action.reconcile_with_library(library);
     }
@@ -365,6 +407,7 @@ struct ObjectDelta {
     velocity: Option<Vector2>,
     energy: Option<i32>,
     action: Option<ActionUpdate>,
+    status: Option<ObjectStatus>,
     owner: Option<i32>,
     crew_member: Option<bool>,
 }
@@ -386,6 +429,9 @@ impl ObjectDelta {
         if let Some(crew_member) = update.crew_member {
             self.crew_member = Some(crew_member);
         }
+        if let Some(status) = update.status {
+            self.status = Some(status);
+        }
         if let Some(action) = update.action {
             match &mut self.action {
                 Some(existing) => existing.merge(action),
@@ -402,6 +448,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             velocity: update.velocity,
             energy: update.energy,
             action: update.action,
+            status: update.status,
             owner: update.owner,
             crew_member: update.crew_member,
         }
@@ -414,6 +461,8 @@ pub struct ObjectUpdate {
     pub velocity: Option<Vector2>,
     pub energy: Option<i32>,
     pub action: Option<ActionUpdate>,
+    #[serde(default)]
+    pub status: Option<ObjectStatus>,
     #[serde(default)]
     pub owner: Option<i32>,
     #[serde(default)]
@@ -471,6 +520,11 @@ impl ObjectUpdate {
         self
     }
 
+    pub fn with_status(mut self, status: ObjectStatus) -> Self {
+        self.status = Some(status);
+        self
+    }
+
     pub fn with_crew_member(mut self, crew_member: bool) -> Self {
         self.crew_member = Some(crew_member);
         self
@@ -481,6 +535,7 @@ impl ObjectUpdate {
             && self.velocity.is_none()
             && self.energy.is_none()
             && self.action.is_none()
+            && self.status.is_none()
             && self.owner.is_none()
             && self.crew_member.is_none()
     }
@@ -664,8 +719,8 @@ impl Object {
         Self {
             id,
             definition_id,
+            destroyed: matches!(state.status, ObjectStatus::Deleted),
             state,
-            destroyed: false,
             command_queue: VecDeque::new(),
         }
     }
@@ -675,6 +730,7 @@ impl Object {
             return Vec::new();
         }
         self.destroyed = true;
+        self.state.status = ObjectStatus::Deleted;
         self.drain_effects_with_reason(EffectStopReason::Destroyed)
     }
 
@@ -691,6 +747,7 @@ impl Object {
             action: self.state.action.clone(),
             action_procedure: procedure,
             effects: self.state.effects.clone(),
+            status: self.state.status,
             owner: self.state.owner,
             crew_member: self.state.crew_member,
         }
@@ -780,6 +837,23 @@ impl Object {
         self.command_queue.extend(commands);
     }
 
+    fn apply_status(&mut self, status: ObjectStatus) -> Vec<EffectEvent> {
+        if self.state.status == status {
+            return Vec::new();
+        }
+
+        self.state.status = status;
+        match status {
+            ObjectStatus::Deleted => self.mark_destroyed(),
+            _ => {
+                if status.is_active() {
+                    self.destroyed = false;
+                }
+                Vec::new()
+            }
+        }
+    }
+
     fn execute_command_queue(
         &mut self,
         physics: &PhysicsSettings,
@@ -805,9 +879,20 @@ impl Object {
             let delta: ObjectDelta = command.update.into();
             self.state.apply_delta(&delta, action_library);
             let mut effect_events = self.apply_effect_commands(&command.effects);
+            if let Some(status) = delta.status {
+                let mut status_events = self.apply_status(status);
+                if !status_events.is_empty() {
+                    effect_events.append(&mut status_events);
+                }
+                if matches!(status, ObjectStatus::Deleted) {
+                    outcome.destroy = true;
+                }
+            }
             physics.clamp_velocity(&mut self.state.velocity);
             if command.destroy {
-                effect_events.extend(self.mark_destroyed());
+                if !matches!(self.state.status, ObjectStatus::Deleted) {
+                    effect_events.extend(self.mark_destroyed());
+                }
                 outcome.destroy = true;
             }
             if !effect_events.is_empty() {
@@ -881,6 +966,8 @@ pub struct SpawnConfig {
     pub owner: i32,
     #[serde(default)]
     pub crew_member: Option<bool>,
+    #[serde(default)]
+    pub status: Option<ObjectStatus>,
 }
 
 impl SpawnConfig {
@@ -894,6 +981,7 @@ impl SpawnConfig {
             effects: Vec::new(),
             owner: OWNER_NONE,
             crew_member: None,
+            status: None,
         }
     }
 
@@ -932,6 +1020,11 @@ impl SpawnConfig {
         self
     }
 
+    pub fn with_status(mut self, status: ObjectStatus) -> Self {
+        self.status = Some(status);
+        self
+    }
+
     pub fn with_crew_member(mut self, crew_member: bool) -> Self {
         self.crew_member = Some(crew_member);
         self
@@ -951,6 +1044,8 @@ pub struct ObjectSnapshot {
     pub action_procedure: Option<String>,
     #[serde(default)]
     pub effects: Vec<EffectState>,
+    #[serde(default)]
+    pub status: ObjectStatus,
     #[serde(default = "default_owner")]
     pub owner: i32,
     #[serde(default)]
@@ -1137,7 +1232,11 @@ impl Definition {
         ];
         let guard = enter_random_context(rng);
         let (result, host_effects) = compat::with_effect_context(
-            Some(compat::HostObjectContext::new(object_id, &state.effects)),
+            Some(compat::HostObjectContext::new(
+                object_id,
+                state.status,
+                &state.effects,
+            )),
             global_effects,
             || self.script.call("Initialize", &args),
         );
@@ -1198,7 +1297,11 @@ impl Definition {
         ];
         let guard = enter_random_context(rng);
         let (result, host_effects) = compat::with_effect_context(
-            Some(compat::HostObjectContext::new(object_id, &state.effects)),
+            Some(compat::HostObjectContext::new(
+                object_id,
+                state.status,
+                &state.effects,
+            )),
             global_effects,
             || self.script.call("Step", &args),
         );
@@ -1323,7 +1426,11 @@ impl Definition {
 
         let guard = enter_random_context(rng);
         let (result, commands) = compat::with_effect_context(
-            Some(compat::HostObjectContext::new(object_id, &state.effects)),
+            Some(compat::HostObjectContext::new(
+                object_id,
+                state.status,
+                &state.effects,
+            )),
             global_effects,
             || {
                 self.script
@@ -1430,7 +1537,11 @@ impl Engine {
     pub fn crew_members(&self, owner: i32) -> Vec<ObjectId> {
         self.objects
             .iter()
-            .filter(|object| object.state.crew_member && object.state.owner == owner)
+            .filter(|object| {
+                object.state.crew_member
+                    && object.state.owner == owner
+                    && object.state.status.is_active()
+            })
             .map(|object| object.id)
             .collect()
     }
@@ -1479,6 +1590,12 @@ impl Engine {
                 return Err(EngineError::CrewSelection {
                     owner,
                     detail: format!("object {} is not a crew member", id),
+                });
+            }
+            if !object.state.status.is_active() {
+                return Err(EngineError::CrewSelection {
+                    owner,
+                    detail: format!("object {} is not active", id),
                 });
             }
             validated.push(id);
@@ -1540,6 +1657,12 @@ impl Engine {
                         detail: format!("object {} is not a crew member", id),
                     });
                 }
+                if !object.state.status.is_active() {
+                    return Err(EngineError::CrewSelection {
+                        owner,
+                        detail: format!("object {} is not active", id),
+                    });
+                }
                 let selection = self.crew_selection.entry(owner).or_default();
                 selection.select(id);
                 selection.set_cursor(Some(id));
@@ -1585,6 +1708,12 @@ impl Engine {
             return Err(EngineError::CrewRole {
                 owner,
                 detail: format!("object {} is not a crew member", object_id),
+            });
+        }
+        if !object.state.status.is_active() {
+            return Err(EngineError::CrewRole {
+                owner,
+                detail: format!("object {} is not active", object_id),
             });
         }
 
@@ -1728,6 +1857,10 @@ impl Engine {
             }
 
             if queue_destroy || self.objects[idx].destroyed {
+                continue;
+            }
+
+            if !self.objects[idx].state.status.is_active() {
                 continue;
             }
 
@@ -1897,6 +2030,7 @@ impl Engine {
             velocity,
             energy,
             action,
+            status,
             owner,
             crew_member,
         } = update;
@@ -1936,6 +2070,9 @@ impl Engine {
             }
             if let Some(crew_member) = crew_member {
                 object.state.crew_member = crew_member;
+            }
+            if let Some(status) = status {
+                object.apply_status(status);
             }
 
             self.physics.clamp_velocity(&mut object.state.velocity);
@@ -2102,6 +2239,7 @@ impl Engine {
                     energy: snapshot.energy,
                     action: snapshot.action.clone(),
                     effects: snapshot.effects.clone(),
+                    status: snapshot.status,
                     owner: snapshot.owner,
                     crew_member: snapshot.crew_member,
                 },
@@ -2260,6 +2398,12 @@ impl Engine {
             self.remove_from_selection(new_owner, object_id);
             self.remove_from_roles(new_owner, object_id);
         }
+        if let Some(object) = self.objects.iter().find(|object| object.id == object_id) {
+            if !object.state.status.is_active() {
+                self.remove_from_selection(new_owner, object_id);
+                self.remove_from_roles(new_owner, object_id);
+            }
+        }
     }
 
     fn remove_from_selection(&mut self, owner: i32, object_id: ObjectId) {
@@ -2289,7 +2433,7 @@ impl Engine {
         let alive: HashSet<ObjectId> = self
             .objects
             .iter()
-            .filter(|object| object.state.crew_member)
+            .filter(|object| object.state.crew_member && object.state.status.is_active())
             .map(|object| object.id)
             .collect();
         self.crew_selection.retain(|_, selection| {
@@ -2305,7 +2449,7 @@ impl Engine {
 
         let mut valid = HashMap::new();
         for object in &self.objects {
-            if object.state.crew_member {
+            if object.state.crew_member && object.state.status.is_active() {
                 valid.insert(object.id, object.state.owner);
             }
         }
@@ -2356,8 +2500,11 @@ impl Engine {
             if owner == OWNER_NONE {
                 continue;
             }
-            active.insert(owner);
             self.known_crew_owners.insert(owner);
+            if !object.state.status.is_active() {
+                continue;
+            }
+            active.insert(owner);
             self.eliminated_crew_owners.remove(&owner);
         }
 
@@ -2453,6 +2600,7 @@ impl Engine {
             effects,
             owner,
             crew_member,
+            status,
         } = config;
 
         let definition_ref = self
@@ -2477,6 +2625,7 @@ impl Engine {
                 energy,
                 action: initial_action,
                 effects: Vec::new(),
+                status: status.unwrap_or_default(),
                 owner,
                 crew_member: initial_crew_member,
             },
@@ -2604,6 +2753,7 @@ fn build_state_value(
     map.insert("energy".into(), Value::Int(state.energy));
     map.insert("owner".into(), Value::Int(state.owner));
     map.insert("crew_member".into(), Value::Bool(state.crew_member));
+    map.insert("status".into(), Value::Int(state.status.to_script_value()));
     let mut action = HashMap::with_capacity(4);
     action.insert("name".into(), Value::String(state.action.name.clone()));
     action.insert("phase".into(), Value::Int(state.action.phase));
@@ -3683,6 +3833,85 @@ mod tests {
         engine.tick().expect("first tick succeeds");
 
         assert!(engine.global_effects().is_empty());
+    }
+
+    #[test]
+    fn inactive_objects_skip_physics_and_step() {
+        let mut definition = build_definition();
+        definition.configure_actions(Some("Idle".to_string()), HashMap::new());
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_velocity(Vector2::new(3, 0))
+                    .with_energy(50),
+            )
+            .expect("spawn succeeds");
+
+        engine.tick().expect("initial tick runs");
+
+        engine
+            .apply_object_update(id, ObjectUpdate::new().with_status(ObjectStatus::Inactive))
+            .expect("status update applies");
+
+        let before = engine
+            .object_snapshot(id)
+            .expect("snapshot available before tick");
+
+        engine.tick().expect("tick with inactive object runs");
+
+        let after = engine
+            .object_snapshot(id)
+            .expect("snapshot available after tick");
+
+        assert_eq!(after.velocity, before.velocity);
+        assert_eq!(after.position, before.position);
+        assert_eq!(after.energy, before.energy);
+        assert_eq!(after.status, ObjectStatus::Inactive);
+    }
+
+    #[test]
+    fn engine_state_persists_object_status() {
+        let mut definition = build_definition();
+        definition.configure_actions(Some("Idle".to_string()), HashMap::new());
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_status(ObjectStatus::Inactive)
+                    .with_owner(1)
+                    .with_crew_member(true),
+            )
+            .expect("spawn succeeds");
+
+        engine
+            .apply_object_update(id, ObjectUpdate::new().with_status(ObjectStatus::Inactive))
+            .expect("status update applies");
+
+        let state = engine.capture_state();
+
+        let mut restored = Engine::with_seed(0);
+        restored
+            .register_definition(build_definition())
+            .expect("definition registers");
+        restored.restore_state(&state).expect("state restores");
+
+        let snapshot = restored
+            .object_snapshot(id)
+            .expect("restored object available");
+        assert_eq!(snapshot.status, ObjectStatus::Inactive);
+        assert!(restored.crew_members(1).is_empty());
+        assert!(restored.is_owner_eliminated(1));
     }
 
     #[test]

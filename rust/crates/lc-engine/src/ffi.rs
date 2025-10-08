@@ -1,6 +1,6 @@
 use crate::{
-    ActionState, CrewRole, CrewSelectionState, EffectState, ObjectId, ObjectSnapshot, Playback,
-    Recorder, Recording, SimulationSnapshot, Vector2,
+    ActionState, CrewRole, CrewSelectionState, EffectState, ObjectId, ObjectSnapshot, ObjectStatus,
+    Playback, Recorder, Recording, SimulationSnapshot, Vector2,
 };
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -165,6 +165,7 @@ unsafe fn make_snapshot(
             action,
             action_procedure: None,
             effects,
+            status: ObjectStatus::Normal,
             owner: entry.owner,
             crew_member: entry.crew_member,
         });

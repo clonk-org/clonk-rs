@@ -285,7 +285,9 @@ impl fmt::Display for Recording {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ActionState, ObjectSnapshot, SimulationSnapshot, Vector2, OWNER_NONE};
+    use crate::{
+        ActionState, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2, OWNER_NONE,
+    };
 
     fn make_snapshot(frame: u64, energy: i32) -> SimulationSnapshot {
         SimulationSnapshot {
@@ -299,6 +301,7 @@ mod tests {
                 action: ActionState::default(),
                 action_procedure: None,
                 effects: Vec::new(),
+                status: ObjectStatus::Normal,
                 owner: OWNER_NONE,
                 crew_member: false,
             }],

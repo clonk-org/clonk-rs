@@ -4,7 +4,7 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState};
-use crate::{ActionUpdate, ObjectId, ObjectUpdate, QueuedCommand};
+use crate::{ActionUpdate, ObjectId, ObjectStatus, ObjectUpdate, QueuedCommand};
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
@@ -20,6 +20,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetEffect", get_effect);
     script.register_host_function("GetEffectCount", get_effect_count);
     script.register_host_function("SetAction", set_action);
+    script.register_host_function("SetObjectStatus", set_object_status);
+    script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("Random", random);
 }
 
@@ -42,12 +44,17 @@ pub(crate) fn enter_random_context(rng: ChaCha8Rng) -> RandomContextGuard {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct HostObjectContext<'a> {
     pub id: ObjectId,
+    pub status: ObjectStatus,
     pub effects: &'a [EffectState],
 }
 
 impl<'a> HostObjectContext<'a> {
-    pub fn new(id: ObjectId, effects: &'a [EffectState]) -> Self {
-        Self { id, effects }
+    pub fn new(id: ObjectId, status: ObjectStatus, effects: &'a [EffectState]) -> Self {
+        Self {
+            id,
+            status,
+            effects,
+        }
     }
 }
 
@@ -740,6 +747,143 @@ fn with_context_mut<R>(
     })
 }
 
+fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetObjectStatus expects at least 1 argument: status",
+        ));
+    }
+
+    let status_value = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetObjectStatus: expected int or nil for status, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let status = match ObjectStatus::from_script_value(status_value) {
+        Some(status) => status,
+        None => return Ok(Value::Bool(false)),
+    };
+
+    if matches!(status, ObjectStatus::Deleted) {
+        return Ok(Value::Bool(false));
+    }
+
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Bool(_) | Value::Nil => {
+                index += 1;
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "SetObjectStatus: expected bool or nil for clear pointers, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetObjectStatus: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("SetObjectStatus requires an active engine context")
+        })?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        object.set_status(status);
+        Ok(Value::Bool(true))
+    })
+}
+
+fn get_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetObjectStatus expects at most 1 argument",
+        ));
+    }
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(0) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+            }
+            Value::Nil => {}
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "GetObjectStatus: expected proplist or nil for target, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Nil);
+            }
+        }
+
+        Ok(Value::Int(object.status().to_script_value()))
+    })
+}
+
 fn snapshot_effects_from_context(scope: EffectScope) -> Option<Vec<EffectState>> {
     HOST_CONTEXT.with(|cell| cell.borrow().as_ref().and_then(|ctx| ctx.snapshot(scope)))
 }
@@ -886,7 +1030,8 @@ struct EffectHostContext {
 
 impl EffectHostContext {
     fn new(object: Option<HostObjectContext<'_>>, global_effects: Vec<EffectState>) -> Self {
-        let object = object.map(|ctx| ObjectScopeContext::new(ctx.id, ctx.effects.to_vec()));
+        let object =
+            object.map(|ctx| ObjectScopeContext::new(ctx.id, ctx.status, ctx.effects.to_vec()));
         let global = Some(EffectScopeContext::new(global_effects));
         Self { object, global }
     }
@@ -918,6 +1063,10 @@ impl EffectHostContext {
 
     fn object_context_mut(&mut self) -> Option<&mut ObjectScopeContext> {
         self.object.as_mut()
+    }
+
+    fn object_context(&self) -> Option<&ObjectScopeContext> {
+        self.object.as_ref()
     }
 
     fn into_commands(self) -> EffectContextOutcome {
@@ -1047,6 +1196,7 @@ impl EffectScopeContext {
 
 struct ObjectScopeContext {
     id: ObjectId,
+    status: ObjectStatus,
     effects: EffectScopeContext,
     pending_update: ObjectUpdate,
     queued_commands: Vec<QueuedCommand>,
@@ -1054,9 +1204,10 @@ struct ObjectScopeContext {
 }
 
 impl ObjectScopeContext {
-    fn new(id: ObjectId, effects: Vec<EffectState>) -> Self {
+    fn new(id: ObjectId, status: ObjectStatus, effects: Vec<EffectState>) -> Self {
         Self {
             id,
+            status,
             effects: EffectScopeContext::new(effects),
             pending_update: ObjectUpdate::default(),
             queued_commands: Vec::new(),
@@ -1066,6 +1217,15 @@ impl ObjectScopeContext {
 
     fn id(&self) -> ObjectId {
         self.id
+    }
+
+    fn status(&self) -> ObjectStatus {
+        self.pending_update.status.unwrap_or(self.status)
+    }
+
+    fn set_status(&mut self, status: ObjectStatus) {
+        self.status = status;
+        self.pending_update.status = Some(status);
     }
 }
 
@@ -1084,7 +1244,11 @@ mod tests {
         F: FnOnce() -> Result<T, RuntimeError>,
     {
         with_effect_context(
-            Some(HostObjectContext::new(ObjectId::new(1), &[])),
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                &[],
+            )),
             &[],
             func,
         )
@@ -1318,6 +1482,40 @@ mod tests {
         let value = result.expect("SetAction returns bool");
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
+    fn set_object_status_records_update() {
+        let args = vec![Value::Int(ObjectStatus::Inactive.to_script_value())];
+        let (result, outcome) = with_object_host_context(|| set_object_status(&args));
+        let value = result.expect("SetObjectStatus succeeds");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("status update present");
+        assert_eq!(update.status, Some(ObjectStatus::Inactive));
+    }
+
+    #[test]
+    fn set_object_status_rejects_deleted() {
+        let args = vec![Value::Int(ObjectStatus::Deleted.to_script_value())];
+        let (result, outcome) = with_object_host_context(|| set_object_status(&args));
+        let value = result.expect("SetObjectStatus returns bool");
+        assert_eq!(value, Value::Bool(false));
+        assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
+    fn get_object_status_reflects_pending_update() {
+        let (result, outcome) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            let set_value =
+                set_object_status(&[Value::Int(ObjectStatus::Inactive.to_script_value())])?;
+            assert_eq!(set_value, Value::Bool(true));
+            get_object_status(&[])
+        });
+
+        let value = result.expect("GetObjectStatus succeeds");
+        assert_eq!(value, Value::Int(ObjectStatus::Inactive.to_script_value()));
+        let update = outcome.object_update.expect("status update present");
+        assert_eq!(update.status, Some(ObjectStatus::Inactive));
     }
 
     #[test]
