@@ -25,6 +25,14 @@ struct Cli {
     #[arg(long = "scenario", value_name = "PATH")]
     scenario: Option<PathBuf>,
 
+    /// Restore the engine from a saved JSON state before running
+    #[arg(long = "load-state", value_name = "PATH")]
+    load_state: Option<PathBuf>,
+
+    /// Save the final engine state as JSON after the run completes
+    #[arg(long = "save-state", value_name = "PATH")]
+    save_state: Option<PathBuf>,
+
     /// Write the run summary as JSON to the given path
     #[arg(long = "summary-json", value_name = "PATH")]
     summary_json: Option<PathBuf>,
@@ -55,9 +63,14 @@ fn run_with_cli(cli: Cli) -> GameResult<()> {
         config_path: cli.config.clone(),
         scenario_path: cli.scenario.clone(),
         interactive: cli.interactive,
+        load_state_path: cli.load_state.clone(),
     })?;
     let ticks = cli.ticks.unwrap_or_else(|| game.configured_ticks());
     let summary = game.run(ticks)?;
+
+    if let Some(path) = cli.save_state.as_deref() {
+        game.save_state_to_path(path)?;
+    }
 
     if let Some(path) = cli.summary_json.as_deref() {
         write_summary_json(path, &summary)?;
@@ -140,6 +153,8 @@ mod tests {
         assert_eq!(cli.ticks, Some(42));
         assert!(cli.quiet);
         assert!(cli.scenario.is_none());
+        assert!(cli.load_state.is_none());
+        assert!(cli.save_state.is_none());
         assert!(!cli.interactive);
     }
 
@@ -148,6 +163,8 @@ mod tests {
         let cli = Cli::parse_from(["lc-app", "--scenario", "test_scenario", "--quiet"]);
         assert_eq!(cli.scenario, Some(PathBuf::from("test_scenario")));
         assert!(cli.quiet);
+        assert!(cli.load_state.is_none());
+        assert!(cli.save_state.is_none());
         assert!(!cli.interactive);
     }
 
@@ -164,6 +181,8 @@ mod tests {
             ticks: Some(4),
             config: None,
             scenario: None,
+            load_state: None,
+            save_state: None,
             summary_json: Some(path.clone()),
             quiet: true,
             interactive: false,

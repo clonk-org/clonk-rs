@@ -12,9 +12,9 @@ use crossterm::{
 use lc_audio::{AudioSystem, SoundHandle};
 use lc_core::std_config::Config;
 use lc_engine::{
-    CrewCommandTarget, CrewRole, Definition, Engine, EngineError, Landscape, ObjectId,
-    ObjectSnapshot, ObjectUpdate, PhysicsSettings, Scenario, ScenarioError, SimulationSnapshot,
-    SpawnConfig, Vector2,
+    CrewCommandTarget, CrewRole, Definition, Engine, EngineError, EngineState, EngineStateIoError,
+    Landscape, ObjectId, ObjectSnapshot, ObjectUpdate, PhysicsSettings, Scenario, ScenarioError,
+    SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_graphics::{Color, PixelFormat, SnapshotHasher, Surface};
 use lc_gui::{
@@ -68,6 +68,8 @@ pub enum GameError {
     SummarySerialize(#[from] serde_json::Error),
     #[error("input error: {0}")]
     Input(String),
+    #[error("engine state error: {0}")]
+    EngineStateIo(#[from] EngineStateIoError),
 }
 
 pub struct DemoGame {
@@ -100,6 +102,7 @@ pub struct DemoGameOptions {
     pub config_path: Option<PathBuf>,
     pub scenario_path: Option<PathBuf>,
     pub interactive: bool,
+    pub load_state_path: Option<PathBuf>,
 }
 
 impl Default for DemoGameOptions {
@@ -108,6 +111,7 @@ impl Default for DemoGameOptions {
             config_path: None,
             scenario_path: None,
             interactive: false,
+            load_state_path: None,
         }
     }
 }
@@ -345,7 +349,7 @@ impl DemoGame {
         let paths = AppPaths::discover()?;
         let mut engine = Engine::with_seed(12345);
         engine.set_physics(base_physics);
-        let object_id = if let Some(scenario) = scenario.as_ref() {
+        let mut object_id = if let Some(scenario) = scenario.as_ref() {
             if let Some(ticks) = scenario.configured_ticks() {
                 configured_ticks = ticks;
             }
@@ -384,12 +388,22 @@ impl DemoGame {
             )?
         };
         let scenario_label = format!("SCENARIO {}", sanitize_label(&scenario_name));
-        let world_width = engine
-            .landscape()
-            .map(|landscape| landscape.width() as i32)
-            .unwrap_or(SURFACE_WIDTH as i32);
 
         let owner_id = LOCAL_CLIENT_ID as i32;
+        if let Some(state_path) = options.load_state_path.as_deref() {
+            let state = EngineState::load_from_path(state_path)?;
+            engine.restore_state(&state)?;
+            if engine.object_snapshot(object_id).is_none() {
+                let restored = engine.snapshot();
+                let candidate = restored
+                    .objects
+                    .first()
+                    .ok_or(GameError::ScenarioNoObjects)?
+                    .id;
+                object_id = candidate;
+            }
+        }
+
         let snapshot = engine
             .object_snapshot(object_id)
             .ok_or(GameError::Engine(EngineError::UnknownObject(object_id)))?;
@@ -408,8 +422,18 @@ impl DemoGame {
         }
 
         engine.set_crew_role(owner_id, object_id, CrewRole::from("demo-bouncer"))?;
-        engine.select_crew(owner_id, [object_id])?;
-        engine.set_crew_cursor(owner_id, Some(object_id))?;
+        let current_selection = engine.selected_crew(owner_id);
+        if !current_selection.iter().any(|id| *id == object_id) {
+            engine.select_crew(owner_id, [object_id])?;
+        }
+        if engine.crew_cursor(owner_id) != Some(object_id) {
+            engine.set_crew_cursor(owner_id, Some(object_id))?;
+        }
+
+        let world_width = engine
+            .landscape()
+            .map(|landscape| landscape.width() as i32)
+            .unwrap_or(SURFACE_WIDTH as i32);
 
         let mut gui = Gui::new();
         let root = gui.root();
@@ -488,6 +512,18 @@ impl DemoGame {
 
     pub fn configured_ticks(&self) -> u32 {
         self.configured_ticks
+    }
+
+    pub fn save_state_to_path(&self, path: &Path) -> GameResult<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|err| GameError::EngineStateIo(err.into()))?;
+            }
+        }
+        let state = self.engine.capture_state();
+        state.save_to_path(path)?;
+        Ok(())
     }
 
     pub fn run(&mut self, ticks: u32) -> GameResult<GameSummary> {
@@ -910,6 +946,7 @@ fn scripted_control_for_tick(tick: u32) -> ControlPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn sine_wave_encoder_produces_pcm_data() {
@@ -930,5 +967,22 @@ mod tests {
             summary.max_horizontal_speed,
             PhysicsSettings::default().max_horizontal_speed
         );
+    }
+
+    #[test]
+    fn demo_game_saves_and_restores_engine_state() {
+        let mut game = DemoGame::new(DemoGameOptions::default()).expect("game constructed");
+        let _ = game.run(4).expect("simulation runs");
+
+        let temp = NamedTempFile::new().expect("temp file");
+        game.save_state_to_path(temp.path()).expect("state saves");
+
+        let options = DemoGameOptions {
+            load_state_path: Some(temp.path().to_path_buf()),
+            ..DemoGameOptions::default()
+        };
+        let mut restored = DemoGame::new(options).expect("restored game constructed");
+        let summary = restored.run(2).expect("restored simulation runs");
+        assert!(summary.ticks > 0);
     }
 }

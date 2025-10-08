@@ -746,6 +746,7 @@ dependencies = [
  "lc-script",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
