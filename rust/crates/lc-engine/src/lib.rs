@@ -4343,6 +4343,15 @@ impl Engine {
             }
         };
 
+        let mut push_handled = false;
+        if matches!(procedure, ActionProcedure::Push) {
+            if !self.apply_push_procedure(idx, command_direction, movement_profile, &definition_id)
+            {
+                return;
+            }
+            push_handled = true;
+        }
+
         {
             let object = &mut self.objects[idx];
             object.state.velocity.y = object.state.velocity.y.saturating_add(gravity_component);
@@ -4401,6 +4410,12 @@ impl Engine {
                         object.state.direction,
                     );
                 }
+                ActionProcedure::Push => {
+                    if !push_handled {
+                        // If push was not handled earlier (shouldn't happen), ensure velocities stay zeroed.
+                        object.state.velocity = Vector2::ZERO;
+                    }
+                }
                 _ => {}
             }
             match procedure {
@@ -4425,6 +4440,13 @@ impl Engine {
                     if let Some(direction) = pending_direction {
                         object.state.direction = direction;
                     } else if object.state.velocity.x < 0 {
+                        object.state.direction = Direction::Left;
+                    } else if object.state.velocity.x > 0 {
+                        object.state.direction = Direction::Right;
+                    }
+                }
+                ActionProcedure::Push => {
+                    if object.state.velocity.x < 0 {
                         object.state.direction = Direction::Left;
                     } else if object.state.velocity.x > 0 {
                         object.state.direction = Direction::Right;
@@ -4493,7 +4515,12 @@ impl Engine {
         true
     }
 
-    fn reset_lift_action(&mut self, idx: usize, definition_id: &DefinitionId) {
+    fn reset_action_to_default(
+        &mut self,
+        idx: usize,
+        definition_id: &DefinitionId,
+        clear_targets: bool,
+    ) {
         let library = self
             .definitions
             .get(definition_id)
@@ -4507,8 +4534,8 @@ impl Engine {
             phase: Some(0),
             ticks: Some(0),
             force: true,
-            target: Some(None),
-            target2: Some(None),
+            target: if clear_targets { Some(None) } else { None },
+            target2: if clear_targets { Some(None) } else { None },
         };
 
         let object = &mut self.objects[idx];
@@ -4516,12 +4543,137 @@ impl Engine {
             .state
             .action
             .apply_update_with_library(&update, &library);
-        let changed = previous.name != object.state.action.name;
-        object.state.action.target = None;
-        object.state.action.target2 = None;
-        if matches!(result, ActionUpdateResult::Applied) && changed {
+        if clear_targets {
+            object.state.action.target = None;
+            object.state.action.target2 = None;
+        }
+        object.state.command_direction = CommandDirection::Stop;
+        object.state.velocity = Vector2::ZERO;
+        if matches!(result, ActionUpdateResult::Applied)
+            && previous.name != object.state.action.name
+        {
             object.record_action_event(previous, ActionTransitionKind::Forced);
         }
+    }
+
+    fn reset_lift_action(&mut self, idx: usize, definition_id: &DefinitionId) {
+        self.reset_action_to_default(idx, definition_id, true);
+    }
+
+    fn apply_push_procedure(
+        &mut self,
+        idx: usize,
+        command_direction: CommandDirection,
+        movement_profile: MovementProfile,
+        definition_id: &DefinitionId,
+    ) -> bool {
+        let Some(target_id) = self.objects[idx].state.action.target else {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        };
+        let Some(target_idx) = self.find_object_index(target_id) else {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        };
+        if target_idx == idx {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+        let target_removed = {
+            let target = &self.objects[target_idx];
+            target.destroyed || matches!(target.state.status, ObjectStatus::Deleted)
+        };
+        if target_removed {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+        if self.objects[target_idx].state.container == Some(self.objects[idx].id) {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        let push_speed = movement_profile.walk_speed.max(0);
+        let push_accel = movement_profile.walk_acceleration.max(0);
+        let straighten = matches!(
+            command_direction,
+            CommandDirection::Up | CommandDirection::UpLeft | CommandDirection::UpRight
+        );
+        let desired_target_velocity = match command_direction {
+            CommandDirection::Left | CommandDirection::DownLeft | CommandDirection::UpLeft => {
+                -push_speed
+            }
+            CommandDirection::Right | CommandDirection::DownRight | CommandDirection::UpRight => {
+                push_speed
+            }
+            _ => 0,
+        };
+
+        let physics = self.physics;
+
+        if idx < target_idx {
+            let (first, rest) = self.objects.split_at_mut(target_idx);
+            let pusher = &mut first[idx];
+            let target = &mut rest[0];
+            Self::update_push_pair(
+                pusher,
+                target,
+                desired_target_velocity,
+                push_speed,
+                push_accel,
+                straighten,
+                physics,
+            );
+        } else {
+            let (first, rest) = self.objects.split_at_mut(idx);
+            let target = &mut first[target_idx];
+            let pusher = &mut rest[0];
+            Self::update_push_pair(
+                pusher,
+                target,
+                desired_target_velocity,
+                push_speed,
+                push_accel,
+                straighten,
+                physics,
+            );
+        }
+
+        true
+    }
+
+    fn update_push_pair(
+        pusher: &mut Object,
+        target: &mut Object,
+        desired_target_velocity: i32,
+        push_speed: i32,
+        push_accel: i32,
+        straighten: bool,
+        physics: PhysicsSettings,
+    ) {
+        let new_target_velocity =
+            step_toward(target.state.velocity.x, desired_target_velocity, push_accel);
+        target.state.velocity.x = clamp_to_limit(new_target_velocity, push_speed);
+        if straighten && push_accel > 0 {
+            target.state.velocity.y = decelerate_toward_zero(target.state.velocity.y, push_accel);
+        }
+        physics.clamp_velocity(&mut target.state.velocity);
+
+        let mut desired_pusher_velocity = desired_target_velocity;
+        if desired_pusher_velocity == 0 {
+            let delta = target.state.position.x - pusher.state.position.x;
+            let threshold = push_speed.max(1);
+            if delta > threshold {
+                desired_pusher_velocity = push_speed;
+            } else if delta < -threshold {
+                desired_pusher_velocity = -push_speed;
+            }
+        }
+
+        let new_pusher_velocity =
+            step_toward(pusher.state.velocity.x, desired_pusher_velocity, push_accel);
+        pusher.state.velocity.x = clamp_to_limit(new_pusher_velocity, push_speed);
+        pusher.state.velocity.y = 0;
+        physics.clamp_velocity(&mut pusher.state.velocity);
     }
 
     fn apply_landscape_at_index(&mut self, idx: usize) {
@@ -7636,7 +7788,7 @@ mod tests {
     }
 
     #[test]
-    fn push_procedure_blocks_gravity_and_wind() {
+    fn push_procedure_without_target_resets_to_default() {
         let script = r#"
         global func Initialize(state, random) {
             return nil;
@@ -7650,31 +7802,122 @@ mod tests {
         let mut definition = Definition::from_script("Pusher", "Pusher", script).unwrap();
         let mut actions = HashMap::new();
         actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
             "Push".to_string(),
             ActionSpec::default().with_procedure("push"),
         );
-        definition.configure_actions(Some("Push".to_string()), actions);
+        definition.configure_actions(Some("Idle".to_string()), actions);
 
         let mut engine = Engine::with_seed(12);
         engine
             .register_definition(definition)
             .expect("definition registers");
-        engine.set_physics(PhysicsSettings::new(5, 50, -20));
-        engine.set_environment(EnvironmentSettings::new(6));
 
+        let push_state = ActionState::new("Push");
         let id = engine
-            .spawn_object(SpawnConfig::new("Pusher"))
+            .spawn_object(
+                SpawnConfig::new("Pusher")
+                    .with_action(push_state)
+                    .with_command_direction(CommandDirection::Right),
+            )
             .expect("spawn succeeds");
 
-        let snapshot = engine.tick().expect("first tick succeeds");
+        let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.action.name, "Push");
+        assert_eq!(object.action.name, "Idle");
         assert_eq!(object.velocity, Vector2::ZERO);
+        assert_eq!(object.command_direction, CommandDirection::Stop);
+    }
+
+    #[test]
+    fn push_procedure_moves_target_and_pusher() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut pusher_definition = Definition::from_script("Pusher", "Pusher", script).unwrap();
+        let mut pusher_actions = HashMap::new();
+        pusher_actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        pusher_actions.insert(
+            "Push".to_string(),
+            ActionSpec::default().with_procedure("push"),
+        );
+        pusher_definition.configure_actions(Some("Idle".to_string()), pusher_actions);
+        pusher_definition.set_movement_profile(
+            MovementProfile::default()
+                .with_walk_speed(6)
+                .with_walk_acceleration(3),
+        );
+
+        let mut target_definition = Definition::from_script("Crate", "Crate", script).unwrap();
+        let mut target_actions = HashMap::new();
+        target_actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        target_definition.configure_actions(Some("Idle".to_string()), target_actions);
+
+        let mut engine = Engine::with_seed(18);
+        engine
+            .register_definition(pusher_definition)
+            .expect("pusher registers");
+        engine
+            .register_definition(target_definition)
+            .expect("target registers");
+
+        let target_id = engine
+            .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(10, 0)))
+            .expect("target spawns");
+        let target_initial_position = engine
+            .object_snapshot(target_id)
+            .expect("snapshot available")
+            .position;
+
+        let mut push_state = ActionState::new("Push");
+        push_state.target = Some(target_id);
+
+        let pusher_id = engine
+            .spawn_object(
+                SpawnConfig::new("Pusher")
+                    .with_position(Vector2::new(0, 0))
+                    .with_action(push_state)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("pusher spawns");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let pusher = snapshot
+            .object(pusher_id)
+            .expect("pusher present after tick");
+        assert_eq!(pusher.action.name, "Push");
+        assert!(pusher.velocity.x > 0, "pusher should move forward");
+        assert_eq!(pusher.direction, Direction::Right);
+
+        let target = snapshot
+            .object(target_id)
+            .expect("target present after tick");
+        assert!(target.velocity.x >= 0);
 
         let snapshot = engine.tick().expect("second tick succeeds");
-        let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity, Vector2::ZERO);
-        assert_eq!(object.position, Vector2::new(0, 0));
+        let target_after = snapshot
+            .object(target_id)
+            .expect("target present after second tick");
+        assert!(
+            target_after.position.x > target_initial_position.x,
+            "target should advance horizontally"
+        );
     }
 
     #[test]

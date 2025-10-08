@@ -6,11 +6,10 @@
 - Movement profiles now expose walk/float/swim speeds and accelerations, and `ActionProcedure::Walk` mirrors C++ steering, braking, and facing updates.
 - Scale, hangle, and dig command handling now mirror the C++ procedures, including configurable climb/hang/dig movement profiles.
 - Parity runs can capture per-frame Rust engine snapshots by setting `LC_RUST_ENGINE_RUNTIME_SNAPSHOT` while the validation toggle is enabled.
+- Push procedure parity keeps the pusher aligned with the target, imparts horizontal velocity based on command direction, and cleanly reverts when the target is unavailable.
 
 ## Priority Backlog
-1. ✅ Walk procedure command movement parity (Rust engine accelerates/decelerates via per-definition walk profiles and exposes `movement.walk.*` manifest knobs).
-2. ✅ Expand grounded procedure parity (Scale/Hangle/Dig command handling) so climbing and digging match C++ behaviour.
-3. ✅ Wire the Rust gameplay loop into the main C++ runtime behind a feature toggle to validate parity during live rounds (inputs, HUD, save/load).
+1. Implement pull procedure parity so towing interactions mirror C++ behaviour during validation runs.
 
 ## Notes
 - Scenario manifests can now provide `movement.walk.speed` and `movement.walk.acceleration` to tune procedures per definition.
