@@ -8,10 +8,11 @@
 - Parity runs can capture per-frame Rust engine snapshots by setting `LC_RUST_ENGINE_RUNTIME_SNAPSHOT` while the validation toggle is enabled.
 - Push procedure parity keeps the pusher aligned with the target, imparts horizontal velocity based on command direction, and cleanly reverts when the target is unavailable.
 - Pull procedure parity now mirrors the C++ towing offsets, range checks, and velocity handling for validation runs.
+- `std_markup::strip_markup` now handles unterminated inline image tags exactly like the legacy C++ path, removing stray `{{` brace pairs instead of leaving them in Rust output.
 
 ## Priority Backlog
 
-- (none; pull parity delivered)
+- (none; markup parity gap resolved)
 
 ## Notes
 - Scenario manifests can now provide `movement.walk.speed` and `movement.walk.acceleration` to tune procedures per definition.

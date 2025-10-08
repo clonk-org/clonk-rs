@@ -125,6 +125,9 @@ impl Markup {
                 if let Some(end) = reader[2..].find("}}") {
                     reader = &reader[2 + end + 2..];
                     continue;
+                } else {
+                    reader = &reader[2..];
+                    continue;
                 }
             }
             if reader.starts_with("}}") {
@@ -204,5 +207,12 @@ mod tests {
         let mut buf = StdStrBuf::from_str("<c ff0000>colored</c>", true);
         assert!(Markup::strip_markup_buf(&mut buf));
         assert_eq!(std::str::from_utf8(buf.as_bytes()).unwrap(), "colored");
+    }
+
+    #[test]
+    fn strip_markup_handles_unterminated_inline_tag() {
+        let mut text = "{{broken".to_string();
+        assert!(Markup::strip_markup(&mut text));
+        assert_eq!(text, "broken");
     }
 }
