@@ -158,6 +158,9 @@ public:
 
 	C4ParticleList() { pFirst = nullptr; }
 
+	C4Particle *First() const { return pFirst; }
+	static C4Particle *Next(const C4Particle *particle) { return particle ? particle->pNext : nullptr; }
+
 	void Exec(C4Object *pObj = nullptr); // execute all particles
 	void Draw(C4FacetEx &cgo, C4Object *pObj = nullptr); // draw all particles
 	void Clear(); // remove all particles

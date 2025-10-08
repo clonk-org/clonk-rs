@@ -11,6 +11,7 @@
 #include <C4Object.h>
 #include <C4ObjectList.h>
 #include <C4Effects.h>
+#include <C4Particles.h>
 #include <C4Player.h>
 #include <C4Wrappers.h>
 #include <StdCompiler.h>
@@ -78,6 +79,17 @@ struct CrewRoleEntry {
     std::vector<std::string> role_names;
 };
 
+enum class ParticleLayer : int32_t {
+    Global = 0,
+    ObjectFront = 1,
+    ObjectBack = 2,
+};
+
+struct ParticleEntry {
+    LcEngineParticleSnapshot snapshot{};
+    std::string definition;
+};
+
 struct SnapshotBuffer {
     std::vector<SnapshotEntry> entries;
     std::vector<LcEngineObjectSnapshot> raw;
@@ -87,6 +99,8 @@ struct SnapshotBuffer {
     std::vector<LcEngineCrewSelectionSnapshot> crew_selection_raw;
     std::vector<CrewRoleEntry> crew_roles;
     std::vector<LcEngineCrewRoleSnapshot> crew_role_raw;
+    std::vector<ParticleEntry> particles;
+    std::vector<LcEngineParticleSnapshot> particle_raw;
     std::vector<int32_t> known_crew_owners;
     std::vector<int32_t> eliminated_crew_owners;
 };
@@ -190,14 +204,51 @@ bool InitialiseRuntime(C4Game &game) {
     return true;
 }
 
+void CollectParticlesFromList(
+    C4ParticleList &list,
+    ParticleLayer layer,
+    uint64_t owner_id,
+    SnapshotBuffer &buffer) {
+    for (C4Particle *particle = list.First(); particle; particle = C4ParticleList::Next(particle)) {
+        if (!particle || !particle->pDef) {
+            continue;
+        }
+        ParticleEntry entry;
+        if (const char *name = particle->pDef->Name.getData()) {
+            entry.definition = name;
+        } else {
+            entry.definition.clear();
+        }
+        entry.snapshot.x = particle->x;
+        entry.snapshot.y = particle->y;
+        entry.snapshot.xdir = particle->xdir;
+        entry.snapshot.ydir = particle->ydir;
+        entry.snapshot.life = particle->life;
+        entry.snapshot.parameter_a = particle->a;
+        entry.snapshot.parameter_b = particle->b;
+        entry.snapshot.layer = static_cast<int32_t>(layer);
+        entry.snapshot.has_owner = owner_id != 0;
+        entry.snapshot.owner_id = owner_id;
+        buffer.particles.push_back(std::move(entry));
+    }
+}
+
 SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
     SnapshotBuffer buffer;
+    CollectParticlesFromList(
+        game.Particles.GlobalParticles,
+        ParticleLayer::Global,
+        0,
+        buffer);
     std::set<int32_t> active_owners;
     for (auto it = game.Objects.begin(); it != game.Objects.end(); ++it) {
         C4Object *object = *it;
         if (!object || !object->Status) {
             continue;
         }
+        const uint64_t object_id = static_cast<uint64_t>(object->Number);
+        CollectParticlesFromList(object->FrontParticles, ParticleLayer::ObjectFront, object_id, buffer);
+        CollectParticlesFromList(object->BackParticles, ParticleLayer::ObjectBack, object_id, buffer);
         SnapshotEntry entry;
         entry.snapshot.id = static_cast<uint64_t>(object->Number);
         entry.definition = object->Def ? object->Def->GetName() : "";
@@ -287,6 +338,47 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
         entry.snapshot.contents = entry.contents.empty() ? nullptr : entry.contents.data();
         entry.snapshot.contents_count = entry.contents.size();
         buffer.raw.push_back(entry.snapshot);
+    }
+
+    std::sort(
+        buffer.particles.begin(),
+        buffer.particles.end(),
+        [](const ParticleEntry &lhs, const ParticleEntry &rhs) {
+            if (lhs.snapshot.layer != rhs.snapshot.layer) {
+                return lhs.snapshot.layer < rhs.snapshot.layer;
+            }
+            if (lhs.snapshot.owner_id != rhs.snapshot.owner_id) {
+                return lhs.snapshot.owner_id < rhs.snapshot.owner_id;
+            }
+            int comparison = lhs.definition.compare(rhs.definition);
+            if (comparison != 0) {
+                return comparison < 0;
+            }
+            if (lhs.snapshot.x != rhs.snapshot.x) {
+                return lhs.snapshot.x < rhs.snapshot.x;
+            }
+            if (lhs.snapshot.y != rhs.snapshot.y) {
+                return lhs.snapshot.y < rhs.snapshot.y;
+            }
+            if (lhs.snapshot.xdir != rhs.snapshot.xdir) {
+                return lhs.snapshot.xdir < rhs.snapshot.xdir;
+            }
+            if (lhs.snapshot.ydir != rhs.snapshot.ydir) {
+                return lhs.snapshot.ydir < rhs.snapshot.ydir;
+            }
+            if (lhs.snapshot.life != rhs.snapshot.life) {
+                return lhs.snapshot.life < rhs.snapshot.life;
+            }
+            if (lhs.snapshot.parameter_a != rhs.snapshot.parameter_a) {
+                return lhs.snapshot.parameter_a < rhs.snapshot.parameter_a;
+            }
+            return lhs.snapshot.parameter_b < rhs.snapshot.parameter_b;
+        });
+
+    buffer.particle_raw.reserve(buffer.particles.size());
+    for (auto &entry : buffer.particles) {
+        entry.snapshot.definition_id = entry.definition.c_str();
+        buffer.particle_raw.push_back(entry.snapshot);
     }
 
     for (C4Effect *effect = game.pGlobalEffects; effect; effect = effect->pNext) {
@@ -583,9 +675,12 @@ void OnFrame(C4Game &game) {
     const auto &global_effects = buffer.global_effects;
     const auto &crew_selection = buffer.crew_selection_raw;
     const auto &crew_roles = buffer.crew_role_raw;
+    const auto &particles = buffer.particle_raw;
     const LcEngineObjectSnapshot *object_data = raw.empty() ? nullptr : raw.data();
     const LcEngineEffectSnapshot *global_effect_data =
         global_effects.empty() ? nullptr : global_effects.data();
+    const LcEngineParticleSnapshot *particle_data =
+        particles.empty() ? nullptr : particles.data();
     const LcEngineCrewSelectionSnapshot *crew_selection_data =
         crew_selection.empty() ? nullptr : crew_selection.data();
     const LcEngineCrewRoleSnapshot *crew_role_data =
@@ -606,6 +701,8 @@ void OnFrame(C4Game &game) {
                 raw.size(),
                 global_effect_data,
                 global_effects.size(),
+                particle_data,
+                particles.size(),
                 crew_selection_data,
                 crew_selection.size(),
                 crew_role_data,
@@ -634,6 +731,8 @@ void OnFrame(C4Game &game) {
             raw.size(),
             global_effect_data,
             global_effects.size(),
+            particle_data,
+            particles.size(),
             crew_selection_data,
             crew_selection.size(),
             crew_role_data,
@@ -653,6 +752,8 @@ void OnFrame(C4Game &game) {
                 raw.size(),
                 global_effect_data,
                 global_effects.size(),
+                particle_data,
+                particles.size(),
                 crew_selection_data,
                 crew_selection.size(),
                 crew_role_data,

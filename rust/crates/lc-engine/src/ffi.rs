@@ -1,17 +1,17 @@
 use crate::{
     ActionState, CommandDirection, CrewRole, CrewSelectionState, Direction, EffectState, Engine,
-    EnvironmentFrame, ObjectId, ObjectSnapshot, ObjectStatus, Playback, Recorder, Recording,
-    Scenario, SimulationSnapshot, Vector2,
+    EnvironmentFrame, FloatVector2, ObjectId, ObjectSnapshot, ObjectStatus, ParticleLayer,
+    ParticleSnapshot, Playback, Recorder, Recording, Scenario, SimulationSnapshot, Vector2,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::PathBuf;
 use std::ptr;
 use std::slice;
-use serde::Serialize;
 
 #[repr(C)]
 pub struct LcEngineEffectSnapshot {
@@ -19,6 +19,21 @@ pub struct LcEngineEffectSnapshot {
     pub priority: i32,
     pub interval: i32,
     pub timer: i32,
+}
+
+#[repr(C)]
+pub struct LcEngineParticleSnapshot {
+    pub definition_id: *const c_char,
+    pub x: f32,
+    pub y: f32,
+    pub xdir: f32,
+    pub ydir: f32,
+    pub life: i32,
+    pub parameter_a: f32,
+    pub parameter_b: i32,
+    pub layer: i32,
+    pub has_owner: bool,
+    pub owner_id: u64,
 }
 
 #[repr(C)]
@@ -115,6 +130,8 @@ unsafe fn make_snapshot(
     object_len: usize,
     global_effects: *const LcEngineEffectSnapshot,
     global_effect_len: usize,
+    particles: *const LcEngineParticleSnapshot,
+    particle_len: usize,
     crew_selection: *const LcEngineCrewSelectionSnapshot,
     crew_selection_len: usize,
     crew_roles: *const LcEngineCrewRoleSnapshot,
@@ -227,6 +244,39 @@ unsafe fn make_snapshot(
     }
     snapshots.sort_by_key(|object| object.id);
 
+    let particle_slice: &[LcEngineParticleSnapshot] = if particle_len == 0 {
+        &[]
+    } else if particles.is_null() {
+        return None;
+    } else {
+        slice::from_raw_parts(particles, particle_len)
+    };
+    let mut particle_snapshots = Vec::with_capacity(particle_slice.len());
+    for entry in particle_slice {
+        if entry.definition_id.is_null() {
+            return None;
+        }
+        let definition_id = match CStr::from_ptr(entry.definition_id).to_str() {
+            Ok(value) => value.to_string(),
+            Err(_) => CStr::from_ptr(entry.definition_id)
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let layer = match ParticleLayer::from_ffi(entry.layer, entry.has_owner, entry.owner_id) {
+            Some(layer) => layer,
+            None => return None,
+        };
+        particle_snapshots.push(ParticleSnapshot {
+            definition_id,
+            position: FloatVector2::new(entry.x, entry.y),
+            velocity: FloatVector2::new(entry.xdir, entry.ydir),
+            life: entry.life,
+            parameter_a: entry.parameter_a,
+            parameter_b: entry.parameter_b,
+            layer,
+        });
+    }
+
     let global_effects_slice: &[LcEngineEffectSnapshot] = if global_effect_len == 0 {
         &[]
     } else if global_effects.is_null() {
@@ -334,6 +384,7 @@ unsafe fn make_snapshot(
         objects: snapshots,
         environment: EnvironmentFrame::default(),
         global_effects: global_effects_vec,
+        particles: particle_snapshots,
         crew_selection: crew_selection_map,
         crew_roles: crew_role_map,
         known_crew_owners,
@@ -453,6 +504,14 @@ fn runtime_snapshot_mismatch(
 
     if expected.global_effects != actual.global_effects {
         problems.push("global effects mismatch".into());
+    }
+
+    if expected.particles != actual.particles {
+        problems.push(format!(
+            "particle state mismatch (expected {} entries, got {})",
+            expected.particles.len(),
+            actual.particles.len()
+        ));
     }
 
     if expected.crew_selection != actual.crew_selection {
@@ -641,6 +700,8 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     object_count: usize,
     global_effects: *const LcEngineEffectSnapshot,
     global_effect_count: usize,
+    particles: *const LcEngineParticleSnapshot,
+    particle_count: usize,
     crew_selection: *const LcEngineCrewSelectionSnapshot,
     crew_selection_count: usize,
     crew_roles: *const LcEngineCrewRoleSnapshot,
@@ -663,6 +724,8 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
             object_count,
             global_effects,
             global_effect_count,
+            particles,
+            particle_count,
             crew_selection,
             crew_selection_count,
             crew_roles,
@@ -806,6 +869,8 @@ pub extern "C" fn lc_engine_recorder_record(
     len: usize,
     global_effects: *const LcEngineEffectSnapshot,
     global_effect_len: usize,
+    particles: *const LcEngineParticleSnapshot,
+    particle_len: usize,
     crew_selection: *const LcEngineCrewSelectionSnapshot,
     crew_selection_len: usize,
     crew_roles: *const LcEngineCrewRoleSnapshot,
@@ -825,6 +890,8 @@ pub extern "C" fn lc_engine_recorder_record(
             len,
             global_effects,
             global_effect_len,
+            particles,
+            particle_len,
             crew_selection,
             crew_selection_len,
             crew_roles,
@@ -911,6 +978,8 @@ pub extern "C" fn lc_engine_playback_compare(
     len: usize,
     global_effects: *const LcEngineEffectSnapshot,
     global_effect_len: usize,
+    particles: *const LcEngineParticleSnapshot,
+    particle_len: usize,
     crew_selection: *const LcEngineCrewSelectionSnapshot,
     crew_selection_len: usize,
     crew_roles: *const LcEngineCrewRoleSnapshot,
@@ -932,6 +1001,8 @@ pub extern "C" fn lc_engine_playback_compare(
             len,
             global_effects,
             global_effect_len,
+            particles,
+            particle_len,
             crew_selection,
             crew_selection_len,
             crew_roles,
@@ -1057,6 +1128,8 @@ mod tests {
                 0,
                 ptr::null(),
                 0,
+                ptr::null(),
+                0,
             )
         }
         .expect("snapshot should deserialize");
@@ -1093,6 +1166,8 @@ mod tests {
                 0,
                 &effect_snapshot,
                 1,
+                ptr::null(),
+                0,
                 ptr::null(),
                 0,
                 ptr::null(),
@@ -1142,6 +1217,8 @@ mod tests {
         let snapshot = unsafe {
             make_snapshot(
                 1,
+                ptr::null(),
+                0,
                 ptr::null(),
                 0,
                 ptr::null(),
@@ -1232,6 +1309,8 @@ mod tests {
                 1,
                 objects.as_ptr(),
                 objects.len(),
+                ptr::null(),
+                0,
                 ptr::null(),
                 0,
                 ptr::null(),

@@ -324,6 +324,7 @@ mod tests {
             }],
             environment: EnvironmentFrame::default(),
             global_effects: Vec::new(),
+            particles: Vec::new(),
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
             known_crew_owners: Vec::new(),

@@ -14,10 +14,24 @@ typedef struct LcEngineRuntimeHandle LcEngineRuntimeHandle;
 
 typedef struct LcEngineEffectSnapshot {
     const char *name;
-    int32_t priority;
+   int32_t priority;
     int32_t interval;
     int32_t timer;
 } LcEngineEffectSnapshot;
+
+typedef struct LcEngineParticleSnapshot {
+    const char *definition_id;
+    float x;
+    float y;
+    float xdir;
+    float ydir;
+    int32_t life;
+    float parameter_a;
+    int32_t parameter_b;
+    int32_t layer;
+    bool has_owner;
+    uint64_t owner_id;
+} LcEngineParticleSnapshot;
 
 typedef struct LcEngineObjectSnapshot {
     uint64_t id;
@@ -70,6 +84,8 @@ void lc_engine_recorder_record(
     size_t object_count,
     const LcEngineEffectSnapshot *global_effects,
     size_t global_effect_count,
+    const LcEngineParticleSnapshot *particles,
+    size_t particle_count,
     const LcEngineCrewSelectionSnapshot *crew_selection,
     size_t crew_selection_count,
     const LcEngineCrewRoleSnapshot *crew_roles,
@@ -89,6 +105,8 @@ bool lc_engine_playback_compare(
     size_t object_count,
     const LcEngineEffectSnapshot *global_effects,
     size_t global_effect_count,
+    const LcEngineParticleSnapshot *particles,
+    size_t particle_count,
     const LcEngineCrewSelectionSnapshot *crew_selection,
     size_t crew_selection_count,
     const LcEngineCrewRoleSnapshot *crew_roles,
@@ -123,6 +141,8 @@ bool lc_engine_runtime_compare_snapshot(
     size_t object_count,
     const LcEngineEffectSnapshot *global_effects,
     size_t global_effect_count,
+    const LcEngineParticleSnapshot *particles,
+    size_t particle_count,
     const LcEngineCrewSelectionSnapshot *crew_selection,
     size_t crew_selection_count,
     const LcEngineCrewRoleSnapshot *crew_roles,

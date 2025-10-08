@@ -328,6 +328,87 @@ impl AddAssign<Vector2> for Vector2 {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct FloatVector2 {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl FloatVector2 {
+    pub fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
+impl PartialEq for FloatVector2 {
+    fn eq(&self, other: &Self) -> bool {
+        self.x.to_bits() == other.x.to_bits() && self.y.to_bits() == other.y.to_bits()
+    }
+}
+
+impl Eq for FloatVector2 {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", content = "object")]
+pub enum ParticleLayer {
+    #[serde(rename = "global")]
+    Global,
+    #[serde(rename = "front")]
+    ObjectFront(ObjectId),
+    #[serde(rename = "back")]
+    ObjectBack(ObjectId),
+}
+
+impl ParticleLayer {
+    pub fn from_ffi(layer: i32, has_owner: bool, owner_id: u64) -> Option<Self> {
+        match layer {
+            0 => Some(Self::Global),
+            1 => {
+                if !has_owner {
+                    None
+                } else {
+                    Some(Self::ObjectFront(ObjectId::new(owner_id)))
+                }
+            }
+            2 => {
+                if !has_owner {
+                    None
+                } else {
+                    Some(Self::ObjectBack(ObjectId::new(owner_id)))
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticleSnapshot {
+    pub definition_id: String,
+    pub position: FloatVector2,
+    pub velocity: FloatVector2,
+    pub life: i32,
+    #[serde(default)]
+    pub parameter_a: f32,
+    #[serde(default)]
+    pub parameter_b: i32,
+    pub layer: ParticleLayer,
+}
+
+impl PartialEq for ParticleSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.definition_id == other.definition_id
+            && self.position == other.position
+            && self.velocity == other.velocity
+            && self.life == other.life
+            && self.parameter_a.to_bits() == other.parameter_a.to_bits()
+            && self.parameter_b == other.parameter_b
+            && self.layer == other.layer
+    }
+}
+
+impl Eq for ParticleSnapshot {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ObjectVertex {
     pub x: i32,
@@ -1700,6 +1781,8 @@ pub struct SimulationSnapshot {
     #[serde(default)]
     pub global_effects: Vec<EffectState>,
     #[serde(default)]
+    pub particles: Vec<ParticleSnapshot>,
+    #[serde(default)]
     pub crew_selection: HashMap<i32, CrewSelectionState>,
     #[serde(default)]
     pub crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
@@ -1736,6 +1819,8 @@ pub struct EngineState {
     pub landscape: Option<Landscape>,
     #[serde(default)]
     pub objects: Vec<PersistedObject>,
+    #[serde(default)]
+    pub particles: Vec<ParticleSnapshot>,
     #[serde(default)]
     pub crew_selection: HashMap<i32, CrewSelectionState>,
     #[serde(default)]
@@ -1818,6 +1903,7 @@ impl EngineState {
             next_object_id,
             landscape: snapshot.landscape.clone(),
             objects,
+            particles: snapshot.particles.clone(),
             crew_selection: snapshot.crew_selection.clone(),
             crew_roles: snapshot.crew_roles.clone(),
             global_effects: snapshot.global_effects.clone(),
@@ -3906,6 +3992,7 @@ impl Engine {
             objects,
             environment,
             global_effects: self.global_effects.clone(),
+            particles: Vec::new(),
             crew_selection,
             crew_roles,
             known_crew_owners,
@@ -3956,6 +4043,7 @@ impl Engine {
             next_object_id: self.next_object_id,
             landscape: self.landscape.clone(),
             objects,
+            particles: Vec::new(),
             crew_selection,
             crew_roles,
             global_effects: self.global_effects.clone(),

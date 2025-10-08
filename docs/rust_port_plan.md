@@ -19,7 +19,7 @@
 
 ## Port Roadmap (Real Game Focus)
 - **Phase 0 · Parity Harness Expansion**
-  - Drive the shipping client through `LC_RUST_ENGINE_RUNTIME` for full matches, capturing snapshots, I/O, particles, and HUD state. (I/O capture now streamed per control tick into parity exports; particles & HUD remain.)
+  - Drive the shipping client through `LC_RUST_ENGINE_RUNTIME` for full matches, capturing snapshots, I/O, particles, and HUD state. (Snapshots now embed per-frame particle state alongside I/O; HUD capture still outstanding.)
   - Record canonical replays and savegames from C++ and ensure the Rust engine can import them losslessly.
   - Extend automated diff tooling to compare network traffic, HUD buffers, and rendered surfaces frame-by-frame.
 - **Phase 1 · Simulation Authority Flip**
