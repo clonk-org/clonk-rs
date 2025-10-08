@@ -1,9 +1,9 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
 use std::rc::Rc;
 
-use crate::effect::{EffectCommand, EffectState};
+use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::{ActionLibrary, ActionUpdate, ObjectId, ObjectStatus, ObjectUpdate, QueuedCommand};
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -19,6 +19,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("RemoveEffect", remove_effect);
     script.register_host_function("GetEffect", get_effect);
     script.register_host_function("GetEffectCount", get_effect_count);
+    script.register_host_function("EffectVar", effect_var);
     script.register_host_function("SetAction", set_action);
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
@@ -245,6 +246,7 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut command_target: Option<i32> = None;
     let mut command_target_id: Option<String> = None;
     let mut timer: Option<i32> = None;
+    let mut vars: Vec<EffectVarValue> = Vec::new();
 
     if idx < len {
         match &args[idx] {
@@ -323,13 +325,13 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
-    if idx < len {
-        return Err(RuntimeError::new(
-            "AddEffect: additional arguments are not supported",
-        ));
+    while idx < len {
+        let value = &args[idx];
+        vars.push(value_to_effect_var(value));
+        idx += 1;
     }
 
-    let identifier = with_context_mut(scope, |ctx| {
+    let identifier = with_context_mut(scope, move |ctx| {
         let mut effect = EffectState::new(name)
             .with_priority(priority)
             .with_interval(interval);
@@ -338,6 +340,9 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         }
         effect = effect.with_command_target(command_target);
         effect = effect.with_command_id(command_target_id);
+        if !vars.is_empty() {
+            effect = effect.with_vars(vars);
+        }
         ctx.add_effect(effect)
     })?;
 
@@ -585,6 +590,70 @@ fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let count = i32::try_from(count).unwrap_or(i32::MAX);
     Ok(Value::Int(count))
+}
+
+fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 3 {
+        return Err(RuntimeError::new(
+            "EffectVar expects at least 3 arguments: index, state, and number",
+        ));
+    }
+
+    let var_index = match &args[0] {
+        Value::Int(value) if *value >= 0 => *value as usize,
+        Value::Int(_) | Value::Nil => return Ok(Value::Nil),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "EffectVar: expected int for index, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let scope = determine_scope_from_state(&args[1])?;
+
+    let effect_number = match &args[2] {
+        Value::Int(value) if *value > 0 => *value as usize,
+        Value::Int(_) | Value::Nil => return Ok(Value::Nil),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "EffectVar: expected positive int for number, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let new_value = args.get(3).map(value_to_effect_var);
+
+    let context_value = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(None);
+        };
+
+        match context.scope_mut(scope) {
+            Ok(stack) => Ok(stack.effect_var(effect_number, var_index, new_value.clone())),
+            Err(_) => Ok(None),
+        }
+    })?;
+
+    if let Some(value) = context_value {
+        return Ok(effect_var_to_value(&value));
+    }
+
+    if new_value.is_some() {
+        return Err(RuntimeError::new(
+            "EffectVar: setting variables requires an active engine context",
+        ));
+    }
+
+    let effects = extract_effects_from_state(&args[1])?;
+    if effect_number == 0 || effect_number > effects.len() {
+        return Ok(Value::Nil);
+    }
+    let effect = &effects[effect_number - 1];
+    let value = effect.var(var_index);
+    Ok(effect_var_to_value(&value))
 }
 
 fn random(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -973,12 +1042,22 @@ fn extract_effects_from_state(state: &Value) -> Result<Vec<EffectState>, Runtime
                     _ => None,
                 };
 
-                let effect = EffectState::new(name)
+                let vars = match props.get("vars") {
+                    Some(Value::Array(entries)) => {
+                        entries.iter().map(value_to_effect_var).collect()
+                    }
+                    _ => Vec::new(),
+                };
+
+                let mut effect = EffectState::new(name)
                     .with_priority(priority)
                     .with_interval(interval)
                     .with_timer(timer)
                     .with_command_target(command_target)
                     .with_command_id(command_id);
+                if !vars.is_empty() {
+                    effect = effect.with_vars(vars);
+                }
                 effects.push(effect);
             }
             Ok(effects)
@@ -991,7 +1070,7 @@ fn extract_effects_from_state(state: &Value) -> Result<Vec<EffectState>, Runtime
 }
 
 fn build_effect_value(effect: &EffectState) -> Value {
-    let mut map = HashMap::with_capacity(4);
+    let mut map = HashMap::with_capacity(5);
     map.insert("name".into(), Value::String(effect.name.clone()));
     map.insert("priority".into(), Value::Int(effect.priority));
     map.insert("interval".into(), Value::Int(effect.interval));
@@ -1002,7 +1081,61 @@ fn build_effect_value(effect: &EffectState) -> Value {
     if let Some(id) = &effect.command_id {
         map.insert("command_target_id".into(), Value::String(id.clone()));
     }
+    if !effect.vars().is_empty() {
+        let vars = effect
+            .vars()
+            .iter()
+            .map(|value| effect_var_to_value(value))
+            .collect();
+        map.insert("vars".into(), Value::Array(vars));
+    }
     Value::Proplist(map)
+}
+
+fn value_to_effect_var(value: &Value) -> EffectVarValue {
+    match value {
+        Value::Int(value) => EffectVarValue::Int(*value),
+        Value::Bool(value) => EffectVarValue::Bool(*value),
+        Value::String(value) => EffectVarValue::String(value.clone()),
+        Value::Array(entries) => {
+            let vars = entries
+                .iter()
+                .map(|entry| value_to_effect_var(entry))
+                .collect();
+            EffectVarValue::Array(vars)
+        }
+        Value::Proplist(map) => {
+            let mut entries = BTreeMap::new();
+            for (key, value) in map {
+                entries.insert(key.clone(), value_to_effect_var(value));
+            }
+            EffectVarValue::Proplist(entries)
+        }
+        Value::Nil => EffectVarValue::Nil,
+    }
+}
+
+fn effect_var_to_value(value: &EffectVarValue) -> Value {
+    match value {
+        EffectVarValue::Int(value) => Value::Int(*value),
+        EffectVarValue::Bool(value) => Value::Bool(*value),
+        EffectVarValue::String(value) => Value::String(value.clone()),
+        EffectVarValue::Array(entries) => {
+            let vars = entries
+                .iter()
+                .map(|entry| effect_var_to_value(entry))
+                .collect();
+            Value::Array(vars)
+        }
+        EffectVarValue::Proplist(map) => {
+            let mut entries = HashMap::with_capacity(map.len());
+            for (key, value) in map {
+                entries.insert(key.clone(), effect_var_to_value(value));
+            }
+            Value::Proplist(entries)
+        }
+        EffectVarValue::Nil => Value::Nil,
+    }
 }
 
 fn parse_command_target(value: &Value) -> Result<Option<i32>, RuntimeError> {
@@ -1176,6 +1309,28 @@ impl EffectScopeContext {
         self.effects.insert(insert_pos, effect.clone());
         self.commands.push(EffectCommand::add(effect));
         (insert_pos + 1) as i32
+    }
+
+    fn effect_var(
+        &mut self,
+        effect_number: usize,
+        var_index: usize,
+        new_value: Option<EffectVarValue>,
+    ) -> Option<EffectVarValue> {
+        if effect_number == 0 {
+            return None;
+        }
+        let index = effect_number - 1;
+        if index >= self.effects.len() {
+            return None;
+        }
+        let effect = &mut self.effects[index];
+        if let Some(value) = new_value {
+            effect.set_var(var_index, value);
+            let updated = effect.clone();
+            self.commands.push(EffectCommand::add(updated));
+        }
+        Some(effect.var(var_index))
     }
 
     fn remove_effect(
@@ -1386,6 +1541,36 @@ mod tests {
                 assert_eq!(effect.command_id.as_deref(), Some("FOOB"));
             }
             other => panic!("unexpected command: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn add_effect_captures_initial_vars() {
+        let state = empty_state();
+        let (result, outcome) = with_object_host_context(|| {
+            add_effect(&[
+                Value::String("Glow".into()),
+                state.clone(),
+                Value::Int(120),
+                Value::Int(2),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Int(7),
+                Value::Bool(true),
+            ])
+        });
+
+        let value = result.expect("AddEffect succeeds");
+        assert_eq!(value, Value::Int(1));
+        assert_eq!(outcome.object.len(), 1);
+        match &outcome.object[0] {
+            EffectCommand::Add(effect) => {
+                assert_eq!(effect.vars().len(), 2);
+                assert_eq!(effect.vars()[0], EffectVarValue::Int(7));
+                assert_eq!(effect.vars()[1], EffectVarValue::Bool(true));
+            }
+            other => panic!("unexpected command: {other:?}"),
         }
     }
 
@@ -1615,6 +1800,84 @@ mod tests {
         let value = get_effect_count(&[Value::String("Spark".into()), state, Value::Int(50)])
             .expect("GetEffectCount with state filter succeeds");
         assert_eq!(value, Value::Int(0));
+    }
+
+    #[test]
+    fn effect_var_reads_and_writes_values() {
+        let state = empty_state();
+        let (result, outcome) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[
+                Value::String("Spark".into()),
+                state.clone(),
+                Value::Int(100),
+                Value::Int(1),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Int(3),
+            ])?;
+
+            let initial = effect_var(&[Value::Int(0), state.clone(), Value::Int(1)])?;
+            assert_eq!(initial, Value::Int(3));
+
+            let unset = effect_var(&[Value::Int(1), state.clone(), Value::Int(1)])?;
+            assert_eq!(unset, Value::Nil);
+
+            let updated = effect_var(&[
+                Value::Int(1),
+                state.clone(),
+                Value::Int(1),
+                Value::String("beam".into()),
+            ])?;
+            assert_eq!(updated, Value::String("beam".into()));
+
+            let reread = effect_var(&[Value::Int(1), state.clone(), Value::Int(1)])?;
+            assert_eq!(reread, Value::String("beam".into()));
+
+            Ok(Value::Nil)
+        });
+
+        result.expect("EffectVar interactions succeed");
+        assert_eq!(outcome.object.len(), 2);
+        match &outcome.object[1] {
+            EffectCommand::Add(effect) => {
+                assert_eq!(effect.vars().len(), 2);
+                assert_eq!(effect.vars()[0], EffectVarValue::Int(3));
+                assert_eq!(effect.vars()[1], EffectVarValue::String("beam".into()));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_var_reads_from_state_without_context() {
+        let mut effect_map = HashMap::new();
+        effect_map.insert("name".into(), Value::String("Glow".into()));
+        effect_map.insert("priority".into(), Value::Int(80));
+        effect_map.insert("interval".into(), Value::Int(1));
+        effect_map.insert("timer".into(), Value::Int(0));
+        effect_map.insert(
+            "vars".into(),
+            Value::Array(vec![Value::Int(9), Value::String("pulse".into())]),
+        );
+
+        let mut state_map = HashMap::new();
+        state_map.insert(
+            "effects".into(),
+            Value::Array(vec![Value::Proplist(effect_map.clone())]),
+        );
+        let state = Value::Proplist(state_map);
+
+        let read_value = effect_var(&[Value::Int(0), state.clone(), Value::Int(1)])
+            .expect("EffectVar read succeeds");
+        assert_eq!(read_value, Value::Int(9));
+
+        let read_string = effect_var(&[Value::Int(1), state.clone(), Value::Int(1)])
+            .expect("EffectVar string read succeeds");
+        assert_eq!(read_string, Value::String("pulse".into()));
+
+        let set_result = effect_var(&[Value::Int(0), state, Value::Int(1), Value::Int(5)]);
+        assert!(set_result.is_err());
     }
 
     #[test]

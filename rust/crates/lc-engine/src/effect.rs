@@ -1,4 +1,21 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EffectVarValue {
+    Int(i32),
+    Bool(bool),
+    String(String),
+    Array(Vec<EffectVarValue>),
+    Proplist(BTreeMap<String, EffectVarValue>),
+    Nil,
+}
+
+impl Default for EffectVarValue {
+    fn default() -> Self {
+        EffectVarValue::Nil
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectState {
@@ -10,6 +27,8 @@ pub struct EffectState {
     pub command_target: Option<i32>,
     #[serde(default)]
     pub command_id: Option<String>,
+    #[serde(default)]
+    pub vars: Vec<EffectVarValue>,
 }
 
 impl EffectState {
@@ -21,6 +40,7 @@ impl EffectState {
             timer: 0,
             command_target: None,
             command_id: None,
+            vars: Vec::new(),
         }
     }
 
@@ -58,6 +78,11 @@ impl EffectState {
         self
     }
 
+    pub fn with_vars(mut self, vars: Vec<EffectVarValue>) -> Self {
+        self.vars = vars;
+        self
+    }
+
     pub fn advance_tick(&mut self) -> bool {
         if self.interval <= 0 {
             self.timer = self.timer.saturating_add(1);
@@ -70,6 +95,24 @@ impl EffectState {
         } else {
             false
         }
+    }
+
+    pub fn set_var(&mut self, index: usize, value: EffectVarValue) {
+        if self.vars.len() <= index {
+            self.vars.resize(index + 1, EffectVarValue::default());
+        }
+        self.vars[index] = value;
+    }
+
+    pub fn var(&self, index: usize) -> EffectVarValue {
+        self.vars
+            .get(index)
+            .cloned()
+            .unwrap_or_else(EffectVarValue::default)
+    }
+
+    pub fn vars(&self) -> &[EffectVarValue] {
+        &self.vars
     }
 }
 
