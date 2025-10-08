@@ -4,7 +4,10 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
-use crate::{ActionLibrary, ActionUpdate, ObjectId, ObjectStatus, ObjectUpdate, QueuedCommand};
+use crate::{
+    ActionLibrary, ActionUpdate, EnvironmentSettings, ObjectId, ObjectStatus, ObjectUpdate,
+    QueuedCommand,
+};
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
@@ -12,6 +15,9 @@ use rand_chacha::ChaCha8Rng;
 thread_local! {
     static HOST_CONTEXT: RefCell<Option<EffectHostContext>> = const { RefCell::new(None) };
     static RANDOM_CONTEXT: RefCell<Option<Rc<RandomContext>>> = const { RefCell::new(None) };
+    static ENVIRONMENT_CONTEXT: RefCell<Option<Rc<EnvironmentContext>>> = const {
+        RefCell::new(None)
+    };
 }
 
 pub fn register_host_functions(script: &mut ScriptEngine) {
@@ -24,6 +30,12 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("Random", random);
+    script.register_host_function("SetWind", set_wind);
+    script.register_host_function("GetWind", get_wind);
+    script.register_host_function("SetTemperature", set_temperature);
+    script.register_host_function("GetTemperature", get_temperature);
+    script.register_host_function("SetClimate", set_climate);
+    script.register_host_function("GetClimate", get_climate);
 }
 
 pub(crate) fn enter_random_context(rng: ChaCha8Rng) -> RandomContextGuard {
@@ -69,6 +81,134 @@ impl<'a> HostObjectContext<'a> {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct EnvironmentDelta {
+    pub wind: Option<i32>,
+    pub temperature: Option<i32>,
+    pub climate: Option<i32>,
+}
+
+impl EnvironmentDelta {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.wind.is_none() && self.temperature.is_none() && self.climate.is_none()
+    }
+
+    pub fn apply(&self, environment: &mut EnvironmentSettings) {
+        if let Some(wind) = self.wind {
+            environment.wind = wind.clamp(-100, 100);
+        }
+        if let Some(temperature) = self.temperature {
+            environment.temperature = temperature.clamp(-100, 100);
+        }
+        if let Some(climate) = self.climate {
+            environment.climate = climate.clamp(-50, 50);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct EnvironmentContext {
+    settings: RefCell<EnvironmentSettings>,
+    frame: u64,
+    pending: RefCell<EnvironmentDelta>,
+}
+
+impl EnvironmentContext {
+    fn new(settings: EnvironmentSettings, frame: u64) -> Self {
+        Self {
+            settings: RefCell::new(settings),
+            frame,
+            pending: RefCell::new(EnvironmentDelta::default()),
+        }
+    }
+
+    fn set_wind(&self, wind: i32) {
+        let clamped = wind.clamp(-100, 100);
+        self.settings.borrow_mut().wind = clamped;
+        self.pending.borrow_mut().wind = Some(clamped);
+    }
+
+    fn wind_force(&self) -> i32 {
+        let settings = self.settings.borrow();
+        settings.wind_force(self.frame)
+    }
+
+    fn set_temperature(&self, temperature: i32) {
+        let clamped = temperature.clamp(-100, 100);
+        self.settings.borrow_mut().temperature = clamped;
+        self.pending.borrow_mut().temperature = Some(clamped);
+    }
+
+    fn ambient_temperature(&self) -> i32 {
+        let settings = self.settings.borrow();
+        settings.ambient_temperature(self.frame)
+    }
+
+    fn set_climate(&self, climate: i32) {
+        let clamped = climate.clamp(-50, 50);
+        self.settings.borrow_mut().climate = clamped;
+        self.pending.borrow_mut().climate = Some(clamped);
+    }
+
+    fn climate(&self) -> i32 {
+        self.settings.borrow().climate
+    }
+
+    fn into_delta(self) -> EnvironmentDelta {
+        self.pending.into_inner()
+    }
+}
+
+pub(crate) struct EnvironmentContextGuard {
+    context: Option<Rc<EnvironmentContext>>,
+}
+
+impl EnvironmentContextGuard {
+    pub fn finish(mut self) -> EnvironmentDelta {
+        let context = self
+            .context
+            .take()
+            .expect("environment context already consumed");
+        ENVIRONMENT_CONTEXT.with(|cell| {
+            let stored = cell
+                .borrow_mut()
+                .take()
+                .expect("environment context must be present");
+            debug_assert!(Rc::ptr_eq(&stored, &context));
+        });
+        Rc::try_unwrap(context)
+            .expect("environment context still referenced")
+            .into_delta()
+    }
+}
+
+impl Drop for EnvironmentContextGuard {
+    fn drop(&mut self) {
+        if self.context.is_some() {
+            ENVIRONMENT_CONTEXT.with(|cell| {
+                cell.borrow_mut().take();
+            });
+        }
+    }
+}
+
+pub(crate) fn enter_environment_context(
+    settings: EnvironmentSettings,
+    frame: u64,
+) -> EnvironmentContextGuard {
+    ENVIRONMENT_CONTEXT.with(|cell| {
+        assert!(
+            cell.borrow().is_none(),
+            "nested environment contexts are not supported",
+        );
+        let context = Rc::new(EnvironmentContext::new(settings, frame));
+        *cell.borrow_mut() = Some(context.clone());
+        EnvironmentContextGuard {
+            context: Some(context),
+        }
+    })
+}
+
 pub(crate) fn with_effect_context<F, T, E>(
     object: Option<HostObjectContext<'_>>,
     global_effects: &[EffectState],
@@ -99,6 +239,7 @@ pub(crate) struct EffectContextOutcome {
     pub object_update: Option<ObjectUpdate>,
     pub object_commands: Vec<QueuedCommand>,
     pub destroy_object: bool,
+    pub environment: Option<EnvironmentDelta>,
 }
 
 impl EffectContextOutcome {
@@ -108,6 +249,7 @@ impl EffectContextOutcome {
         object_update: Option<ObjectUpdate>,
         object_commands: Vec<QueuedCommand>,
         destroy_object: bool,
+        environment: Option<EnvironmentDelta>,
     ) -> Self {
         Self {
             object,
@@ -115,6 +257,7 @@ impl EffectContextOutcome {
             object_update,
             object_commands,
             destroy_object,
+            environment,
         }
     }
 
@@ -125,6 +268,7 @@ impl EffectContextOutcome {
             object_update: None,
             object_commands: Vec::new(),
             destroy_object: false,
+            environment: None,
         }
     }
 }
@@ -687,6 +831,154 @@ fn random(args: &[Value]) -> Result<Value, RuntimeError> {
         let upper = range as u32;
         let value = rng.gen_range(0..upper) as i32;
         Ok(Value::Int(value))
+    })
+}
+
+fn set_wind(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new("SetWind expects 1 argument: wind"));
+    }
+
+    let wind = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetWind: expected int or nil for wind, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    ENVIRONMENT_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("SetWind requires an active engine context"))?
+            .clone();
+        context.set_wind(wind);
+        Ok(Value::Nil)
+    })
+}
+
+fn get_wind(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "GetWind expects at most 3 arguments: x, y, global",
+        ));
+    }
+
+    for (index, arg) in args.iter().enumerate() {
+        match arg {
+            Value::Int(_) | Value::Nil => {}
+            Value::Bool(_) if index == 2 => {}
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "GetWind: unexpected argument type {} at position {}",
+                    other.type_name(),
+                    index + 1
+                )))
+            }
+        }
+    }
+
+    ENVIRONMENT_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("GetWind requires an active engine context"))?
+            .clone();
+        Ok(Value::Int(context.wind_force()))
+    })
+}
+
+fn set_temperature(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetTemperature expects 1 argument: temperature",
+        ));
+    }
+
+    let temperature = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetTemperature: expected int or nil for temperature, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    ENVIRONMENT_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("SetTemperature requires an active engine context"))?
+            .clone();
+        context.set_temperature(temperature);
+        Ok(Value::Nil)
+    })
+}
+
+fn get_temperature(args: &[Value]) -> Result<Value, RuntimeError> {
+    if !args.is_empty() {
+        return Err(RuntimeError::new(
+            "GetTemperature does not accept any arguments",
+        ));
+    }
+
+    ENVIRONMENT_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("GetTemperature requires an active engine context"))?
+            .clone();
+        Ok(Value::Int(context.ambient_temperature()))
+    })
+}
+
+fn set_climate(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new("SetClimate expects 1 argument: climate"));
+    }
+
+    let climate = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetClimate: expected int or nil for climate, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    ENVIRONMENT_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("SetClimate requires an active engine context"))?
+            .clone();
+        context.set_climate(climate);
+        Ok(Value::Nil)
+    })
+}
+
+fn get_climate(args: &[Value]) -> Result<Value, RuntimeError> {
+    if !args.is_empty() {
+        return Err(RuntimeError::new(
+            "GetClimate does not accept any arguments",
+        ));
+    }
+
+    ENVIRONMENT_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("GetClimate requires an active engine context"))?
+            .clone();
+        Ok(Value::Int(context.climate()))
     })
 }
 
@@ -1260,6 +1552,7 @@ impl EffectHostContext {
             object_update,
             object_commands,
             destroy,
+            None,
         )
     }
 }
@@ -1488,6 +1781,20 @@ mod tests {
         )
     }
 
+    fn with_environment_context<F, T>(
+        settings: EnvironmentSettings,
+        frame: u64,
+        func: F,
+    ) -> (Result<T, RuntimeError>, EnvironmentDelta)
+    where
+        F: FnOnce() -> Result<T, RuntimeError>,
+    {
+        let guard = enter_environment_context(settings, frame);
+        let result = func();
+        let delta = guard.finish();
+        (result, delta)
+    }
+
     #[test]
     fn add_effect_registers_command_and_updates_view() {
         let state = empty_state();
@@ -1542,6 +1849,54 @@ mod tests {
             }
             other => panic!("unexpected command: {:?}", other),
         }
+    }
+
+    #[test]
+    fn set_wind_records_environment_update() {
+        let (result, delta) = with_environment_context(EnvironmentSettings::new(0), 0, || {
+            set_wind(&[Value::Int(75)])?;
+            get_wind(&[])
+        });
+
+        let value = result.expect("SetWind/GetWind succeeds");
+        assert_eq!(value, Value::Int(75));
+        assert_eq!(delta.wind, Some(75));
+    }
+
+    #[test]
+    fn set_wind_clamps_to_bounds() {
+        let (result, delta) = with_environment_context(EnvironmentSettings::new(0), 0, || {
+            set_wind(&[Value::Int(150)])?;
+            get_wind(&[])
+        });
+
+        let value = result.expect("SetWind/GetWind succeeds");
+        assert_eq!(value, Value::Int(100));
+        assert_eq!(delta.wind, Some(100));
+    }
+
+    #[test]
+    fn set_temperature_updates_context() {
+        let (result, delta) = with_environment_context(EnvironmentSettings::new(0), 42, || {
+            set_temperature(&[Value::Int(-30)])?;
+            get_temperature(&[])
+        });
+
+        let value = result.expect("SetTemperature/GetTemperature succeeds");
+        assert_eq!(value, Value::Int(-30));
+        assert_eq!(delta.temperature, Some(-30));
+    }
+
+    #[test]
+    fn set_climate_clamps_and_updates() {
+        let (result, delta) = with_environment_context(EnvironmentSettings::new(0), 0, || {
+            set_climate(&[Value::Int(-80)])?;
+            get_climate(&[])
+        });
+
+        let value = result.expect("SetClimate/GetClimate succeeds");
+        assert_eq!(value, Value::Int(-50));
+        assert_eq!(delta.climate, Some(-50));
     }
 
     #[test]

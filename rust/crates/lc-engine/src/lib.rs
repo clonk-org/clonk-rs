@@ -15,7 +15,9 @@ pub use landscape::{CollisionResolution, Landscape, LandscapeCommand, LandscapeE
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
 
-use compat::{enter_random_context, EffectContextOutcome};
+use compat::{
+    enter_environment_context, enter_random_context, EffectContextOutcome, EnvironmentDelta,
+};
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -1563,6 +1565,8 @@ impl Definition {
         random: i32,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        environment: EnvironmentSettings,
+        frame: u64,
     ) -> Result<(CommandBatch, ChaCha8Rng), EngineError> {
         if !self.has_initialize {
             return Ok((CommandBatch::default(), rng));
@@ -1571,6 +1575,7 @@ impl Definition {
             build_state_value(&self.id, object_id, state, &self.action_library),
             Value::Int(random),
         ];
+        let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let (result, host_effects) = compat::with_effect_context(
             Some(compat::HostObjectContext::new(
@@ -1584,6 +1589,7 @@ impl Definition {
             || self.script.call("Initialize", &args),
         );
         let rng = guard.finish();
+        let environment_delta = env_guard.finish();
         let result = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: "Initialize",
@@ -1596,6 +1602,7 @@ impl Definition {
             object_update,
             object_commands,
             destroy_object,
+            environment: _,
         } = host_effects;
 
         if let Some(update) = object_update {
@@ -1613,6 +1620,9 @@ impl Definition {
         if !host_global_effects.is_empty() {
             batch.global_effects.extend(host_global_effects);
         }
+        if !environment_delta.is_empty() {
+            batch.environment = Some(environment_delta);
+        }
         Ok((batch, rng))
     }
 
@@ -1624,6 +1634,7 @@ impl Definition {
         random: i32,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        environment: EnvironmentSettings,
     ) -> Result<(CommandBatch, ChaCha8Rng), EngineError> {
         if !self.has_step {
             return Ok((CommandBatch::default(), rng));
@@ -1638,6 +1649,7 @@ impl Definition {
             Value::Int(frame_value),
             Value::Int(random),
         ];
+        let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let (result, host_effects) = compat::with_effect_context(
             Some(compat::HostObjectContext::new(
@@ -1651,6 +1663,7 @@ impl Definition {
             || self.script.call("Step", &args),
         );
         let rng = guard.finish();
+        let environment_delta = env_guard.finish();
         let result = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: "Step",
@@ -1663,6 +1676,7 @@ impl Definition {
             object_update,
             object_commands,
             destroy_object,
+            environment: _,
         } = host_effects;
 
         if let Some(update) = object_update {
@@ -1680,6 +1694,9 @@ impl Definition {
         if !host_global_effects.is_empty() {
             batch.global_effects.extend(host_global_effects);
         }
+        if !environment_delta.is_empty() {
+            batch.environment = Some(environment_delta);
+        }
         Ok((batch, rng))
     }
 
@@ -1692,6 +1709,8 @@ impl Definition {
         action_name: &str,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        environment: EnvironmentSettings,
+        frame: u64,
     ) -> Result<(compat::EffectContextOutcome, ChaCha8Rng), EngineError> {
         if !self.script.has_function(function) {
             return Err(EngineError::InvalidScriptOutput {
@@ -1705,6 +1724,7 @@ impl Definition {
             build_state_value(&self.id, object_id, state, &self.action_library),
             Value::String(action_name.to_string()),
         ];
+        let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let (result, host_effects) = compat::with_effect_context(
             Some(compat::HostObjectContext::new(
@@ -1718,6 +1738,7 @@ impl Definition {
             || self.script.call(function, &args),
         );
         let rng = guard.finish();
+        let environment_delta = env_guard.finish();
         let value = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: kind.context(),
@@ -1736,6 +1757,11 @@ impl Definition {
             });
         }
 
+        let mut host_effects = host_effects;
+        if !environment_delta.is_empty() {
+            host_effects.environment = Some(environment_delta);
+        }
+
         Ok((host_effects, rng))
     }
 
@@ -1746,6 +1772,8 @@ impl Definition {
         effect: &EffectState,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        environment: EnvironmentSettings,
+        frame: u64,
     ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
             state,
@@ -1756,6 +1784,8 @@ impl Definition {
             Vec::new(),
             rng,
             global_effects,
+            environment,
+            frame,
         )
     }
 
@@ -1764,8 +1794,10 @@ impl Definition {
         state: &ObjectState,
         object_id: ObjectId,
         effect: &EffectState,
+        frame: u64,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        environment: EnvironmentSettings,
     ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
             state,
@@ -1776,6 +1808,8 @@ impl Definition {
             vec![Value::Int(effect.timer)],
             rng,
             global_effects,
+            environment,
+            frame,
         )
     }
 
@@ -1787,6 +1821,8 @@ impl Definition {
         reason: EffectStopReason,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        environment: EnvironmentSettings,
+        frame: u64,
     ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
             state,
@@ -1797,6 +1833,8 @@ impl Definition {
             vec![effect_stop_reason_value(reason)],
             rng,
             global_effects,
+            environment,
+            frame,
         )
     }
 
@@ -1810,6 +1848,8 @@ impl Definition {
         mut extras: Vec<Value>,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        environment: EnvironmentSettings,
+        frame: u64,
     ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
         if !self.script.has_effect_callback(&effect.name, event) {
             return Ok((EffectContextOutcome::empty(), rng));
@@ -1825,8 +1865,9 @@ impl Definition {
         args.push(build_effect_value(effect));
         args.append(&mut extras);
 
+        let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
-        let (result, commands) = compat::with_effect_context(
+        let (result, mut commands) = compat::with_effect_context(
             Some(compat::HostObjectContext::new(
                 object_id,
                 state.status,
@@ -1842,9 +1883,15 @@ impl Definition {
             },
         );
         let rng = guard.finish();
+        let environment_delta = env_guard.finish();
 
         result
-            .map(|_| (commands, rng))
+            .map(|_| {
+                if !environment_delta.is_empty() {
+                    commands.environment = Some(environment_delta);
+                }
+                (commands, rng)
+            })
             .map_err(|source| EngineError::Script {
                 definition: format!("{}::{}", self.id, effect.name),
                 function: function_label,
@@ -1861,6 +1908,7 @@ struct CommandBatch {
     commands: Vec<QueuedCommand>,
     effects: Vec<EffectCommand>,
     global_effects: Vec<EffectCommand>,
+    environment: Option<EnvironmentDelta>,
 }
 
 pub struct Engine {
@@ -2256,6 +2304,8 @@ impl Engine {
                         object,
                         queue_events,
                         global_view,
+                        &mut self.environment,
+                        self.frame,
                     )?
                 };
                 self.rng = new_rng;
@@ -2298,6 +2348,8 @@ impl Engine {
                         object,
                         timer_events,
                         global_view,
+                        &mut self.environment,
+                        self.frame,
                     )?
                 };
                 self.rng = new_rng;
@@ -2369,6 +2421,7 @@ impl Engine {
                     random,
                     rng_state,
                     &self.global_effects,
+                    self.environment,
                 )?
             };
             self.rng = new_rng;
@@ -2380,7 +2433,12 @@ impl Engine {
                 commands,
                 effects,
                 global_effects,
+                environment,
             } = command;
+
+            if let Some(update) = environment {
+                update.apply(&mut self.environment);
+            }
 
             let mut effect_events = Vec::new();
             let (object_id, previous_owner, new_owner, new_crew, container_change) = {
@@ -2439,6 +2497,8 @@ impl Engine {
                         object,
                         effect_events,
                         global_view,
+                        &mut self.environment,
+                        self.frame,
                     )?;
                     self.rng = new_rng;
                     new_container = object.state.container;
@@ -2702,6 +2762,8 @@ impl Engine {
             action_name,
             rng_state,
             &global_view,
+            self.environment,
+            self.frame,
         )?;
         self.rng = new_rng;
 
@@ -2728,7 +2790,12 @@ impl Engine {
             object_update,
             object_commands,
             destroy_object,
+            environment,
         } = outcome;
+
+        if let Some(update) = environment {
+            update.apply(&mut self.environment);
+        }
 
         let mut effect_events = Vec::new();
         let mut container_changes = Vec::new();
@@ -2803,6 +2870,8 @@ impl Engine {
                 &mut self.objects[index],
                 effect_events,
                 global_view,
+                &mut self.environment,
+                self.frame,
             )?;
             self.rng = new_rng;
             if !global_cmds.is_empty() {
@@ -3038,6 +3107,8 @@ impl Engine {
         object: &mut Object,
         events: Vec<EffectEvent>,
         mut global_view: Vec<EffectState>,
+        environment: &mut EnvironmentSettings,
+        frame: u64,
     ) -> Result<(Vec<EffectCommand>, ChaCha8Rng), EngineError> {
         if events.is_empty() {
             return Ok((Vec::new(), rng));
@@ -3046,6 +3117,7 @@ impl Engine {
         let mut queue: VecDeque<EffectEvent> = VecDeque::from(events);
         let mut state_snapshot = object.state.clone();
         let mut global_commands = Vec::new();
+        let mut current_environment = *environment;
 
         while let Some(event) = queue.pop_front() {
             let snapshot_for_call = state_snapshot.clone();
@@ -3056,13 +3128,17 @@ impl Engine {
                     &event.effect,
                     rng,
                     &global_view,
+                    current_environment,
+                    frame,
                 )?,
                 EffectEventKind::Timer => definition.call_effect_timer(
                     &snapshot_for_call,
                     object_id,
                     &event.effect,
+                    frame,
                     rng,
                     &global_view,
+                    current_environment,
                 )?,
                 EffectEventKind::Stopped(reason) => definition.call_effect_stop(
                     &snapshot_for_call,
@@ -3071,6 +3147,8 @@ impl Engine {
                     reason,
                     rng,
                     &global_view,
+                    current_environment,
+                    frame,
                 )?,
             };
             rng = new_rng;
@@ -3081,7 +3159,12 @@ impl Engine {
                 object_update,
                 object_commands,
                 destroy_object,
+                environment: environment_update,
             } = outcome;
+
+            if let Some(update) = environment_update {
+                update.apply(&mut current_environment);
+            }
 
             if let Some(update) = object_update {
                 let mut delta = ObjectDelta::default();
@@ -3119,6 +3202,8 @@ impl Engine {
                 global_commands.append(&mut global_effect_commands);
             }
         }
+
+        *environment = current_environment;
 
         Ok((global_commands, rng))
     }
@@ -3539,6 +3624,7 @@ impl Engine {
                     commands,
                     effects,
                     global_effects,
+                    environment,
                 },
                 new_rng,
             ) = {
@@ -3552,9 +3638,14 @@ impl Engine {
                     random,
                     rng_state,
                     &self.global_effects,
+                    self.environment,
+                    self.frame,
                 )?
             };
             self.rng = new_rng;
+            if let Some(update) = environment {
+                update.apply(&mut self.environment);
+            }
             if destroy {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition_id.clone(),
@@ -3596,6 +3687,8 @@ impl Engine {
                 &mut object,
                 effect_events,
                 global_view,
+                &mut self.environment,
+                self.frame,
             )?;
             self.rng = new_rng;
             if !global_cmds.is_empty() {
