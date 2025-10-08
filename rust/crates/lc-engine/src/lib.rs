@@ -17,7 +17,10 @@ use compat::{enter_random_context, EffectContextOutcome};
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::ops::AddAssign;
+use std::path::Path;
 
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, ScriptError, Value};
 use rand::{Rng, SeedableRng};
@@ -823,6 +826,14 @@ pub enum EngineError {
     },
 }
 
+#[derive(Debug, Error)]
+pub enum EngineStateIoError {
+    #[error("I/O error while handling engine state")]
+    Io(#[from] io::Error),
+    #[error("failed to (de)serialize engine state as JSON")]
+    Json(#[from] serde_json::Error),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnConfig {
     pub definition_id: DefinitionId,
@@ -961,6 +972,41 @@ pub struct EngineState {
     #[serde(default)]
     pub eliminated_crew_owners: Vec<i32>,
     pub rng: ChaCha8Rng,
+}
+
+impl EngineState {
+    /// Serializes the engine state to a writer using pretty-printed JSON.
+    pub fn to_writer<W: Write>(&self, mut writer: W) -> Result<(), EngineStateIoError> {
+        serde_json::to_writer_pretty(&mut writer, self).map_err(EngineStateIoError::from)?;
+        writer.flush().map_err(EngineStateIoError::from)
+    }
+
+    /// Deserializes an engine state from any reader containing JSON data.
+    pub fn from_reader<R: Read>(reader: R) -> Result<Self, EngineStateIoError> {
+        serde_json::from_reader(reader).map_err(EngineStateIoError::from)
+    }
+
+    /// Saves the state to a JSON file at the given path.
+    pub fn save_to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), EngineStateIoError> {
+        let mut file = File::create(path)?;
+        self.to_writer(&mut file)
+    }
+
+    /// Loads a state from a JSON file at the given path.
+    pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self, EngineStateIoError> {
+        let file = File::open(path)?;
+        Self::from_reader(file)
+    }
+
+    /// Serializes the state into a pretty-printed JSON string.
+    pub fn to_json_string(&self) -> Result<String, EngineStateIoError> {
+        serde_json::to_string_pretty(self).map_err(EngineStateIoError::from)
+    }
+
+    /// Parses an engine state from a JSON string.
+    pub fn from_json_str(json: &str) -> Result<Self, EngineStateIoError> {
+        serde_json::from_str(json).map_err(EngineStateIoError::from)
+    }
 }
 
 pub struct Definition {
@@ -3205,6 +3251,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+    use tempfile::NamedTempFile;
 
     const STATEFUL_SCRIPT: &str = r#"
     global func Initialize(state, random)
@@ -4979,6 +5026,56 @@ mod tests {
     }
 
     #[test]
+    fn saves_and_loads_engine_state_via_files() -> Result<(), EngineError> {
+        let mut engine = Engine::with_seed(0xC0FFEE);
+        engine.set_physics(PhysicsSettings::new(3, 8, -5));
+        engine.set_environment(EnvironmentSettings::new(5));
+        engine.set_landscape(Landscape::flat(48, 12));
+
+        let definition = Definition::from_script("Stateful", "Stateful", STATEFUL_SCRIPT)?;
+        engine.register_definition(definition)?;
+
+        let object_id = engine.spawn_object(
+            SpawnConfig::new("Stateful")
+                .with_position(Vector2::new(4, 2))
+                .with_velocity(Vector2::new(1, -1))
+                .with_energy(7),
+        )?;
+
+        engine.queue_object_command(
+            object_id,
+            QueuedCommand::new(1, ObjectUpdate::new().with_velocity(Vector2::new(2, -3))),
+        )?;
+        let _ = engine.tick()?;
+
+        let state = engine.capture_state();
+        let temp_file = NamedTempFile::new().expect("create temp state file");
+        state
+            .save_to_path(temp_file.path())
+            .expect("write state to disk");
+
+        let loaded = EngineState::load_from_path(temp_file.path()).expect("load state from disk");
+        assert_eq!(loaded.frame, state.frame);
+        assert_eq!(loaded.physics, state.physics);
+        assert_eq!(loaded.environment, state.environment);
+        assert_eq!(loaded.objects.len(), state.objects.len());
+        assert_eq!(loaded.global_effects, state.global_effects);
+        assert_eq!(loaded.crew_selection, state.crew_selection);
+        assert_eq!(loaded.crew_roles, state.crew_roles);
+        assert_eq!(loaded.known_crew_owners, state.known_crew_owners);
+        assert_eq!(loaded.eliminated_crew_owners, state.eliminated_crew_owners);
+
+        let mut restored = Engine::with_seed(77);
+        let definition = Definition::from_script("Stateful", "Stateful", STATEFUL_SCRIPT)?;
+        restored.register_definition(definition)?;
+        restored.restore_state(&loaded)?;
+
+        assert_eq!(engine.tick()?, restored.tick()?);
+
+        Ok(())
+    }
+
+    #[test]
     fn captures_and_restores_engine_state() -> Result<(), EngineError> {
         let mut engine = Engine::with_seed(0xBAD_F00D);
         engine.set_physics(PhysicsSettings::new(2, 9, -6));
@@ -5019,9 +5116,11 @@ mod tests {
 
         let state = engine.capture_state();
         assert_eq!(state.environment, EnvironmentSettings::new(-4));
-        let serialized = serde_json::to_string(&state).expect("state serializes");
-        let decoded: EngineState =
-            serde_json::from_str(&serialized).expect("state round-trips via JSON");
+        let serialized = state
+            .to_json_string()
+            .expect("state serializes through helper");
+        let decoded =
+            EngineState::from_json_str(&serialized).expect("state round-trips via helper");
 
         let mut restored = Engine::with_seed(123);
         restored.set_physics(PhysicsSettings::new(5, 11, -8));
