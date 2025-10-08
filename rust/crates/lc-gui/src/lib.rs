@@ -94,6 +94,10 @@ pub enum KeyCode {
     Escape,
     Space,
     Tab,
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 #[derive(Clone, Copy, Debug)]

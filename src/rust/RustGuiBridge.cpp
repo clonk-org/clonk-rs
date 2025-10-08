@@ -24,6 +24,28 @@ GuiAction ToGuiAction(LcGuiActionKind action) {
     throw std::runtime_error("Unsupported GUI action from Rust");
 }
 
+LcGuiKeyCode ToFfiKeyCode(KeyCode key) {
+    switch (key) {
+    case KeyCode::Enter:
+        return LC_GUI_KEY_ENTER;
+    case KeyCode::Escape:
+        return LC_GUI_KEY_ESCAPE;
+    case KeyCode::Space:
+        return LC_GUI_KEY_SPACE;
+    case KeyCode::Tab:
+        return LC_GUI_KEY_TAB;
+    case KeyCode::Up:
+        return LC_GUI_KEY_UP;
+    case KeyCode::Down:
+        return LC_GUI_KEY_DOWN;
+    case KeyCode::Left:
+        return LC_GUI_KEY_LEFT;
+    case KeyCode::Right:
+        return LC_GUI_KEY_RIGHT;
+    }
+    throw std::runtime_error("Unsupported GUI key code");
+}
+
 std::vector<DrawCommand> ConvertCommands(const LcGuiDrawCommand *commands, size_t len) {
     std::vector<DrawCommand> result;
     if (commands == nullptr || len == 0) {
@@ -180,10 +202,31 @@ EventResult Gui::PointerMove(Point point) {
     return DispatchPointerEvent(LC_GUI_EVENT_POINTER_MOVE, point);
 }
 
+EventResult Gui::KeyDown(KeyCode key) {
+    return DispatchKeyEvent(LC_GUI_KEY_EVENT_DOWN, key);
+}
+
+EventResult Gui::KeyUp(KeyCode key) {
+    return DispatchKeyEvent(LC_GUI_KEY_EVENT_UP, key);
+}
+
 EventResult Gui::DispatchPointerEvent(LcGuiEventKind kind, Point point) {
     EnsureHandle();
     const LcGuiPoint ffi_point{point.x, point.y};
     LcGuiEventResultHandle *event_handle = lc_gui_pointer_event(handle_, kind, ffi_point);
+    if (!event_handle) {
+        return {};
+    }
+    const LcGuiEventResultView view = lc_gui_event_result_view(event_handle);
+    auto converted = ConvertEventResult(view);
+    lc_gui_event_result_free(event_handle);
+    return converted;
+}
+
+EventResult Gui::DispatchKeyEvent(LcGuiKeyEventKind kind, KeyCode key) {
+    EnsureHandle();
+    const LcGuiKeyCode ffi_key = ToFfiKeyCode(key);
+    LcGuiEventResultHandle *event_handle = lc_gui_key_event(handle_, kind, ffi_key);
     if (!event_handle) {
         return {};
     }

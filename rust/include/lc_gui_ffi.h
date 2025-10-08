@@ -50,6 +50,22 @@ typedef enum LcGuiEventKind {
     LC_GUI_EVENT_POINTER_MOVE = 2,
 } LcGuiEventKind;
 
+typedef enum LcGuiKeyEventKind {
+    LC_GUI_KEY_EVENT_DOWN = 0,
+    LC_GUI_KEY_EVENT_UP = 1,
+} LcGuiKeyEventKind;
+
+typedef enum LcGuiKeyCode {
+    LC_GUI_KEY_ENTER = 0,
+    LC_GUI_KEY_ESCAPE = 1,
+    LC_GUI_KEY_SPACE = 2,
+    LC_GUI_KEY_TAB = 3,
+    LC_GUI_KEY_UP = 4,
+    LC_GUI_KEY_DOWN = 5,
+    LC_GUI_KEY_LEFT = 6,
+    LC_GUI_KEY_RIGHT = 7,
+} LcGuiKeyCode;
+
 typedef enum LcGuiActionKind {
     LC_GUI_ACTION_ACTIVATE = 0,
 } LcGuiActionKind;
@@ -80,10 +96,14 @@ const LcGuiDrawCommand *lc_gui_render_data(const LcGuiRenderHandle *handle, size
 void lc_gui_render_free(LcGuiRenderHandle *handle);
 
 LcGuiEventResultHandle *lc_gui_pointer_event(LcGuiHandle *handle, LcGuiEventKind kind, LcGuiPoint point);
+LcGuiEventResultHandle *lc_gui_key_event(
+    LcGuiHandle *handle,
+    LcGuiKeyEventKind kind,
+    LcGuiKeyCode key
+);
 LcGuiEventResultView lc_gui_event_result_view(const LcGuiEventResultHandle *handle);
 void lc_gui_event_result_free(LcGuiEventResultHandle *handle);
 
 #ifdef __cplusplus
 }
 #endif
-

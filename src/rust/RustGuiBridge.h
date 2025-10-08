@@ -39,6 +39,17 @@ enum class GuiAction {
     Activate,
 };
 
+enum class KeyCode {
+    Enter,
+    Escape,
+    Space,
+    Tab,
+    Up,
+    Down,
+    Left,
+    Right,
+};
+
 struct DrawCommand {
     DrawCommandKind kind;
     Rect rect;
@@ -82,9 +93,12 @@ public:
     EventResult PointerDown(Point point);
     EventResult PointerUp(Point point);
     EventResult PointerMove(Point point);
+    EventResult KeyDown(KeyCode key);
+    EventResult KeyUp(KeyCode key);
 
 private:
     EventResult DispatchPointerEvent(LcGuiEventKind kind, Point point);
+    EventResult DispatchKeyEvent(LcGuiKeyEventKind kind, KeyCode key);
     void EnsureHandle() const;
 
     LcGuiHandle *handle_ {nullptr};
@@ -93,4 +107,3 @@ private:
 } // namespace RustGuiBridge
 
 #endif // USE_RUST_GUI_VALIDATION
-

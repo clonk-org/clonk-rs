@@ -1,6 +1,6 @@
 use crate::{
-    DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, LayoutConstraints, Point, Rect, Size,
-    WidgetId,
+    DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, KeyCode, LayoutConstraints, Point, Rect,
+    Size, WidgetId,
 };
 use lc_graphics::Color;
 use std::convert::TryFrom;
@@ -133,6 +133,50 @@ impl LcGuiEventKind {
             LcGuiEventKind::PointerDown => GuiEvent::PointerDown { position: point },
             LcGuiEventKind::PointerUp => GuiEvent::PointerUp { position: point },
             LcGuiEventKind::PointerMove => GuiEvent::PointerMove { position: point },
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LcGuiKeyEventKind {
+    KeyDown = 0,
+    KeyUp = 1,
+}
+
+impl LcGuiKeyEventKind {
+    fn to_gui_event(self, key: KeyCode) -> GuiEvent {
+        match self {
+            LcGuiKeyEventKind::KeyDown => GuiEvent::KeyDown { key },
+            LcGuiKeyEventKind::KeyUp => GuiEvent::KeyUp { key },
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LcGuiKeyCode {
+    Enter = 0,
+    Escape = 1,
+    Space = 2,
+    Tab = 3,
+    Up = 4,
+    Down = 5,
+    Left = 6,
+    Right = 7,
+}
+
+impl LcGuiKeyCode {
+    fn to_key_code(self) -> Option<KeyCode> {
+        match self {
+            LcGuiKeyCode::Enter => Some(KeyCode::Enter),
+            LcGuiKeyCode::Escape => Some(KeyCode::Escape),
+            LcGuiKeyCode::Space => Some(KeyCode::Space),
+            LcGuiKeyCode::Tab => Some(KeyCode::Tab),
+            LcGuiKeyCode::Up => Some(KeyCode::Up),
+            LcGuiKeyCode::Down => Some(KeyCode::Down),
+            LcGuiKeyCode::Left => Some(KeyCode::Left),
+            LcGuiKeyCode::Right => Some(KeyCode::Right),
         }
     }
 }
@@ -418,6 +462,25 @@ pub extern "C" fn lc_gui_pointer_event(
         None => return ptr::null_mut(),
     };
     let result = handle.gui.handle_event(kind.to_gui_event(point.into()));
+    Box::into_raw(Box::new(build_event_result(result)))
+}
+
+#[no_mangle]
+pub extern "C" fn lc_gui_key_event(
+    handle: *mut GuiHandle,
+    kind: LcGuiKeyEventKind,
+    key: LcGuiKeyCode,
+) -> *mut EventResultHandle {
+    let handle = match handle_mut(handle) {
+        Some(handle) => handle,
+        None => return ptr::null_mut(),
+    };
+    let key = match key.to_key_code() {
+        Some(code) => code,
+        None => return ptr::null_mut(),
+    };
+    let event = kind.to_gui_event(key);
+    let result = handle.gui.handle_event(event);
     Box::into_raw(Box::new(build_event_result(result)))
 }
 

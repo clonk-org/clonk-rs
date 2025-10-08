@@ -1,5 +1,5 @@
 use crate::{
-    DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, GuiResult, Rect, Size, WidgetId,
+    DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, GuiResult, KeyCode, Rect, Size, WidgetId,
 };
 use std::fmt;
 
@@ -133,46 +133,23 @@ impl ScenarioBrowser {
     }
 
     pub fn handle_event(&mut self, event: GuiEvent) -> ScenarioBrowserResponse {
-        let gui_result = self.gui.handle_event(event);
-        let mut messages = Vec::new();
-
-        for (widget, action) in gui_result.actions.iter().copied() {
-            if action != GuiAction::Activate {
-                continue;
+        match event {
+            GuiEvent::KeyDown { key } => {
+                let gui_result = self.gui.handle_event(GuiEvent::KeyDown { key });
+                let mut response = self.process_gui_result(gui_result);
+                let (captured, mut messages) = self.handle_key_down_event(key);
+                response.gui.captured |= captured;
+                response.messages.append(&mut messages);
+                response
             }
-            if let Some(index) = self.layout.index_of(widget) {
-                if let Ok(Some(message)) = self.select_entry(index) {
-                    messages.push(message);
-                }
-                continue;
+            GuiEvent::KeyUp { key } => {
+                let gui_result = self.gui.handle_event(GuiEvent::KeyUp { key });
+                self.process_gui_result(gui_result)
             }
-            if widget == self.layout.action_buttons.start {
-                if let Some(entry) = self.selected_entry() {
-                    if entry.is_playable {
-                        messages.push(ScenarioBrowserMessage::StartScenario(entry.summary()));
-                    }
-                }
-                continue;
+            other => {
+                let gui_result = self.gui.handle_event(other);
+                self.process_gui_result(gui_result)
             }
-            if widget == self.layout.action_buttons.open {
-                if let Some(entry) = self.selected_entry() {
-                    messages.push(ScenarioBrowserMessage::OpenEntry(entry.summary()));
-                }
-                continue;
-            }
-            if widget == self.layout.action_buttons.edit {
-                if let Some(entry) = self.selected_entry() {
-                    if entry.is_editable {
-                        messages.push(ScenarioBrowserMessage::EditEntry(entry.summary()));
-                    }
-                }
-                continue;
-            }
-        }
-
-        ScenarioBrowserResponse {
-            gui: gui_result,
-            messages,
         }
     }
 
@@ -268,6 +245,111 @@ impl ScenarioBrowser {
             .set_button_enabled(self.layout.action_buttons.edit, false)?;
         Ok(())
     }
+
+    fn process_gui_result(&mut self, gui_result: GuiEventResult) -> ScenarioBrowserResponse {
+        let mut messages = Vec::new();
+
+        for (widget, action) in gui_result.actions.iter().copied() {
+            if action != GuiAction::Activate {
+                continue;
+            }
+            if let Some(index) = self.layout.index_of(widget) {
+                if let Ok(Some(message)) = self.select_entry(index) {
+                    messages.push(message);
+                }
+                continue;
+            }
+            if widget == self.layout.action_buttons.start {
+                if let Some(entry) = self.selected_entry() {
+                    if entry.is_playable {
+                        messages.push(ScenarioBrowserMessage::StartScenario(entry.summary()));
+                    }
+                }
+                continue;
+            }
+            if widget == self.layout.action_buttons.open {
+                if let Some(entry) = self.selected_entry() {
+                    messages.push(ScenarioBrowserMessage::OpenEntry(entry.summary()));
+                }
+                continue;
+            }
+            if widget == self.layout.action_buttons.edit {
+                if let Some(entry) = self.selected_entry() {
+                    if entry.is_editable {
+                        messages.push(ScenarioBrowserMessage::EditEntry(entry.summary()));
+                    }
+                }
+                continue;
+            }
+        }
+
+        ScenarioBrowserResponse {
+            gui: gui_result,
+            messages,
+        }
+    }
+
+    fn handle_key_down_event(&mut self, key: KeyCode) -> (bool, Vec<ScenarioBrowserMessage>) {
+        let mut captured = false;
+        let mut messages = Vec::new();
+
+        match key {
+            KeyCode::Up | KeyCode::Left => {
+                if self.entries.is_empty() {
+                    return (false, messages);
+                }
+                captured = true;
+                if let Ok(Some(message)) = self.move_selection(-1) {
+                    messages.push(message);
+                }
+            }
+            KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
+                if self.entries.is_empty() {
+                    return (false, messages);
+                }
+                captured = true;
+                if let Ok(Some(message)) = self.move_selection(1) {
+                    messages.push(message);
+                }
+            }
+            KeyCode::Enter | KeyCode::Space => {
+                if let Some(entry) = self.selected_entry() {
+                    captured = true;
+                    if entry.is_playable {
+                        messages.push(ScenarioBrowserMessage::StartScenario(entry.summary()));
+                    } else {
+                        messages.push(ScenarioBrowserMessage::OpenEntry(entry.summary()));
+                    }
+                }
+            }
+            KeyCode::Escape => {
+                if self.selected.is_some() {
+                    captured = true;
+                    let _ = self.clear_selection_ui();
+                }
+            }
+        }
+
+        (captured, messages)
+    }
+
+    fn move_selection(&mut self, delta: isize) -> GuiResult<Option<ScenarioBrowserMessage>> {
+        if self.entries.is_empty() {
+            return Ok(None);
+        }
+        let len = self.entries.len() as isize;
+        let new_index = match self.selected {
+            Some(current) => ((current as isize + delta).rem_euclid(len)) as usize,
+            None => {
+                if delta.is_negative() {
+                    (len - 1) as usize
+                } else {
+                    0
+                }
+            }
+        };
+        self.select_entry(new_index)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -345,7 +427,7 @@ struct ActionButtons {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GuiEvent, Point, Size};
+    use crate::{GuiEvent, KeyCode, Point, Size};
 
     fn center(rect: Rect) -> Point {
         Point::new(
@@ -417,5 +499,74 @@ mod tests {
             .messages
             .iter()
             .any(|msg| matches!(msg, ScenarioBrowserMessage::StartScenario(summary) if summary.identifier == "scenario_1")));
+    }
+
+    #[test]
+    fn keyboard_navigation_supports_selection_and_activation() {
+        let entries = vec![
+            ScenarioEntry {
+                identifier: "scenario_1".into(),
+                title: "Tutorial".into(),
+                description: Some("Learn the basics".into()),
+                kind: ScenarioKind::Scenario,
+                is_editable: false,
+                is_playable: true,
+            },
+            ScenarioEntry {
+                identifier: "folder_1".into(),
+                title: "Campaign".into(),
+                description: None,
+                kind: ScenarioKind::Folder,
+                is_editable: true,
+                is_playable: false,
+            },
+        ];
+
+        let mut browser = ScenarioBrowser::new(entries).expect("browser");
+        browser.layout(Size::new(480.0, 720.0));
+
+        let first = browser.handle_event(GuiEvent::KeyDown { key: KeyCode::Down });
+        assert!(first.gui.captured);
+        assert_eq!(first.messages.len(), 1);
+        assert!(matches!(
+            &first.messages[0],
+            ScenarioBrowserMessage::SelectionChanged(summary)
+                if summary.identifier == "scenario_1"
+        ));
+
+        let start = browser.handle_event(GuiEvent::KeyDown {
+            key: KeyCode::Enter,
+        });
+        assert!(start.gui.captured);
+        assert!(matches!(
+            start.messages.as_slice(),
+            [ScenarioBrowserMessage::StartScenario(summary)]
+                if summary.identifier == "scenario_1"
+        ));
+
+        let second = browser.handle_event(GuiEvent::KeyDown { key: KeyCode::Down });
+        assert!(second.gui.captured);
+        assert!(matches!(
+            &second.messages[0],
+            ScenarioBrowserMessage::SelectionChanged(summary)
+                if summary.identifier == "folder_1"
+        ));
+
+        let open = browser.handle_event(GuiEvent::KeyDown {
+            key: KeyCode::Enter,
+        });
+        assert!(open.gui.captured);
+        assert!(matches!(
+            open.messages.as_slice(),
+            [ScenarioBrowserMessage::OpenEntry(summary)]
+                if summary.identifier == "folder_1"
+        ));
+
+        let escape = browser.handle_event(GuiEvent::KeyDown {
+            key: KeyCode::Escape,
+        });
+        assert!(escape.gui.captured);
+        assert!(escape.messages.is_empty());
+        assert!(browser.selected_entry().is_none());
     }
 }
