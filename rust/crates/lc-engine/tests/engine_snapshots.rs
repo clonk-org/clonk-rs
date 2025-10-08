@@ -27,9 +27,12 @@ fn basic_movement_matches_snapshot() {
                 baseline_path.display()
             )
         });
-        actual
-            .to_writer(&mut file)
-            .unwrap_or_else(|err| panic!("failed to write baseline {}: {err}", baseline_path.display()));
+        actual.to_writer(&mut file).unwrap_or_else(|err| {
+            panic!(
+                "failed to write baseline {}: {err}",
+                baseline_path.display()
+            )
+        });
         return;
     }
 

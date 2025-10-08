@@ -1,13 +1,15 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use lc_resources::{Group, GroupError};
+use serde::de::{self, Deserializer, Visitor};
 use serde::Deserialize;
 
 use crate::{
     action::ActionSpec, ActionState, Definition, EffectState, Engine, EngineError,
-    EnvironmentSettings, Landscape, ObjectId, PhysicsSettings, SpawnConfig, Vector2,
+    EnvironmentSettings, Landscape, ObjectId, ObjectStatus, PhysicsSettings, SpawnConfig, Vector2,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -212,6 +214,7 @@ impl Scenario {
                 action,
                 effects,
                 crew_member,
+                status,
             } = object;
 
             let mut spawn = SpawnConfig::new(definition.clone());
@@ -250,6 +253,9 @@ impl Scenario {
                     spawn = spawn.with_crew_member(true);
                 }
                 None => {}
+            }
+            if let Some(status) = status {
+                spawn = spawn.with_status(status.into());
             }
             spawns.push(spawn);
         }
@@ -333,6 +339,96 @@ struct ObjectManifest {
     effects: Vec<EffectManifest>,
     #[serde(default)]
     crew_member: Option<bool>,
+    #[serde(default)]
+    status: Option<ObjectStatusSpec>,
+}
+
+#[derive(Debug)]
+struct ObjectStatusSpec(ObjectStatus);
+
+impl ObjectStatusSpec {
+    fn from_name(name: &str) -> Option<ObjectStatus> {
+        if name.eq_ignore_ascii_case("deleted") {
+            Some(ObjectStatus::Deleted)
+        } else if name.eq_ignore_ascii_case("normal") {
+            Some(ObjectStatus::Normal)
+        } else if name.eq_ignore_ascii_case("inactive") {
+            Some(ObjectStatus::Inactive)
+        } else {
+            None
+        }
+    }
+
+    fn from_code(code: i64) -> Option<ObjectStatus> {
+        match code {
+            0 => Some(ObjectStatus::Deleted),
+            1 => Some(ObjectStatus::Normal),
+            2 => Some(ObjectStatus::Inactive),
+            _ => None,
+        }
+    }
+}
+
+impl From<ObjectStatusSpec> for ObjectStatus {
+    fn from(spec: ObjectStatusSpec) -> Self {
+        spec.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ObjectStatusSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct StatusVisitor;
+
+        impl<'de> Visitor<'de> for StatusVisitor {
+            type Value = ObjectStatusSpec;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(
+                    "an object status (\"deleted\", \"normal\", \"inactive\") or numeric code 0/1/2",
+                )
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                ObjectStatusSpec::from_name(value)
+                    .map(ObjectStatusSpec)
+                    .ok_or_else(|| E::custom(format!("unknown object status `{value}`")))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                ObjectStatusSpec::from_code(value)
+                    .map(ObjectStatusSpec)
+                    .ok_or_else(|| E::custom(format!("unsupported object status code {value}")))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value > i64::MAX as u64 {
+                    return Err(E::custom(format!("unsupported object status code {value}")));
+                }
+                self.visit_i64(value as i64)
+            }
+        }
+
+        deserializer.deserialize_any(StatusVisitor)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -645,6 +741,48 @@ global func Step(state, frame, random)
         assert_eq!(effect.priority, 150);
         assert_eq!(effect.interval, 3);
         assert_eq!(effect.timer, 2);
+    }
+
+    #[test]
+    fn seeds_initial_status_from_manifest() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                {
+                    "id": "Mover",
+                    "script": "scripts/mover.aul",
+                    "default_action": "Idle",
+                    "actions": { "Idle": { "length": 1 } }
+                }
+            ],
+            "initial_objects": [
+                {
+                    "definition": "Mover",
+                    "status": "inactive"
+                }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        let created = scenario.apply(&mut engine).expect("scenario applies");
+        let id = created[0];
+
+        let snapshot = engine.snapshot();
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.status, ObjectStatus::Inactive);
+        let initial_phase = object.action.phase;
+
+        let ticked = engine.tick().expect("tick succeeds");
+        let object = ticked.object(id).expect("object present");
+        assert_eq!(object.status, ObjectStatus::Inactive);
+        assert_eq!(object.action.phase, initial_phase);
     }
 
     #[test]
