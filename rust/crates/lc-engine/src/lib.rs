@@ -2447,6 +2447,20 @@ fn clamp_to_limit(value: i32, limit: i32) -> i32 {
     }
 }
 
+fn step_toward(current: i32, desired: i32, step: i32) -> i32 {
+    if current == desired || step <= 0 {
+        return desired;
+    }
+    let delta = desired - current;
+    if delta.abs() <= step {
+        desired
+    } else if delta > 0 {
+        current.saturating_add(step)
+    } else {
+        current.saturating_sub(step)
+    }
+}
+
 fn apply_float_command_movement(
     velocity: &mut Vector2,
     command_direction: CommandDirection,
@@ -4078,9 +4092,13 @@ impl Engine {
             return;
         }
 
+        let definition_id = self.objects[idx].definition_id.clone();
+        let command_direction = self.objects[idx].state.command_direction;
+        let action_target = self.objects[idx].state.action.target;
+
         let (procedure, movement_profile, gravity_component) = {
-            let object = &self.objects[idx];
-            if let Some(definition) = self.definitions.get(&object.definition_id) {
+            if let Some(definition) = self.definitions.get(&definition_id) {
+                let object = &self.objects[idx];
                 let procedure = definition
                     .action_library()
                     .procedure_for_action(&object.state.action.name);
@@ -4093,42 +4111,133 @@ impl Engine {
             }
         };
 
+        {
+            let object = &mut self.objects[idx];
+            object.state.velocity.y = object.state.velocity.y.saturating_add(gravity_component);
+            if procedure.allows_wind() {
+                self.environment
+                    .apply_to_velocity(&mut object.state.velocity, self.frame);
+            }
+            if procedure.locks_vertical_velocity() {
+                object.state.velocity.y = 0;
+            }
+            if matches!(procedure, ActionProcedure::Float) {
+                apply_float_command_movement(
+                    &mut object.state.velocity,
+                    command_direction,
+                    movement_profile,
+                );
+            } else if matches!(procedure, ActionProcedure::Swim) {
+                apply_swim_command_movement(
+                    &mut object.state.velocity,
+                    command_direction,
+                    movement_profile,
+                    gravity_component,
+                );
+            }
+            match procedure {
+                ActionProcedure::Bridge
+                | ActionProcedure::Build
+                | ActionProcedure::Throw
+                | ActionProcedure::Chop => {
+                    object.state.velocity = Vector2::ZERO;
+                }
+                ActionProcedure::Scale => {
+                    object.state.velocity.x = 0;
+                }
+                _ => {}
+            }
+            self.physics.clamp_velocity(&mut object.state.velocity);
+        }
+
+        if matches!(procedure, ActionProcedure::Lift) {
+            if !self.apply_lift_to_target(idx, command_direction, action_target) {
+                self.reset_lift_action(idx, &definition_id);
+            }
+        }
+    }
+
+    fn apply_lift_to_target(
+        &mut self,
+        lifter_idx: usize,
+        command_direction: CommandDirection,
+        action_target: Option<ObjectId>,
+    ) -> bool {
+        let target_id = match action_target {
+            Some(id) => id,
+            None => return false,
+        };
+        let target_idx = match self.find_object_index(target_id) {
+            Some(idx) => idx,
+            None => return false,
+        };
+        if self.objects[target_idx].destroyed
+            || !self.objects[target_idx].state.status.is_active()
+            || self.objects[target_idx].state.container.is_some()
+        {
+            return false;
+        }
+
+        let base_gravity = self.physics.gravity.abs().max(1);
+        let lift_speed = base_gravity.saturating_mul(2).max(2);
+        let desired_velocity = match command_direction {
+            CommandDirection::Up => -lift_speed,
+            CommandDirection::Down => lift_speed,
+            CommandDirection::Stop => -self.physics.gravity,
+            _ => 0,
+        };
+        let lift_force = lift_speed.max(1);
+        let physics = self.physics;
+
+        let adjust_velocity = |object: &mut Object| {
+            let new_velocity = step_toward(object.state.velocity.y, desired_velocity, lift_force);
+            object.state.velocity.y = new_velocity;
+            physics.clamp_velocity(&mut object.state.velocity);
+        };
+
+        if target_idx == lifter_idx {
+            let object = &mut self.objects[target_idx];
+            adjust_velocity(object);
+        } else if target_idx < lifter_idx {
+            let (targets, _) = self.objects.split_at_mut(lifter_idx);
+            adjust_velocity(&mut targets[target_idx]);
+        } else {
+            let (_, targets) = self.objects.split_at_mut(target_idx);
+            adjust_velocity(&mut targets[0]);
+        }
+
+        true
+    }
+
+    fn reset_lift_action(&mut self, idx: usize, definition_id: &DefinitionId) {
+        let library = self
+            .definitions
+            .get(definition_id)
+            .map(|definition| definition.action_library().clone())
+            .unwrap_or_default();
+        let default_action = library.default_action().to_string();
+        let previous = self.objects[idx].state.action.clone();
+
+        let update = ActionUpdate {
+            name: Some(default_action),
+            phase: Some(0),
+            ticks: Some(0),
+            force: true,
+            target: Some(None),
+            target2: Some(None),
+        };
+
         let object = &mut self.objects[idx];
-        object.state.velocity.y = object.state.velocity.y.saturating_add(gravity_component);
-        if procedure.allows_wind() {
-            self.environment
-                .apply_to_velocity(&mut object.state.velocity, self.frame);
+        let result = object
+            .state
+            .action
+            .apply_update_with_library(&update, &library);
+        let changed = previous.name != object.state.action.name;
+        object.state.action.target = None;
+        object.state.action.target2 = None;
+        if matches!(result, ActionUpdateResult::Applied) && changed {
+            object.record_action_event(previous, ActionTransitionKind::Forced);
         }
-        if procedure.locks_vertical_velocity() {
-            object.state.velocity.y = 0;
-        }
-        if matches!(procedure, ActionProcedure::Float) {
-            apply_float_command_movement(
-                &mut object.state.velocity,
-                object.state.command_direction,
-                movement_profile,
-            );
-        } else if matches!(procedure, ActionProcedure::Swim) {
-            apply_swim_command_movement(
-                &mut object.state.velocity,
-                object.state.command_direction,
-                movement_profile,
-                gravity_component,
-            );
-        }
-        match procedure {
-            ActionProcedure::Bridge
-            | ActionProcedure::Build
-            | ActionProcedure::Throw
-            | ActionProcedure::Chop => {
-                object.state.velocity = Vector2::ZERO;
-            }
-            ActionProcedure::Scale => {
-                object.state.velocity.x = 0;
-            }
-            _ => {}
-        }
-        self.physics.clamp_velocity(&mut object.state.velocity);
     }
 
     fn apply_landscape_at_index(&mut self, idx: usize) {
@@ -5908,6 +6017,23 @@ mod tests {
     }
     "#;
 
+    fn build_lift_definition(id: &str) -> Definition {
+        let mut definition =
+            Definition::from_script(id, id, PROCEDURE_MOVEMENT_SCRIPT).expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        actions.insert(
+            "Lift".to_string(),
+            ActionSpec::default().with_procedure("lift"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+        definition
+    }
+
+    fn build_idle_definition(id: &str) -> Definition {
+        Definition::from_script(id, id, PROCEDURE_MOVEMENT_SCRIPT).expect("script compiles")
+    }
+
     fn build_definition() -> Definition {
         let source = r#"
         global func Initialize(state, random) {
@@ -6815,6 +6941,64 @@ mod tests {
         let snapshot = engine.tick().expect("fourth tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity, Vector2::new(0, 0));
+    }
+
+    #[test]
+    fn lift_procedure_adjusts_target_velocity() {
+        let lifter_definition = build_lift_definition("Lifter");
+        let crate_definition = build_idle_definition("Crate");
+
+        let mut engine = Engine::with_seed(31);
+        engine
+            .register_definition(lifter_definition)
+            .expect("lifter registers");
+        engine
+            .register_definition(crate_definition)
+            .expect("crate registers");
+
+        let target_id = engine
+            .spawn_object(SpawnConfig::new("Crate"))
+            .expect("target spawns");
+
+        let mut lift_action = ActionState::new("Lift");
+        lift_action.target = Some(target_id);
+
+        let lifter_id = engine
+            .spawn_object(
+                SpawnConfig::new("Lifter")
+                    .with_action(lift_action)
+                    .with_command_direction(CommandDirection::Up),
+            )
+            .expect("lifter spawns");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let target = snapshot.object(target_id).expect("target present");
+        assert!(target.velocity.y < 0, "lift should pull target upward");
+        let lifter = snapshot.object(lifter_id).expect("lifter present");
+        assert_eq!(lifter.action.name, "Lift");
+    }
+
+    #[test]
+    fn lift_procedure_resets_without_target() {
+        let lifter_definition = build_lift_definition("Lifter");
+
+        let mut engine = Engine::with_seed(37);
+        engine
+            .register_definition(lifter_definition)
+            .expect("definition registers");
+
+        let lifter_id = engine
+            .spawn_object(
+                SpawnConfig::new("Lifter")
+                    .with_action(ActionState::new("Lift"))
+                    .with_command_direction(CommandDirection::Up),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let lifter = snapshot.object(lifter_id).expect("lifter present");
+        assert_eq!(lifter.action.name, "Idle");
+        assert!(lifter.action.target.is_none());
     }
 
     #[test]
