@@ -110,6 +110,11 @@ bool lc_engine_runtime_load_scenario(
     const char *path,
     uint64_t seed,
     char **error_message);
+bool lc_engine_runtime_record_control_ini(
+    LcEngineRuntimeHandle *handle,
+    uint64_t frame,
+    const char *ini_data,
+    char **error_message);
 bool lc_engine_runtime_reset(LcEngineRuntimeHandle *handle, char **error_message);
 bool lc_engine_runtime_compare_snapshot(
     LcEngineRuntimeHandle *handle,

@@ -5,12 +5,13 @@ use crate::{
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::PathBuf;
 use std::ptr;
 use std::slice;
+use serde::Serialize;
 
 #[repr(C)]
 pub struct LcEngineEffectSnapshot {
@@ -79,6 +80,7 @@ pub struct RuntimeHandle {
     scenario_path: Option<PathBuf>,
     seed: u64,
     last_frame: u64,
+    control_log: BTreeMap<u64, Vec<String>>,
 }
 
 impl RecorderHandle {
@@ -102,6 +104,7 @@ impl RuntimeHandle {
             scenario_path: None,
             seed: 0,
             last_frame: 0,
+            control_log: BTreeMap::new(),
         }
     }
 }
@@ -516,6 +519,7 @@ fn load_scenario_into_runtime(
     runtime.seed = seed;
     runtime.last_frame = runtime.engine.frame();
     runtime.scenario_path = Some(path.clone());
+    runtime.control_log.clear();
     Ok(())
 }
 
@@ -553,6 +557,57 @@ pub extern "C" fn lc_engine_runtime_load_scenario(
 }
 
 #[no_mangle]
+pub extern "C" fn lc_engine_runtime_record_control_ini(
+    handle: *mut RuntimeHandle,
+    frame: u64,
+    ini: *const c_char,
+    error_out: *mut *mut c_char,
+) -> bool {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    let Some(runtime) = (unsafe { handle.as_mut() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return false;
+    };
+
+    if ini.is_null() {
+        set_error(error_out, "control data is null".into());
+        return false;
+    }
+
+    let ini_cstr = unsafe { CStr::from_ptr(ini) };
+    let ini_string = match ini_cstr.to_str() {
+        Ok(value) => value.to_owned(),
+        Err(_) => ini_cstr.to_string_lossy().into_owned(),
+    };
+
+    if let Some((&last_frame, _)) = runtime.control_log.iter().next_back() {
+        if frame < last_frame {
+            set_error(
+                error_out,
+                format!(
+                    "control frame {} out of order (last recorded frame {})",
+                    frame, last_frame
+                ),
+            );
+            return false;
+        }
+    }
+
+    runtime
+        .control_log
+        .entry(frame)
+        .or_insert_with(Vec::new)
+        .push(ini_string);
+
+    true
+}
+
+#[no_mangle]
 pub extern "C" fn lc_engine_runtime_reset(
     handle: *mut RuntimeHandle,
     error_out: *mut *mut c_char,
@@ -565,6 +620,7 @@ pub extern "C" fn lc_engine_runtime_reset(
     let Some(path) = runtime.scenario_path.clone() else {
         runtime.engine = Engine::with_seed(runtime.seed);
         runtime.last_frame = runtime.engine.frame();
+        runtime.control_log.clear();
         return true;
     };
 
@@ -685,13 +741,25 @@ pub extern "C" fn lc_engine_runtime_export_snapshot_json(
         }
     }
 
-    let Some(runtime) = (unsafe { handle.as_ref() }) else {
+    let Some(runtime) = (unsafe { handle.as_mut() }) else {
         set_error(error_out, "runtime handle is null".into());
         return ptr::null_mut();
     };
 
     let snapshot = runtime.engine.snapshot();
-    let json = match serde_json::to_string(&snapshot) {
+    let frame = snapshot.frame;
+    let control = runtime.control_log.remove(&frame);
+
+    #[derive(Serialize)]
+    struct RuntimeSnapshotExport {
+        snapshot: SimulationSnapshot,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        control: Option<Vec<String>>,
+    }
+
+    let export = RuntimeSnapshotExport { snapshot, control };
+
+    let json = match serde_json::to_string(&export) {
         Ok(json) => json,
         Err(error) => {
             set_error(

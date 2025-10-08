@@ -5,12 +5,15 @@
 #include "lc_engine_ffi.h"
 
 #include <C4Include.h>
+#include <C4Control.h>
 #include <C4Game.h>
 #include <C4Log.h>
 #include <C4Object.h>
 #include <C4ObjectList.h>
 #include <C4Effects.h>
 #include <C4Player.h>
+#include <C4Wrappers.h>
+#include <StdCompiler.h>
 
 #include <Fixed.h>
 
@@ -19,6 +22,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <exception>
 #include <set>
 #include <string>
 #include <vector>
@@ -102,6 +106,23 @@ bool g_runtime_snapshot_checked = false;
 
 RustStringPtr MakeString(char *raw) {
     return RustStringPtr(raw, lc_engine_string_free);
+}
+
+std::string SerialiseControl(const C4Control &control) {
+    if (!control.firstPkt()) {
+        return {};
+    }
+
+    C4Control copy;
+    copy.Copy(control);
+    try {
+        return DecompileToBuf<StdCompilerINIWrite>(mkNamingAdapt(copy, "Control"));
+    } catch (const std::exception &exception) {
+        LogWarning(std::string("Failed to serialise control for Rust runtime: ") + exception.what());
+    } catch (...) {
+        LogWarning("Failed to serialise control for Rust runtime (unknown error)");
+    }
+    return {};
 }
 
 void LogWarning(const std::string &message) {
@@ -516,6 +537,37 @@ void OnGameStart(C4Game &game) {
     g_runtime_disabled = false;
     if (!InitialiseRuntime(game)) {
         g_runtime.reset();
+    }
+}
+
+void OnControlFrame(const C4Control &control, uint64_t frame) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    EnsureInitialised();
+    if (!g_runtime_requested || g_runtime_disabled) {
+        return;
+    }
+
+    if (!g_runtime) {
+        return;
+    }
+
+    const std::string serialised = SerialiseControl(control);
+    if (serialised.empty()) {
+        return;
+    }
+
+    char *error_message = nullptr;
+    if (!lc_engine_runtime_record_control_ini(
+            g_runtime.get(),
+            frame,
+            serialised.c_str(),
+            &error_message)) {
+        RustStringPtr error = MakeString(error_message);
+        if (error) {
+            LogWarning(std::string("Rust runtime control capture failed: ") + error.get());
+        } else {
+            LogWarning("Rust runtime control capture failed (no detail)");
+        }
     }
 }
 

@@ -1,22 +1,45 @@
-# LegacyClonk Rust Port Evaluation
+# LegacyClonk Rust Port Plan
 
-## Current Status
-- Rust crates continue to power the demo harness (`lc-app`) and validation tooling; the shipping runtime still routes gameplay through C++.
-- Scenario loading, action/event bridging, float/swim/lift physics, and GUI/input parity are in place for the validation stack.
-- Movement profiles now expose walk/float/swim speeds and accelerations, and `ActionProcedure::Walk` mirrors C++ steering, braking, and facing updates.
-- Scale, hangle, and dig command handling now mirror the C++ procedures, including configurable climb/hang/dig movement profiles.
-- Parity runs can capture per-frame Rust engine snapshots by setting `LC_RUST_ENGINE_RUNTIME_SNAPSHOT` while the validation toggle is enabled.
-- Push procedure parity keeps the pusher aligned with the target, imparts horizontal velocity based on command direction, and cleanly reverts when the target is unavailable.
-- Pull procedure parity now mirrors the C++ towing offsets, range checks, and velocity handling for validation runs.
-- `std_markup::strip_markup` now handles unterminated inline image tags exactly like the legacy C++ path, removing stray `{{` brace pairs instead of leaving them in Rust output.
-- Object container relationships and per-object inventories are now surfaced in parity snapshots, letting the Rust runtime validate contents against the C++ engine.
+## Goal
+- Ship LegacyClonk with a Rust-based client/server runtime that is behavior-identical to the current C++ build across simulation, rendering, networking, UI, and modding, running the production game rather than demos.
 
-## Priority Backlog
+## Current State Snapshot
+- Rust crates (`lc-core`, `lc-engine`, `lc-script`, `lc-graphics`, etc.) back the `lc-app` demo and parity tooling; the live game loop, rendering, and UI remain C++ (`C4Game`, `C4GraphicsSystem`, `C4Gui`).
+- `RustEngineBridge` can mirror frames alongside the C++ loop for validation, but authoritative physics, control queues, and object lifetimes are still driven by the C++ engine.
+- Graphics/audio/platform crates operate on CPU surfaces or null backends for comparisons and do not yet present a window, swap chain, input handling, or OS event loop.
+- The Rust AUL VM runs scripted procedures inside controlled host contexts, yet large parts of the C4 API surface (effect callbacks, proplist mutation, object enumerators, particles, menus, cutscenes) still rely on C++ glue.
+- Build, packaging, and installer flows are CMake/C++ centric; Cargo artifacts are not integrated into CI releases or launcher updates.
 
-- (none; markup parity gap resolved)
+## Blocking Gaps For Full Game Runtime
+- Authoritative game loop: C++ still owns object creation/destruction, crew control, scheduler ticks, particles, pathfinding, viewport syncing, and landscape updates; the Rust engine lacks coverage for many procedures beyond the demo set.
+- Script and engine API coverage: Hundreds of AUL functions, proplist operations, callback hooks, effect priorities, overlay rendering, and global state mutations need Rust equivalents with identical call ordering and edge cases.
+- Frontend and IO parity: Window management, software/OpenGL render paths, HUD/GUI widgets, font and text layout, input devices (mouse, keyboard, gamepad), and platform-specific integrations live only in the C++ frontend.
+- Networking and concurrency: Lobby discovery, control packet resync, league/master-server protocols, voice/chat relays, and host migration logic are handled by C++ systems beyond the current `lc-network` framing.
+- Toolchain compatibility: Scenario/editor workflows, savegames, replay files, localization, diagnostics, and mod packaging expect existing C++ utilities and file formats tied to legacy serialization.
 
-## Notes
-- Scenario manifests can now provide `movement.walk.speed` and `movement.walk.acceleration` to tune procedures per definition.
-- Additional knobs: `movement.scale.*`, `movement.hangle.*`, and `movement.dig.speed` feed the new grounded procedure parity.
-- Runtime parity toggle `LC_RUST_ENGINE_RUNTIME` now boots the Rust engine alongside the C++ loop and compares live snapshots per frame, reinitialising with scenario seeds during startup.
-- Setting `LC_RUST_ENGINE_RUNTIME_SNAPSHOT=/path/to/log.ndjson` streams Rust runtime snapshots (one JSON object per frame) to aid diffing during live parity sessions.
+## Port Roadmap (Real Game Focus)
+- **Phase 0 · Parity Harness Expansion**
+  - Drive the shipping client through `LC_RUST_ENGINE_RUNTIME` for full matches, capturing snapshots, I/O, particles, and HUD state. (I/O capture now streamed per control tick into parity exports; particles & HUD remain.)
+  - Record canonical replays and savegames from C++ and ensure the Rust engine can import them losslessly.
+  - Extend automated diff tooling to compare network traffic, HUD buffers, and rendered surfaces frame-by-frame.
+- **Phase 1 · Simulation Authority Flip**
+  - Close feature gaps in `lc-engine` (all action procedures, crew AI, physics edge cases, object enumerators, global effects) until the C++ loop can defer object ticking to Rust.
+  - Expose every required engine/AUL entry point through FFI so C++ only marshals inputs/outputs while Rust advances world state deterministically.
+  - Promote the Rust VM to the primary script runtime, running scenario/system scripts in Rust while shadow-running the C++ VM for audit until clean.
+- **Phase 2 · Frontend and Platform Port**
+  - Replace `C4GraphicsSystem`, GUI, and input handling with Rust implementations (SDL/OpenGL or wgpu) that reproduce batching, overlay composition, and device quirks.
+  - Port HUD/menus/console to Rust (`lc-gui` or successor) and ensure layout, focus, and animations match frame-perfect with legacy recordings.
+  - Wire audio mixing to `lc-audio` using a real backend (e.g., cpal/SDL) with streaming music, positional effects, and identical volume curves.
+- **Phase 3 · Networking and Services**
+  - Extend `lc-network` to handle league lobby, NAT traversal, replay upload, and peer reconnect semantics; let Rust host authoritative control arbitration.
+  - Port platform services (patcher, updater, telemetry, crash reporting) or provide Rust bindings to the existing implementations.
+  - Validate mixed C++/Rust multiplayer sessions before fully retiring the legacy netcode.
+- **Phase 4 · Release Integration**
+  - Integrate Cargo builds into CI, produce signed installers, and run automated parity suites on canonical replays before each release.
+  - Remove unused C++ modules once Rust reaches feature lock, keeping a fallback branch for hotfix builds until the Rust client proves stable in the wild.
+
+## Validation & Tooling Requirements
+- Maintain deterministic replays across both runtimes, gating merges on replay hashes and rendered frame hashes.
+- Add exhaustive property-based and fixture-driven tests for AUL builtins, scenario loading, particle systems, and network state machines.
+- Provide developer toggles to dump cross-runtime diffs (state, HUD layers, audio mix) and integrate them into CI dashboards.
+- Establish performance baselines comparing CPU/GPU usage so regressions surface before release candidates.

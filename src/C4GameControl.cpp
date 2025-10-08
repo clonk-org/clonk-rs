@@ -25,6 +25,7 @@
 #include <C4Record.h>
 #include <C4Log.h>
 #include <C4Network2Stats.h>
+#include "rust/RustEngineBridge.h"
 
 #include <cassert>
 
@@ -313,6 +314,7 @@ void C4GameControl::Execute()
 	// execute
 	pExecutingControl = &Control;
 	Control.Execute(logger);
+	RustEngineBridge::OnControlFrame(Control, static_cast<uint64_t>(Game.FrameCounter));
 	Control.Clear();
 	pExecutingControl = nullptr;
 
