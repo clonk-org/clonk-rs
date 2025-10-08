@@ -198,19 +198,23 @@ impl ActionProcedure {
     }
 
     pub fn allows_wind(self) -> bool {
-        match self {
+        !matches!(
+            self,
             ActionProcedure::Flight
-            | ActionProcedure::Hang
-            | ActionProcedure::Attach
-            | ActionProcedure::Swim
-            | ActionProcedure::Dig
-            | ActionProcedure::Kneel
-            | ActionProcedure::Bridge
-            | ActionProcedure::Build
-            | ActionProcedure::Throw
-            | ActionProcedure::Scale => false,
-            _ => true,
-        }
+                | ActionProcedure::Hang
+                | ActionProcedure::Attach
+                | ActionProcedure::Swim
+                | ActionProcedure::Dig
+                | ActionProcedure::Kneel
+                | ActionProcedure::Bridge
+                | ActionProcedure::Build
+                | ActionProcedure::Throw
+                | ActionProcedure::Scale
+                | ActionProcedure::Push
+                | ActionProcedure::Pull
+                | ActionProcedure::Chop
+                | ActionProcedure::Fight
+        )
     }
 
     pub fn locks_vertical_velocity(self) -> bool {
@@ -222,6 +226,10 @@ impl ActionProcedure {
                 | ActionProcedure::Bridge
                 | ActionProcedure::Build
                 | ActionProcedure::Throw
+                | ActionProcedure::Push
+                | ActionProcedure::Pull
+                | ActionProcedure::Chop
+                | ActionProcedure::Fight
         )
     }
 }

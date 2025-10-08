@@ -3296,7 +3296,10 @@ impl Engine {
             object.state.velocity.y = 0;
         }
         match procedure {
-            ActionProcedure::Bridge | ActionProcedure::Build | ActionProcedure::Throw => {
+            ActionProcedure::Bridge
+            | ActionProcedure::Build
+            | ActionProcedure::Throw
+            | ActionProcedure::Chop => {
                 object.state.velocity = Vector2::ZERO;
             }
             ActionProcedure::Scale => {
@@ -5736,6 +5739,89 @@ mod tests {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity, Vector2::new(4, 2));
         assert_eq!(object.position, Vector2::new(6, 3));
+    }
+
+    #[test]
+    fn push_procedure_blocks_gravity_and_wind() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Pusher", "Pusher", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Push".to_string(),
+            ActionSpec::default().with_procedure("push"),
+        );
+        definition.configure_actions(Some("Push".to_string()), actions);
+
+        let mut engine = Engine::with_seed(12);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(5, 50, -20));
+        engine.set_environment(EnvironmentSettings::new(6));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Pusher"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("first tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Push");
+        assert_eq!(object.velocity, Vector2::ZERO);
+
+        let snapshot = engine.tick().expect("second tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::ZERO);
+        assert_eq!(object.position, Vector2::new(0, 0));
+    }
+
+    #[test]
+    fn chop_procedure_zeroes_existing_velocity() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Chopper", "Chopper", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Chop".to_string(),
+            ActionSpec::default().with_procedure("chop"),
+        );
+        definition.configure_actions(Some("Chop".to_string()), actions);
+
+        let mut engine = Engine::with_seed(20);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(3, 40, -20));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Chopper")
+                    .with_position(Vector2::new(0, 0))
+                    .with_velocity(Vector2::new(5, -3)),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Chop");
+        assert_eq!(object.velocity, Vector2::ZERO);
+        assert_eq!(object.position, Vector2::new(0, 0));
     }
 
     #[test]
