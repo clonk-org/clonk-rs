@@ -501,14 +501,29 @@ pub struct ObjectState {
     pub crew_member: bool,
 }
 
+#[derive(Debug, Clone)]
+struct ActionChange {
+    previous: ActionState,
+    requested_name_change: bool,
+}
+
+impl ActionChange {
+    fn should_record(&self, current: &ActionState) -> bool {
+        self.requested_name_change || self.previous.name != current.name
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ApplyDeltaOutcome {
+    container_change: Option<(Option<ObjectId>, Option<ObjectId>)>,
+    action_change: Option<ActionChange>,
+}
+
 impl ObjectState {
-    fn apply_delta(
-        &mut self,
-        delta: &ObjectDelta,
-        library: &ActionLibrary,
-    ) -> Option<(Option<ObjectId>, Option<ObjectId>)> {
+    fn apply_delta(&mut self, delta: &ObjectDelta, library: &ActionLibrary) -> ApplyDeltaOutcome {
         let previous_container = self.container;
         let mut container_change = None;
+        let mut action_change = None;
         if let Some(position) = delta.position {
             self.position = position;
         }
@@ -519,7 +534,13 @@ impl ObjectState {
             self.energy = energy;
         }
         if let Some(action) = &delta.action {
+            let requested_name_change = action.name.is_some();
+            let previous_action = self.action.clone();
             self.action.apply_update_with_library(action, library);
+            action_change = Some(ActionChange {
+                previous: previous_action,
+                requested_name_change,
+            });
         } else {
             self.action.reconcile_with_library(library);
         }
@@ -540,7 +561,16 @@ impl ObjectState {
         }
 
         self.action.reconcile_with_library(library);
-        container_change
+        ApplyDeltaOutcome {
+            container_change,
+            action_change: action_change.and_then(|change| {
+                if change.should_record(&self.action) {
+                    Some(change)
+                } else {
+                    None
+                }
+            }),
+        }
     }
 }
 
@@ -866,6 +896,19 @@ struct Object {
     state: ObjectState,
     destroyed: bool,
     command_queue: VecDeque<QueuedCommand>,
+    pending_action_events: VecDeque<ActionTransitionEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionTransitionKind {
+    Natural,
+    Forced,
+}
+
+#[derive(Debug, Clone)]
+struct ActionTransitionEvent {
+    previous_action: String,
+    kind: ActionTransitionKind,
 }
 
 #[derive(Debug)]
@@ -891,6 +934,7 @@ impl Object {
             destroyed: matches!(state.status, ObjectStatus::Deleted),
             state,
             command_queue: VecDeque::new(),
+            pending_action_events: VecDeque::new(),
         }
     }
 
@@ -1027,6 +1071,13 @@ impl Object {
         }
     }
 
+    fn record_action_event(&mut self, previous: ActionState, kind: ActionTransitionKind) {
+        self.pending_action_events.push_back(ActionTransitionEvent {
+            previous_action: previous.name,
+            kind,
+        });
+    }
+
     fn execute_command_queue(
         &mut self,
         physics: &PhysicsSettings,
@@ -1050,7 +1101,11 @@ impl Object {
 
             let command = self.command_queue.pop_front().expect("front exists");
             let delta: ObjectDelta = command.update.into();
-            if let Some((previous, new)) = self.state.apply_delta(&delta, action_library) {
+            let delta_outcome = self.state.apply_delta(&delta, action_library);
+            if let Some(change) = delta_outcome.action_change {
+                self.record_action_event(change.previous, ActionTransitionKind::Forced);
+            }
+            if let Some((previous, new)) = delta_outcome.container_change {
                 outcome.container_updates.push(ContainerUpdateRecord {
                     object_id: self.id,
                     previous,
@@ -1399,6 +1454,7 @@ enum ActionCallbackKind {
     Start,
     End,
     Phase,
+    Abort,
 }
 
 impl ActionCallbackKind {
@@ -1407,6 +1463,7 @@ impl ActionCallbackKind {
             ActionCallbackKind::Start => "action start",
             ActionCallbackKind::End => "action end",
             ActionCallbackKind::Phase => "action phase",
+            ActionCallbackKind::Abort => "action abort",
         }
     }
 }
@@ -2112,7 +2169,8 @@ impl Engine {
         let landscape_for_commands = self.landscape.clone();
         for idx in 0..self.objects.len() {
             let definition_id = self.objects[idx].definition_id.clone();
-            let previous_action_name = self.objects[idx].state.action.name.clone();
+            let previous_action_state = self.objects[idx].state.action.clone();
+            let previous_action_name = previous_action_state.name.clone();
             let action_library = {
                 let definition = self
                     .definitions
@@ -2230,6 +2288,11 @@ impl Engine {
                 object.state.action.advance_with_library(&action_library)
             };
 
+            if self.objects[idx].state.action.name != previous_action_state.name {
+                self.objects[idx]
+                    .record_action_event(previous_action_state, ActionTransitionKind::Natural);
+            }
+
             if let Some(event) = advance_outcome.phase_event {
                 if let Some(function_name) = action_library.phase_call_for_action(&event.action) {
                     let state_snapshot = pre_phase_state
@@ -2292,7 +2355,14 @@ impl Engine {
             let (object_id, previous_owner, new_owner, new_crew, container_change) = {
                 let object = &mut self.objects[idx];
                 let previous_owner = object.state.owner;
-                let container_change = object.state.apply_delta(&delta, &action_library);
+                let mut container_change = None;
+                let delta_outcome = object.state.apply_delta(&delta, &action_library);
+                if let Some(change) = delta_outcome.action_change {
+                    object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                }
+                if let Some(change) = delta_outcome.container_change {
+                    container_change = Some(change);
+                }
                 let mut applied = object.apply_effect_commands(&effects);
                 effect_events.append(&mut applied);
                 self.physics.clamp_velocity(&mut object.state.velocity);
@@ -2431,10 +2501,15 @@ impl Engine {
                 object.state.energy = energy;
             }
             if let Some(action) = action {
+                let previous_action = object.state.action.clone();
+                let requested_name_change = action.name.is_some();
                 object
                     .state
                     .action
                     .apply_update_with_library(&action, &action_library);
+                if requested_name_change || object.state.action.name != previous_action.name {
+                    object.record_action_event(previous_action, ActionTransitionKind::Forced);
+                }
             } else {
                 object.state.action.reconcile_with_library(&action_library);
             }
@@ -2499,36 +2574,49 @@ impl Engine {
         }
 
         let mut needs_start = previous_action.is_none();
-        if let Some(previous) = previous_action {
-            let initial_current = self.objects[index].state.action.name.clone();
-            if previous == initial_current {
+
+        while let Some(event) = self.objects[index].pending_action_events.pop_front() {
+            let callback_kind = match event.kind {
+                ActionTransitionKind::Natural => ActionCallbackKind::End,
+                ActionTransitionKind::Forced => ActionCallbackKind::Abort,
+            };
+
+            self.invoke_action_callback(index, callback_kind, &event.previous_action, None, None)?;
+            if self.objects[index].destroyed
+                || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
+            {
                 return Ok(());
             }
 
-            self.invoke_action_callback(index, ActionCallbackKind::End, &previous, None, None)?;
-            if self.objects[index].destroyed {
+            let current_action = self.objects[index].state.action.name.clone();
+            self.invoke_action_callback(
+                index,
+                ActionCallbackKind::Start,
+                &current_action,
+                None,
+                None,
+            )?;
+            if self.objects[index].destroyed
+                || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
+            {
                 return Ok(());
             }
 
-            let updated = self.objects[index].state.action.name.clone();
-            if updated == previous {
-                return Ok(());
-            }
-            needs_start = true;
+            needs_start = false;
         }
 
-        if !needs_start {
-            return Ok(());
+        if needs_start {
+            let current_action = self.objects[index].state.action.name.clone();
+            self.invoke_action_callback(
+                index,
+                ActionCallbackKind::Start,
+                &current_action,
+                None,
+                None,
+            )?;
         }
 
-        let current_action = self.objects[index].state.action.name.clone();
-        self.invoke_action_callback(
-            index,
-            ActionCallbackKind::Start,
-            &current_action,
-            None,
-            None,
-        )
+        Ok(())
     }
 
     fn invoke_action_callback(
@@ -2554,6 +2642,7 @@ impl Engine {
                 ActionCallbackKind::Start => action_library.start_call_for_action(action_name),
                 ActionCallbackKind::End => action_library.end_call_for_action(action_name),
                 ActionCallbackKind::Phase => action_library.phase_call_for_action(action_name),
+                ActionCallbackKind::Abort => action_library.abort_call_for_action(action_name),
             },
         };
 
@@ -2621,7 +2710,11 @@ impl Engine {
 
             if let Some(update) = object_update {
                 let delta: ObjectDelta = update.into();
-                if let Some(change) = object.state.apply_delta(&delta, action_library) {
+                let outcome = object.state.apply_delta(&delta, action_library);
+                if let Some(change) = outcome.action_change {
+                    object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                }
+                if let Some(change) = outcome.container_change {
                     container_changes.push(change);
                 }
             } else {
@@ -2960,9 +3053,12 @@ impl Engine {
             if let Some(update) = object_update {
                 let mut delta = ObjectDelta::default();
                 delta.merge_update(update);
-                object
+                let outcome = object
                     .state
                     .apply_delta(&delta, definition.action_library());
+                if let Some(change) = outcome.action_change {
+                    object.record_action_event(change.previous, ActionTransitionKind::Forced);
+                }
                 state_snapshot = object.state.clone();
             }
 
@@ -3421,7 +3517,11 @@ impl Engine {
                     detail: "Initialize may not destroy the object".into(),
                 });
             }
-            if let Some(change) = object.state.apply_delta(&delta, &action_library) {
+            let outcome = object.state.apply_delta(&delta, &action_library);
+            if let Some(change) = outcome.action_change {
+                object.record_action_event(change.previous, ActionTransitionKind::Forced);
+            }
+            if let Some(change) = outcome.container_change {
                 container_changes.push(change);
             }
             let mut applied = object.apply_effect_commands(&effects);
@@ -4599,6 +4699,85 @@ mod tests {
             assert_eq!(idle_start, 1);
             assert_eq!(idle_end, 1);
             assert_eq!(walk_start, 1);
+        }
+    }
+
+    #[test]
+    fn forced_action_change_triggers_abort_callbacks() {
+        use std::sync::{Arc, Mutex};
+
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        global func OnIdleStart(state, action) { return nil; }
+        global func OnIdleEnd(state, action) { return nil; }
+        global func OnIdleAbort(state, action) { return nil; }
+        global func OnRunStart(state, action) { return nil; }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default()
+                .with_length(20)
+                .with_start_call("OnIdleStart")
+                .with_end_call("OnIdleEnd")
+                .with_abort_call("OnIdleAbort"),
+        );
+        actions.insert(
+            "Run".to_string(),
+            ActionSpec::default().with_start_call("OnRunStart"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        {
+            let calls = call_log.lock().unwrap().clone();
+            let idle_start = calls.iter().filter(|name| *name == "OnIdleStart").count();
+            let idle_abort = calls.iter().filter(|name| *name == "OnIdleAbort").count();
+            let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
+            let run_start = calls.iter().filter(|name| *name == "OnRunStart").count();
+            assert_eq!(idle_start, 1);
+            assert_eq!(idle_abort, 0);
+            assert_eq!(idle_end, 0);
+            assert_eq!(run_start, 0);
+        }
+
+        engine
+            .apply_object_update(id, ObjectUpdate::new().with_action("Run"))
+            .expect("update succeeds");
+
+        {
+            let calls = call_log.lock().unwrap().clone();
+            let idle_start = calls.iter().filter(|name| *name == "OnIdleStart").count();
+            let idle_abort = calls.iter().filter(|name| *name == "OnIdleAbort").count();
+            let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
+            let run_start = calls.iter().filter(|name| *name == "OnRunStart").count();
+            assert_eq!(idle_start, 1);
+            assert_eq!(idle_abort, 1);
+            assert_eq!(idle_end, 0);
+            assert_eq!(run_start, 1);
         }
     }
 

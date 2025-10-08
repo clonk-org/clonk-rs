@@ -22,6 +22,8 @@ pub struct ActionSpec {
     pub start_call: Option<String>,
     #[serde(default)]
     pub end_call: Option<String>,
+    #[serde(default)]
+    pub abort_call: Option<String>,
 }
 
 impl ActionSpec {
@@ -35,6 +37,7 @@ impl ActionSpec {
             phase_call: None,
             start_call: None,
             end_call: None,
+            abort_call: None,
         }
     }
 
@@ -77,6 +80,11 @@ impl ActionSpec {
         self.end_call = Some(end_call.into());
         self
     }
+
+    pub fn with_abort_call(mut self, abort_call: impl Into<String>) -> Self {
+        self.abort_call = Some(abort_call.into());
+        self
+    }
 }
 
 impl Default for ActionSpec {
@@ -90,6 +98,7 @@ impl Default for ActionSpec {
             phase_call: None,
             start_call: None,
             end_call: None,
+            abort_call: None,
         }
     }
 }
@@ -217,6 +226,12 @@ impl ActionLibrary {
         self.specs
             .get(action)
             .and_then(|spec| spec.phase_call.as_deref())
+    }
+
+    pub fn abort_call_for_action(&self, action: &str) -> Option<&str> {
+        self.specs
+            .get(action)
+            .and_then(|spec| spec.abort_call.as_deref())
     }
 
     pub fn advance_state(&self, state: &mut ActionState) -> ActionAdvanceOutcome {
