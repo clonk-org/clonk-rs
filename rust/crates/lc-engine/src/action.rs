@@ -179,11 +179,11 @@ impl ActionProcedure {
                 }
             }
             ActionProcedure::Flight | ActionProcedure::Hang | ActionProcedure::Attach => 0,
+            ActionProcedure::Dig => 0,
             ActionProcedure::Undefined
             | ActionProcedure::Walk
             | ActionProcedure::Kneel
             | ActionProcedure::Scale
-            | ActionProcedure::Dig
             | ActionProcedure::Throw
             | ActionProcedure::Bridge
             | ActionProcedure::Build
@@ -203,6 +203,7 @@ impl ActionProcedure {
             | ActionProcedure::Hang
             | ActionProcedure::Attach
             | ActionProcedure::Swim
+            | ActionProcedure::Dig
             | ActionProcedure::Kneel
             | ActionProcedure::Bridge
             | ActionProcedure::Build

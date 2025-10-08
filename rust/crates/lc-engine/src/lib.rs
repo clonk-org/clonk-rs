@@ -5460,6 +5460,40 @@ mod tests {
     }
 
     #[test]
+    fn dig_procedure_preserves_velocity_against_gravity_and_wind() {
+        let mut definition = Definition::from_script("Digger", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
+            .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Dig".to_string(),
+            ActionSpec::default().with_procedure("dig"),
+        );
+        definition.configure_actions(Some("Dig".to_string()), actions);
+
+        let mut engine = Engine::with_seed(29);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        engine.set_physics(PhysicsSettings::default());
+        engine.set_environment(EnvironmentSettings::new(7));
+
+        let initial_velocity = Vector2::new(4, -3);
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Digger")
+                    .with_velocity(initial_velocity)
+                    .with_action(ActionState::new("Dig")),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, initial_velocity);
+    }
+
+    #[test]
     fn scale_procedure_zeroes_horizontal_velocity() {
         let mut definition = Definition::from_script("Scaler", "Scaler", PROCEDURE_MOVEMENT_SCRIPT)
             .expect("script compiles");
