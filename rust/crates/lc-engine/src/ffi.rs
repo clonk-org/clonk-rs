@@ -165,6 +165,8 @@ unsafe fn make_snapshot(
             action,
             action_procedure: None,
             effects,
+            container: None,
+            contents: Vec::new(),
             status: ObjectStatus::Normal,
             owner: entry.owner,
             crew_member: entry.crew_member,

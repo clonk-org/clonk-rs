@@ -364,6 +364,10 @@ pub struct ObjectState {
     pub action: ActionState,
     pub effects: Vec<EffectState>,
     #[serde(default)]
+    pub container: Option<ObjectId>,
+    #[serde(default)]
+    pub contents: Vec<ObjectId>,
+    #[serde(default)]
     pub status: ObjectStatus,
     #[serde(default = "default_owner")]
     pub owner: i32,
@@ -372,7 +376,13 @@ pub struct ObjectState {
 }
 
 impl ObjectState {
-    fn apply_delta(&mut self, delta: &ObjectDelta, library: &ActionLibrary) {
+    fn apply_delta(
+        &mut self,
+        delta: &ObjectDelta,
+        library: &ActionLibrary,
+    ) -> Option<(Option<ObjectId>, Option<ObjectId>)> {
+        let previous_container = self.container;
+        let mut container_change = None;
         if let Some(position) = delta.position {
             self.position = position;
         }
@@ -396,8 +406,15 @@ impl ObjectState {
         if let Some(status) = delta.status {
             self.status = status;
         }
+        if let Some(container) = delta.container {
+            if self.container != container {
+                self.container = container;
+                container_change = Some((previous_container, self.container));
+            }
+        }
 
         self.action.reconcile_with_library(library);
+        container_change
     }
 }
 
@@ -410,6 +427,7 @@ struct ObjectDelta {
     status: Option<ObjectStatus>,
     owner: Option<i32>,
     crew_member: Option<bool>,
+    container: Option<Option<ObjectId>>,
 }
 
 impl ObjectDelta {
@@ -428,6 +446,9 @@ impl ObjectDelta {
         }
         if let Some(crew_member) = update.crew_member {
             self.crew_member = Some(crew_member);
+        }
+        if let Some(container) = update.container {
+            self.container = Some(container);
         }
         if let Some(status) = update.status {
             self.status = Some(status);
@@ -451,6 +472,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             status: update.status,
             owner: update.owner,
             crew_member: update.crew_member,
+            container: update.container,
         }
     }
 }
@@ -467,6 +489,8 @@ pub struct ObjectUpdate {
     pub owner: Option<i32>,
     #[serde(default)]
     pub crew_member: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<Option<ObjectId>>,
 }
 
 impl ObjectUpdate {
@@ -525,6 +549,16 @@ impl ObjectUpdate {
         self
     }
 
+    pub fn with_container(mut self, container: ObjectId) -> Self {
+        self.container = Some(Some(container));
+        self
+    }
+
+    pub fn clear_container(mut self) -> Self {
+        self.container = Some(None);
+        self
+    }
+
     pub fn with_crew_member(mut self, crew_member: bool) -> Self {
         self.crew_member = Some(crew_member);
         self
@@ -538,6 +572,7 @@ impl ObjectUpdate {
             && self.status.is_none()
             && self.owner.is_none()
             && self.crew_member.is_none()
+            && self.container.is_none()
     }
 }
 
@@ -707,11 +742,19 @@ struct Object {
     command_queue: VecDeque<QueuedCommand>,
 }
 
+#[derive(Debug)]
+struct ContainerUpdateRecord {
+    object_id: ObjectId,
+    previous: Option<ObjectId>,
+    new: Option<ObjectId>,
+}
+
 #[derive(Debug, Default)]
 struct CommandQueueOutcome {
     spawns: Vec<SpawnConfig>,
     destroy: bool,
     effect_events: Vec<EffectEvent>,
+    container_updates: Vec<ContainerUpdateRecord>,
 }
 
 impl Object {
@@ -747,6 +790,8 @@ impl Object {
             action: self.state.action.clone(),
             action_procedure: procedure,
             effects: self.state.effects.clone(),
+            container: self.state.container,
+            contents: self.state.contents.clone(),
             status: self.state.status,
             owner: self.state.owner,
             crew_member: self.state.crew_member,
@@ -877,7 +922,13 @@ impl Object {
 
             let command = self.command_queue.pop_front().expect("front exists");
             let delta: ObjectDelta = command.update.into();
-            self.state.apply_delta(&delta, action_library);
+            if let Some((previous, new)) = self.state.apply_delta(&delta, action_library) {
+                outcome.container_updates.push(ContainerUpdateRecord {
+                    object_id: self.id,
+                    previous,
+                    new,
+                });
+            }
             let mut effect_events = self.apply_effect_commands(&command.effects);
             if let Some(status) = delta.status {
                 let mut status_events = self.apply_status(status);
@@ -927,6 +978,8 @@ pub enum EngineError {
     UnknownDefinition(String),
     #[error("unknown object `{0}`")]
     UnknownObject(ObjectId),
+    #[error("container error for object {object}: {detail}")]
+    Container { object: ObjectId, detail: String },
     #[error("crew selection error for owner {owner}: {detail}")]
     CrewSelection { owner: i32, detail: String },
     #[error("crew role error for owner {owner}: {detail}")]
@@ -968,6 +1021,8 @@ pub struct SpawnConfig {
     pub crew_member: Option<bool>,
     #[serde(default)]
     pub status: Option<ObjectStatus>,
+    #[serde(default)]
+    pub container: Option<ObjectId>,
 }
 
 impl SpawnConfig {
@@ -982,6 +1037,7 @@ impl SpawnConfig {
             owner: OWNER_NONE,
             crew_member: None,
             status: None,
+            container: None,
         }
     }
 
@@ -1029,6 +1085,11 @@ impl SpawnConfig {
         self.crew_member = Some(crew_member);
         self
     }
+
+    pub fn with_container(mut self, container: ObjectId) -> Self {
+        self.container = Some(container);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1044,6 +1105,10 @@ pub struct ObjectSnapshot {
     pub action_procedure: Option<String>,
     #[serde(default)]
     pub effects: Vec<EffectState>,
+    #[serde(default)]
+    pub container: Option<ObjectId>,
+    #[serde(default)]
+    pub contents: Vec<ObjectId>,
     #[serde(default)]
     pub status: ObjectStatus,
     #[serde(default = "default_owner")]
@@ -1807,6 +1872,7 @@ impl Engine {
                 queued_spawns,
                 queue_destroy,
                 queue_events,
+                container_updates,
                 (object_id, previous_owner, new_owner, new_crew),
             ) = {
                 let object = &mut self.objects[idx];
@@ -1822,10 +1888,15 @@ impl Engine {
                     outcome.spawns,
                     outcome.destroy,
                     outcome.effect_events,
+                    outcome.container_updates,
                     (object.id, previous_owner, new_owner, new_crew),
                 )
             };
             self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
+
+            for update in container_updates {
+                self.apply_container_change(update.object_id, update.previous, update.new)?;
+            }
 
             if !queue_events.is_empty() {
                 let object_id = self.objects[idx].id;
@@ -1937,10 +2008,10 @@ impl Engine {
             } = command;
 
             let mut effect_events = Vec::new();
-            let (object_id, previous_owner, new_owner, new_crew) = {
+            let (object_id, previous_owner, new_owner, new_crew, container_change) = {
                 let object = &mut self.objects[idx];
                 let previous_owner = object.state.owner;
-                object.state.apply_delta(&delta, &action_library);
+                let container_change = object.state.apply_delta(&delta, &action_library);
                 let mut applied = object.apply_effect_commands(&effects);
                 effect_events.append(&mut applied);
                 self.physics.clamp_velocity(&mut object.state.velocity);
@@ -1955,33 +2026,47 @@ impl Engine {
                     previous_owner,
                     object.state.owner,
                     object.state.crew_member,
+                    container_change,
                 )
             };
             self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
+            if let Some((previous_container, new_container)) = container_change {
+                self.apply_container_change(object_id, previous_container, new_container)?;
+            }
 
             if !global_effects.is_empty() {
                 self.apply_global_effect_commands(&global_effects);
             }
 
             if !effect_events.is_empty() {
-                let definition = self
-                    .definitions
-                    .get(&definition_id)
-                    .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                let global_view = self.global_effects.clone();
-                let object = &mut self.objects[idx];
-                let rng_state = self.rng.clone();
-                let (global_cmds, new_rng) = Self::run_effect_events_for_object(
-                    definition,
-                    rng_state,
-                    object_id,
-                    object,
-                    effect_events,
-                    global_view,
-                )?;
-                self.rng = new_rng;
+                let previous_container;
+                let new_container;
+                let global_cmds = {
+                    let definition = self
+                        .definitions
+                        .get(&definition_id)
+                        .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let global_view = self.global_effects.clone();
+                    let object = &mut self.objects[idx];
+                    previous_container = object.state.container;
+                    let rng_state = self.rng.clone();
+                    let (global_cmds, new_rng) = Self::run_effect_events_for_object(
+                        definition,
+                        rng_state,
+                        object_id,
+                        object,
+                        effect_events,
+                        global_view,
+                    )?;
+                    self.rng = new_rng;
+                    new_container = object.state.container;
+                    global_cmds
+                };
                 if !global_cmds.is_empty() {
                     self.apply_global_effect_commands(&global_cmds);
+                }
+                if previous_container != new_container {
+                    self.apply_container_change(object_id, previous_container, new_container)?;
                 }
             }
 
@@ -1993,6 +2078,7 @@ impl Engine {
             spawn_requests.extend(spawns.into_iter());
         }
 
+        self.detach_destroyed_objects()?;
         self.objects.retain(|object| !object.destroyed);
         self.prune_selection();
         self.process_spawn_queue(spawn_requests)?;
@@ -2033,6 +2119,7 @@ impl Engine {
             status,
             owner,
             crew_member,
+            container,
         } = update;
 
         let definition_id = self.objects[index].definition_id.clone();
@@ -2044,9 +2131,11 @@ impl Engine {
             definition.action_library().clone()
         };
 
-        let (object_id, previous_owner, new_owner, new_crew) = {
+        let (object_id, previous_owner, new_owner, new_crew, container_change) = {
             let object = &mut self.objects[index];
             let previous_owner = object.state.owner;
+            let previous_container = object.state.container;
+            let mut container_change = None;
 
             if let Some(position) = position {
                 object.state.position = position;
@@ -2074,6 +2163,12 @@ impl Engine {
             if let Some(status) = status {
                 object.apply_status(status);
             }
+            if let Some(container_update) = container {
+                if object.state.container != container_update {
+                    object.state.container = container_update;
+                    container_change = Some((previous_container, object.state.container));
+                }
+            }
 
             self.physics.clamp_velocity(&mut object.state.velocity);
 
@@ -2091,10 +2186,19 @@ impl Engine {
                 previous_owner,
                 object.state.owner,
                 object.state.crew_member,
+                container_change,
             )
         };
 
         self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
+        if let Some((previous_container, new_container)) = container_change {
+            self.apply_container_change(object_id, previous_container, new_container)?;
+        }
+        if self.objects[index].destroyed
+            || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
+        {
+            self.detach_destroyed_objects()?;
+        }
         self.refresh_elimination_state();
 
         Ok(())
@@ -2228,6 +2332,7 @@ impl Engine {
             .map(|(&owner, selection)| (owner, CrewSelection::from(selection.clone())))
             .collect();
 
+        let mut container_assignments = Vec::new();
         for persisted in &state.objects {
             let snapshot = &persisted.snapshot;
             let mut object = Object::new(
@@ -2239,6 +2344,8 @@ impl Engine {
                     energy: snapshot.energy,
                     action: snapshot.action.clone(),
                     effects: snapshot.effects.clone(),
+                    container: None,
+                    contents: Vec::new(),
                     status: snapshot.status,
                     owner: snapshot.owner,
                     crew_member: snapshot.crew_member,
@@ -2246,6 +2353,13 @@ impl Engine {
             );
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
             self.objects.push(object);
+            if let Some(container) = snapshot.container {
+                container_assignments.push((snapshot.id, container));
+            }
+        }
+
+        for (object_id, container) in container_assignments {
+            self.apply_container_change(object_id, None, Some(container))?;
         }
 
         self.crew_roles = state
@@ -2577,6 +2691,118 @@ impl Engine {
         ObjectId::new(id)
     }
 
+    fn find_object_index(&self, id: ObjectId) -> Option<usize> {
+        self.objects.iter().position(|object| object.id == id)
+    }
+
+    fn is_container_cycle(&self, object_id: ObjectId, container_id: ObjectId) -> bool {
+        let mut current = Some(container_id);
+        while let Some(id) = current {
+            if id == object_id {
+                return true;
+            }
+            current = self
+                .objects
+                .iter()
+                .find(|object| object.id == id)
+                .and_then(|object| object.state.container);
+        }
+        false
+    }
+
+    fn apply_container_change(
+        &mut self,
+        object_id: ObjectId,
+        previous: Option<ObjectId>,
+        new: Option<ObjectId>,
+    ) -> Result<(), EngineError> {
+        if previous == new {
+            return Ok(());
+        }
+
+        if let Some(prev_id) = previous {
+            if let Some(prev_index) = self.find_object_index(prev_id) {
+                let contents = &mut self.objects[prev_index].state.contents;
+                contents.retain(|&child| child != object_id);
+            }
+        }
+
+        let object_index = match self.find_object_index(object_id) {
+            Some(index) => index,
+            None => return Err(EngineError::UnknownObject(object_id)),
+        };
+
+        match new {
+            Some(container_id) => {
+                if container_id == object_id {
+                    return Err(EngineError::Container {
+                        object: object_id,
+                        detail: "object cannot contain itself".into(),
+                    });
+                }
+                let container_index = match self.find_object_index(container_id) {
+                    Some(index) => index,
+                    None => return Err(EngineError::UnknownObject(container_id)),
+                };
+                let container = &self.objects[container_index];
+                if container.destroyed || matches!(container.state.status, ObjectStatus::Deleted) {
+                    return Err(EngineError::Container {
+                        object: object_id,
+                        detail: format!("container {} is destroyed", container_id),
+                    });
+                }
+                if self.is_container_cycle(object_id, container_id) {
+                    return Err(EngineError::Container {
+                        object: object_id,
+                        detail: format!("container {} would create a cycle", container_id),
+                    });
+                }
+
+                let contents = &mut self.objects[container_index].state.contents;
+                if !contents.contains(&object_id) {
+                    contents.push(object_id);
+                    contents.sort_by_key(|id| id.as_u64());
+                }
+
+                self.objects[object_index].state.container = Some(container_id);
+            }
+            None => {
+                self.objects[object_index].state.container = None;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn detach_destroyed_objects(&mut self) -> Result<(), EngineError> {
+        let mut updates = Vec::new();
+        for object in &self.objects {
+            if (object.destroyed || matches!(object.state.status, ObjectStatus::Deleted))
+                && object.state.container.is_some()
+            {
+                updates.push((object.id, object.state.container));
+            }
+
+            if object.destroyed || matches!(object.state.status, ObjectStatus::Deleted) {
+                for child in &object.state.contents {
+                    updates.push((*child, Some(object.id)));
+                }
+            }
+        }
+
+        for (object_id, previous) in updates {
+            self.apply_container_change(object_id, previous, None)?;
+        }
+
+        for object in &mut self.objects {
+            if object.destroyed || matches!(object.state.status, ObjectStatus::Deleted) {
+                object.state.contents.clear();
+            }
+        }
+
+        Ok(())
+    }
+
     fn apply_global_effect_commands(&mut self, commands: &[EffectCommand]) {
         apply_effect_commands_to_stack(&mut self.global_effects, commands);
     }
@@ -2601,6 +2827,7 @@ impl Engine {
             owner,
             crew_member,
             status,
+            container,
         } = config;
 
         let definition_ref = self
@@ -2625,11 +2852,18 @@ impl Engine {
                 energy,
                 action: initial_action,
                 effects: Vec::new(),
+                container: None,
+                contents: Vec::new(),
                 status: status.unwrap_or_default(),
                 owner,
                 crew_member: initial_crew_member,
             },
         );
+        let mut container_changes = Vec::new();
+        if let Some(container_id) = container {
+            object.state.container = Some(container_id);
+            container_changes.push((None, Some(container_id)));
+        }
 
         let mut effect_events = Vec::new();
         if !effects.is_empty() {
@@ -2680,7 +2914,9 @@ impl Engine {
                     detail: "Initialize may not destroy the object".into(),
                 });
             }
-            object.state.apply_delta(&delta, &action_library);
+            if let Some(change) = object.state.apply_delta(&delta, &action_library) {
+                container_changes.push(change);
+            }
             let mut applied = object.apply_effect_commands(&effects);
             effect_events.append(&mut applied);
             if !global_effects.is_empty() {
@@ -2699,6 +2935,7 @@ impl Engine {
                 .get(&definition_id)
                 .expect("definition must exist");
             let global_view = self.global_effects.clone();
+            let previous_container = object.state.container;
             let rng_state = self.rng.clone();
             let (global_cmds, new_rng) = Self::run_effect_events_for_object(
                 definition,
@@ -2712,10 +2949,16 @@ impl Engine {
             if !global_cmds.is_empty() {
                 self.apply_global_effect_commands(&global_cmds);
             }
+            if previous_container != object.state.container {
+                container_changes.push((previous_container, object.state.container));
+            }
         }
 
         self.apply_landscape(&mut object.state);
         self.objects.push(object);
+        for (previous, new) in container_changes {
+            self.apply_container_change(id, previous, new)?;
+        }
         Ok((id, additional_spawns))
     }
 
@@ -2754,6 +2997,23 @@ fn build_state_value(
     map.insert("owner".into(), Value::Int(state.owner));
     map.insert("crew_member".into(), Value::Bool(state.crew_member));
     map.insert("status".into(), Value::Int(state.status.to_script_value()));
+    match state.container {
+        Some(container) => {
+            map.insert(
+                "container".into(),
+                Value::Int(truncate_to_i32(container.as_u64())),
+            );
+        }
+        None => {
+            map.insert("container".into(), Value::Nil);
+        }
+    }
+    let contents: Vec<_> = state
+        .contents
+        .iter()
+        .map(|id| Value::Int(truncate_to_i32(id.as_u64())))
+        .collect();
+    map.insert("contents".into(), Value::Array(contents));
     let mut action = HashMap::with_capacity(4);
     action.insert("name".into(), Value::String(state.action.name.clone()));
     action.insert("phase".into(), Value::Int(state.action.phase));
@@ -5306,6 +5566,146 @@ mod tests {
         let snapshot = engine.tick().expect("second tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.position, Vector2::new(6, -7));
+    }
+
+    fn simple_definition(id: &str) -> Definition {
+        Definition::from_script(
+            id,
+            id,
+            r#"
+            global func Initialize(state, random) { return nil; }
+            global func Step(state, frame, random) { return nil; }
+            "#,
+        )
+        .expect("script compiles")
+    }
+
+    #[test]
+    fn spawn_assigns_container_relationships() {
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(simple_definition("Crate"))
+            .expect("crate registers");
+        engine
+            .register_definition(simple_definition("Gem"))
+            .expect("gem registers");
+
+        let crate_id = engine
+            .spawn_object(SpawnConfig::new("Crate"))
+            .expect("crate spawns");
+        let gem_id = engine
+            .spawn_object(SpawnConfig::new("Gem").with_container(crate_id))
+            .expect("gem spawns");
+
+        let crate_snapshot = engine.object_snapshot(crate_id).expect("crate snapshot");
+        assert_eq!(crate_snapshot.contents, vec![gem_id]);
+
+        let gem_snapshot = engine.object_snapshot(gem_id).expect("gem snapshot");
+        assert_eq!(gem_snapshot.container, Some(crate_id));
+    }
+
+    #[test]
+    fn object_update_moves_between_containers() {
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(simple_definition("Crate"))
+            .expect("crate registers");
+        engine
+            .register_definition(simple_definition("Chest"))
+            .expect("chest registers");
+        engine
+            .register_definition(simple_definition("Gem"))
+            .expect("gem registers");
+
+        let crate_id = engine
+            .spawn_object(SpawnConfig::new("Crate"))
+            .expect("crate spawns");
+        let chest_id = engine
+            .spawn_object(SpawnConfig::new("Chest"))
+            .expect("chest spawns");
+        let gem_id = engine
+            .spawn_object(SpawnConfig::new("Gem").with_container(crate_id))
+            .expect("gem spawns");
+
+        engine
+            .apply_object_update(gem_id, ObjectUpdate::new().with_container(chest_id))
+            .expect("update succeeds");
+
+        let crate_snapshot = engine.object_snapshot(crate_id).expect("crate snapshot");
+        assert!(crate_snapshot.contents.is_empty());
+
+        let chest_snapshot = engine.object_snapshot(chest_id).expect("chest snapshot");
+        assert_eq!(chest_snapshot.contents, vec![gem_id]);
+
+        let gem_snapshot = engine.object_snapshot(gem_id).expect("gem snapshot");
+        assert_eq!(gem_snapshot.container, Some(chest_id));
+    }
+
+    #[test]
+    fn destroying_container_detaches_contents() {
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(simple_definition("Crate"))
+            .expect("crate registers");
+        engine
+            .register_definition(simple_definition("Gem"))
+            .expect("gem registers");
+
+        let crate_id = engine
+            .spawn_object(SpawnConfig::new("Crate"))
+            .expect("crate spawns");
+        let gem_id = engine
+            .spawn_object(SpawnConfig::new("Gem").with_container(crate_id))
+            .expect("gem spawns");
+
+        engine
+            .apply_object_update(
+                crate_id,
+                ObjectUpdate::new().with_status(ObjectStatus::Deleted),
+            )
+            .expect("delete succeeds");
+
+        let gem_snapshot = engine.object_snapshot(gem_id).expect("gem snapshot");
+        assert_eq!(gem_snapshot.container, None);
+
+        let crate_snapshot = engine.object_snapshot(crate_id).expect("crate snapshot");
+        assert!(crate_snapshot.contents.is_empty());
+        assert_eq!(crate_snapshot.status, ObjectStatus::Deleted);
+    }
+
+    #[test]
+    fn capture_state_restores_container_relationships() {
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(simple_definition("Crate"))
+            .expect("crate registers");
+        engine
+            .register_definition(simple_definition("Gem"))
+            .expect("gem registers");
+
+        let crate_id = engine
+            .spawn_object(SpawnConfig::new("Crate"))
+            .expect("crate spawns");
+        let gem_id = engine
+            .spawn_object(SpawnConfig::new("Gem").with_container(crate_id))
+            .expect("gem spawns");
+
+        let state = engine.capture_state();
+
+        let mut restored = Engine::with_seed(1);
+        restored
+            .register_definition(simple_definition("Crate"))
+            .expect("crate registers");
+        restored
+            .register_definition(simple_definition("Gem"))
+            .expect("gem registers");
+        restored.restore_state(&state).expect("restore succeeds");
+
+        let crate_snapshot = restored.object_snapshot(crate_id).expect("crate snapshot");
+        assert_eq!(crate_snapshot.contents, vec![gem_id]);
+
+        let gem_snapshot = restored.object_snapshot(gem_id).expect("gem snapshot");
+        assert_eq!(gem_snapshot.container, Some(crate_id));
     }
 
     #[test]

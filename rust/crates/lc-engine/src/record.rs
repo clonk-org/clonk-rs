@@ -301,6 +301,8 @@ mod tests {
                 action: ActionState::default(),
                 action_procedure: None,
                 effects: Vec::new(),
+                container: None,
+                contents: Vec::new(),
                 status: ObjectStatus::Normal,
                 owner: OWNER_NONE,
                 crew_member: false,
