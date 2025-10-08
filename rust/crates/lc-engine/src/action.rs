@@ -202,13 +202,26 @@ impl ActionProcedure {
             ActionProcedure::Flight
             | ActionProcedure::Hang
             | ActionProcedure::Attach
-            | ActionProcedure::Swim => false,
+            | ActionProcedure::Swim
+            | ActionProcedure::Kneel
+            | ActionProcedure::Bridge
+            | ActionProcedure::Build
+            | ActionProcedure::Throw
+            | ActionProcedure::Scale => false,
             _ => true,
         }
     }
 
     pub fn locks_vertical_velocity(self) -> bool {
-        matches!(self, ActionProcedure::Hang | ActionProcedure::Attach)
+        matches!(
+            self,
+            ActionProcedure::Hang
+                | ActionProcedure::Attach
+                | ActionProcedure::Kneel
+                | ActionProcedure::Bridge
+                | ActionProcedure::Build
+                | ActionProcedure::Throw
+        )
     }
 }
 

@@ -3276,6 +3276,15 @@ impl Engine {
         if procedure.locks_vertical_velocity() {
             object.state.velocity.y = 0;
         }
+        match procedure {
+            ActionProcedure::Bridge | ActionProcedure::Build | ActionProcedure::Throw => {
+                object.state.velocity = Vector2::ZERO;
+            }
+            ActionProcedure::Scale => {
+                object.state.velocity.x = 0;
+            }
+            _ => {}
+        }
         self.physics.clamp_velocity(&mut object.state.velocity);
     }
 
@@ -5383,6 +5392,103 @@ mod tests {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity.y, 0);
         assert_eq!(object.velocity.x, 1);
+    }
+
+    #[test]
+    fn bridge_procedure_freezes_velocity_and_ignores_wind() {
+        let mut definition =
+            Definition::from_script("Bridger", "Bridger", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Bridge".to_string(),
+            ActionSpec::default().with_procedure("bridge"),
+        );
+        definition.configure_actions(Some("Bridge".to_string()), actions);
+
+        let mut engine = Engine::with_seed(13);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        engine.set_environment(EnvironmentSettings::new(6));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Bridger")
+                    .with_velocity(Vector2::new(8, -3))
+                    .with_action(ActionState::new("Bridge")),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::ZERO);
+    }
+
+    #[test]
+    fn kneel_procedure_locks_vertical_velocity_and_blocks_wind() {
+        let mut definition =
+            Definition::from_script("Kneeler", "Kneeler", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Kneel".to_string(),
+            ActionSpec::default().with_procedure("kneel"),
+        );
+        definition.configure_actions(Some("Kneel".to_string()), actions);
+
+        let mut engine = Engine::with_seed(19);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        engine.set_environment(EnvironmentSettings::new(8));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Kneeler")
+                    .with_velocity(Vector2::new(5, -4))
+                    .with_action(ActionState::new("Kneel")),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity.y, 0);
+        assert_eq!(object.velocity.x, 5);
+    }
+
+    #[test]
+    fn scale_procedure_zeroes_horizontal_velocity() {
+        let mut definition = Definition::from_script("Scaler", "Scaler", PROCEDURE_MOVEMENT_SCRIPT)
+            .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Scale".to_string(),
+            ActionSpec::default().with_procedure("scale"),
+        );
+        definition.configure_actions(Some("Scale".to_string()), actions);
+
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        engine.set_environment(EnvironmentSettings::new(3));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Scaler")
+                    .with_velocity(Vector2::new(-7, 2))
+                    .with_action(ActionState::new("Scale")),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity.x, 0);
+        assert_eq!(object.velocity.y, 3);
     }
 
     #[test]
