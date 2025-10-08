@@ -60,6 +60,7 @@ struct SnapshotEntry {
     std::string action;
     std::vector<LcEngineEffectSnapshot> effects;
     std::vector<std::string> effect_names;
+    std::vector<uint64_t> contents;
 };
 
 struct CrewSelectionEntry {
@@ -197,6 +198,24 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
             active_owners.insert(entry.snapshot.owner);
         }
 
+        if (object->Contained) {
+            if (C4Object *container = object->Contained.Object()) {
+                if (container->Status) {
+                    entry.snapshot.has_container = true;
+                    entry.snapshot.container_id =
+                        static_cast<uint64_t>(container->Number);
+                }
+            }
+        }
+
+        for (C4ObjectLink *link = object->Contents.First; link; link = link->Next) {
+            C4Object *contained = link->Obj;
+            if (!contained || !contained->Status) {
+                continue;
+            }
+            entry.contents.push_back(static_cast<uint64_t>(contained->Number));
+        }
+
         if (object->pEffects) {
             size_t effect_count = 0;
             for (C4Effect *effect = object->pEffects; effect; effect = effect->pNext) {
@@ -244,6 +263,8 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
         entry.snapshot.action_name = entry.action.c_str();
         entry.snapshot.effects = entry.effects.empty() ? nullptr : entry.effects.data();
         entry.snapshot.effect_count = entry.effects.size();
+        entry.snapshot.contents = entry.contents.empty() ? nullptr : entry.contents.data();
+        entry.snapshot.contents_count = entry.contents.size();
         buffer.raw.push_back(entry.snapshot);
     }
 

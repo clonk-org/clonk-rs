@@ -38,6 +38,10 @@ pub struct LcEngineObjectSnapshot {
     pub command_direction: i32,
     pub effects: *const LcEngineEffectSnapshot,
     pub effect_count: usize,
+    pub has_container: bool,
+    pub container_id: u64,
+    pub contents: *const u64,
+    pub contents_len: usize,
 }
 
 #[repr(C)]
@@ -184,6 +188,21 @@ unsafe fn make_snapshot(
             effects.push(effect);
         }
 
+        let container = if entry.has_container {
+            Some(ObjectId::new(entry.container_id))
+        } else {
+            None
+        };
+
+        let contents_slice: &[u64] = if entry.contents_len == 0 {
+            &[]
+        } else if entry.contents.is_null() {
+            return None;
+        } else {
+            slice::from_raw_parts(entry.contents, entry.contents_len)
+        };
+        let contents = contents_slice.iter().copied().map(ObjectId::new).collect();
+
         snapshots.push(ObjectSnapshot {
             id: ObjectId::new(entry.id),
             definition_id,
@@ -196,8 +215,8 @@ unsafe fn make_snapshot(
             action_procedure: None,
             effects,
             vertices: Vec::new(),
-            container: None,
-            contents: Vec::new(),
+            container,
+            contents,
             status: ObjectStatus::Normal,
             owner: entry.owner,
             crew_member: entry.crew_member,
@@ -949,6 +968,10 @@ mod tests {
             command_direction: 3,
             effects: &effect_snapshot,
             effect_count: 1,
+            has_container: false,
+            container_id: 0,
+            contents: ptr::null(),
+            contents_len: 0,
         };
 
         let snapshot = unsafe {
@@ -1083,5 +1106,94 @@ mod tests {
 
         assert_eq!(snapshot.known_crew_owners, vec![1]);
         assert_eq!(snapshot.eliminated_crew_owners, vec![2]);
+    }
+
+    #[test]
+    fn make_snapshot_collects_container_relationships() {
+        let container_contents = [2u64];
+        let container_snapshot = LcEngineObjectSnapshot {
+            id: 1,
+            definition_id: ptr::null(),
+            position_x: 0,
+            position_y: 0,
+            velocity_x: 0,
+            velocity_y: 0,
+            energy: 0,
+            owner: -1,
+            crew_member: false,
+            action_name: ptr::null(),
+            action_phase: 0,
+            action_ticks: 0,
+            direction: 0,
+            command_direction: 0,
+            effects: ptr::null(),
+            effect_count: 0,
+            has_container: false,
+            container_id: 0,
+            contents: container_contents.as_ptr(),
+            contents_len: container_contents.len(),
+        };
+
+        let child_snapshot = LcEngineObjectSnapshot {
+            id: 2,
+            definition_id: ptr::null(),
+            position_x: 0,
+            position_y: 0,
+            velocity_x: 0,
+            velocity_y: 0,
+            energy: 0,
+            owner: -1,
+            crew_member: false,
+            action_name: ptr::null(),
+            action_phase: 0,
+            action_ticks: 0,
+            direction: 0,
+            command_direction: 0,
+            effects: ptr::null(),
+            effect_count: 0,
+            has_container: true,
+            container_id: 1,
+            contents: ptr::null(),
+            contents_len: 0,
+        };
+
+        let objects = [container_snapshot, child_snapshot];
+
+        let snapshot = unsafe {
+            make_snapshot(
+                1,
+                objects.as_ptr(),
+                objects.len(),
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        }
+        .expect("snapshot should include container data");
+
+        let container = snapshot
+            .objects
+            .iter()
+            .find(|object| object.id.as_u64() == 1)
+            .expect("container present");
+        let mut contents: Vec<_> = container.contents.iter().map(|id| id.as_u64()).collect();
+        contents.sort_unstable();
+        assert_eq!(contents, vec![2]);
+        assert!(container.container.is_none());
+
+        let child = snapshot
+            .objects
+            .iter()
+            .find(|object| object.id.as_u64() == 2)
+            .expect("child present");
+        assert_eq!(child.container.map(|id| id.as_u64()), Some(1));
+        assert!(child.contents.is_empty());
     }
 }

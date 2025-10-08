@@ -9,6 +9,7 @@
 - Push procedure parity keeps the pusher aligned with the target, imparts horizontal velocity based on command direction, and cleanly reverts when the target is unavailable.
 - Pull procedure parity now mirrors the C++ towing offsets, range checks, and velocity handling for validation runs.
 - `std_markup::strip_markup` now handles unterminated inline image tags exactly like the legacy C++ path, removing stray `{{` brace pairs instead of leaving them in Rust output.
+- Object container relationships and per-object inventories are now surfaced in parity snapshots, letting the Rust runtime validate contents against the C++ engine.
 
 ## Priority Backlog
 

@@ -36,6 +36,10 @@ typedef struct LcEngineObjectSnapshot {
     int32_t command_direction;
     const LcEngineEffectSnapshot *effects;
     size_t effect_count;
+    bool has_container;
+    uint64_t container_id;
+    const uint64_t *contents;
+    size_t contents_count;
 } LcEngineObjectSnapshot;
 
 typedef struct LcEngineCrewSelectionSnapshot {
