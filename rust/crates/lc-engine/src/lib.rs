@@ -899,6 +899,14 @@ pub struct SimulationSnapshot {
     pub objects: Vec<ObjectSnapshot>,
     #[serde(default)]
     pub global_effects: Vec<EffectState>,
+    #[serde(default)]
+    pub crew_selection: HashMap<i32, CrewSelectionState>,
+    #[serde(default)]
+    pub crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
+    #[serde(default)]
+    pub known_crew_owners: Vec<i32>,
+    #[serde(default)]
+    pub eliminated_crew_owners: Vec<i32>,
 }
 
 impl SimulationSnapshot {
@@ -1820,10 +1828,25 @@ impl Engine {
     pub fn snapshot(&self) -> SimulationSnapshot {
         let mut objects: Vec<_> = self.objects.iter().map(Object::snapshot).collect();
         objects.sort_by_key(|object| object.id);
+        let crew_selection = self
+            .crew_selection
+            .iter()
+            .map(|(&owner, selection)| (owner, CrewSelectionState::from(selection)))
+            .collect();
+        let crew_roles = self.crew_roles.clone();
+        let mut known_crew_owners: Vec<_> = self.known_crew_owners.iter().cloned().collect();
+        known_crew_owners.sort_unstable();
+        let mut eliminated_crew_owners: Vec<_> =
+            self.eliminated_crew_owners.iter().cloned().collect();
+        eliminated_crew_owners.sort_unstable();
         SimulationSnapshot {
             frame: self.frame,
             objects,
             global_effects: self.global_effects.clone(),
+            crew_selection,
+            crew_roles,
+            known_crew_owners,
+            eliminated_crew_owners,
         }
     }
 

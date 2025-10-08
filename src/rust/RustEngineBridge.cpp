@@ -10,6 +10,7 @@
 #include <C4Object.h>
 #include <C4ObjectList.h>
 #include <C4Effects.h>
+#include <C4Player.h>
 
 #include <Fixed.h>
 
@@ -18,6 +19,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -51,11 +53,28 @@ struct SnapshotEntry {
     std::vector<std::string> effect_names;
 };
 
+struct CrewSelectionEntry {
+    LcEngineCrewSelectionSnapshot snapshot{};
+    std::vector<uint64_t> selected;
+};
+
+struct CrewRoleEntry {
+    LcEngineCrewRoleSnapshot snapshot{};
+    std::vector<LcEngineCrewRoleAssignment> assignments;
+    std::vector<std::string> role_names;
+};
+
 struct SnapshotBuffer {
     std::vector<SnapshotEntry> entries;
     std::vector<LcEngineObjectSnapshot> raw;
     std::vector<LcEngineEffectSnapshot> global_effects;
     std::vector<std::string> global_effect_names;
+    std::vector<CrewSelectionEntry> crew_selections;
+    std::vector<LcEngineCrewSelectionSnapshot> crew_selection_raw;
+    std::vector<CrewRoleEntry> crew_roles;
+    std::vector<LcEngineCrewRoleSnapshot> crew_role_raw;
+    std::vector<int32_t> known_crew_owners;
+    std::vector<int32_t> eliminated_crew_owners;
 };
 
 std::mutex g_mutex;
@@ -87,6 +106,7 @@ std::string LoadFile(const std::string &path) {
 
 SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
     SnapshotBuffer buffer;
+    std::set<int32_t> active_owners;
     for (auto it = game.Objects.begin(); it != game.Objects.end(); ++it) {
         C4Object *object = *it;
         if (!object || !object->Status) {
@@ -105,6 +125,10 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
         entry.action = object->Action.Name;
         entry.snapshot.action_name = entry.action.c_str();
         entry.snapshot.action_phase = object->Action.Phase;
+
+        if (entry.snapshot.crew_member && entry.snapshot.owner != NO_OWNER) {
+            active_owners.insert(entry.snapshot.owner);
+        }
 
         if (object->pEffects) {
             size_t effect_count = 0;
@@ -172,6 +196,77 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
     for (size_t i = 0; i < buffer.global_effects.size(); ++i) {
         buffer.global_effects[i].name = buffer.global_effect_names[i].c_str();
     }
+
+    for (C4Player *player = game.Players.First; player; player = player->Next) {
+        if (!player) {
+            continue;
+        }
+        const int32_t owner = static_cast<int32_t>(player->Number);
+        if (owner == NO_OWNER) {
+            continue;
+        }
+
+        CrewSelectionEntry selection_entry;
+        selection_entry.snapshot.owner = owner;
+        if (player->Cursor && player->Cursor->Status) {
+            selection_entry.snapshot.has_cursor = true;
+            selection_entry.snapshot.cursor = static_cast<uint64_t>(player->Cursor->Number);
+        }
+
+        for (C4ObjectLink *link = player->Crew.First; link; link = link->Next) {
+            C4Object *crew = link->Obj;
+            if (!crew || !crew->Status) {
+                continue;
+            }
+            if (crew->Select) {
+                selection_entry.selected.push_back(static_cast<uint64_t>(crew->Number));
+            }
+        }
+
+        if (!selection_entry.selected.empty() || selection_entry.snapshot.has_cursor) {
+            buffer.crew_selections.push_back(std::move(selection_entry));
+        }
+
+        if (player->Eliminated) {
+            buffer.eliminated_crew_owners.push_back(owner);
+        }
+    }
+
+    buffer.crew_selection_raw.reserve(buffer.crew_selections.size());
+    for (auto &entry : buffer.crew_selections) {
+        entry.snapshot.selected = entry.selected.empty() ? nullptr : entry.selected.data();
+        entry.snapshot.selected_count = entry.selected.size();
+        buffer.crew_selection_raw.push_back(entry.snapshot);
+        active_owners.insert(entry.snapshot.owner);
+    }
+
+    buffer.crew_role_raw.reserve(buffer.crew_roles.size());
+    for (auto &entry : buffer.crew_roles) {
+        for (size_t i = 0; i < entry.assignments.size(); ++i) {
+            entry.assignments[i].role = entry.role_names[i].c_str();
+        }
+        entry.snapshot.assignments =
+            entry.assignments.empty() ? nullptr : entry.assignments.data();
+        entry.snapshot.assignment_count = entry.assignments.size();
+        buffer.crew_role_raw.push_back(entry.snapshot);
+        active_owners.insert(entry.snapshot.owner);
+    }
+
+    std::sort(
+        buffer.eliminated_crew_owners.begin(),
+        buffer.eliminated_crew_owners.end());
+    buffer.eliminated_crew_owners.erase(
+        std::unique(
+            buffer.eliminated_crew_owners.begin(),
+            buffer.eliminated_crew_owners.end()),
+        buffer.eliminated_crew_owners.end());
+
+    std::set<int32_t> known_owners = active_owners;
+    for (int32_t owner : buffer.eliminated_crew_owners) {
+        known_owners.insert(owner);
+    }
+    buffer.known_crew_owners.assign(known_owners.begin(), known_owners.end());
+    std::sort(buffer.known_crew_owners.begin(), buffer.known_crew_owners.end());
 
     return buffer;
 }
@@ -307,9 +402,20 @@ void OnFrame(C4Game &game) {
     SnapshotBuffer buffer = CollectSnapshotBuffer(game);
     const auto &raw = buffer.raw;
     const auto &global_effects = buffer.global_effects;
+    const auto &crew_selection = buffer.crew_selection_raw;
+    const auto &crew_roles = buffer.crew_role_raw;
     const LcEngineObjectSnapshot *object_data = raw.empty() ? nullptr : raw.data();
     const LcEngineEffectSnapshot *global_effect_data =
         global_effects.empty() ? nullptr : global_effects.data();
+    const LcEngineCrewSelectionSnapshot *crew_selection_data =
+        crew_selection.empty() ? nullptr : crew_selection.data();
+    const LcEngineCrewRoleSnapshot *crew_role_data =
+        crew_roles.empty() ? nullptr : crew_roles.data();
+    const int32_t *known_owners =
+        buffer.known_crew_owners.empty() ? nullptr : buffer.known_crew_owners.data();
+    const int32_t *eliminated_owners = buffer.eliminated_crew_owners.empty()
+        ? nullptr
+        : buffer.eliminated_crew_owners.data();
     const uint64_t frame = static_cast<uint64_t>(game.FrameCounter);
 
     if (g_playback) {
@@ -321,6 +427,14 @@ void OnFrame(C4Game &game) {
                 raw.size(),
                 global_effect_data,
                 global_effects.size(),
+                crew_selection_data,
+                crew_selection.size(),
+                crew_role_data,
+                crew_roles.size(),
+                known_owners,
+                buffer.known_crew_owners.size(),
+                eliminated_owners,
+                buffer.eliminated_crew_owners.size(),
                 &error_message)) {
             RustStringPtr error = MakeString(error_message);
             if (error) {
@@ -340,7 +454,15 @@ void OnFrame(C4Game &game) {
             object_data,
             raw.size(),
             global_effect_data,
-            global_effects.size());
+            global_effects.size(),
+            crew_selection_data,
+            crew_selection.size(),
+            crew_role_data,
+            crew_roles.size(),
+            known_owners,
+            buffer.known_crew_owners.size(),
+            eliminated_owners,
+            buffer.eliminated_crew_owners.size());
     }
 }
 

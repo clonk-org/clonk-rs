@@ -34,6 +34,25 @@ typedef struct LcEngineObjectSnapshot {
     size_t effect_count;
 } LcEngineObjectSnapshot;
 
+typedef struct LcEngineCrewSelectionSnapshot {
+    int32_t owner;
+    const uint64_t *selected;
+    size_t selected_count;
+    bool has_cursor;
+    uint64_t cursor;
+} LcEngineCrewSelectionSnapshot;
+
+typedef struct LcEngineCrewRoleAssignment {
+    uint64_t object_id;
+    const char *role;
+} LcEngineCrewRoleAssignment;
+
+typedef struct LcEngineCrewRoleSnapshot {
+    int32_t owner;
+    const LcEngineCrewRoleAssignment *assignments;
+    size_t assignment_count;
+} LcEngineCrewRoleSnapshot;
+
 LcEngineRecorderHandle *lc_engine_recorder_new(void);
 void lc_engine_recorder_clear(LcEngineRecorderHandle *handle);
 void lc_engine_recorder_record(
@@ -42,7 +61,15 @@ void lc_engine_recorder_record(
     const LcEngineObjectSnapshot *objects,
     size_t object_count,
     const LcEngineEffectSnapshot *global_effects,
-    size_t global_effect_count);
+    size_t global_effect_count,
+    const LcEngineCrewSelectionSnapshot *crew_selection,
+    size_t crew_selection_count,
+    const LcEngineCrewRoleSnapshot *crew_roles,
+    size_t crew_role_count,
+    const int32_t *known_crew_owners,
+    size_t known_crew_owner_count,
+    const int32_t *eliminated_crew_owners,
+    size_t eliminated_crew_owner_count);
 char *lc_engine_recorder_export_json(LcEngineRecorderHandle *handle);
 void lc_engine_recorder_free(LcEngineRecorderHandle *handle);
 
@@ -54,6 +81,14 @@ bool lc_engine_playback_compare(
     size_t object_count,
     const LcEngineEffectSnapshot *global_effects,
     size_t global_effect_count,
+    const LcEngineCrewSelectionSnapshot *crew_selection,
+    size_t crew_selection_count,
+    const LcEngineCrewRoleSnapshot *crew_roles,
+    size_t crew_role_count,
+    const int32_t *known_crew_owners,
+    size_t known_crew_owner_count,
+    const int32_t *eliminated_crew_owners,
+    size_t eliminated_crew_owner_count,
     char **error_message);
 bool lc_engine_playback_finish(LcEnginePlaybackHandle *handle, char **error_message);
 void lc_engine_playback_free(LcEnginePlaybackHandle *handle);

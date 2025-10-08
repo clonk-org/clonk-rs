@@ -1,7 +1,8 @@
 use crate::{
-    ActionState, EffectState, ObjectId, ObjectSnapshot, Playback, Recorder, Recording,
-    SimulationSnapshot, Vector2,
+    ActionState, CrewRole, CrewSelectionState, EffectState, ObjectId, ObjectSnapshot, Playback,
+    Recorder, Recording, SimulationSnapshot, Vector2,
 };
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
@@ -32,6 +33,28 @@ pub struct LcEngineObjectSnapshot {
     pub effect_count: usize,
 }
 
+#[repr(C)]
+pub struct LcEngineCrewSelectionSnapshot {
+    pub owner: i32,
+    pub selected: *const u64,
+    pub selected_count: usize,
+    pub has_cursor: bool,
+    pub cursor: u64,
+}
+
+#[repr(C)]
+pub struct LcEngineCrewRoleAssignment {
+    pub object_id: u64,
+    pub role: *const c_char,
+}
+
+#[repr(C)]
+pub struct LcEngineCrewRoleSnapshot {
+    pub owner: i32,
+    pub assignments: *const LcEngineCrewRoleAssignment,
+    pub assignment_count: usize,
+}
+
 pub struct RecorderHandle {
     recorder: Recorder,
 }
@@ -60,6 +83,14 @@ unsafe fn make_snapshot(
     object_len: usize,
     global_effects: *const LcEngineEffectSnapshot,
     global_effect_len: usize,
+    crew_selection: *const LcEngineCrewSelectionSnapshot,
+    crew_selection_len: usize,
+    crew_roles: *const LcEngineCrewRoleSnapshot,
+    crew_roles_len: usize,
+    known_crew_owners: *const i32,
+    known_crew_owner_len: usize,
+    eliminated_crew_owners: *const i32,
+    eliminated_crew_owner_len: usize,
 ) -> Option<SimulationSnapshot> {
     let objects_slice: &[LcEngineObjectSnapshot] = if object_len == 0 {
         &[]
@@ -159,10 +190,89 @@ unsafe fn make_snapshot(
         global_effects_vec.push(effect);
     }
 
+    let crew_selection_slice: &[LcEngineCrewSelectionSnapshot] = if crew_selection_len == 0 {
+        &[]
+    } else if crew_selection.is_null() {
+        return None;
+    } else {
+        slice::from_raw_parts(crew_selection, crew_selection_len)
+    };
+    let mut crew_selection_map = HashMap::with_capacity(crew_selection_slice.len());
+    for entry in crew_selection_slice {
+        let selected_slice: &[u64] = if entry.selected_count == 0 {
+            &[]
+        } else if entry.selected.is_null() {
+            return None;
+        } else {
+            slice::from_raw_parts(entry.selected, entry.selected_count)
+        };
+        let selected = selected_slice.iter().copied().map(ObjectId::new).collect();
+        let cursor = if entry.has_cursor {
+            Some(ObjectId::new(entry.cursor))
+        } else {
+            None
+        };
+        crew_selection_map.insert(entry.owner, CrewSelectionState { selected, cursor });
+    }
+
+    let crew_roles_slice: &[LcEngineCrewRoleSnapshot] = if crew_roles_len == 0 {
+        &[]
+    } else if crew_roles.is_null() {
+        return None;
+    } else {
+        slice::from_raw_parts(crew_roles, crew_roles_len)
+    };
+    let mut crew_role_map = HashMap::with_capacity(crew_roles_slice.len());
+    for entry in crew_roles_slice {
+        let assignments_slice: &[LcEngineCrewRoleAssignment] = if entry.assignment_count == 0 {
+            &[]
+        } else if entry.assignments.is_null() {
+            return None;
+        } else {
+            slice::from_raw_parts(entry.assignments, entry.assignment_count)
+        };
+        let mut assignments = HashMap::with_capacity(assignments_slice.len());
+        for assignment in assignments_slice {
+            if assignment.role.is_null() {
+                return None;
+            }
+            let role = match CStr::from_ptr(assignment.role).to_str() {
+                Ok(value) => value.to_string(),
+                Err(_) => CStr::from_ptr(assignment.role)
+                    .to_string_lossy()
+                    .into_owned(),
+            };
+            assignments.insert(ObjectId::new(assignment.object_id), CrewRole::from(role));
+        }
+        crew_role_map.insert(entry.owner, assignments);
+    }
+
+    let known_crew_slice: &[i32] = if known_crew_owner_len == 0 {
+        &[]
+    } else if known_crew_owners.is_null() {
+        return None;
+    } else {
+        slice::from_raw_parts(known_crew_owners, known_crew_owner_len)
+    };
+    let known_crew_owners = known_crew_slice.to_vec();
+
+    let eliminated_crew_slice: &[i32] = if eliminated_crew_owner_len == 0 {
+        &[]
+    } else if eliminated_crew_owners.is_null() {
+        return None;
+    } else {
+        slice::from_raw_parts(eliminated_crew_owners, eliminated_crew_owner_len)
+    };
+    let eliminated_crew_owners = eliminated_crew_slice.to_vec();
+
     Some(SimulationSnapshot {
         frame,
         objects: snapshots,
         global_effects: global_effects_vec,
+        crew_selection: crew_selection_map,
+        crew_roles: crew_role_map,
+        known_crew_owners,
+        eliminated_crew_owners,
     })
 }
 
@@ -201,11 +311,35 @@ pub extern "C" fn lc_engine_recorder_record(
     len: usize,
     global_effects: *const LcEngineEffectSnapshot,
     global_effect_len: usize,
+    crew_selection: *const LcEngineCrewSelectionSnapshot,
+    crew_selection_len: usize,
+    crew_roles: *const LcEngineCrewRoleSnapshot,
+    crew_roles_len: usize,
+    known_crew_owners: *const i32,
+    known_crew_owner_len: usize,
+    eliminated_crew_owners: *const i32,
+    eliminated_crew_owner_len: usize,
 ) {
     if handle.is_null() {
         return;
     }
-    let snapshot = unsafe { make_snapshot(frame, objects, len, global_effects, global_effect_len) };
+    let snapshot = unsafe {
+        make_snapshot(
+            frame,
+            objects,
+            len,
+            global_effects,
+            global_effect_len,
+            crew_selection,
+            crew_selection_len,
+            crew_roles,
+            crew_roles_len,
+            known_crew_owners,
+            known_crew_owner_len,
+            eliminated_crew_owners,
+            eliminated_crew_owner_len,
+        )
+    };
     if let Some(snapshot) = snapshot {
         unsafe {
             let handle = &mut *handle;
@@ -282,13 +416,37 @@ pub extern "C" fn lc_engine_playback_compare(
     len: usize,
     global_effects: *const LcEngineEffectSnapshot,
     global_effect_len: usize,
+    crew_selection: *const LcEngineCrewSelectionSnapshot,
+    crew_selection_len: usize,
+    crew_roles: *const LcEngineCrewRoleSnapshot,
+    crew_roles_len: usize,
+    known_crew_owners: *const i32,
+    known_crew_owner_len: usize,
+    eliminated_crew_owners: *const i32,
+    eliminated_crew_owner_len: usize,
     error_out: *mut *mut c_char,
 ) -> bool {
     if handle.is_null() {
         set_error(error_out, "playback handle is null".to_string());
         return false;
     }
-    let snapshot = unsafe { make_snapshot(frame, objects, len, global_effects, global_effect_len) };
+    let snapshot = unsafe {
+        make_snapshot(
+            frame,
+            objects,
+            len,
+            global_effects,
+            global_effect_len,
+            crew_selection,
+            crew_selection_len,
+            crew_roles,
+            crew_roles_len,
+            known_crew_owners,
+            known_crew_owner_len,
+            eliminated_crew_owners,
+            eliminated_crew_owner_len,
+        )
+    };
     let Some(snapshot) = snapshot else {
         set_error(error_out, "invalid object snapshot data".to_string());
         return false;
@@ -382,8 +540,24 @@ mod tests {
             effect_count: 1,
         };
 
-        let snapshot = unsafe { make_snapshot(5, &object, 1, ptr::null(), 0) }
-            .expect("snapshot should deserialize");
+        let snapshot = unsafe {
+            make_snapshot(
+                5,
+                &object,
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        }
+        .expect("snapshot should deserialize");
 
         assert_eq!(snapshot.objects.len(), 1);
         let recorded = &snapshot.objects[0];
@@ -409,8 +583,24 @@ mod tests {
             timer: 3,
         };
 
-        let snapshot = unsafe { make_snapshot(1, ptr::null(), 0, &effect_snapshot, 1) }
-            .expect("snapshot should deserialize");
+        let snapshot = unsafe {
+            make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                &effect_snapshot,
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        }
+        .expect("snapshot should deserialize");
 
         assert!(snapshot.objects.is_empty());
         assert_eq!(snapshot.global_effects.len(), 1);
@@ -419,5 +609,67 @@ mod tests {
         assert_eq!(effect.priority, 42);
         assert_eq!(effect.interval, 10);
         assert_eq!(effect.timer, 3);
+    }
+
+    #[test]
+    fn make_snapshot_collects_crew_state() {
+        let selected = [1u64, 2u64];
+        let crew_selection = LcEngineCrewSelectionSnapshot {
+            owner: 1,
+            selected: selected.as_ptr(),
+            selected_count: selected.len(),
+            has_cursor: true,
+            cursor: 2,
+        };
+
+        let role_name = CString::new("builder").unwrap();
+        let role_assignment = LcEngineCrewRoleAssignment {
+            object_id: 1,
+            role: role_name.as_ptr(),
+        };
+        let crew_role = LcEngineCrewRoleSnapshot {
+            owner: 1,
+            assignments: &role_assignment,
+            assignment_count: 1,
+        };
+
+        let known = [1i32];
+        let eliminated = [2i32];
+
+        let snapshot = unsafe {
+            make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                &crew_selection,
+                1,
+                &crew_role,
+                1,
+                known.as_ptr(),
+                known.len(),
+                eliminated.as_ptr(),
+                eliminated.len(),
+            )
+        }
+        .expect("snapshot should include crew data");
+
+        assert_eq!(snapshot.crew_selection.len(), 1);
+        let selection = snapshot.crew_selection.get(&1).expect("owner present");
+        let mut selected_ids: Vec<_> = selection.selected.iter().map(|id| id.as_u64()).collect();
+        selected_ids.sort_unstable();
+        assert_eq!(selected_ids, vec![1, 2]);
+        assert_eq!(selection.cursor.map(|id| id.as_u64()), Some(2));
+
+        let roles = snapshot.crew_roles.get(&1).expect("roles present");
+        let role = roles
+            .get(&ObjectId::new(1))
+            .expect("assignment present")
+            .as_str();
+        assert_eq!(role, "builder");
+
+        assert_eq!(snapshot.known_crew_owners, vec![1]);
+        assert_eq!(snapshot.eliminated_crew_owners, vec![2]);
     }
 }

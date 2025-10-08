@@ -241,6 +241,34 @@ fn describe_snapshot_mismatch(
         }
     }
 
+    if expected.crew_selection != actual.crew_selection {
+        problems.push(format!(
+            "crew selection mismatch (expected {:?}, got {:?})",
+            expected.crew_selection, actual.crew_selection
+        ));
+    }
+
+    if expected.crew_roles != actual.crew_roles {
+        problems.push(format!(
+            "crew roles mismatch (expected {:?}, got {:?})",
+            expected.crew_roles, actual.crew_roles
+        ));
+    }
+
+    if expected.known_crew_owners != actual.known_crew_owners {
+        problems.push(format!(
+            "known crew owners mismatch (expected {:?}, got {:?})",
+            expected.known_crew_owners, actual.known_crew_owners
+        ));
+    }
+
+    if expected.eliminated_crew_owners != actual.eliminated_crew_owners {
+        problems.push(format!(
+            "eliminated crew owners mismatch (expected {:?}, got {:?})",
+            expected.eliminated_crew_owners, actual.eliminated_crew_owners
+        ));
+    }
+
     if problems.is_empty() {
         "unknown mismatch".into()
     } else {
@@ -274,6 +302,10 @@ mod tests {
                 crew_member: false,
             }],
             global_effects: Vec::new(),
+            crew_selection: HashMap::new(),
+            crew_roles: HashMap::new(),
+            known_crew_owners: Vec::new(),
+            eliminated_crew_owners: Vec::new(),
         }
     }
 
