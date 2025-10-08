@@ -123,6 +123,12 @@ fn print_summary(summary: &GameSummary) {
         summary.environment.time_speed,
         summary.environment.precipitation
     );
+    if let Some(color) = summary.environment.sky_color {
+        println!(
+            "Sky color override: #{:02X}{:02X}{:02X}",
+            color[0], color[1], color[2]
+        );
+    }
     println!("Frames simulated: {}", summary.ticks);
     println!("Ground contacts: {}", summary.ground_hits);
     println!("Control ready batches: {}", summary.ready_batches);

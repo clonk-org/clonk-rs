@@ -4,12 +4,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use lc_resources::{Group, GroupError};
-use serde::de::{self, Deserializer, Visitor};
+use serde::de::Error as _;
+use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::Deserialize;
 
 use crate::{
     action::ActionSpec, ActionState, Definition, EffectState, Engine, EngineError,
-    EnvironmentSettings, Landscape, ObjectId, ObjectStatus, PhysicsSettings, SpawnConfig, Vector2,
+    EnvironmentSettings, Landscape, ObjectId, ObjectStatus, PhysicsSettings, RgbColor, SpawnConfig,
+    Vector2,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -554,6 +556,99 @@ struct EnvironmentManifest {
     time_speed: Option<i32>,
     #[serde(default)]
     precipitation: Option<i32>,
+    #[serde(default)]
+    sky_color: Option<ColorSpec>,
+}
+
+#[derive(Debug)]
+struct ColorSpec(RgbColor);
+
+impl ColorSpec {
+    fn into_color(self) -> RgbColor {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ColorSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ColorVisitor;
+
+        impl<'de> Visitor<'de> for ColorVisitor {
+            type Value = ColorSpec;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a hex string #RRGGBB or an array [r, g, b]")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut components = Vec::with_capacity(3);
+                while let Some(value) = seq.next_element::<i32>()? {
+                    if !(0..=255).contains(&value) {
+                        return Err(A::Error::custom(format!(
+                            "color components must be between 0 and 255 (got {value})"
+                        )));
+                    }
+                    components.push(value as u8);
+                }
+
+                if components.len() != 3 {
+                    return Err(A::Error::invalid_length(
+                        components.len(),
+                        &"array with exactly three entries [r, g, b]",
+                    ));
+                }
+
+                Ok(ColorSpec(RgbColor::new(
+                    components[0],
+                    components[1],
+                    components[2],
+                )))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                parse_hex_color(value).map(ColorSpec).map_err(E::custom)
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+        }
+
+        fn parse_hex_color(value: &str) -> Result<RgbColor, String> {
+            let trimmed = value.trim();
+            let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
+            if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!(
+                    "expected hex color in RRGGBB format, got `{}`",
+                    value
+                ));
+            }
+
+            let parse_component = |segment: &str| -> Result<u8, String> {
+                u8::from_str_radix(segment, 16)
+                    .map_err(|_| format!("invalid hex component `{segment}`"))
+            };
+
+            let r = parse_component(&hex[0..2])?;
+            let g = parse_component(&hex[2..4])?;
+            let b = parse_component(&hex[4..6])?;
+            Ok(RgbColor::new(r, g, b))
+        }
+
+        deserializer.deserialize_any(ColorVisitor)
+    }
 }
 
 impl EnvironmentManifest {
@@ -586,6 +681,9 @@ impl EnvironmentManifest {
         }
         if let Some(precipitation) = self.precipitation {
             settings = settings.with_precipitation(precipitation);
+        }
+        if let Some(color) = self.sky_color {
+            settings = settings.with_sky_color(color.into_color());
         }
         settings
     }
@@ -887,6 +985,7 @@ global func Step(state, frame, random)
         assert_eq!(environment.wind_period, 0);
         assert_eq!(environment.temperature, 0);
         assert_eq!(environment.precipitation, 0);
+        assert!(environment.sky_color.is_none());
 
         let mut engine = Engine::with_seed(0);
         let created = scenario.apply(&mut engine).expect("scenario applies");
@@ -898,6 +997,7 @@ global func Step(state, frame, random)
         assert_eq!(configured.wind_period, 0);
         assert_eq!(configured.temperature, 0);
         assert_eq!(configured.precipitation, 0);
+        assert!(configured.sky_color.is_none());
     }
 
     #[test]
@@ -1061,6 +1161,70 @@ global func Step(state, frame, random)
         let configured = engine.environment();
         assert_eq!(configured.wind, 2);
         assert_eq!(configured.precipitation, 100);
+    }
+
+    #[test]
+    fn loads_environment_sky_color_from_array() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r#"
+        {
+            "definitions": [
+                { "id": "Mover", "script": "scripts/mover.aul" }
+            ],
+            "environment": {
+                "wind": 1,
+                "sky_color": [18, 42, 200]
+            },
+            "initial_objects": [
+                { "definition": "Mover" }
+            ]
+        }
+        "#;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let environment = scenario.environment().expect("environment present");
+        assert_eq!(environment.sky_color, Some(RgbColor::new(18, 42, 200)));
+
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let configured = engine.environment();
+        assert_eq!(configured.sky_color, Some(RgbColor::new(18, 42, 200)));
+    }
+
+    #[test]
+    fn loads_environment_sky_color_from_hex() {
+        let dir = tempdir().expect("tempdir");
+        let manifest = r##"
+        {
+            "definitions": [
+                { "id": "Mover", "script": "scripts/mover.aul" }
+            ],
+            "environment": {
+                "wind": 0,
+                "sky_color": "#7F9AC3"
+            },
+            "initial_objects": [
+                { "definition": "Mover" }
+            ]
+        }
+        "##;
+
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
+        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
+        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
+
+        let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
+        let environment = scenario.environment().expect("environment present");
+        assert_eq!(environment.sky_color, Some(RgbColor::new(0x7F, 0x9A, 0xC3)));
+
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let configured = engine.environment();
+        assert_eq!(configured.sky_color, Some(RgbColor::new(0x7F, 0x9A, 0xC3)));
     }
 
     #[test]

@@ -92,6 +92,19 @@ impl Default for ObjectStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RgbColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl RgbColor {
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CrewRole(String);
@@ -270,6 +283,8 @@ pub struct EnvironmentSettings {
     pub time_speed: i16,
     #[serde(default)]
     pub precipitation: i32,
+    #[serde(default)]
+    pub sky_color: Option<RgbColor>,
 }
 
 impl EnvironmentSettings {
@@ -289,6 +304,7 @@ impl EnvironmentSettings {
             time_of_day: 0,
             time_speed: 0,
             precipitation: 0,
+            sky_color: None,
         }
     }
 
@@ -347,6 +363,20 @@ impl EnvironmentSettings {
         let clamped = precipitation.clamp(-100, 100);
         self.precipitation = clamped;
         self
+    }
+
+    pub fn with_sky_color(mut self, color: RgbColor) -> Self {
+        self.sky_color = Some(color);
+        self
+    }
+
+    pub fn without_sky_color(mut self) -> Self {
+        self.sky_color = None;
+        self
+    }
+
+    pub fn sky_color(&self) -> Option<RgbColor> {
+        self.sky_color
     }
 
     pub fn ambient_temperature(&self, frame: u64) -> i32 {
@@ -432,6 +462,8 @@ pub struct EnvironmentFrame {
     pub ambient_temperature: i32,
     #[serde(default)]
     pub precipitation: i32,
+    #[serde(default)]
+    pub sky_color: Option<RgbColor>,
 }
 
 impl Default for EnvironmentFrame {
@@ -441,6 +473,7 @@ impl Default for EnvironmentFrame {
             wind_force: 0,
             ambient_temperature: 0,
             precipitation: 0,
+            sky_color: None,
         }
     }
 }
@@ -2663,6 +2696,7 @@ impl Engine {
             wind_force: self.environment.wind_force(self.frame),
             ambient_temperature: self.environment.ambient_temperature(self.frame),
             precipitation: self.environment.precipitation(),
+            sky_color: self.environment.sky_color(),
         };
         SimulationSnapshot {
             frame: self.frame,
@@ -4949,7 +4983,8 @@ mod tests {
             .with_temperature_cycle(6, 16, 5)
             .with_time_of_day(900)
             .with_time_speed(30)
-            .with_precipitation(-45);
+            .with_precipitation(-45)
+            .with_sky_color(RgbColor::new(24, 48, 192));
         engine.set_environment(environment);
 
         let snapshot = engine.snapshot();
@@ -4963,6 +4998,16 @@ mod tests {
             snapshot.environment.precipitation,
             environment.precipitation()
         );
+        assert_eq!(snapshot.environment.sky_color, environment.sky_color());
+    }
+
+    #[test]
+    fn environment_sky_color_can_be_configured_and_cleared() {
+        let configured = EnvironmentSettings::new(0).with_sky_color(RgbColor::new(5, 10, 15));
+        assert_eq!(configured.sky_color(), Some(RgbColor::new(5, 10, 15)));
+
+        let cleared = configured.without_sky_color();
+        assert!(cleared.sky_color().is_none());
     }
 
     #[test]

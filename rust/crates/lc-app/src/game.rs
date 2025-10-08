@@ -131,6 +131,7 @@ pub struct EnvironmentSummary {
     pub time_of_day: u16,
     pub time_speed: i16,
     pub precipitation: i32,
+    pub sky_color: Option<[u8; 3]>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -619,6 +620,9 @@ impl DemoGame {
             time_of_day: environment_settings.time_of_day(),
             time_speed: environment_settings.time_speed(),
             precipitation: environment_settings.precipitation(),
+            sky_color: environment_settings
+                .sky_color()
+                .map(|color| [color.r, color.g, color.b]),
         };
         Ok(GameSummary {
             ticks: executed_ticks,
@@ -710,7 +714,13 @@ impl DemoGame {
     }
 
     fn draw_frame(&mut self, snapshot: &SimulationSnapshot) {
-        let sky = Self::sky_color_for_temperature(snapshot.environment.ambient_temperature);
+        let sky = snapshot
+            .environment
+            .sky_color
+            .map(|color| Color::opaque(color.r, color.g, color.b))
+            .unwrap_or_else(|| {
+                Self::sky_color_for_temperature(snapshot.environment.ambient_temperature)
+            });
         self.surface.fill(sky);
         self.draw_precipitation(snapshot.environment.precipitation, snapshot.frame);
         self.draw_ground(snapshot.environment.ambient_temperature);
