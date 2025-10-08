@@ -477,6 +477,12 @@ struct MovementManifest {
     swim: Option<SwimMovementManifest>,
     #[serde(default)]
     walk: Option<WalkMovementManifest>,
+    #[serde(default)]
+    scale: Option<ScaleMovementManifest>,
+    #[serde(default)]
+    hangle: Option<HangleMovementManifest>,
+    #[serde(default)]
+    dig: Option<DigMovementManifest>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -501,6 +507,28 @@ struct WalkMovementManifest {
     speed: Option<i32>,
     #[serde(default)]
     acceleration: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ScaleMovementManifest {
+    #[serde(default)]
+    speed: Option<i32>,
+    #[serde(default)]
+    acceleration: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct HangleMovementManifest {
+    #[serde(default)]
+    speed: Option<i32>,
+    #[serde(default)]
+    acceleration: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DigMovementManifest {
+    #[serde(default)]
+    speed: Option<i32>,
 }
 
 impl MovementManifest {
@@ -564,6 +592,57 @@ impl MovementManifest {
                     });
                 }
                 profile.walk_acceleration = acceleration;
+            }
+        }
+        if let Some(scale) = self.scale {
+            if let Some(speed) = scale.speed {
+                if speed < 0 {
+                    return Err(ScenarioError::InvalidMovement {
+                        id: id.to_string(),
+                        detail: format!("scale.speed must be >= 0 (got {speed})"),
+                    });
+                }
+                profile.scale_speed = speed;
+            }
+            if let Some(acceleration) = scale.acceleration {
+                if acceleration < 0 {
+                    return Err(ScenarioError::InvalidMovement {
+                        id: id.to_string(),
+                        detail: format!("scale.acceleration must be >= 0 (got {acceleration})"),
+                    });
+                }
+                profile.scale_acceleration = acceleration;
+            }
+        }
+        if let Some(hangle) = self.hangle {
+            if let Some(speed) = hangle.speed {
+                if speed < 0 {
+                    return Err(ScenarioError::InvalidMovement {
+                        id: id.to_string(),
+                        detail: format!("hangle.speed must be >= 0 (got {speed})"),
+                    });
+                }
+                profile.hangle_speed = speed;
+            }
+            if let Some(acceleration) = hangle.acceleration {
+                if acceleration < 0 {
+                    return Err(ScenarioError::InvalidMovement {
+                        id: id.to_string(),
+                        detail: format!("hangle.acceleration must be >= 0 (got {acceleration})"),
+                    });
+                }
+                profile.hangle_acceleration = acceleration;
+            }
+        }
+        if let Some(dig) = self.dig {
+            if let Some(speed) = dig.speed {
+                if speed < 0 {
+                    return Err(ScenarioError::InvalidMovement {
+                        id: id.to_string(),
+                        detail: format!("dig.speed must be >= 0 (got {speed})"),
+                    });
+                }
+                profile.dig_speed = speed;
             }
         }
         Ok(profile)

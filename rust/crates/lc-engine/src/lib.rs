@@ -445,6 +445,11 @@ pub struct MovementProfile {
     pub float_acceleration: i32,
     pub swim_speed: i32,
     pub swim_acceleration: i32,
+    pub scale_speed: i32,
+    pub scale_acceleration: i32,
+    pub hangle_speed: i32,
+    pub hangle_acceleration: i32,
+    pub dig_speed: i32,
 }
 
 impl MovementProfile {
@@ -456,6 +461,11 @@ impl MovementProfile {
             float_acceleration,
             swim_speed: 6,
             swim_acceleration: 1,
+            scale_speed: 8,
+            scale_acceleration: 1,
+            hangle_speed: 8,
+            hangle_acceleration: 1,
+            dig_speed: 8,
         }
     }
 
@@ -488,6 +498,31 @@ impl MovementProfile {
         self.swim_acceleration = swim_acceleration;
         self
     }
+
+    pub fn with_scale_speed(mut self, scale_speed: i32) -> Self {
+        self.scale_speed = scale_speed;
+        self
+    }
+
+    pub fn with_scale_acceleration(mut self, scale_acceleration: i32) -> Self {
+        self.scale_acceleration = scale_acceleration;
+        self
+    }
+
+    pub fn with_hangle_speed(mut self, hangle_speed: i32) -> Self {
+        self.hangle_speed = hangle_speed;
+        self
+    }
+
+    pub fn with_hangle_acceleration(mut self, hangle_acceleration: i32) -> Self {
+        self.hangle_acceleration = hangle_acceleration;
+        self
+    }
+
+    pub fn with_dig_speed(mut self, dig_speed: i32) -> Self {
+        self.dig_speed = dig_speed;
+        self
+    }
 }
 
 impl Default for MovementProfile {
@@ -499,6 +534,11 @@ impl Default for MovementProfile {
             float_acceleration: 1,
             swim_speed: 6,
             swim_acceleration: 1,
+            scale_speed: 8,
+            scale_acceleration: 1,
+            hangle_speed: 8,
+            hangle_acceleration: 1,
+            dig_speed: 8,
         }
     }
 }
@@ -2575,6 +2615,153 @@ fn apply_swim_command_movement(
     velocity.y = clamp_to_limit(velocity.y, limit);
 }
 
+fn apply_scale_command_movement(
+    velocity: &mut Vector2,
+    command_direction: CommandDirection,
+    profile: MovementProfile,
+    facing: Direction,
+) {
+    let accel = profile.scale_acceleration.max(0);
+    let limit = profile.scale_speed;
+    let effective_direction = match (facing, command_direction) {
+        (Direction::Left, CommandDirection::Left) | (Direction::Right, CommandDirection::Right) => {
+            CommandDirection::Up
+        }
+        _ => command_direction,
+    };
+
+    match effective_direction {
+        CommandDirection::Up | CommandDirection::UpLeft | CommandDirection::UpRight => {
+            if accel > 0 {
+                velocity.y = velocity.y.saturating_sub(accel);
+            }
+        }
+        CommandDirection::Down | CommandDirection::DownLeft | CommandDirection::DownRight => {
+            if accel > 0 {
+                velocity.y = velocity.y.saturating_add(accel);
+            }
+        }
+        CommandDirection::Left | CommandDirection::Right | CommandDirection::Stop => {
+            if accel > 0 {
+                velocity.y = decelerate_toward_zero(velocity.y, accel);
+            }
+        }
+    }
+
+    velocity.y = clamp_to_limit(velocity.y, limit);
+    velocity.x = 0;
+}
+
+fn apply_hangle_command_movement(
+    velocity: &mut Vector2,
+    command_direction: CommandDirection,
+    profile: MovementProfile,
+    facing: Direction,
+) -> Option<Direction> {
+    let accel = profile.hangle_acceleration.max(0);
+    let limit = profile.hangle_speed;
+
+    match command_direction {
+        CommandDirection::Left | CommandDirection::UpLeft | CommandDirection::DownLeft => {
+            if accel > 0 {
+                velocity.x = velocity.x.saturating_sub(accel);
+            }
+        }
+        CommandDirection::Right | CommandDirection::UpRight | CommandDirection::DownRight => {
+            if accel > 0 {
+                velocity.x = velocity.x.saturating_add(accel);
+            }
+        }
+        CommandDirection::Up => {
+            if accel > 0 {
+                if matches!(facing, Direction::Left) {
+                    velocity.x = velocity.x.saturating_sub(accel);
+                } else {
+                    velocity.x = velocity.x.saturating_add(accel);
+                }
+            }
+        }
+        CommandDirection::Stop | CommandDirection::Down => {
+            if accel > 0 {
+                velocity.x = decelerate_toward_zero(velocity.x, accel);
+            }
+        }
+    }
+
+    velocity.x = clamp_to_limit(velocity.x, limit);
+    velocity.y = 0;
+
+    if velocity.x < 0 {
+        Some(Direction::Left)
+    } else if velocity.x > 0 {
+        Some(Direction::Right)
+    } else {
+        None
+    }
+}
+
+fn apply_dig_command_movement(
+    velocity: &mut Vector2,
+    command_direction: CommandDirection,
+    profile: MovementProfile,
+    facing: Direction,
+) -> Option<Direction> {
+    let speed = profile.dig_speed.max(0);
+    let half_speed = speed / 2;
+
+    match command_direction {
+        CommandDirection::Stop => {
+            velocity.x = 0;
+            velocity.y = 0;
+            return None;
+        }
+        CommandDirection::Up => {
+            velocity.x = if matches!(facing, Direction::Left) {
+                -speed
+            } else {
+                speed
+            };
+            velocity.y = -half_speed;
+        }
+        CommandDirection::UpLeft => {
+            velocity.x = -speed;
+            velocity.y = -half_speed;
+        }
+        CommandDirection::Left => {
+            velocity.x = -speed;
+            velocity.y = 0;
+        }
+        CommandDirection::DownLeft => {
+            velocity.x = -speed;
+            velocity.y = speed;
+        }
+        CommandDirection::Down => {
+            velocity.x = 0;
+            velocity.y = speed;
+        }
+        CommandDirection::DownRight => {
+            velocity.x = speed;
+            velocity.y = speed;
+        }
+        CommandDirection::Right => {
+            velocity.x = speed;
+            velocity.y = 0;
+        }
+        CommandDirection::UpRight => {
+            velocity.x = speed;
+            velocity.y = -half_speed;
+        }
+    }
+
+    if velocity.x < 0 {
+        Some(Direction::Left)
+    } else if velocity.x > 0 {
+        Some(Direction::Right)
+    } else {
+        None
+    }
+}
+
 impl Engine {
     pub fn new() -> Self {
         Self::with_seed(0)
@@ -4166,25 +4353,55 @@ impl Engine {
             if procedure.locks_vertical_velocity() {
                 object.state.velocity.y = 0;
             }
-            if matches!(procedure, ActionProcedure::Float) {
-                apply_float_command_movement(
-                    &mut object.state.velocity,
-                    command_direction,
-                    movement_profile,
-                );
-            } else if matches!(procedure, ActionProcedure::Swim) {
-                apply_swim_command_movement(
-                    &mut object.state.velocity,
-                    command_direction,
-                    movement_profile,
-                    gravity_component,
-                );
-            } else if matches!(procedure, ActionProcedure::Walk) {
-                apply_walk_command_movement(
-                    &mut object.state.velocity,
-                    command_direction,
-                    movement_profile,
-                );
+            let mut pending_direction = None;
+            match procedure {
+                ActionProcedure::Float => {
+                    apply_float_command_movement(
+                        &mut object.state.velocity,
+                        command_direction,
+                        movement_profile,
+                    );
+                }
+                ActionProcedure::Swim => {
+                    apply_swim_command_movement(
+                        &mut object.state.velocity,
+                        command_direction,
+                        movement_profile,
+                        gravity_component,
+                    );
+                }
+                ActionProcedure::Walk => {
+                    apply_walk_command_movement(
+                        &mut object.state.velocity,
+                        command_direction,
+                        movement_profile,
+                    );
+                }
+                ActionProcedure::Scale => {
+                    apply_scale_command_movement(
+                        &mut object.state.velocity,
+                        command_direction,
+                        movement_profile,
+                        object.state.direction,
+                    );
+                }
+                ActionProcedure::Hang => {
+                    pending_direction = apply_hangle_command_movement(
+                        &mut object.state.velocity,
+                        command_direction,
+                        movement_profile,
+                        object.state.direction,
+                    );
+                }
+                ActionProcedure::Dig => {
+                    pending_direction = apply_dig_command_movement(
+                        &mut object.state.velocity,
+                        command_direction,
+                        movement_profile,
+                        object.state.direction,
+                    );
+                }
+                _ => {}
             }
             match procedure {
                 ActionProcedure::Bridge
@@ -4193,18 +4410,27 @@ impl Engine {
                 | ActionProcedure::Chop => {
                     object.state.velocity = Vector2::ZERO;
                 }
-                ActionProcedure::Scale => {
-                    object.state.velocity.x = 0;
-                }
                 _ => {}
             }
             self.physics.clamp_velocity(&mut object.state.velocity);
-            if matches!(procedure, ActionProcedure::Walk) {
-                if object.state.velocity.x < 0 {
-                    object.state.direction = Direction::Left;
-                } else if object.state.velocity.x > 0 {
-                    object.state.direction = Direction::Right;
+            match procedure {
+                ActionProcedure::Walk => {
+                    if object.state.velocity.x < 0 {
+                        object.state.direction = Direction::Left;
+                    } else if object.state.velocity.x > 0 {
+                        object.state.direction = Direction::Right;
+                    }
                 }
+                ActionProcedure::Hang | ActionProcedure::Dig => {
+                    if let Some(direction) = pending_direction {
+                        object.state.direction = direction;
+                    } else if object.state.velocity.x < 0 {
+                        object.state.direction = Direction::Left;
+                    } else if object.state.velocity.x > 0 {
+                        object.state.direction = Direction::Right;
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -7094,7 +7320,7 @@ mod tests {
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity.y, 0);
-        assert_eq!(object.velocity.x, 1);
+        assert_eq!(object.velocity.x, 0);
     }
 
     #[test]
@@ -7163,7 +7389,7 @@ mod tests {
     }
 
     #[test]
-    fn dig_procedure_preserves_velocity_against_gravity_and_wind() {
+    fn dig_procedure_zeroes_velocity_when_stopped() {
         let mut definition = Definition::from_script("Digger", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
             .expect("script compiles");
         let mut actions = HashMap::new();
@@ -7193,7 +7419,7 @@ mod tests {
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity, initial_velocity);
+        assert_eq!(object.velocity, Vector2::ZERO);
     }
 
     #[test]
@@ -7225,7 +7451,124 @@ mod tests {
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity.x, 0);
-        assert_eq!(object.velocity.y, 3);
+        assert_eq!(object.velocity.y, 1);
+    }
+
+    #[test]
+    fn scale_command_direction_moves_up_when_pressing_wall_direction() {
+        let mut definition = Definition::from_script("Scaler", "Scaler", PROCEDURE_MOVEMENT_SCRIPT)
+            .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Scale".to_string(),
+            ActionSpec::default().with_procedure("scale"),
+        );
+        definition.configure_actions(Some("Scale".to_string()), actions);
+        definition.set_movement_profile(
+            MovementProfile::default()
+                .with_scale_speed(6)
+                .with_scale_acceleration(3),
+        );
+
+        let mut engine = Engine::with_seed(41);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Scaler")
+                    .with_direction(Direction::Left)
+                    .with_command_direction(CommandDirection::Left)
+                    .with_action(ActionState::new("Scale")),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::new(0, -3));
+        assert_eq!(object.direction, Direction::Left);
+    }
+
+    #[test]
+    fn hangle_command_direction_updates_velocity_and_direction() {
+        let mut definition =
+            Definition::from_script("Hangler", "Hangler", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Hangle".to_string(),
+            ActionSpec::default().with_procedure("hang"),
+        );
+        definition.configure_actions(Some("Hangle".to_string()), actions);
+        definition.set_movement_profile(
+            MovementProfile::default()
+                .with_hangle_speed(5)
+                .with_hangle_acceleration(2),
+        );
+
+        let mut engine = Engine::with_seed(43);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Hangler")
+                    .with_direction(Direction::Right)
+                    .with_command_direction(CommandDirection::Left)
+                    .with_action(ActionState::new("Hangle")),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::new(-2, 0));
+        assert_eq!(object.direction, Direction::Left);
+    }
+
+    #[test]
+    fn dig_command_direction_sets_directional_velocity() {
+        let mut definition = Definition::from_script("Digger", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
+            .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Dig".to_string(),
+            ActionSpec::default().with_procedure("dig"),
+        );
+        definition.configure_actions(Some("Dig".to_string()), actions);
+        definition.set_movement_profile(MovementProfile::default().with_dig_speed(6));
+
+        let mut engine = Engine::with_seed(47);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Digger")
+                    .with_direction(Direction::Right)
+                    .with_command_direction(CommandDirection::DownLeft)
+                    .with_action(ActionState::new("Dig")),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("first tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::new(-6, 6));
+        assert_eq!(object.direction, Direction::Left);
+
+        engine
+            .apply_object_update(
+                id,
+                ObjectUpdate::new().with_command_direction(CommandDirection::Up),
+            )
+            .expect("update succeeds");
+
+        let snapshot = engine.tick().expect("second tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::new(-6, -3));
+        assert_eq!(object.direction, Direction::Left);
     }
 
     #[test]
