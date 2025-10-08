@@ -1,6 +1,12 @@
 [
   {
     "frame": 1,
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
     "objects": [
       {
         "id": 1,
@@ -16,13 +22,48 @@
         "energy": 84,
         "action": {
           "name": "Idle",
-          "phase": 1
-        }
+          "phase": 1,
+          "ticks": 0
+        },
+        "action_procedure": null,
+        "effects": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": -1,
+        "crew_member": false
       }
-    ]
+    ],
+    "environment": {
+      "settings": {
+        "wind": 0,
+        "wind_variation": 0,
+        "wind_period": 0,
+        "temperature": 0,
+        "climate": 0,
+        "temperature_variation": 0,
+        "temperature_period": 0,
+        "temperature_phase": 0,
+        "time_of_day": 0,
+        "time_speed": 0
+      },
+      "wind_force": 0,
+      "ambient_temperature": 0
+    },
+    "global_effects": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": []
   },
   {
     "frame": 2,
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
     "objects": [
       {
         "id": 1,
@@ -38,13 +79,48 @@
         "energy": 83,
         "action": {
           "name": "Idle",
-          "phase": 2
-        }
+          "phase": 2,
+          "ticks": 0
+        },
+        "action_procedure": null,
+        "effects": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": -1,
+        "crew_member": false
       }
-    ]
+    ],
+    "environment": {
+      "settings": {
+        "wind": 0,
+        "wind_variation": 0,
+        "wind_period": 0,
+        "temperature": 0,
+        "climate": 0,
+        "temperature_variation": 0,
+        "temperature_period": 0,
+        "temperature_phase": 0,
+        "time_of_day": 0,
+        "time_speed": 0
+      },
+      "wind_force": 0,
+      "ambient_temperature": 0
+    },
+    "global_effects": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": []
   },
   {
     "frame": 3,
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
     "objects": [
       {
         "id": 1,
@@ -60,8 +136,16 @@
         "energy": 82,
         "action": {
           "name": "Idle",
-          "phase": 3
-        }
+          "phase": 3,
+          "ticks": 0
+        },
+        "action_procedure": null,
+        "effects": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": -1,
+        "crew_member": false
       },
       {
         "id": 2,
@@ -77,13 +161,48 @@
         "energy": 25,
         "action": {
           "name": "Idle",
-          "phase": 0
-        }
+          "phase": 0,
+          "ticks": 0
+        },
+        "action_procedure": null,
+        "effects": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": -1,
+        "crew_member": false
       }
-    ]
+    ],
+    "environment": {
+      "settings": {
+        "wind": 0,
+        "wind_variation": 0,
+        "wind_period": 0,
+        "temperature": 0,
+        "climate": 0,
+        "temperature_variation": 0,
+        "temperature_period": 0,
+        "temperature_phase": 0,
+        "time_of_day": 0,
+        "time_speed": 0
+      },
+      "wind_force": 0,
+      "ambient_temperature": 0
+    },
+    "global_effects": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": []
   },
   {
     "frame": 4,
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
     "objects": [
       {
         "id": 1,
@@ -99,8 +218,16 @@
         "energy": 81,
         "action": {
           "name": "Idle",
-          "phase": 4
-        }
+          "phase": 4,
+          "ticks": 0
+        },
+        "action_procedure": null,
+        "effects": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": -1,
+        "crew_member": false
       },
       {
         "id": 2,
@@ -116,13 +243,48 @@
         "energy": 24,
         "action": {
           "name": "Idle",
-          "phase": 1
-        }
+          "phase": 1,
+          "ticks": 0
+        },
+        "action_procedure": null,
+        "effects": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": -1,
+        "crew_member": false
       }
-    ]
+    ],
+    "environment": {
+      "settings": {
+        "wind": 0,
+        "wind_variation": 0,
+        "wind_period": 0,
+        "temperature": 0,
+        "climate": 0,
+        "temperature_variation": 0,
+        "temperature_period": 0,
+        "temperature_phase": 0,
+        "time_of_day": 0,
+        "time_speed": 0
+      },
+      "wind_force": 0,
+      "ambient_temperature": 0
+    },
+    "global_effects": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": []
   },
   {
     "frame": 5,
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
     "objects": [
       {
         "id": 1,
@@ -138,8 +300,16 @@
         "energy": 80,
         "action": {
           "name": "Idle",
-          "phase": 5
-        }
+          "phase": 5,
+          "ticks": 0
+        },
+        "action_procedure": null,
+        "effects": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": -1,
+        "crew_member": false
       },
       {
         "id": 2,
@@ -155,13 +325,69 @@
         "energy": 23,
         "action": {
           "name": "Idle",
-          "phase": 2
-        }
+          "phase": 2,
+          "ticks": 0
+        },
+        "action_procedure": null,
+        "effects": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": -1,
+        "crew_member": false
       }
-    ]
+    ],
+    "environment": {
+      "settings": {
+        "wind": 0,
+        "wind_variation": 0,
+        "wind_period": 0,
+        "temperature": 0,
+        "climate": 0,
+        "temperature_variation": 0,
+        "temperature_period": 0,
+        "temperature_phase": 0,
+        "time_of_day": 0,
+        "time_speed": 0
+      },
+      "wind_force": 0,
+      "ambient_temperature": 0
+    },
+    "global_effects": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": []
   },
   {
     "frame": 6,
-    "objects": []
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
+    "objects": [],
+    "environment": {
+      "settings": {
+        "wind": 0,
+        "wind_variation": 0,
+        "wind_period": 0,
+        "temperature": 0,
+        "climate": 0,
+        "temperature_variation": 0,
+        "temperature_period": 0,
+        "temperature_phase": 0,
+        "time_of_day": 0,
+        "time_speed": 0
+      },
+      "wind_force": 0,
+      "ambient_temperature": 0
+    },
+    "global_effects": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": []
   }
 ]

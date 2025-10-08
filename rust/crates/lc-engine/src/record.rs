@@ -293,6 +293,7 @@ mod tests {
     fn make_snapshot(frame: u64, energy: i32) -> SimulationSnapshot {
         SimulationSnapshot {
             frame,
+            physics: None,
             objects: vec![ObjectSnapshot {
                 id: crate::ObjectId::new(1),
                 definition_id: "Test".into(),

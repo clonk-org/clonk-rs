@@ -277,6 +277,7 @@ unsafe fn make_snapshot(
 
     Some(SimulationSnapshot {
         frame,
+        physics: None,
         objects: snapshots,
         environment: EnvironmentFrame::default(),
         global_effects: global_effects_vec,

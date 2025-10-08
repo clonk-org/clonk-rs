@@ -1193,6 +1193,8 @@ pub struct ObjectSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimulationSnapshot {
     pub frame: u64,
+    #[serde(default)]
+    pub physics: Option<PhysicsSettings>,
     pub objects: Vec<ObjectSnapshot>,
     #[serde(default)]
     pub environment: EnvironmentFrame,
@@ -1276,6 +1278,50 @@ impl EngineState {
     /// Parses an engine state from a JSON string.
     pub fn from_json_str(json: &str) -> Result<Self, EngineStateIoError> {
         serde_json::from_str(json).map_err(EngineStateIoError::from)
+    }
+
+    /// Builds an engine state snapshot from a simulation frame.
+    pub fn from_snapshot(snapshot: &SimulationSnapshot) -> Self {
+        let physics = snapshot.physics.unwrap_or_else(PhysicsSettings::default);
+
+        let mut objects = Vec::with_capacity(snapshot.objects.len());
+        for object in &snapshot.objects {
+            objects.push(PersistedObject {
+                snapshot: object.clone(),
+                command_queue: Vec::new(),
+            });
+        }
+
+        let mut known_crew_owners = snapshot.known_crew_owners.clone();
+        known_crew_owners.sort_unstable();
+        known_crew_owners.dedup();
+
+        let mut eliminated_crew_owners = snapshot.eliminated_crew_owners.clone();
+        eliminated_crew_owners.sort_unstable();
+        eliminated_crew_owners.dedup();
+
+        let next_object_id = snapshot
+            .objects
+            .iter()
+            .map(|object| object.id.as_u64())
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+
+        Self {
+            frame: snapshot.frame,
+            physics,
+            environment: snapshot.environment.settings,
+            next_object_id,
+            landscape: None,
+            objects,
+            crew_selection: snapshot.crew_selection.clone(),
+            crew_roles: snapshot.crew_roles.clone(),
+            global_effects: snapshot.global_effects.clone(),
+            known_crew_owners,
+            eliminated_crew_owners,
+            rng: ChaCha8Rng::seed_from_u64(snapshot.frame),
+        }
     }
 }
 
@@ -2593,6 +2639,7 @@ impl Engine {
         };
         SimulationSnapshot {
             frame: self.frame,
+            physics: Some(self.physics),
             objects,
             environment,
             global_effects: self.global_effects.clone(),
@@ -2742,6 +2789,11 @@ impl Engine {
         self.refresh_elimination_state();
 
         Ok(())
+    }
+
+    pub fn restore_snapshot(&mut self, snapshot: &SimulationSnapshot) -> Result<(), EngineError> {
+        let state = EngineState::from_snapshot(snapshot);
+        self.restore_state(&state)
     }
 
     fn run_effect_events_for_object(
@@ -5229,6 +5281,63 @@ mod tests {
             assignments.get(&crew).map(|role| role.as_str()),
             Some("pilot")
         );
+    }
+
+    #[test]
+    fn engine_state_from_snapshot_allows_resuming_simulation() {
+        let mut engine = Engine::with_seed(42);
+        engine
+            .register_definition(build_definition())
+            .expect("definition registers");
+
+        engine
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_position(Vector2::new(5, -3))
+                    .with_velocity(Vector2::new(2, -1))
+                    .with_energy(75),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("first tick succeeds");
+        let expected_next = engine.tick().expect("second tick succeeds");
+
+        let state = EngineState::from_snapshot(&snapshot);
+
+        let mut restored = Engine::with_seed(1234);
+        restored
+            .register_definition(build_definition())
+            .expect("definition registers");
+        restored.restore_state(&state).expect("state restores");
+
+        let resumed = restored.tick().expect("tick after restore succeeds");
+        assert_eq!(resumed, expected_next);
+    }
+
+    #[test]
+    fn restore_snapshot_wrapper_matches_state_restore() {
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(build_definition())
+            .expect("definition registers");
+
+        engine
+            .spawn_object(SpawnConfig::new("Test").with_velocity(Vector2::new(1, 0)))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("first tick succeeds");
+        let expected_next = engine.tick().expect("second tick succeeds");
+
+        let mut restored = Engine::with_seed(0);
+        restored
+            .register_definition(build_definition())
+            .expect("definition registers");
+        restored
+            .restore_snapshot(&snapshot)
+            .expect("snapshot restores");
+
+        let resumed = restored.tick().expect("tick after restore succeeds");
+        assert_eq!(resumed, expected_next);
     }
 
     #[test]
