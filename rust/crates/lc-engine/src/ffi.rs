@@ -656,6 +656,46 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
 }
 
 #[no_mangle]
+pub extern "C" fn lc_engine_runtime_export_snapshot_json(
+    handle: *mut RuntimeHandle,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    let Some(runtime) = (unsafe { handle.as_ref() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return ptr::null_mut();
+    };
+
+    let snapshot = runtime.engine.snapshot();
+    let json = match serde_json::to_string(&snapshot) {
+        Ok(json) => json,
+        Err(error) => {
+            set_error(
+                error_out,
+                format!("failed to serialize runtime snapshot: {error}"),
+            );
+            return ptr::null_mut();
+        }
+    };
+
+    match CString::new(json) {
+        Ok(string) => string.into_raw(),
+        Err(_) => {
+            set_error(
+                error_out,
+                "runtime snapshot JSON contained interior null byte".into(),
+            );
+            ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn lc_engine_recorder_new() -> *mut RecorderHandle {
     Box::into_raw(Box::new(RecorderHandle::new()))
 }

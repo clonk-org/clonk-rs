@@ -95,6 +95,9 @@ std::string g_record_path;
 RuntimePtr g_runtime;
 bool g_runtime_requested = false;
 bool g_runtime_disabled = false;
+std::ofstream g_runtime_snapshot_stream;
+bool g_runtime_snapshot_enabled = false;
+bool g_runtime_snapshot_checked = false;
 
 RustStringPtr MakeString(char *raw) {
     return RustStringPtr(raw, lc_engine_string_free);
@@ -394,6 +397,21 @@ void EnsureInitialised() {
         }
     }
 
+    if (!g_runtime_snapshot_checked) {
+        g_runtime_snapshot_checked = true;
+        if (const char *snapshot_path = std::getenv("LC_RUST_ENGINE_RUNTIME_SNAPSHOT")) {
+            if (*snapshot_path) {
+                g_runtime_snapshot_stream.close();
+                g_runtime_snapshot_stream.open(snapshot_path, std::ios::out | std::ios::trunc);
+                if (!g_runtime_snapshot_stream) {
+                    LogWarning(std::string("Failed to open Rust runtime snapshot path: ") + snapshot_path);
+                } else {
+                    g_runtime_snapshot_enabled = true;
+                }
+            }
+        }
+    }
+
     if (const char *playback_path = std::getenv("LC_RUST_ENGINE_PLAYBACK")) {
         if (*playback_path) {
             std::string json = LoadFile(playback_path);
@@ -580,6 +598,30 @@ void OnFrame(C4Game &game) {
             g_runtime.reset();
             g_runtime_disabled = true;
         }
+        if (g_runtime && g_runtime_snapshot_enabled && g_runtime_snapshot_stream) {
+            char *snapshot_error = nullptr;
+            char *json_ptr =
+                lc_engine_runtime_export_snapshot_json(g_runtime.get(), &snapshot_error);
+            RustStringPtr error = MakeString(snapshot_error);
+            RustStringPtr json = MakeString(json_ptr);
+            if (!json) {
+                if (error) {
+                    LogWarning(
+                        std::string("Failed to capture Rust runtime snapshot: ") + error.get());
+                } else {
+                    LogWarning("Failed to capture Rust runtime snapshot (no detail)");
+                }
+                g_runtime_snapshot_enabled = false;
+            } else {
+                g_runtime_snapshot_stream << json.get() << '\n';
+                g_runtime_snapshot_stream.flush();
+                if (!g_runtime_snapshot_stream.good()) {
+                    LogWarning("Failed to write Rust runtime snapshot to stream");
+                    g_runtime_snapshot_stream.close();
+                    g_runtime_snapshot_enabled = false;
+                }
+            }
+        }
     }
 }
 
@@ -596,6 +638,11 @@ void Shutdown() {
     g_disabled = false;
     g_runtime.reset();
     g_runtime_disabled = false;
+    if (g_runtime_snapshot_stream.is_open()) {
+        g_runtime_snapshot_stream.close();
+    }
+    g_runtime_snapshot_enabled = false;
+    g_runtime_snapshot_checked = false;
 }
 
 } // namespace RustEngineBridge

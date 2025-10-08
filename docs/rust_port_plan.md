@@ -5,6 +5,7 @@
 - Scenario loading, action/event bridging, float/swim/lift physics, and GUI/input parity are in place for the validation stack.
 - Movement profiles now expose walk/float/swim speeds and accelerations, and `ActionProcedure::Walk` mirrors C++ steering, braking, and facing updates.
 - Scale, hangle, and dig command handling now mirror the C++ procedures, including configurable climb/hang/dig movement profiles.
+- Parity runs can capture per-frame Rust engine snapshots by setting `LC_RUST_ENGINE_RUNTIME_SNAPSHOT` while the validation toggle is enabled.
 
 ## Priority Backlog
 1. ✅ Walk procedure command movement parity (Rust engine accelerates/decelerates via per-definition walk profiles and exposes `movement.walk.*` manifest knobs).
@@ -15,3 +16,4 @@
 - Scenario manifests can now provide `movement.walk.speed` and `movement.walk.acceleration` to tune procedures per definition.
 - Additional knobs: `movement.scale.*`, `movement.hangle.*`, and `movement.dig.speed` feed the new grounded procedure parity.
 - Runtime parity toggle `LC_RUST_ENGINE_RUNTIME` now boots the Rust engine alongside the C++ loop and compares live snapshots per frame, reinitialising with scenario seeds during startup.
+- Setting `LC_RUST_ENGINE_RUNTIME_SNAPSHOT=/path/to/log.ndjson` streams Rust runtime snapshots (one JSON object per frame) to aid diffing during live parity sessions.

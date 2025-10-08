@@ -123,6 +123,9 @@ bool lc_engine_runtime_compare_snapshot(
     const int32_t *eliminated_crew_owners,
     size_t eliminated_crew_owner_count,
     char **error_message);
+char *lc_engine_runtime_export_snapshot_json(
+    LcEngineRuntimeHandle *handle,
+    char **error_message);
 
 #ifdef __cplusplus
 }
