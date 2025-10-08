@@ -162,10 +162,11 @@ unsafe fn make_snapshot(
             position: Vector2::new(entry.position_x, entry.position_y),
             velocity: Vector2::new(entry.velocity_x, entry.velocity_y),
             energy: entry.energy,
+            action,
+            action_procedure: None,
+            effects,
             owner: entry.owner,
             crew_member: entry.crew_member,
-            action,
-            effects,
         });
     }
     snapshots.sort_by_key(|object| object.id);

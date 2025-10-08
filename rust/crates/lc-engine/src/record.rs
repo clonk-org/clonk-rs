@@ -297,6 +297,7 @@ mod tests {
                 velocity: Vector2::new(0, 0),
                 energy,
                 action: ActionState::default(),
+                action_procedure: None,
                 effects: Vec::new(),
                 owner: OWNER_NONE,
                 crew_member: false,

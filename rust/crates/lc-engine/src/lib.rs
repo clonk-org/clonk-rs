@@ -640,7 +640,10 @@ impl Object {
         self.drain_effects_with_reason(EffectStopReason::Destroyed)
     }
 
-    fn snapshot(&self) -> ObjectSnapshot {
+    fn snapshot(&self, library: Option<&ActionLibrary>) -> ObjectSnapshot {
+        let procedure = library
+            .and_then(|lib| lib.procedure_name_for_action(&self.state.action.name))
+            .map(|name| name.to_string());
         ObjectSnapshot {
             id: self.id,
             definition_id: self.definition_id.clone(),
@@ -648,6 +651,7 @@ impl Object {
             velocity: self.state.velocity,
             energy: self.state.energy,
             action: self.state.action.clone(),
+            action_procedure: procedure,
             effects: self.state.effects.clone(),
             owner: self.state.owner,
             crew_member: self.state.crew_member,
@@ -897,6 +901,8 @@ pub struct ObjectSnapshot {
     pub energy: i32,
     #[serde(default)]
     pub action: ActionState,
+    #[serde(default)]
+    pub action_procedure: Option<String>,
     #[serde(default)]
     pub effects: Vec<EffectState>,
     #[serde(default = "default_owner")]
@@ -1745,7 +1751,13 @@ impl Engine {
         self.objects
             .iter()
             .find(|object| object.id == id)
-            .map(Object::snapshot)
+            .map(|object| {
+                let library = self
+                    .definitions
+                    .get(&object.definition_id)
+                    .map(|definition| definition.action_library());
+                object.snapshot(library)
+            })
     }
 
     pub fn apply_object_update(
@@ -1853,7 +1865,14 @@ impl Engine {
     }
 
     pub fn snapshot(&self) -> SimulationSnapshot {
-        let mut objects: Vec<_> = self.objects.iter().map(Object::snapshot).collect();
+        let mut objects = Vec::with_capacity(self.objects.len());
+        for object in &self.objects {
+            let library = self
+                .definitions
+                .get(&object.definition_id)
+                .map(|definition| definition.action_library());
+            objects.push(object.snapshot(library));
+        }
         objects.sort_by_key(|object| object.id);
         let crew_selection = self
             .crew_selection
@@ -1881,9 +1900,15 @@ impl Engine {
         let objects = self
             .objects
             .iter()
-            .map(|object| PersistedObject {
-                snapshot: object.snapshot(),
-                command_queue: object.command_queue.iter().cloned().collect(),
+            .map(|object| {
+                let library = self
+                    .definitions
+                    .get(&object.definition_id)
+                    .map(|definition| definition.action_library());
+                PersistedObject {
+                    snapshot: object.snapshot(library),
+                    command_queue: object.command_queue.iter().cloned().collect(),
+                }
             })
             .collect();
 
@@ -3565,6 +3590,31 @@ mod tests {
 
         let snapshot = engine.object_snapshot(id).expect("snapshot available");
         assert_eq!(snapshot.energy, 7);
+    }
+
+    #[test]
+    fn snapshot_includes_action_procedure() {
+        let mut definition =
+            Definition::from_script("Airborne", "Airborne", PROCEDURE_STATE_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Fly".to_string(),
+            ActionSpec::default().with_procedure("flight"),
+        );
+        definition.configure_actions(Some("Fly".to_string()), actions);
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Airborne"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.object_snapshot(id).expect("snapshot available");
+        assert_eq!(snapshot.action_procedure.as_deref(), Some("flight"));
     }
 
     #[test]
