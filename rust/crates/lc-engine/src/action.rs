@@ -14,6 +14,10 @@ pub struct ActionSpec {
     pub procedure: Option<String>,
     #[serde(default)]
     pub delay: Option<u32>,
+    #[serde(default)]
+    pub start_call: Option<String>,
+    #[serde(default)]
+    pub end_call: Option<String>,
 }
 
 impl ActionSpec {
@@ -23,6 +27,8 @@ impl ActionSpec {
             next,
             procedure: None,
             delay: None,
+            start_call: None,
+            end_call: None,
         }
     }
 
@@ -45,6 +51,16 @@ impl ActionSpec {
         self.delay = Some(delay);
         self
     }
+
+    pub fn with_start_call(mut self, start_call: impl Into<String>) -> Self {
+        self.start_call = Some(start_call.into());
+        self
+    }
+
+    pub fn with_end_call(mut self, end_call: impl Into<String>) -> Self {
+        self.end_call = Some(end_call.into());
+        self
+    }
 }
 
 impl Default for ActionSpec {
@@ -54,6 +70,8 @@ impl Default for ActionSpec {
             next: None,
             procedure: None,
             delay: None,
+            start_call: None,
+            end_call: None,
         }
     }
 }
@@ -163,6 +181,18 @@ impl ActionLibrary {
 
     pub fn specs(&self) -> &HashMap<String, ActionSpec> {
         &self.specs
+    }
+
+    pub fn start_call_for_action(&self, action: &str) -> Option<&str> {
+        self.specs
+            .get(action)
+            .and_then(|spec| spec.start_call.as_deref())
+    }
+
+    pub fn end_call_for_action(&self, action: &str) -> Option<&str> {
+        self.specs
+            .get(action)
+            .and_then(|spec| spec.end_call.as_deref())
     }
 
     pub fn advance_state(&self, state: &mut ActionState) {

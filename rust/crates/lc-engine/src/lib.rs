@@ -1289,6 +1289,21 @@ pub struct Definition {
     crew_member: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ActionCallbackKind {
+    Start,
+    End,
+}
+
+impl ActionCallbackKind {
+    fn context(self) -> &'static str {
+        match self {
+            ActionCallbackKind::Start => "action start",
+            ActionCallbackKind::End => "action end",
+        }
+    }
+}
+
 impl Definition {
     pub fn from_script(
         id: impl Into<String>,
@@ -1476,6 +1491,60 @@ impl Definition {
             batch.global_effects.extend(host_global_effects);
         }
         Ok((batch, rng))
+    }
+
+    fn call_action_callback(
+        &self,
+        function: &str,
+        kind: ActionCallbackKind,
+        state: &ObjectState,
+        object_id: ObjectId,
+        action_name: &str,
+        rng: ChaCha8Rng,
+        global_effects: &[EffectState],
+    ) -> Result<(compat::EffectContextOutcome, ChaCha8Rng), EngineError> {
+        if !self.script.has_function(function) {
+            return Err(EngineError::InvalidScriptOutput {
+                definition: self.id.clone(),
+                function: kind.context(),
+                detail: format!("callback `{}` is not defined", function),
+            });
+        }
+
+        let args = [
+            build_state_value(&self.id, object_id, state, &self.action_library),
+            Value::String(action_name.to_string()),
+        ];
+        let guard = enter_random_context(rng);
+        let (result, host_effects) = compat::with_effect_context(
+            Some(compat::HostObjectContext::new(
+                object_id,
+                state.status,
+                &state.effects,
+            )),
+            global_effects,
+            || self.script.call(function, &args),
+        );
+        let rng = guard.finish();
+        let value = result.map_err(|source| EngineError::Script {
+            definition: self.id.clone(),
+            function: kind.context(),
+            source,
+        })?;
+
+        if !matches!(value, Value::Nil) {
+            return Err(EngineError::InvalidScriptOutput {
+                definition: self.id.clone(),
+                function: kind.context(),
+                detail: format!(
+                    "callback `{}` must return nil (got {})",
+                    function,
+                    value.type_name()
+                ),
+            });
+        }
+
+        Ok((host_effects, rng))
     }
 
     fn call_effect_start(
@@ -1936,6 +2005,7 @@ impl Engine {
         let landscape_for_commands = self.landscape.clone();
         for idx in 0..self.objects.len() {
             let definition_id = self.objects[idx].definition_id.clone();
+            let previous_action_name = self.objects[idx].state.action.name.clone();
             let action_library = {
                 let definition = self
                     .definitions
@@ -2145,6 +2215,8 @@ impl Engine {
                 }
             }
 
+            self.trigger_action_callbacks(idx, Some(previous_action_name))?;
+
             if self.objects[idx].destroyed {
                 continue;
             }
@@ -2198,6 +2270,7 @@ impl Engine {
         } = update;
 
         let definition_id = self.objects[index].definition_id.clone();
+        let previous_action_name = self.objects[index].state.action.name.clone();
         let action_library = {
             let definition = self
                 .definitions
@@ -2269,12 +2342,204 @@ impl Engine {
         if let Some((previous_container, new_container)) = container_change {
             self.apply_container_change(object_id, previous_container, new_container)?;
         }
+        self.trigger_action_callbacks(index, Some(previous_action_name))?;
         if self.objects[index].destroyed
             || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
         {
             self.detach_destroyed_objects()?;
         }
         self.refresh_elimination_state();
+
+        Ok(())
+    }
+
+    fn trigger_action_callbacks(
+        &mut self,
+        index: usize,
+        previous_action: Option<String>,
+    ) -> Result<(), EngineError> {
+        if self.objects[index].destroyed {
+            return Ok(());
+        }
+
+        let mut needs_start = previous_action.is_none();
+        if let Some(previous) = previous_action {
+            let initial_current = self.objects[index].state.action.name.clone();
+            if previous == initial_current {
+                return Ok(());
+            }
+
+            self.invoke_action_callback(index, ActionCallbackKind::End, &previous)?;
+            if self.objects[index].destroyed {
+                return Ok(());
+            }
+
+            let updated = self.objects[index].state.action.name.clone();
+            if updated == previous {
+                return Ok(());
+            }
+            needs_start = true;
+        }
+
+        if !needs_start {
+            return Ok(());
+        }
+
+        let current_action = self.objects[index].state.action.name.clone();
+        self.invoke_action_callback(index, ActionCallbackKind::Start, &current_action)
+    }
+
+    fn invoke_action_callback(
+        &mut self,
+        index: usize,
+        kind: ActionCallbackKind,
+        action_name: &str,
+    ) -> Result<(), EngineError> {
+        let definition_id = self.objects[index].definition_id.clone();
+        let action_library = {
+            let definition = self
+                .definitions
+                .get(&definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+            definition.action_library().clone()
+        };
+
+        let function = match kind {
+            ActionCallbackKind::Start => action_library.start_call_for_action(action_name),
+            ActionCallbackKind::End => action_library.end_call_for_action(action_name),
+        };
+
+        let Some(function) = function else {
+            return Ok(());
+        };
+
+        let object_id = self.objects[index].id;
+        let state_snapshot = self.objects[index].state.clone();
+        let definition = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let rng_state = self.rng.clone();
+        let global_view = self.global_effects.clone();
+        let (outcome, new_rng) = definition.call_action_callback(
+            function,
+            kind,
+            &state_snapshot,
+            object_id,
+            action_name,
+            rng_state,
+            &global_view,
+        )?;
+        self.rng = new_rng;
+
+        self.apply_action_callback_outcome(
+            index,
+            outcome,
+            &action_library,
+            object_id,
+            &definition_id,
+        )
+    }
+
+    fn apply_action_callback_outcome(
+        &mut self,
+        index: usize,
+        outcome: compat::EffectContextOutcome,
+        action_library: &ActionLibrary,
+        object_id: ObjectId,
+        definition_id: &str,
+    ) -> Result<(), EngineError> {
+        let compat::EffectContextOutcome {
+            object: object_effects,
+            global: global_effects,
+            object_update,
+            object_commands,
+            destroy_object,
+        } = outcome;
+
+        let mut effect_events = Vec::new();
+        let mut container_changes = Vec::new();
+
+        let (previous_owner, previous_crew_member) = {
+            let object = &self.objects[index];
+            (object.state.owner, object.state.crew_member)
+        };
+
+        {
+            let object = &mut self.objects[index];
+
+            if let Some(update) = object_update {
+                let delta: ObjectDelta = update.into();
+                if let Some(change) = object.state.apply_delta(&delta, action_library) {
+                    container_changes.push(change);
+                }
+            } else {
+                object.state.action.reconcile_with_library(action_library);
+            }
+
+            if destroy_object {
+                effect_events.extend(object.mark_destroyed());
+            }
+
+            if !object_commands.is_empty() {
+                object.enqueue_commands(object_commands);
+            }
+
+            if !object_effects.is_empty() {
+                let mut applied = object.apply_effect_commands(&object_effects);
+                effect_events.append(&mut applied);
+            }
+
+            self.physics.clamp_velocity(&mut object.state.velocity);
+        }
+
+        let (new_owner, new_crew_member) = {
+            let object = &self.objects[index];
+            (object.state.owner, object.state.crew_member)
+        };
+
+        if previous_owner != new_owner || previous_crew_member != new_crew_member {
+            self.update_selection_for_state_change(
+                object_id,
+                previous_owner,
+                new_owner,
+                new_crew_member,
+            );
+        }
+
+        if !global_effects.is_empty() {
+            self.apply_global_effect_commands(&global_effects);
+        }
+
+        if !effect_events.is_empty() {
+            let previous_container = self.objects[index].state.container;
+            let global_view = self.global_effects.clone();
+            let rng_state = self.rng.clone();
+            let definition = self
+                .definitions
+                .get(definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.to_string()))?;
+            let (global_cmds, new_rng) = Self::run_effect_events_for_object(
+                definition,
+                rng_state,
+                object_id,
+                &mut self.objects[index],
+                effect_events,
+                global_view,
+            )?;
+            self.rng = new_rng;
+            if !global_cmds.is_empty() {
+                self.apply_global_effect_commands(&global_cmds);
+            }
+            let new_container = self.objects[index].state.container;
+            if previous_container != new_container {
+                container_changes.push((previous_container, new_container));
+            }
+        }
+
+        for (previous, new) in container_changes {
+            self.apply_container_change(object_id, previous, new)?;
+        }
 
         Ok(())
     }
@@ -3040,6 +3305,8 @@ impl Engine {
         for (previous, new) in container_changes {
             self.apply_container_change(id, previous, new)?;
         }
+        let index = self.objects.len() - 1;
+        self.trigger_action_callbacks(index, None)?;
         Ok((id, additional_spawns))
     }
 
@@ -4088,6 +4355,90 @@ mod tests {
         let object = after_fourth.object(id).expect("object present");
         assert_eq!(object.action.phase, 2);
         assert_eq!(object.action.ticks, 0);
+    }
+
+    #[test]
+    fn action_start_and_end_callbacks_fire() {
+        use std::sync::{Arc, Mutex};
+
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        global func OnIdleStart(state, action) { return nil; }
+        global func OnIdleEnd(state, action) { return nil; }
+        global func OnWalkStart(state, action) { return nil; }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default()
+                .with_length(1)
+                .with_next("Walk")
+                .with_start_call("OnIdleStart")
+                .with_end_call("OnIdleEnd"),
+        );
+        actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default().with_start_call("OnWalkStart"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        {
+            let calls = call_log.lock().unwrap().clone();
+            let idle_start = calls.iter().filter(|name| *name == "OnIdleStart").count();
+            let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
+            let walk_start = calls.iter().filter(|name| *name == "OnWalkStart").count();
+            assert_eq!(idle_start, 1);
+            assert_eq!(idle_end, 0);
+            assert_eq!(walk_start, 0);
+        }
+
+        engine.tick().expect("first tick succeeds");
+
+        {
+            let calls = call_log.lock().unwrap().clone();
+            let idle_start = calls.iter().filter(|name| *name == "OnIdleStart").count();
+            let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
+            let walk_start = calls.iter().filter(|name| *name == "OnWalkStart").count();
+            assert_eq!(idle_start, 1);
+            assert_eq!(idle_end, 1);
+            assert_eq!(walk_start, 1);
+        }
+
+        engine.tick().expect("second tick succeeds");
+
+        {
+            let calls = call_log.lock().unwrap().clone();
+            let idle_start = calls.iter().filter(|name| *name == "OnIdleStart").count();
+            let idle_end = calls.iter().filter(|name| *name == "OnIdleEnd").count();
+            let walk_start = calls.iter().filter(|name| *name == "OnWalkStart").count();
+            assert_eq!(idle_start, 1);
+            assert_eq!(idle_end, 1);
+            assert_eq!(walk_start, 1);
+        }
     }
 
     #[test]
