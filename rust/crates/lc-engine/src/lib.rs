@@ -11,7 +11,7 @@ pub use action::{
     ActionLibrary, ActionProcedure, ActionSpec, ActionState, ActionUpdate, ActionUpdateResult,
 };
 pub use effect::EffectState;
-pub use landscape::{CollisionResolution, Landscape, LandscapeError};
+pub use landscape::{CollisionResolution, Landscape, LandscapeCommand, LandscapeError};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
 
@@ -743,6 +743,8 @@ pub struct QueuedCommand {
     pub effects: Vec<EffectCommand>,
     pub destroy: bool,
     pub spawns: Vec<SpawnConfig>,
+    #[serde(default)]
+    pub landscape: Vec<LandscapeCommand>,
 }
 
 impl QueuedCommand {
@@ -753,6 +755,7 @@ impl QueuedCommand {
             effects: Vec::new(),
             destroy: false,
             spawns: Vec::new(),
+            landscape: Vec::new(),
         }
     }
 
@@ -763,6 +766,7 @@ impl QueuedCommand {
             effects: Vec::new(),
             destroy: false,
             spawns: Vec::new(),
+            landscape: Vec::new(),
         }
     }
 
@@ -786,12 +790,21 @@ impl QueuedCommand {
         self
     }
 
+    pub fn with_landscape(mut self, commands: Vec<LandscapeCommand>) -> Self {
+        self.landscape = commands;
+        self
+    }
+
     pub fn update(&self) -> &ObjectUpdate {
         &self.update
     }
 
     pub fn effects(&self) -> &[EffectCommand] {
         &self.effects
+    }
+
+    pub fn landscape(&self) -> &[LandscapeCommand] {
+        &self.landscape
     }
 }
 
@@ -1085,7 +1098,7 @@ impl Object {
     fn execute_command_queue(
         &mut self,
         physics: &PhysicsSettings,
-        landscape: Option<&Landscape>,
+        mut landscape: Option<&mut Landscape>,
         action_library: &ActionLibrary,
     ) -> CommandQueueOutcome {
         let mut outcome = CommandQueueOutcome::default();
@@ -1139,9 +1152,14 @@ impl Object {
             if !command.spawns.is_empty() {
                 outcome.spawns.extend(command.spawns);
             }
-            if let Some(landscape) = landscape {
+            if let Some(landscape_ref) = &mut landscape {
+                for op in command.landscape.iter() {
+                    op.apply(&mut **landscape_ref);
+                }
+            }
+            if let Some(landscape_ref) = &mut landscape {
                 let resolution =
-                    landscape.resolve_collision(self.state.position, self.state.velocity);
+                    (**landscape_ref).resolve_collision(self.state.position, self.state.velocity);
                 if resolution.collided {
                     self.state.position = resolution.position;
                     self.state.velocity = resolution.velocity;
@@ -2178,7 +2196,6 @@ impl Engine {
         self.environment.advance_frame();
         let mut spawn_requests = Vec::new();
         self.tick_global_effects();
-        let landscape_for_commands = self.landscape.clone();
         for idx in 0..self.objects.len() {
             let definition_id = self.objects[idx].definition_id.clone();
             let previous_action_state = self.objects[idx].state.action.clone();
@@ -2190,6 +2207,7 @@ impl Engine {
                     .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
                 definition.action_library().clone()
             };
+            let mut landscape_slot = self.landscape.take();
             let (
                 queued_spawns,
                 queue_destroy,
@@ -2201,7 +2219,7 @@ impl Engine {
                 let previous_owner = object.state.owner;
                 let outcome = object.execute_command_queue(
                     &self.physics,
-                    landscape_for_commands.as_ref(),
+                    landscape_slot.as_mut(),
                     &action_library,
                 );
                 let new_owner = object.state.owner;
@@ -2214,6 +2232,7 @@ impl Engine {
                     (object.id, previous_owner, new_owner, new_crew),
                 )
             };
+            self.landscape = landscape_slot;
             self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
 
             for update in container_updates {
@@ -4120,6 +4139,7 @@ fn value_to_commands(
         let mut effects = Vec::new();
         let mut destroy = false;
         let mut spawns = Vec::new();
+        let mut landscape_ops = Vec::new();
 
         for (key, value) in map.into_iter() {
             match key.as_str() {
@@ -4164,6 +4184,9 @@ fn value_to_commands(
                 "spawn" => {
                     spawns.extend(value_to_spawns(definition, function, value)?);
                 }
+                "landscape" => {
+                    landscape_ops.extend(value_to_landscape_commands(definition, function, value)?);
+                }
                 other => {
                     return Err(EngineError::InvalidScriptOutput {
                         definition: definition.to_string(),
@@ -4178,7 +4201,8 @@ fn value_to_commands(
             QueuedCommand::new(delay.unwrap_or(0), update)
                 .with_effects(effects)
                 .with_spawns(spawns)
-                .with_destroy(destroy),
+                .with_destroy(destroy)
+                .with_landscape(landscape_ops),
         );
     }
 
@@ -4382,6 +4406,131 @@ fn value_to_effect_commands(
                     definition: definition.to_string(),
                     function,
                     detail: format!("unsupported effect op `{}`", other),
+                });
+            }
+        }
+    }
+
+    Ok(commands)
+}
+
+fn value_to_landscape_commands(
+    definition: &str,
+    function: &'static str,
+    value: Value,
+) -> Result<Vec<LandscapeCommand>, EngineError> {
+    let entries = match value {
+        Value::Array(values) => values,
+        Value::Nil => return Ok(Vec::new()),
+        other => {
+            return Err(EngineError::InvalidScriptOutput {
+                definition: definition.to_string(),
+                function,
+                detail: format!(
+                    "expected array for landscape commands, got {}",
+                    other.type_name()
+                ),
+            })
+        }
+    };
+
+    let mut commands = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let mut map = match entry {
+            Value::Proplist(map) => map,
+            other => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function,
+                    detail: format!(
+                        "landscape entry must be proplist, got {}",
+                        other.type_name()
+                    ),
+                })
+            }
+        };
+
+        let op = match map.remove("op") {
+            Some(Value::String(op)) => op,
+            Some(other) => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function,
+                    detail: format!("landscape.op must be string, got {}", other.type_name()),
+                })
+            }
+            None => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function,
+                    detail: "landscape entry missing `op`".into(),
+                })
+            }
+        };
+
+        match op.as_str() {
+            "lower" => {
+                let start = match map.remove("start") {
+                    Some(value) => value_to_int(definition, function, value)?,
+                    None => {
+                        return Err(EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: "landscape lower entry missing `start`".into(),
+                        })
+                    }
+                };
+
+                let height = match map.remove("height") {
+                    Some(value) => value_to_int(definition, function, value)?,
+                    None => {
+                        return Err(EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: "landscape lower entry missing `height`".into(),
+                        })
+                    }
+                };
+
+                let end = if let Some(value) = map.remove("end") {
+                    value_to_int(definition, function, value)?
+                } else if let Some(value) = map.remove("width") {
+                    let width = value_to_int(definition, function, value)?;
+                    if width <= 0 {
+                        return Err(EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: "landscape lower width must be > 0".into(),
+                        });
+                    }
+                    start + width
+                } else {
+                    start + 1
+                };
+
+                if end <= start {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: definition.to_string(),
+                        function,
+                        detail: "landscape lower end must be greater than start".into(),
+                    });
+                }
+
+                if let Some((key, _)) = map.into_iter().next() {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: definition.to_string(),
+                        function,
+                        detail: format!("unexpected key `{}` in landscape lower entry", key),
+                    });
+                }
+
+                commands.push(LandscapeCommand::LowerRange { start, end, height });
+            }
+            other => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function,
+                    detail: format!("unsupported landscape op `{other}`"),
                 });
             }
         }
@@ -6971,6 +7120,59 @@ mod tests {
         let snapshot = engine.tick().expect("second tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.position, Vector2::new(6, -7));
+    }
+
+    #[test]
+    fn queued_commands_lower_landscape_columns() {
+        let script = r#"
+        global func Step(state, frame, random) {
+            if (frame == 1) {
+                return {
+                    commands = [
+                        {
+                            landscape = [
+                                { op = "lower", start = 4, width = 3, height = 18 }
+                            ]
+                        }
+                    ]
+                };
+            }
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Miner", "Miner", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_landscape(Landscape::flat(16, 10));
+
+        engine
+            .spawn_object(SpawnConfig::new("Miner"))
+            .expect("spawn succeeds");
+
+        let _ = engine.tick().expect("first tick succeeds");
+        let surface = engine
+            .landscape()
+            .expect("landscape present")
+            .surface()
+            .to_vec();
+        assert_eq!(surface[4], 10);
+        assert_eq!(surface[6], 10);
+
+        let _ = engine.tick().expect("second tick succeeds");
+        let surface = engine
+            .landscape()
+            .expect("landscape present")
+            .surface()
+            .to_vec();
+        assert_eq!(&surface[4..7], &[18, 18, 18]);
+        assert_eq!(surface[7], 10);
     }
 
     fn simple_definition(id: &str) -> Definition {

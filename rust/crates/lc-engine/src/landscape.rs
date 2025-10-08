@@ -14,6 +14,11 @@ pub struct Landscape {
     surface: Vec<i32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LandscapeCommand {
+    LowerRange { start: i32, end: i32, height: i32 },
+}
+
 impl Landscape {
     pub fn new(width: u32, surface: Vec<i32>) -> Result<Self, LandscapeError> {
         if width as usize != surface.len() {
@@ -43,6 +48,26 @@ impl Landscape {
     pub fn set_height(&mut self, x: u32, height: i32) {
         if let Some(slot) = self.surface.get_mut(x as usize) {
             *slot = height;
+        }
+    }
+
+    pub fn lower_range(&mut self, start: i32, end: i32, height: i32) {
+        if start >= end {
+            return;
+        }
+        let width = self.width as i32;
+        let clamped_start = start.clamp(0, width);
+        let clamped_end = end.clamp(0, width);
+        if clamped_start >= clamped_end {
+            return;
+        }
+        let target_height = height.max(0);
+        for x in clamped_start..clamped_end {
+            if let Some(slot) = self.surface.get_mut(x as usize) {
+                if target_height > *slot {
+                    *slot = target_height;
+                }
+            }
         }
     }
 
@@ -84,6 +109,16 @@ impl Landscape {
     }
 }
 
+impl LandscapeCommand {
+    pub fn apply(&self, landscape: &mut Landscape) {
+        match *self {
+            LandscapeCommand::LowerRange { start, end, height } => {
+                landscape.lower_range(start, end, height);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollisionResolution {
     pub position: Vector2,
@@ -115,5 +150,26 @@ mod tests {
         assert!(!resolution.collided);
         assert_eq!(resolution.position, position);
         assert_eq!(resolution.velocity, velocity);
+    }
+
+    #[test]
+    fn lower_range_expands_surface_depth() {
+        let mut landscape = Landscape::flat(8, 10);
+        landscape.lower_range(2, 6, 14);
+        assert_eq!(landscape.surface()[1], 10);
+        assert_eq!(landscape.surface()[2], 14);
+        assert_eq!(landscape.surface()[5], 14);
+        assert_eq!(landscape.surface()[6], 10);
+    }
+
+    #[test]
+    fn lower_range_clamps_bounds_and_ignores_raises() {
+        let mut landscape = Landscape::flat(5, 12);
+        landscape.lower_range(-3, 3, 18);
+        assert_eq!(landscape.surface()[0], 18);
+        assert_eq!(landscape.surface()[2], 18);
+        landscape.lower_range(0, 5, 6);
+        assert_eq!(landscape.surface()[2], 18);
+        assert_eq!(landscape.surface()[4], 12);
     }
 }
