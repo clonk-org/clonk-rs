@@ -439,6 +439,8 @@ impl Default for PhysicsSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MovementProfile {
+    pub walk_speed: i32,
+    pub walk_acceleration: i32,
     pub float_speed: i32,
     pub float_acceleration: i32,
     pub swim_speed: i32,
@@ -448,11 +450,23 @@ pub struct MovementProfile {
 impl MovementProfile {
     pub const fn new(float_speed: i32, float_acceleration: i32) -> Self {
         Self {
+            walk_speed: 8,
+            walk_acceleration: 1,
             float_speed,
             float_acceleration,
             swim_speed: 6,
             swim_acceleration: 1,
         }
+    }
+
+    pub fn with_walk_speed(mut self, walk_speed: i32) -> Self {
+        self.walk_speed = walk_speed;
+        self
+    }
+
+    pub fn with_walk_acceleration(mut self, walk_acceleration: i32) -> Self {
+        self.walk_acceleration = walk_acceleration;
+        self
     }
 
     pub fn with_float_speed(mut self, float_speed: i32) -> Self {
@@ -479,6 +493,8 @@ impl MovementProfile {
 impl Default for MovementProfile {
     fn default() -> Self {
         Self {
+            walk_speed: 8,
+            walk_acceleration: 1,
             float_speed: 6,
             float_acceleration: 1,
             swim_speed: 6,
@@ -2495,6 +2511,35 @@ fn decelerate_toward_zero(value: i32, accel: i32) -> i32 {
     }
 }
 
+fn apply_walk_command_movement(
+    velocity: &mut Vector2,
+    command_direction: CommandDirection,
+    profile: MovementProfile,
+) {
+    let accel = profile.walk_acceleration.max(0);
+    let limit = profile.walk_speed;
+
+    match command_direction {
+        CommandDirection::Left | CommandDirection::UpLeft | CommandDirection::DownLeft => {
+            if accel > 0 {
+                velocity.x = velocity.x.saturating_sub(accel);
+            }
+        }
+        CommandDirection::Right | CommandDirection::UpRight | CommandDirection::DownRight => {
+            if accel > 0 {
+                velocity.x = velocity.x.saturating_add(accel);
+            }
+        }
+        CommandDirection::Stop | CommandDirection::Up | CommandDirection::Down => {
+            if accel > 0 {
+                velocity.x = decelerate_toward_zero(velocity.x, accel);
+            }
+        }
+    }
+
+    velocity.x = clamp_to_limit(velocity.x, limit);
+}
+
 fn apply_swim_command_movement(
     velocity: &mut Vector2,
     command_direction: CommandDirection,
@@ -4134,6 +4179,12 @@ impl Engine {
                     movement_profile,
                     gravity_component,
                 );
+            } else if matches!(procedure, ActionProcedure::Walk) {
+                apply_walk_command_movement(
+                    &mut object.state.velocity,
+                    command_direction,
+                    movement_profile,
+                );
             }
             match procedure {
                 ActionProcedure::Bridge
@@ -4148,6 +4199,13 @@ impl Engine {
                 _ => {}
             }
             self.physics.clamp_velocity(&mut object.state.velocity);
+            if matches!(procedure, ActionProcedure::Walk) {
+                if object.state.velocity.x < 0 {
+                    object.state.direction = Direction::Left;
+                } else if object.state.velocity.x > 0 {
+                    object.state.direction = Direction::Right;
+                }
+            }
         }
 
         if matches!(procedure, ActionProcedure::Lift) {

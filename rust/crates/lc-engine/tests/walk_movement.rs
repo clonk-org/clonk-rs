@@ -1,0 +1,94 @@
+use lc_engine::{
+    ActionSpec, ActionState, CommandDirection, Definition, Direction, Engine, MovementProfile,
+    ObjectUpdate, SpawnConfig,
+};
+use std::collections::HashMap;
+
+const WALKER_SCRIPT: &str = r#"
+global func Initialize(state, random) { return nil; }
+
+global func Step(state, frame, random) { return nil; }
+"#;
+
+#[test]
+fn walk_procedure_accelerates_and_brakes() -> Result<(), Box<dyn std::error::Error>> {
+    let mut engine = Engine::new();
+    let mut definition = Definition::from_script("Walker", "Walker", WALKER_SCRIPT)?;
+    let mut actions = HashMap::new();
+    actions.insert(
+        "Walk".to_string(),
+        ActionSpec::default().with_procedure("Walk"),
+    );
+    definition.configure_actions(Some("Walk".to_string()), actions);
+    let profile = MovementProfile::default()
+        .with_walk_speed(8)
+        .with_walk_acceleration(3);
+    definition.set_movement_profile(profile);
+    engine.register_definition(definition)?;
+
+    let object_id = engine.spawn_object(
+        SpawnConfig::new("Walker")
+            .with_action(ActionState::new("Walk"))
+            .with_energy(10)
+            .with_command_direction(CommandDirection::Right),
+    )?;
+
+    let snapshot = engine.tick()?;
+    let object = snapshot
+        .object(object_id)
+        .expect("object must exist after first tick");
+    assert_eq!(object.velocity.x, 3);
+    assert_eq!(object.direction, Direction::Right);
+
+    let snapshot = engine.tick()?;
+    let object = snapshot
+        .object(object_id)
+        .expect("object must exist after second tick");
+    assert_eq!(object.velocity.x, 6);
+    assert_eq!(object.direction, Direction::Right);
+
+    let snapshot = engine.tick()?;
+    let object = snapshot
+        .object(object_id)
+        .expect("object must exist after third tick");
+    assert_eq!(object.velocity.x, 8);
+    assert_eq!(object.direction, Direction::Right);
+
+    engine.apply_object_update(
+        object_id,
+        ObjectUpdate::new().with_command_direction(CommandDirection::Stop),
+    )?;
+
+    let snapshot = engine.tick()?;
+    let object = snapshot
+        .object(object_id)
+        .expect("object must exist after braking tick");
+    assert_eq!(object.velocity.x, 5);
+    assert_eq!(object.direction, Direction::Right);
+
+    let snapshot = engine.tick()?;
+    let object = snapshot
+        .object(object_id)
+        .expect("object must exist after second braking tick");
+    assert_eq!(object.velocity.x, 2);
+
+    let snapshot = engine.tick()?;
+    let object = snapshot
+        .object(object_id)
+        .expect("object must exist after third braking tick");
+    assert_eq!(object.velocity.x, 0);
+
+    engine.apply_object_update(
+        object_id,
+        ObjectUpdate::new().with_command_direction(CommandDirection::Left),
+    )?;
+
+    let snapshot = engine.tick()?;
+    let object = snapshot
+        .object(object_id)
+        .expect("object must exist after accelerating left");
+    assert_eq!(object.velocity.x, -3);
+    assert_eq!(object.direction, Direction::Left);
+
+    Ok(())
+}

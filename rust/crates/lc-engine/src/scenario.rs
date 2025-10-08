@@ -475,6 +475,8 @@ struct MovementManifest {
     float: Option<FloatMovementManifest>,
     #[serde(default)]
     swim: Option<SwimMovementManifest>,
+    #[serde(default)]
+    walk: Option<WalkMovementManifest>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -487,6 +489,14 @@ struct FloatMovementManifest {
 
 #[derive(Debug, Deserialize, Default)]
 struct SwimMovementManifest {
+    #[serde(default)]
+    speed: Option<i32>,
+    #[serde(default)]
+    acceleration: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct WalkMovementManifest {
     #[serde(default)]
     speed: Option<i32>,
     #[serde(default)]
@@ -534,6 +544,26 @@ impl MovementManifest {
                     });
                 }
                 profile.swim_acceleration = acceleration;
+            }
+        }
+        if let Some(walk) = self.walk {
+            if let Some(speed) = walk.speed {
+                if speed < 0 {
+                    return Err(ScenarioError::InvalidMovement {
+                        id: id.to_string(),
+                        detail: format!("walk.speed must be >= 0 (got {speed})"),
+                    });
+                }
+                profile.walk_speed = speed;
+            }
+            if let Some(acceleration) = walk.acceleration {
+                if acceleration < 0 {
+                    return Err(ScenarioError::InvalidMovement {
+                        id: id.to_string(),
+                        detail: format!("walk.acceleration must be >= 0 (got {acceleration})"),
+                    });
+                }
+                profile.walk_acceleration = acceleration;
             }
         }
         Ok(profile)
