@@ -1900,6 +1900,142 @@ impl Definition {
     }
 }
 
+struct ScenarioScript {
+    name: String,
+    script: ScriptEngine,
+    has_initialize: bool,
+    has_step: bool,
+}
+
+impl ScenarioScript {
+    fn from_source(name: impl Into<String>, source: &str) -> Result<Self, EngineError> {
+        let name = name.into();
+        let mut script = ScriptEngine::new();
+        script
+            .load_script(source)
+            .map_err(|source| EngineError::Script {
+                definition: name.clone(),
+                function: "load",
+                source,
+            })?;
+        compat::register_host_functions(&mut script);
+        let has_initialize = script.has_function("Initialize");
+        let has_step = script.has_function("Step");
+        Ok(Self {
+            name,
+            script,
+            has_initialize,
+            has_step,
+        })
+    }
+
+    fn initialize(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        rng: ChaCha8Rng,
+        random: i32,
+        global_effects: &[EffectState],
+        environment: EnvironmentSettings,
+    ) -> Result<(ScenarioBatch, ChaCha8Rng), EngineError> {
+        if !self.has_initialize {
+            return Ok((ScenarioBatch::default(), rng));
+        }
+        self.call(
+            "Initialize",
+            snapshot,
+            rng,
+            random,
+            None,
+            global_effects,
+            environment,
+        )
+    }
+
+    fn step(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        rng: ChaCha8Rng,
+        random: i32,
+        frame: u64,
+        global_effects: &[EffectState],
+        environment: EnvironmentSettings,
+    ) -> Result<(ScenarioBatch, ChaCha8Rng), EngineError> {
+        if !self.has_step {
+            return Ok((ScenarioBatch::default(), rng));
+        }
+        self.call(
+            "Step",
+            snapshot,
+            rng,
+            random,
+            Some(frame),
+            global_effects,
+            environment,
+        )
+    }
+
+    fn call(
+        &mut self,
+        function: &'static str,
+        snapshot: &SimulationSnapshot,
+        rng: ChaCha8Rng,
+        random: i32,
+        frame: Option<u64>,
+        global_effects: &[EffectState],
+        environment: EnvironmentSettings,
+    ) -> Result<(ScenarioBatch, ChaCha8Rng), EngineError> {
+        let state_value = build_scenario_state_value(snapshot);
+        let env_frame = frame.unwrap_or(snapshot.frame);
+        let mut args = Vec::new();
+        args.push(state_value);
+        if let Some(frame) = frame {
+            let truncated = if frame > i32::MAX as u64 {
+                i32::MAX
+            } else {
+                frame as i32
+            };
+            args.push(Value::Int(truncated));
+        }
+        args.push(Value::Int(random));
+
+        let env_guard = enter_environment_context(environment, env_frame);
+        let guard = enter_random_context(rng);
+        let (result, host_effects) =
+            compat::with_effect_context(None, global_effects, || self.script.call(function, &args));
+        let rng = guard.finish();
+        let mut environment_delta = env_guard.finish();
+        if let Some(delta) = host_effects.environment {
+            merge_environment_delta(&mut environment_delta, &delta);
+        }
+        let result = result.map_err(|source| EngineError::Script {
+            definition: self.name.clone(),
+            function,
+            source,
+        })?;
+
+        if !host_effects.object.is_empty()
+            || host_effects.object_update.is_some()
+            || !host_effects.object_commands.is_empty()
+            || host_effects.destroy_object
+        {
+            return Err(EngineError::InvalidScriptOutput {
+                definition: self.name.clone(),
+                function,
+                detail: "scenario scripts may not enqueue object commands".into(),
+            });
+        }
+
+        let mut batch = parse_scenario_command(&self.name, function, result)?;
+        if !host_effects.global.is_empty() {
+            batch.global_effects.extend(host_effects.global);
+        }
+        if !environment_delta.is_empty() {
+            batch.environment = Some(environment_delta);
+        }
+        Ok((batch, rng))
+    }
+}
+
 #[derive(Debug, Default)]
 struct CommandBatch {
     delta: ObjectDelta,
@@ -1907,6 +2043,13 @@ struct CommandBatch {
     destroy: bool,
     commands: Vec<QueuedCommand>,
     effects: Vec<EffectCommand>,
+    global_effects: Vec<EffectCommand>,
+    environment: Option<EnvironmentDelta>,
+}
+
+#[derive(Debug, Default)]
+struct ScenarioBatch {
+    spawns: Vec<SpawnConfig>,
     global_effects: Vec<EffectCommand>,
     environment: Option<EnvironmentDelta>,
 }
@@ -1921,6 +2064,7 @@ pub struct Engine {
     physics: PhysicsSettings,
     environment: EnvironmentSettings,
     global_effects: Vec<EffectState>,
+    scenario_script: Option<ScenarioScript>,
     crew_selection: HashMap<i32, CrewSelection>,
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
     known_crew_owners: HashSet<i32>,
@@ -1943,6 +2087,7 @@ impl Engine {
             physics: PhysicsSettings::default(),
             environment: EnvironmentSettings::default(),
             global_effects: Vec::new(),
+            scenario_script: None,
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
             known_crew_owners: HashSet::new(),
@@ -1983,6 +2128,54 @@ impl Engine {
 
     pub fn set_environment(&mut self, environment: EnvironmentSettings) {
         self.environment = environment;
+    }
+
+    pub fn clear_scenario_script(&mut self) {
+        self.scenario_script = None;
+    }
+
+    pub fn install_scenario_script(
+        &mut self,
+        name: impl Into<String>,
+        source: &str,
+    ) -> Result<Vec<ObjectId>, EngineError> {
+        let name = name.into();
+        let mut script = ScenarioScript::from_source(name, source)?;
+        let snapshot = self.snapshot();
+        let random = self.next_random_i32();
+        let rng_state = self.rng.clone();
+        let (batch, new_rng) = script.initialize(
+            &snapshot,
+            rng_state,
+            random,
+            &self.global_effects,
+            self.environment,
+        )?;
+        self.rng = new_rng;
+        let created = self.apply_scenario_batch(batch)?;
+        self.scenario_script = Some(script);
+        Ok(created)
+    }
+
+    fn apply_scenario_batch(&mut self, batch: ScenarioBatch) -> Result<Vec<ObjectId>, EngineError> {
+        let ScenarioBatch {
+            spawns,
+            global_effects,
+            environment,
+        } = batch;
+
+        if let Some(delta) = environment {
+            delta.apply(&mut self.environment);
+        }
+        if !global_effects.is_empty() {
+            self.apply_global_effect_commands(&global_effects);
+        }
+        let mut created = Vec::with_capacity(spawns.len());
+        for spawn in spawns {
+            let id = self.spawn_object(spawn)?;
+            created.push(id);
+        }
+        Ok(created)
     }
 
     pub fn crew_members(&self, owner: i32) -> Vec<ObjectId> {
@@ -2242,6 +2435,29 @@ impl Engine {
         self.frame += 1;
         let frame = self.frame;
         self.environment.advance_frame();
+        if self.scenario_script.is_some() {
+            let snapshot = self.snapshot();
+            let random = self.next_random_i32();
+            let rng_state = self.rng.clone();
+            let environment = self.environment;
+            let global_effects = self.global_effects.clone();
+            let (batch, new_rng) = {
+                let script = self
+                    .scenario_script
+                    .as_mut()
+                    .expect("scenario script must be present");
+                script.step(
+                    &snapshot,
+                    rng_state,
+                    random,
+                    frame,
+                    &global_effects,
+                    environment,
+                )?
+            };
+            self.rng = new_rng;
+            self.apply_scenario_batch(batch)?;
+        }
         let mut spawn_requests = Vec::new();
         self.tick_global_effects();
         for idx in 0..self.objects.len() {
@@ -3792,6 +4008,152 @@ fn build_state_value(
     Value::Proplist(map)
 }
 
+fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
+    let mut map = HashMap::with_capacity(10);
+    map.insert(
+        "definition".into(),
+        Value::String(snapshot.definition_id.clone()),
+    );
+    map.insert(
+        "id".into(),
+        Value::Int(truncate_to_i32(snapshot.id.as_u64())),
+    );
+    map.insert("position".into(), snapshot.position.to_value());
+    map.insert("velocity".into(), snapshot.velocity.to_value());
+    map.insert("energy".into(), Value::Int(snapshot.energy));
+    map.insert("owner".into(), Value::Int(snapshot.owner));
+    map.insert("crew_member".into(), Value::Bool(snapshot.crew_member));
+    map.insert(
+        "status".into(),
+        Value::Int(snapshot.status.to_script_value()),
+    );
+    match snapshot.container {
+        Some(container) => {
+            map.insert(
+                "container".into(),
+                Value::Int(truncate_to_i32(container.as_u64())),
+            );
+        }
+        None => {
+            map.insert("container".into(), Value::Nil);
+        }
+    }
+    let contents: Vec<_> = snapshot
+        .contents
+        .iter()
+        .map(|id| Value::Int(truncate_to_i32(id.as_u64())))
+        .collect();
+    map.insert("contents".into(), Value::Array(contents));
+    let mut action = HashMap::with_capacity(4);
+    action.insert("name".into(), Value::String(snapshot.action.name.clone()));
+    action.insert("phase".into(), Value::Int(snapshot.action.phase));
+    let ticks = snapshot.action.ticks.min(i32::MAX as u32) as i32;
+    action.insert("ticks".into(), Value::Int(ticks));
+    if let Some(procedure) = &snapshot.action_procedure {
+        action.insert("procedure".into(), Value::String(procedure.clone()));
+    }
+    map.insert("action".into(), Value::Proplist(action));
+    let effects: Vec<_> = snapshot.effects.iter().map(build_effect_value).collect();
+    map.insert("effects".into(), Value::Array(effects));
+    Value::Proplist(map)
+}
+
+fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {
+    let mut map = HashMap::with_capacity(5);
+    let frame_value = if snapshot.frame > i32::MAX as u64 {
+        i32::MAX
+    } else {
+        snapshot.frame as i32
+    };
+    map.insert("frame".into(), Value::Int(frame_value));
+    match snapshot.physics {
+        Some(physics) => {
+            map.insert("physics".into(), Value::Proplist(physics_to_map(physics)));
+        }
+        None => {
+            map.insert("physics".into(), Value::Nil);
+        }
+    }
+    map.insert(
+        "environment".into(),
+        Value::Proplist(environment_frame_to_map(&snapshot.environment)),
+    );
+    let objects: Vec<_> = snapshot
+        .objects
+        .iter()
+        .map(build_object_snapshot_value)
+        .collect();
+    map.insert("objects".into(), Value::Array(objects));
+    let global_effects: Vec<_> = snapshot
+        .global_effects
+        .iter()
+        .map(build_effect_value)
+        .collect();
+    map.insert("global_effects".into(), Value::Array(global_effects));
+    Value::Proplist(map)
+}
+
+fn physics_to_map(settings: PhysicsSettings) -> HashMap<String, Value> {
+    let mut map = HashMap::with_capacity(4);
+    map.insert("gravity".into(), Value::Int(settings.gravity));
+    map.insert("max_fall_speed".into(), Value::Int(settings.max_fall_speed));
+    map.insert("max_rise_speed".into(), Value::Int(settings.max_rise_speed));
+    map.insert(
+        "max_horizontal_speed".into(),
+        Value::Int(settings.max_horizontal_speed),
+    );
+    map
+}
+
+fn environment_frame_to_map(frame: &EnvironmentFrame) -> HashMap<String, Value> {
+    let mut map = HashMap::with_capacity(12);
+    let settings = frame.settings;
+    map.insert("wind".into(), Value::Int(settings.wind));
+    map.insert("wind_variation".into(), Value::Int(settings.wind_variation));
+    let wind_period = settings.wind_period.min(i32::MAX as u32) as i32;
+    map.insert("wind_period".into(), Value::Int(wind_period));
+    map.insert("temperature".into(), Value::Int(settings.temperature));
+    map.insert("climate".into(), Value::Int(settings.climate));
+    map.insert(
+        "temperature_variation".into(),
+        Value::Int(settings.temperature_variation),
+    );
+    let temperature_period = settings.temperature_period.min(i32::MAX as u32) as i32;
+    map.insert("temperature_period".into(), Value::Int(temperature_period));
+    let temperature_phase = settings.temperature_phase.min(i32::MAX as u32) as i32;
+    map.insert("temperature_phase".into(), Value::Int(temperature_phase));
+    map.insert(
+        "time_of_day".into(),
+        Value::Int(i32::from(settings.time_of_day)),
+    );
+    map.insert(
+        "time_speed".into(),
+        Value::Int(i32::from(settings.time_speed)),
+    );
+    map.insert("precipitation".into(), Value::Int(settings.precipitation));
+    map.insert("current_wind".into(), Value::Int(frame.wind_force));
+    map.insert(
+        "ambient_temperature".into(),
+        Value::Int(frame.ambient_temperature),
+    );
+    map.insert(
+        "sky_color".into(),
+        frame
+            .sky_color
+            .map(|color| rgb_to_value(color))
+            .unwrap_or(Value::Nil),
+    );
+    map
+}
+
+fn rgb_to_value(color: RgbColor) -> Value {
+    Value::Array(vec![
+        Value::Int(i32::from(color.r)),
+        Value::Int(i32::from(color.g)),
+        Value::Int(i32::from(color.b)),
+    ])
+}
+
 fn build_effect_value(effect: &EffectState) -> Value {
     let mut props = HashMap::with_capacity(6);
     props.insert("name".into(), Value::String(effect.name.clone()));
@@ -3805,6 +4167,58 @@ fn build_effect_value(effect: &EffectState) -> Value {
         props.insert("command_target_id".into(), Value::String(id.clone()));
     }
     Value::Proplist(props)
+}
+
+fn merge_environment_delta(target: &mut EnvironmentDelta, source: &EnvironmentDelta) {
+    if let Some(wind) = source.wind {
+        target.wind = Some(wind);
+    }
+    if let Some(temperature) = source.temperature {
+        target.temperature = Some(temperature);
+    }
+    if let Some(climate) = source.climate {
+        target.climate = Some(climate);
+    }
+}
+
+fn parse_scenario_command(
+    definition: &str,
+    function: &'static str,
+    value: Value,
+) -> Result<ScenarioBatch, EngineError> {
+    match value {
+        Value::Nil => Ok(ScenarioBatch::default()),
+        Value::Proplist(map) => {
+            let mut batch = ScenarioBatch::default();
+            for (key, value) in map.into_iter() {
+                match key.as_str() {
+                    "spawn" => {
+                        batch
+                            .spawns
+                            .extend(value_to_spawns(definition, function, value)?);
+                    }
+                    "global_effects" => {
+                        batch
+                            .global_effects
+                            .extend(value_to_effect_commands(definition, function, value)?);
+                    }
+                    other => {
+                        return Err(EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: format!("unexpected key `{other}`"),
+                        });
+                    }
+                }
+            }
+            Ok(batch)
+        }
+        other => Err(EngineError::InvalidScriptOutput {
+            definition: definition.to_string(),
+            function,
+            detail: format!("expected proplist or nil, got {}", other.type_name()),
+        }),
+    }
 }
 
 fn effect_stop_reason_value(reason: EffectStopReason) -> Value {

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -68,6 +69,12 @@ struct ScenarioSpawn {
     config: SpawnConfig,
 }
 
+#[derive(Debug, Clone)]
+struct ScenarioScriptSource {
+    name: String,
+    source: String,
+}
+
 #[derive(Debug)]
 pub struct Scenario {
     name: Option<String>,
@@ -78,6 +85,7 @@ pub struct Scenario {
     landscape: Option<Landscape>,
     physics: Option<PhysicsSettings>,
     environment: Option<EnvironmentSettings>,
+    script: Option<ScenarioScriptSource>,
 }
 
 impl Scenario {
@@ -125,6 +133,7 @@ impl Scenario {
     }
 
     pub fn apply(&self, engine: &mut Engine) -> Result<Vec<ObjectId>, ScenarioError> {
+        engine.clear_scenario_script();
         if let Some(landscape) = &self.landscape {
             engine.set_landscape(landscape.clone());
         } else {
@@ -149,7 +158,7 @@ impl Scenario {
 
         let mut pending = self.initial_spawns.clone();
         let mut handles: HashMap<String, ObjectId> = HashMap::new();
-        let mut created = Vec::with_capacity(pending.len());
+        let mut created = Vec::with_capacity(pending.len() + 4);
 
         while !pending.is_empty() {
             let mut progress = false;
@@ -195,6 +204,11 @@ impl Scenario {
                 return Err(ScenarioError::ContainerDependencyCycle(culprit));
             }
         }
+
+        if let Some(script) = &self.script {
+            let mut additional = engine.install_scenario_script(&script.name, &script.source)?;
+            created.append(&mut additional);
+        }
         Ok(created)
     }
 
@@ -220,20 +234,7 @@ impl Scenario {
             }
 
             let script_path = Path::new(&script);
-            let script_bytes = match group.read_file(script_path) {
-                Ok(bytes) => bytes,
-                Err(GroupError::EntryNotFound(_)) => {
-                    return Err(ScenarioError::MissingScript {
-                        path: PathBuf::from(script_path),
-                    })
-                }
-                Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-                    return Err(ScenarioError::MissingScript {
-                        path: PathBuf::from(script_path),
-                    })
-                }
-                Err(error) => return Err(ScenarioError::Resources(error)),
-            };
+            let script_bytes = read_group_file_bytes(group, script_path)?;
             let script_source =
                 String::from_utf8(script_bytes).map_err(|_| ScenarioError::ScriptEncoding {
                     path: PathBuf::from(script_path),
@@ -256,6 +257,26 @@ impl Scenario {
                 crew_member,
             });
         }
+
+        let script = if let Some(path) = manifest.script {
+            debug_assert_eq!(
+                path.trim(),
+                path,
+                "scenario script path contains leading/trailing whitespace"
+            );
+            let script_path = Path::new(&path);
+            let script_bytes = read_group_file_bytes(group, script_path)?;
+            let script_source =
+                String::from_utf8(script_bytes).map_err(|_| ScenarioError::ScriptEncoding {
+                    path: PathBuf::from(script_path),
+                })?;
+            Some(ScenarioScriptSource {
+                name: path,
+                source: script_source,
+            })
+        } else {
+            None
+        };
 
         let mut spawns = Vec::with_capacity(manifest.initial_objects.len());
         let mut handles = HashSet::new();
@@ -376,8 +397,27 @@ impl Scenario {
             landscape,
             physics,
             environment,
+            script,
         })
     }
+}
+
+fn read_group_file_bytes(group: &Group, path: &Path) -> Result<Vec<u8>, ScenarioError> {
+    match group.read_file(path) {
+        Ok(bytes) => Ok(bytes),
+        Err(GroupError::EntryNotFound(_)) => read_file_from_fs(group, path),
+        Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            read_file_from_fs(group, path)
+        }
+        Err(error) => Err(ScenarioError::Resources(error)),
+    }
+}
+
+fn read_file_from_fs(group: &Group, path: &Path) -> Result<Vec<u8>, ScenarioError> {
+    let fallback = group.root().join(path);
+    fs::read(&fallback).map_err(|_| ScenarioError::MissingScript {
+        path: PathBuf::from(path),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -398,6 +438,8 @@ struct ScenarioManifest {
     physics: Option<PhysicsManifest>,
     #[serde(default)]
     environment: Option<EnvironmentManifest>,
+    #[serde(default)]
+    script: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1488,26 +1530,128 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn scenario_script_initialize_spawns_objects() {
+        let scenario_script = r#"
+global func Initialize(state, random)
+{
+    return { spawn = [ { definition = "Mover", owner = 42, energy = 77 } ] };
+}
+
+global func Step(state, frame, random)
+{
+    return nil;
+}
+"#;
+
+        let scenario = Scenario {
+            name: Some("Script Test".into()),
+            ticks: None,
+            ground_height_hint: Some(220),
+            definitions: vec![ScenarioDefinition {
+                id: "Mover".into(),
+                name: Some("Mover".into()),
+                script: TEST_SCRIPT.to_string(),
+                actions: None,
+                crew_member: false,
+            }],
+            initial_spawns: vec![ScenarioSpawn {
+                handle: None,
+                container_handle: None,
+                config: SpawnConfig::new("Mover"),
+            }],
+            landscape: None,
+            physics: None,
+            environment: None,
+            script: Some(ScenarioScriptSource {
+                name: "Script.c".into(),
+                source: scenario_script.to_string(),
+            }),
+        };
+
+        let mut engine = Engine::with_seed(11);
+        let created = scenario.apply(&mut engine).expect("scenario applies");
+        assert_eq!(created.len(), 2);
+
+        let mut energies: Vec<i32> = created
+            .iter()
+            .map(|id| engine.object_snapshot(*id).expect("object snapshot").energy)
+            .collect();
+        energies.sort_unstable();
+        assert_eq!(energies, vec![0, 77]);
+
+        let owners: Vec<i32> = created
+            .iter()
+            .map(|id| engine.object_snapshot(*id).expect("object snapshot").owner)
+            .collect();
+        assert!(owners.contains(&42));
+    }
+
+    #[test]
+    fn scenario_script_step_runs_each_tick() {
+        let scenario_script = r#"
+global func Initialize(state, random)
+{
+    return nil;
+}
+
+global func Step(state, frame, random)
+{
+    if (frame == 1)
+    {
+        return { spawn = [ { definition = "Mover", owner = 99 } ] };
+    }
+    return nil;
+}
+"#;
+
+        let scenario = Scenario {
+            name: Some("Step Test".into()),
+            ticks: None,
+            ground_height_hint: Some(220),
+            definitions: vec![ScenarioDefinition {
+                id: "Mover".into(),
+                name: Some("Mover".into()),
+                script: TEST_SCRIPT.to_string(),
+                actions: None,
+                crew_member: false,
+            }],
+            initial_spawns: vec![ScenarioSpawn {
+                handle: None,
+                container_handle: None,
+                config: SpawnConfig::new("Mover").with_owner(1),
+            }],
+            landscape: None,
+            physics: None,
+            environment: None,
+            script: Some(ScenarioScriptSource {
+                name: "Script.c".into(),
+                source: scenario_script.to_string(),
+            }),
+        };
+
+        let mut engine = Engine::with_seed(7);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let initial_snapshot = engine.snapshot();
+        assert_eq!(initial_snapshot.objects.len(), 1);
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        assert_eq!(snapshot.objects.len(), 2);
+        assert!(snapshot.objects.iter().any(|object| object.owner == 99));
+    }
+
+    #[test]
     fn physics_validation_rejects_invalid_limits() {
-        let dir = tempdir().expect("tempdir");
-        let manifest = r#"
-        {
-            "definitions": [
-                { "id": "Mover", "script": "scripts/mover.aul" }
-            ],
-            "physics": {
-                "gravity": 1,
-                "max_fall_speed": 4,
-                "max_rise_speed": 6
-            }
-        }
-        "#;
+        let manifest = PhysicsManifest {
+            gravity: Some(1),
+            max_fall_speed: Some(4),
+            max_rise_speed: Some(6),
+            max_horizontal_speed: None,
+        };
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
-
-        let error = Scenario::load_from_path(dir.path()).expect_err("scenario fails");
+        let error = manifest
+            .into_settings()
+            .expect_err("invalid physics manifest fails");
         match error {
             ScenarioError::InvalidPhysics(detail) => {
                 assert!(detail.contains("max_rise_speed"));
@@ -1518,23 +1662,16 @@ global func Step(state, frame, random)
 
     #[test]
     fn physics_validation_rejects_negative_horizontal_speed() {
-        let dir = tempdir().expect("tempdir");
-        let manifest = r#"
-        {
-            "definitions": [
-                { "id": "Mover", "script": "scripts/mover.aul" }
-            ],
-            "physics": {
-                "max_horizontal_speed": -1
-            }
-        }
-        "#;
+        let manifest = PhysicsManifest {
+            gravity: None,
+            max_fall_speed: None,
+            max_rise_speed: None,
+            max_horizontal_speed: Some(-1),
+        };
 
-        std::fs::create_dir_all(dir.path().join("scripts")).expect("scripts dir");
-        std::fs::write(dir.path().join("Scenario.json"), manifest).expect("write manifest");
-        std::fs::write(dir.path().join("scripts/mover.aul"), TEST_SCRIPT).expect("write script");
-
-        let error = Scenario::load_from_path(dir.path()).expect_err("scenario fails");
+        let error = manifest
+            .into_settings()
+            .expect_err("negative horizontal speed fails");
         match error {
             ScenarioError::InvalidPhysics(detail) => {
                 assert!(detail.contains("max_horizontal_speed"));
