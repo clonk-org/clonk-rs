@@ -11,8 +11,8 @@ use serde::Deserialize;
 
 use crate::{
     action::ActionSpec, ActionState, Definition, EffectState, Engine, EngineError,
-    EnvironmentSettings, Landscape, ObjectId, ObjectStatus, PhysicsSettings, RgbColor, SpawnConfig,
-    Vector2,
+    EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings,
+    RgbColor, SpawnConfig, Vector2,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -43,6 +43,8 @@ pub enum ScenarioError {
     NoDefinitions,
     #[error("invalid physics settings: {0}")]
     InvalidPhysics(String),
+    #[error("definition `{id}` has invalid movement settings: {detail}")]
+    InvalidMovement { id: String, detail: String },
     #[error("engine error while applying scenario: {0}")]
     Engine(#[from] EngineError),
 }
@@ -54,6 +56,7 @@ struct ScenarioDefinition {
     script: String,
     actions: Option<DefinitionActions>,
     crew_member: bool,
+    movement: MovementProfile,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +156,7 @@ impl Scenario {
                 compiled.configure_actions(actions.default_action.clone(), actions.specs.clone());
             }
             compiled.set_crew_member(definition.crew_member);
+            compiled.set_movement_profile(definition.movement);
             engine.register_definition(compiled)?;
         }
 
@@ -227,6 +231,7 @@ impl Scenario {
                 default_action,
                 actions,
                 crew_member,
+                movement,
             } = definition;
 
             if !seen_ids.insert(id.clone()) {
@@ -249,12 +254,18 @@ impl Scenario {
                 })
             };
 
+            let movement_profile = match movement {
+                Some(manifest) => manifest.into_profile(&id)?,
+                None => MovementProfile::default(),
+            };
+
             definitions.push(ScenarioDefinition {
                 id,
                 name,
                 script: script_source,
                 actions,
                 crew_member,
+                movement: movement_profile,
             });
         }
 
@@ -454,6 +465,49 @@ struct DefinitionManifest {
     actions: HashMap<String, ActionSpec>,
     #[serde(default)]
     crew_member: bool,
+    #[serde(default)]
+    movement: Option<MovementManifest>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct MovementManifest {
+    #[serde(default)]
+    float: Option<FloatMovementManifest>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct FloatMovementManifest {
+    #[serde(default)]
+    speed: Option<i32>,
+    #[serde(default)]
+    acceleration: Option<i32>,
+}
+
+impl MovementManifest {
+    fn into_profile(self, id: &str) -> Result<MovementProfile, ScenarioError> {
+        let mut profile = MovementProfile::default();
+        if let Some(float) = self.float {
+            if let Some(speed) = float.speed {
+                if speed < 0 {
+                    return Err(ScenarioError::InvalidMovement {
+                        id: id.to_string(),
+                        detail: format!("float.speed must be >= 0 (got {speed})"),
+                    });
+                }
+                profile.float_speed = speed;
+            }
+            if let Some(acceleration) = float.acceleration {
+                if acceleration < 0 {
+                    return Err(ScenarioError::InvalidMovement {
+                        id: id.to_string(),
+                        detail: format!("float.acceleration must be >= 0 (got {acceleration})"),
+                    });
+                }
+                profile.float_acceleration = acceleration;
+            }
+        }
+        Ok(profile)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1553,6 +1607,7 @@ global func Step(state, frame, random)
                 script: TEST_SCRIPT.to_string(),
                 actions: None,
                 crew_member: false,
+                movement: MovementProfile::default(),
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
@@ -1614,6 +1669,7 @@ global func Step(state, frame, random)
                 script: TEST_SCRIPT.to_string(),
                 actions: None,
                 crew_member: false,
+                movement: MovementProfile::default(),
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,

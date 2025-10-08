@@ -196,6 +196,20 @@ impl CommandDirection {
             _ => None,
         }
     }
+
+    pub const fn axis_components(self) -> (i32, i32) {
+        match self {
+            CommandDirection::Stop => (0, 0),
+            CommandDirection::Up => (0, -1),
+            CommandDirection::UpRight => (1, -1),
+            CommandDirection::Right => (1, 0),
+            CommandDirection::DownRight => (1, 1),
+            CommandDirection::Down => (0, 1),
+            CommandDirection::DownLeft => (-1, 1),
+            CommandDirection::Left => (-1, 0),
+            CommandDirection::UpLeft => (-1, -1),
+        }
+    }
 }
 
 impl Default for CommandDirection {
@@ -418,6 +432,40 @@ impl Default for PhysicsSettings {
             max_fall_speed: 12,
             max_rise_speed: -20,
             max_horizontal_speed: Self::DEFAULT_MAX_HORIZONTAL_SPEED,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MovementProfile {
+    pub float_speed: i32,
+    pub float_acceleration: i32,
+}
+
+impl MovementProfile {
+    pub const fn new(float_speed: i32, float_acceleration: i32) -> Self {
+        Self {
+            float_speed,
+            float_acceleration,
+        }
+    }
+
+    pub fn with_float_speed(mut self, float_speed: i32) -> Self {
+        self.float_speed = float_speed;
+        self
+    }
+
+    pub fn with_float_acceleration(mut self, float_acceleration: i32) -> Self {
+        self.float_acceleration = float_acceleration;
+        self
+    }
+}
+
+impl Default for MovementProfile {
+    fn default() -> Self {
+        Self {
+            float_speed: 6,
+            float_acceleration: 1,
         }
     }
 }
@@ -1715,6 +1763,7 @@ pub struct Definition {
     has_step: bool,
     action_library: ActionLibrary,
     crew_member: bool,
+    movement: MovementProfile,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1763,6 +1812,7 @@ impl Definition {
             has_step,
             action_library: ActionLibrary::default(),
             crew_member: false,
+            movement: MovementProfile::default(),
         })
     }
 
@@ -1800,6 +1850,14 @@ impl Definition {
 
     pub fn set_crew_member(&mut self, crew_member: bool) {
         self.crew_member = crew_member;
+    }
+
+    pub fn movement_profile(&self) -> MovementProfile {
+        self.movement
+    }
+
+    pub fn set_movement_profile(&mut self, movement: MovementProfile) {
+        self.movement = movement;
     }
 
     fn call_initialize(
@@ -2362,6 +2420,35 @@ pub struct Engine {
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
     known_crew_owners: HashSet<i32>,
     eliminated_crew_owners: HashSet<i32>,
+}
+
+fn clamp_to_limit(value: i32, limit: i32) -> i32 {
+    if limit <= 0 {
+        0
+    } else {
+        value.clamp(-limit, limit)
+    }
+}
+
+fn apply_float_command_movement(
+    velocity: &mut Vector2,
+    command_direction: CommandDirection,
+    profile: MovementProfile,
+) {
+    let (dx, dy) = command_direction.axis_components();
+    let accel = profile.float_acceleration.max(0);
+
+    if dx != 0 && accel > 0 {
+        velocity.x = clamp_to_limit(velocity.x.saturating_add(dx * accel), profile.float_speed);
+    } else {
+        velocity.x = clamp_to_limit(velocity.x, profile.float_speed);
+    }
+
+    if dy != 0 && accel > 0 {
+        velocity.y = clamp_to_limit(velocity.y.saturating_add(dy * accel), profile.float_speed);
+    } else {
+        velocity.y = clamp_to_limit(velocity.y, profile.float_speed);
+    }
 }
 
 impl Engine {
@@ -3926,19 +4013,19 @@ impl Engine {
             return;
         }
 
-        let (procedure, gravity_component) = {
+        let (procedure, movement_profile, gravity_component) = {
             let object = &self.objects[idx];
-            let procedure = self
-                .definitions
-                .get(&object.definition_id)
-                .map(|definition| {
-                    definition
-                        .action_library()
-                        .procedure_for_action(&object.state.action.name)
-                })
-                .unwrap_or_default();
-            let gravity = procedure.gravity_component(self.physics.gravity);
-            (procedure, gravity)
+            if let Some(definition) = self.definitions.get(&object.definition_id) {
+                let procedure = definition
+                    .action_library()
+                    .procedure_for_action(&object.state.action.name);
+                let gravity = procedure.gravity_component(self.physics.gravity);
+                (procedure, definition.movement_profile(), gravity)
+            } else {
+                let procedure = ActionProcedure::default();
+                let gravity = procedure.gravity_component(self.physics.gravity);
+                (procedure, MovementProfile::default(), gravity)
+            }
         };
 
         let object = &mut self.objects[idx];
@@ -3949,6 +4036,13 @@ impl Engine {
         }
         if procedure.locks_vertical_velocity() {
             object.state.velocity.y = 0;
+        }
+        if matches!(procedure, ActionProcedure::Float) {
+            apply_float_command_movement(
+                &mut object.state.velocity,
+                object.state.command_direction,
+                movement_profile,
+            );
         }
         match procedure {
             ActionProcedure::Bridge
@@ -6521,6 +6615,41 @@ mod tests {
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity.y, 3);
+    }
+
+    #[test]
+    fn float_command_direction_updates_velocity() {
+        let mut definition =
+            Definition::from_script("Balloon", "Balloon", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Float".to_string(),
+            ActionSpec::default().with_procedure("float"),
+        );
+        definition.configure_actions(Some("Float".to_string()), actions);
+        definition.set_movement_profile(
+            MovementProfile::default()
+                .with_float_speed(6)
+                .with_float_acceleration(2),
+        );
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        engine.set_environment(EnvironmentSettings::new(0));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Balloon").with_command_direction(CommandDirection::UpRight),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::new(2, -1));
     }
 
     #[test]
