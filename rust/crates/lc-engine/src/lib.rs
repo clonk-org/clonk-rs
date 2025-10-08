@@ -1398,6 +1398,7 @@ pub struct Definition {
 enum ActionCallbackKind {
     Start,
     End,
+    Phase,
 }
 
 impl ActionCallbackKind {
@@ -1405,6 +1406,7 @@ impl ActionCallbackKind {
         match self {
             ActionCallbackKind::Start => "action start",
             ActionCallbackKind::End => "action end",
+            ActionCallbackKind::Phase => "action phase",
         }
     }
 }
@@ -2215,10 +2217,39 @@ impl Engine {
                 }
             }
 
+            let mut pre_phase_state = None;
+            if action_library
+                .phase_call_for_action(&self.objects[idx].state.action.name)
+                .is_some()
             {
-                let object = &mut self.objects[idx];
-                object.state.action.advance_with_library(&action_library);
+                pre_phase_state = Some(self.objects[idx].state.clone());
             }
+
+            let advance_outcome = {
+                let object = &mut self.objects[idx];
+                object.state.action.advance_with_library(&action_library)
+            };
+
+            if let Some(event) = advance_outcome.phase_event {
+                if let Some(function_name) = action_library.phase_call_for_action(&event.action) {
+                    let state_snapshot = pre_phase_state
+                        .take()
+                        .unwrap_or_else(|| self.objects[idx].state.clone());
+                    self.invoke_action_callback(
+                        idx,
+                        ActionCallbackKind::Phase,
+                        &event.action,
+                        Some(function_name),
+                        Some(state_snapshot),
+                    )?;
+                    if self.objects[idx].destroyed
+                        || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
+                    {
+                        continue;
+                    }
+                }
+            }
+
             self.apply_physics_at_index(idx);
             {
                 let object = &mut self.objects[idx];
@@ -2474,7 +2505,7 @@ impl Engine {
                 return Ok(());
             }
 
-            self.invoke_action_callback(index, ActionCallbackKind::End, &previous)?;
+            self.invoke_action_callback(index, ActionCallbackKind::End, &previous, None, None)?;
             if self.objects[index].destroyed {
                 return Ok(());
             }
@@ -2491,7 +2522,13 @@ impl Engine {
         }
 
         let current_action = self.objects[index].state.action.name.clone();
-        self.invoke_action_callback(index, ActionCallbackKind::Start, &current_action)
+        self.invoke_action_callback(
+            index,
+            ActionCallbackKind::Start,
+            &current_action,
+            None,
+            None,
+        )
     }
 
     fn invoke_action_callback(
@@ -2499,6 +2536,8 @@ impl Engine {
         index: usize,
         kind: ActionCallbackKind,
         action_name: &str,
+        function_override: Option<&str>,
+        state_override: Option<ObjectState>,
     ) -> Result<(), EngineError> {
         let definition_id = self.objects[index].definition_id.clone();
         let action_library = {
@@ -2509,9 +2548,13 @@ impl Engine {
             definition.action_library().clone()
         };
 
-        let function = match kind {
-            ActionCallbackKind::Start => action_library.start_call_for_action(action_name),
-            ActionCallbackKind::End => action_library.end_call_for_action(action_name),
+        let function = match function_override {
+            Some(name) => Some(name),
+            None => match kind {
+                ActionCallbackKind::Start => action_library.start_call_for_action(action_name),
+                ActionCallbackKind::End => action_library.end_call_for_action(action_name),
+                ActionCallbackKind::Phase => action_library.phase_call_for_action(action_name),
+            },
         };
 
         let Some(function) = function else {
@@ -2519,7 +2562,10 @@ impl Engine {
         };
 
         let object_id = self.objects[index].id;
-        let state_snapshot = self.objects[index].state.clone();
+        let state_snapshot = match state_override {
+            Some(state) => state,
+            None => self.objects[index].state.clone(),
+        };
         let definition = self
             .definitions
             .get(&definition_id)
@@ -4554,6 +4600,134 @@ mod tests {
             assert_eq!(idle_end, 1);
             assert_eq!(walk_start, 1);
         }
+    }
+
+    #[test]
+    fn action_phase_callbacks_fire() {
+        use std::sync::{Arc, Mutex};
+
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        global func OnIdlePhase(state, action) { return nil; }
+        global func OnWalkStart(state, action) { return nil; }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default()
+                .with_length(3)
+                .with_next("Walk")
+                .with_phase_call("OnIdlePhase"),
+        );
+        actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default().with_start_call("OnWalkStart"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(2);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        {
+            let calls = call_log.lock().unwrap().clone();
+            let idle_phase = calls.iter().filter(|name| *name == "OnIdlePhase").count();
+            assert_eq!(idle_phase, 0);
+        }
+
+        engine.tick().expect("first tick succeeds");
+
+        {
+            let calls = call_log.lock().unwrap().clone();
+            let idle_phase = calls.iter().filter(|name| *name == "OnIdlePhase").count();
+            assert_eq!(idle_phase, 1);
+        }
+
+        engine.tick().expect("second tick succeeds");
+
+        {
+            let calls = call_log.lock().unwrap().clone();
+            let idle_phase = calls.iter().filter(|name| *name == "OnIdlePhase").count();
+            assert_eq!(idle_phase, 2);
+        }
+
+        engine.tick().expect("third tick succeeds");
+
+        {
+            let calls = call_log.lock().unwrap().clone();
+            let idle_phase = calls.iter().filter(|name| *name == "OnIdlePhase").count();
+            let walk_start = calls.iter().filter(|name| *name == "OnWalkStart").count();
+            assert_eq!(idle_phase, 3);
+            assert_eq!(walk_start, 1);
+        }
+
+        let snapshot = engine
+            .object_snapshot(id)
+            .expect("object snapshot available");
+        assert_eq!(snapshot.action.name, "Walk");
+        assert_eq!(snapshot.action.phase, 0);
+    }
+
+    #[test]
+    fn action_step_advances_multiple_phases() {
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        "#;
+
+        let mut definition =
+            Definition::from_script("Stepper", "Stepper", script).expect("script compiles");
+
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Pulse".to_string(),
+            ActionSpec::default()
+                .with_length(5)
+                .with_step(2)
+                .with_next("Pulse"),
+        );
+        definition.configure_actions(Some("Pulse".to_string()), actions);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Stepper"))
+            .expect("spawn succeeds");
+
+        let after_first = engine.tick().expect("first tick succeeds");
+        let object = after_first.object(id).expect("object present");
+        assert_eq!(object.action.phase, 2);
+
+        let after_second = engine.tick().expect("second tick succeeds");
+        let object = after_second.object(id).expect("object present");
+        assert_eq!(object.action.phase, 4);
+
+        let after_third = engine.tick().expect("third tick succeeds");
+        let object = after_third.object(id).expect("object present");
+        assert_eq!(object.action.phase, 0);
     }
 
     #[test]

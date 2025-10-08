@@ -15,6 +15,10 @@ pub struct ActionSpec {
     #[serde(default)]
     pub delay: Option<u32>,
     #[serde(default)]
+    pub step: Option<u32>,
+    #[serde(default)]
+    pub phase_call: Option<String>,
+    #[serde(default)]
     pub start_call: Option<String>,
     #[serde(default)]
     pub end_call: Option<String>,
@@ -27,6 +31,8 @@ impl ActionSpec {
             next,
             procedure: None,
             delay: None,
+            step: None,
+            phase_call: None,
             start_call: None,
             end_call: None,
         }
@@ -52,6 +58,16 @@ impl ActionSpec {
         self
     }
 
+    pub fn with_step(mut self, step: u32) -> Self {
+        self.step = Some(step);
+        self
+    }
+
+    pub fn with_phase_call(mut self, phase_call: impl Into<String>) -> Self {
+        self.phase_call = Some(phase_call.into());
+        self
+    }
+
     pub fn with_start_call(mut self, start_call: impl Into<String>) -> Self {
         self.start_call = Some(start_call.into());
         self
@@ -70,6 +86,8 @@ impl Default for ActionSpec {
             next: None,
             procedure: None,
             delay: None,
+            step: None,
+            phase_call: None,
             start_call: None,
             end_call: None,
         }
@@ -195,11 +213,18 @@ impl ActionLibrary {
             .and_then(|spec| spec.end_call.as_deref())
     }
 
-    pub fn advance_state(&self, state: &mut ActionState) {
+    pub fn phase_call_for_action(&self, action: &str) -> Option<&str> {
+        self.specs
+            .get(action)
+            .and_then(|spec| spec.phase_call.as_deref())
+    }
+
+    pub fn advance_state(&self, state: &mut ActionState) -> ActionAdvanceOutcome {
         if let Some(spec) = self.specs.get(&state.name) {
             Self::advance_with_spec(state, spec, self)
         } else {
             state.advance();
+            ActionAdvanceOutcome::default()
         }
     }
 
@@ -217,11 +242,17 @@ impl ActionLibrary {
             .and_then(|spec| spec.procedure.as_deref())
     }
 
-    fn advance_with_spec(state: &mut ActionState, spec: &ActionSpec, library: &ActionLibrary) {
+    fn advance_with_spec(
+        state: &mut ActionState,
+        spec: &ActionSpec,
+        library: &ActionLibrary,
+    ) -> ActionAdvanceOutcome {
+        let mut outcome = ActionAdvanceOutcome::default();
+
         if let Some(length) = spec.length {
             if length == 0 {
                 Self::transition(state, spec, library);
-                return;
+                return outcome;
             }
         }
 
@@ -229,22 +260,41 @@ impl ActionLibrary {
         if delay > 1 {
             state.ticks = state.ticks.saturating_add(1);
             if state.ticks < delay {
-                return;
+                return outcome;
             }
         }
         state.ticks = 0;
 
+        let step = normalize_step(spec.step);
+        let current_action = state.name.clone();
+
         if let Some(length) = spec.length {
-            let next_phase = state.phase.saturating_add(1);
-            if next_phase >= length as i32 {
-                Self::transition(state, spec, library);
-                return;
+            let length = i32::try_from(length).unwrap_or(i32::MAX);
+            let next_phase = state.phase.saturating_add(step);
+            if spec.phase_call.is_some() {
+                outcome.phase_event = Some(ActionPhaseEvent {
+                    action: current_action.clone(),
+                    phase: next_phase,
+                });
             }
 
-            state.phase = next_phase;
+            if next_phase >= length {
+                state.phase = next_phase;
+                Self::transition(state, spec, library);
+            } else {
+                state.phase = next_phase;
+            }
         } else {
-            state.advance();
+            state.phase = state.phase.saturating_add(step);
+            if spec.phase_call.is_some() {
+                outcome.phase_event = Some(ActionPhaseEvent {
+                    action: current_action,
+                    phase: state.phase,
+                });
+            }
         }
+
+        outcome
     }
 
     fn transition(state: &mut ActionState, spec: &ActionSpec, library: &ActionLibrary) {
@@ -267,6 +317,23 @@ impl Default for ActionLibrary {
     fn default() -> Self {
         Self::new(None, HashMap::new())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ActionAdvanceOutcome {
+    pub phase_event: Option<ActionPhaseEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionPhaseEvent {
+    pub action: String,
+    pub phase: i32,
+}
+
+fn normalize_step(step: Option<u32>) -> i32 {
+    let value = step.unwrap_or(1).max(1);
+    let clamped = value.min(i32::MAX as u32);
+    clamped as i32
 }
 
 /// Minimal representation of an object's current action state.
@@ -294,8 +361,8 @@ impl ActionState {
         self.ticks = 0;
     }
 
-    pub fn advance_with_library(&mut self, library: &ActionLibrary) {
-        library.advance_state(self);
+    pub fn advance_with_library(&mut self, library: &ActionLibrary) -> ActionAdvanceOutcome {
+        library.advance_state(self)
     }
 
     pub fn reset_phase(&mut self) {
