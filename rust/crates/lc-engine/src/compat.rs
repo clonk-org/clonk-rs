@@ -26,6 +26,7 @@ pub(crate) struct HostWorldObject {
     pub action_name: String,
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
+    pub action_procedure: Option<String>,
 }
 
 impl HostWorldObject {
@@ -34,12 +35,14 @@ impl HostWorldObject {
         action_name: impl Into<String>,
         action_target: Option<ObjectId>,
         action_target2: Option<ObjectId>,
+        action_procedure: Option<String>,
     ) -> Self {
         Self {
             id,
             action_name: action_name.into(),
             action_target,
             action_target2,
+            action_procedure,
         }
     }
 
@@ -49,6 +52,10 @@ impl HostWorldObject {
             1 => self.action_target2,
             _ => None,
         }
+    }
+
+    pub fn procedure_name(&self) -> Option<&str> {
+        self.action_procedure.as_deref()
     }
 }
 
@@ -121,6 +128,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("EffectVar", effect_var);
     script.register_host_function("SetAction", set_action);
     script.register_host_function("GetAction", get_action);
+    script.register_host_function("GetProcedure", get_procedure);
     script.register_host_function("SetActionTargets", set_action_targets);
     script.register_host_function("GetActionTarget", get_action_target);
     script.register_host_function("SetDir", set_dir);
@@ -1491,6 +1499,70 @@ fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn get_procedure(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "GetProcedure: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let procedure_value = |name: Option<&str>| match name {
+            Some(procedure) => Value::String(procedure.to_string()),
+            None => Value::Nil,
+        };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    let procedure = object.effective_procedure_name();
+                    return Ok(procedure_value(procedure));
+                }
+            }
+
+            if let Some(other) = context.world.get(target) {
+                return Ok(procedure_value(other.procedure_name()));
+            }
+
+            return Ok(Value::Nil);
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        let procedure = object.effective_procedure_name();
+        Ok(procedure_value(procedure))
+    })
+}
+
 fn get_action_target(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let mut target_index = 0;
@@ -2468,6 +2540,11 @@ impl ObjectScopeContext {
         &self.current_action_name
     }
 
+    fn effective_procedure_name(&self) -> Option<&str> {
+        let action = self.effective_action_name();
+        self.action_library.procedure_name_for_action(action)
+    }
+
     fn effective_blocks_other_actions(&self) -> bool {
         if let Some(update) = self.pending_update.action.as_ref() {
             if let Some(name) = update.name.as_ref() {
@@ -2923,6 +3000,122 @@ mod tests {
     }
 
     #[test]
+    fn get_procedure_returns_nil_when_unspecified() {
+        let mut specs = HashMap::new();
+        specs.insert("Idle".to_string(), ActionSpec::default());
+        let library = ActionLibrary::new(Some("Idle".to_string()), specs);
+
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                &[],
+                "Idle",
+                library,
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+            )),
+            &[],
+            HostWorldContext::default(),
+            || get_procedure(&[]),
+        );
+
+        let value = result.expect("GetProcedure succeeds");
+        assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn get_procedure_returns_configured_value() {
+        let mut specs = HashMap::new();
+        specs.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        let library = ActionLibrary::new(Some("Idle".to_string()), specs);
+
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                &[],
+                "Idle",
+                library,
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+            )),
+            &[],
+            HostWorldContext::default(),
+            || get_procedure(&[]),
+        );
+
+        let value = result.expect("GetProcedure succeeds");
+        assert_eq!(value, Value::String("walk".into()));
+    }
+
+    #[test]
+    fn get_procedure_reflects_pending_action_change() {
+        let mut specs = HashMap::new();
+        specs.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        specs.insert(
+            "Float".to_string(),
+            ActionSpec::default().with_procedure("float"),
+        );
+        let library = ActionLibrary::new(Some("Idle".to_string()), specs);
+
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                &[],
+                "Idle",
+                library,
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+            )),
+            &[],
+            HostWorldContext::default(),
+            || {
+                set_action(&[Value::String("Float".into())])?;
+                get_procedure(&[])
+            },
+        );
+
+        let value = result.expect("SetAction/GetProcedure succeed");
+        assert_eq!(value, Value::String("float".into()));
+    }
+
+    #[test]
+    fn get_procedure_reads_world_context() {
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            ObjectId::new(42),
+            "Swim",
+            None,
+            None,
+            Some("swim".to_string()),
+        )]);
+        let (result, _) = with_effect_context(None, &[], world, || {
+            let mut target = HashMap::new();
+            target.insert("id".into(), Value::Int(42));
+            get_procedure(&[Value::Proplist(target)])
+        });
+
+        let value = result.expect("GetProcedure succeeds");
+        assert_eq!(value, Value::String("swim".into()));
+    }
+
+    #[test]
     fn get_action_respects_target_filter() {
         let (result, _) = with_object_host_context(|| {
             let mut target = HashMap::new();
@@ -2937,7 +3130,7 @@ mod tests {
 
     #[test]
     fn get_action_reads_other_object_from_world() {
-        let other = HostWorldObject::new(ObjectId::new(99), "Walk", None, None);
+        let other = HostWorldObject::new(ObjectId::new(99), "Walk", None, None, None);
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_object_host_context_with_world(world, || {
             let mut target = HashMap::new();
@@ -2954,6 +3147,7 @@ mod tests {
         let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
             ObjectId::new(7),
             "Dig",
+            None,
             None,
             None,
         )]);
@@ -3040,7 +3234,13 @@ mod tests {
 
     #[test]
     fn get_action_target_reads_world_context() {
-        let other = HostWorldObject::new(ObjectId::new(99), "Walk", Some(ObjectId::new(77)), None);
+        let other = HostWorldObject::new(
+            ObjectId::new(99),
+            "Walk",
+            Some(ObjectId::new(77)),
+            None,
+            None,
+        );
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_object_host_context_with_world(world, || {
             let mut target = HashMap::new();

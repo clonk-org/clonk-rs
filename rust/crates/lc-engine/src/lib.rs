@@ -2345,11 +2345,21 @@ impl Engine {
 
     fn host_world_context(&self) -> HostWorldContext {
         HostWorldContext::from_objects(self.objects.iter().map(|object| {
+            let procedure = self
+                .definitions
+                .get(&object.definition_id)
+                .and_then(|definition| {
+                    definition
+                        .action_library()
+                        .procedure_name_for_action(&object.state.action.name)
+                })
+                .map(|name| name.to_string());
             HostWorldObject::new(
                 object.id,
                 object.state.action.name.clone(),
                 object.state.action.target,
                 object.state.action.target2,
+                procedure,
             )
         }))
     }
@@ -4386,6 +4396,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
             object.action.name.clone(),
             object.action.target,
             object.action.target2,
+            object.action_procedure.clone(),
         )
     }))
 }

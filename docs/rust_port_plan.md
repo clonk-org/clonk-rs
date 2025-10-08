@@ -35,6 +35,7 @@
 - The AUL runtime now exposes a host function registry so Rust subsystems can publish native helpers to scripts, completing the foundational engine call map and piping debugger hooks through those callbacks.
 - Script host helpers now include `Random` (deterministic RNG access) and `DoEnergy` (script-driven energy deltas that clamp against engine limits).
 - `GetAction`/`GetActionTarget` now mirror the C++ helpers for both the focused object and arbitrary targets by consulting the engine snapshot, and `SetActionTargets` mutates the pending state so scenario scripts and effect callbacks can inspect and adjust action names/targets without extra plumbing.
+- `GetProcedure` now mirrors the C++ helper so scripts can query the active procedure string for the focused object or world lookups, keeping procedure-sensitive logic aligned during Rust parity runs.
 - The AUL runtime now supports assigning to proplist properties (including nested entries), so script-side mutation semantics match the baseline expectations of C4-style proplists.
 - Engine objects now carry owner identifiers across scenario manifests, runtime snapshots, command queues, and the C++ validation bridge so crew ownership mismatches are detectable in recordings and parity checks.
 - Definitions and scenario manifests can now flag crew members; engine snapshots record the crew flag, and the Rust engine can enumerate owned crew objects so validation tooling can line up with C++ crew state.
@@ -49,6 +50,8 @@
 
 ## Priority Focus
 - ✅ Expose the C++ `GetAction`/`GetActionTarget` host helpers in `lc-engine` and wire `SetActionTargets` so AUL scripts can inspect and mutate current action names/targets during Rust parity runs, including cross-object lookups backed by the engine snapshot.
+- ✅ Export `GetProcedure` from `lc-engine` so scripts can query active procedures for the focused object or world lookups without diverging from C++ behaviour.
+- ⏳ Implement object vertex state and queries in `lc-engine` so grounded/attach procedures can match C4 collision handling.
 
 ## Rust Workspace Scope
 - `lc-core`, `lc-resources`, `lc-script`, `lc-engine`, `lc-graphics`, `lc-audio`, `lc-network`, `lc-gui`, `lc-platform`, and `lc-app` provide demo-friendly utilities, parsers, in-memory surfaces, a toy physics loop, and basic networking abstractions.
