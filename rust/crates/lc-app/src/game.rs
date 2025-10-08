@@ -87,6 +87,7 @@ pub struct DemoGame {
     title_label: WidgetId,
     frame_label: WidgetId,
     status_label: WidgetId,
+    energy_gauge: WidgetId,
     audio: AudioSystem,
     bounce_sound: SoundHandle,
     control: ControlCoordinator,
@@ -447,7 +448,9 @@ impl DemoGame {
         let title_label = gui.add_label(root, &scenario_label);
         let frame_label = gui.add_label(root, "FRAME 000 X 000 Y 000 VX P00 VY P00");
         let status_label = gui.add_label(root, "READY 00OF00 GROUND 00 BATCH 000");
-        gui.layout(GuiSize::new(SURFACE_WIDTH as f32, 96.0));
+        let energy_gauge = gui.add_gauge(root);
+        gui.set_gauge_fraction(energy_gauge, 1.0)?;
+        gui.layout(GuiSize::new(SURFACE_WIDTH as f32, 120.0));
 
         let audio =
             AudioSystem::new(MIX_CHANNELS).map_err(|err| GameError::Audio(err.to_string()))?;
@@ -506,6 +509,7 @@ impl DemoGame {
             title_label,
             frame_label,
             status_label,
+            energy_gauge,
             audio,
             bounce_sound,
             control,
@@ -688,6 +692,9 @@ impl DemoGame {
             .set_label_text(self.title_label, &self.scenario_label)?;
         self.gui.set_label_text(self.frame_label, frame_text)?;
         self.gui.set_label_text(self.status_label, status_text)?;
+        let energy_fraction = (object.energy as f32).clamp(0.0, 100.0) / 100.0;
+        self.gui
+            .set_gauge_fraction(self.energy_gauge, energy_fraction)?;
 
         Ok(())
     }

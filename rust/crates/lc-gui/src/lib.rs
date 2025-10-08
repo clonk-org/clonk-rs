@@ -316,6 +316,62 @@ impl Button {
 }
 
 #[derive(Debug)]
+struct Gauge {
+    fraction: f32,
+    min_width: f32,
+    height: f32,
+    background_color: Color,
+    high_color: Color,
+    low_color: Color,
+}
+
+impl Gauge {
+    fn new() -> Self {
+        Self {
+            fraction: 1.0,
+            min_width: 120.0,
+            height: 18.0,
+            background_color: Color::opaque(28, 36, 52),
+            high_color: Color::opaque(96, 176, 88),
+            low_color: Color::opaque(208, 72, 56),
+        }
+    }
+
+    fn intrinsic_size(&self) -> Size {
+        Size::new(self.min_width, self.height)
+    }
+
+    fn effective_fraction(&self) -> f32 {
+        self.fraction.clamp(0.0, 1.0)
+    }
+
+    fn set_fraction(&mut self, value: f32) {
+        if value.is_finite() {
+            self.fraction = value;
+        } else if value.is_sign_negative() {
+            self.fraction = 0.0;
+        } else {
+            self.fraction = 1.0;
+        }
+    }
+
+    fn fill_color(&self) -> Color {
+        let t = self.effective_fraction();
+        let blend = |start: u8, end: u8| -> u8 {
+            let start = start as f32;
+            let end = end as f32;
+            (start + (end - start) * t).round().clamp(0.0, 255.0) as u8
+        };
+        Color::new(
+            blend(self.low_color.r, self.high_color.r),
+            blend(self.low_color.g, self.high_color.g),
+            blend(self.low_color.b, self.high_color.b),
+            self.high_color.a,
+        )
+    }
+}
+
+#[derive(Debug)]
 struct WidgetNode {
     id: WidgetId,
     parent: Option<WidgetId>,
@@ -330,6 +386,7 @@ enum WidgetKind {
     Row(Row),
     Label(Label),
     Button(Button),
+    Gauge(Gauge),
 }
 
 impl WidgetKind {
@@ -339,6 +396,7 @@ impl WidgetKind {
             WidgetKind::Row(_) => "row",
             WidgetKind::Label(_) => "label",
             WidgetKind::Button(_) => "button",
+            WidgetKind::Gauge(_) => "gauge",
         }
     }
 }
@@ -435,6 +493,13 @@ impl Gui {
         id
     }
 
+    pub fn add_gauge(&mut self, parent: WidgetId) -> WidgetId {
+        let id = self.alloc_id();
+        let node = WidgetNode::new(id, Some(parent), WidgetKind::Gauge(Gauge::new()));
+        self.attach_child(parent, node);
+        id
+    }
+
     pub fn set_label_text(&mut self, id: WidgetId, text: impl Into<String>) -> GuiResult<()> {
         let node = self.widget_mut(id)?;
         match &mut node.kind {
@@ -479,6 +544,17 @@ impl Gui {
                 Ok(())
             }
             kind => Err(wrong_widget_type(id, "button", kind)),
+        }
+    }
+
+    pub fn set_gauge_fraction(&mut self, id: WidgetId, value: f32) -> GuiResult<()> {
+        let node = self.widget_mut(id)?;
+        match &mut node.kind {
+            WidgetKind::Gauge(gauge) => {
+                gauge.set_fraction(value);
+                Ok(())
+            }
+            kind => Err(wrong_widget_type(id, "gauge", kind)),
         }
     }
 
@@ -589,6 +665,26 @@ impl Gui {
                     color: label.color,
                 });
             }
+            WidgetKind::Gauge(gauge) => {
+                commands.push(DrawCommand::Quad {
+                    rect: node.rect,
+                    color: gauge.background_color,
+                });
+                let fraction = gauge.effective_fraction();
+                if fraction > 0.0 {
+                    let width = node.rect.size.width * fraction;
+                    if width > 0.0 {
+                        let fill_rect = Rect::from_origin_size(
+                            node.rect.origin,
+                            Size::new(width, node.rect.size.height),
+                        );
+                        commands.push(DrawCommand::Quad {
+                            rect: fill_rect,
+                            color: gauge.fill_color(),
+                        });
+                    }
+                }
+            }
             WidgetKind::Column(_) | WidgetKind::Row(_) => {}
         }
 
@@ -602,6 +698,7 @@ impl Gui {
             WidgetKind::Label(_) => self.layout_label(id, constraints, origin),
             WidgetKind::Button(_) => self.layout_button(id, constraints, origin),
             WidgetKind::Row(_) => self.layout_row(id, constraints, origin),
+            WidgetKind::Gauge(_) => self.layout_gauge(id, constraints, origin),
             WidgetKind::Column(_) => self.layout_column(id, constraints, origin),
         }
     }
@@ -636,6 +733,24 @@ impl Gui {
                 _ => unreachable!(),
             };
             button.intrinsic_size()
+        };
+        let size = intrinsic.clamp(constraints);
+        self.nodes[id.index()].rect = Rect::from_origin_size(origin, size);
+        size
+    }
+
+    fn layout_gauge(
+        &mut self,
+        id: WidgetId,
+        constraints: LayoutConstraints,
+        origin: Point,
+    ) -> Size {
+        let intrinsic = {
+            let gauge = match &self.nodes[id.index()].kind {
+                WidgetKind::Gauge(gauge) => gauge,
+                _ => unreachable!(),
+            };
+            gauge.intrinsic_size()
         };
         let size = intrinsic.clamp(constraints);
         self.nodes[id.index()].rect = Rect::from_origin_size(origin, size);
@@ -899,5 +1014,70 @@ mod tests {
         assert!(commands
             .iter()
             .any(|cmd| matches!(cmd, DrawCommand::Text { text, .. } if text == "Continue")));
+    }
+
+    #[test]
+    fn gauge_renders_background_and_fill() {
+        let mut gui = Gui::new();
+        let root = gui.root();
+        let gauge = gui.add_gauge(root);
+
+        gui.set_gauge_fraction(gauge, 1.5).expect("gauge exists");
+        gui.layout(Size::new(160.0, 64.0));
+
+        let mut quads: Vec<(Rect, Color)> = gui
+            .render()
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                DrawCommand::Quad { rect, color } => Some((rect, color)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(quads.len(), 2, "gauge renders background and fill");
+        let fill = quads.pop().unwrap();
+        let background = quads.pop().unwrap();
+        assert_eq!(background.0.origin, fill.0.origin);
+        assert_eq!(background.0.size.height, fill.0.size.height);
+        assert_eq!(background.0.size.width, fill.0.size.width);
+        assert_ne!(
+            background.1, fill.1,
+            "fill uses distinct color to indicate energy"
+        );
+    }
+
+    #[test]
+    fn gauge_fraction_clamps_to_zero() {
+        let mut gui = Gui::new();
+        let root = gui.root();
+        let gauge = gui.add_gauge(root);
+
+        gui.set_gauge_fraction(gauge, -0.75).expect("gauge exists");
+        gui.layout(Size::new(200.0, 64.0));
+
+        let quads: Vec<_> = gui
+            .render()
+            .into_iter()
+            .filter(|cmd| matches!(cmd, DrawCommand::Quad { .. }))
+            .collect();
+
+        assert_eq!(
+            quads.len(),
+            1,
+            "only background quad rendered when fraction is zero"
+        );
+    }
+
+    #[test]
+    fn gauge_respects_layout_constraints() {
+        let mut gui = Gui::new();
+        let root = gui.root();
+        let gauge = gui.add_gauge(root);
+
+        gui.layout(Size::new(80.0, 32.0));
+
+        let rect = gui.rect_of(gauge).expect("gauge has rect");
+        assert!((rect.size.width - 64.0).abs() < f32::EPSILON);
+        assert!(rect.size.height > 0.0);
     }
 }
