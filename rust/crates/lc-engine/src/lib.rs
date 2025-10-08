@@ -29,7 +29,7 @@ use std::path::Path;
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, ScriptError, Value};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 pub type DefinitionId = String;
@@ -93,6 +93,123 @@ impl ObjectStatus {
 impl Default for ObjectStatus {
     fn default() -> Self {
         ObjectStatus::Normal
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+}
+
+impl Direction {
+    pub const fn to_script_value(self) -> i32 {
+        match self {
+            Direction::Left => 0,
+            Direction::Right => 1,
+        }
+    }
+
+    pub const fn from_script_value(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Direction::Left),
+            1 => Some(Direction::Right),
+            _ => None,
+        }
+    }
+}
+
+impl Default for Direction {
+    fn default() -> Self {
+        Direction::Left
+    }
+}
+
+impl Serialize for Direction {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_i32(self.to_script_value())
+    }
+}
+
+impl<'de> Deserialize<'de> for Direction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = i32::deserialize(deserializer)?;
+        Ok(Direction::from_script_value(raw).unwrap_or_default())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandDirection {
+    Stop,
+    Up,
+    UpRight,
+    Right,
+    DownRight,
+    Down,
+    DownLeft,
+    Left,
+    UpLeft,
+}
+
+impl CommandDirection {
+    pub const fn to_script_value(self) -> i32 {
+        match self {
+            CommandDirection::Stop => 0,
+            CommandDirection::Up => 1,
+            CommandDirection::UpRight => 2,
+            CommandDirection::Right => 3,
+            CommandDirection::DownRight => 4,
+            CommandDirection::Down => 5,
+            CommandDirection::DownLeft => 6,
+            CommandDirection::Left => 7,
+            CommandDirection::UpLeft => 8,
+        }
+    }
+
+    pub const fn from_script_value(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(CommandDirection::Stop),
+            1 => Some(CommandDirection::Up),
+            2 => Some(CommandDirection::UpRight),
+            3 => Some(CommandDirection::Right),
+            4 => Some(CommandDirection::DownRight),
+            5 => Some(CommandDirection::Down),
+            6 => Some(CommandDirection::DownLeft),
+            7 => Some(CommandDirection::Left),
+            8 => Some(CommandDirection::UpLeft),
+            _ => None,
+        }
+    }
+}
+
+impl Default for CommandDirection {
+    fn default() -> Self {
+        CommandDirection::Stop
+    }
+}
+
+impl Serialize for CommandDirection {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_i32(self.to_script_value())
+    }
+}
+
+impl<'de> Deserialize<'de> for CommandDirection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = i32::deserialize(deserializer)?;
+        Ok(CommandDirection::from_script_value(raw).unwrap_or_default())
     }
 }
 
@@ -492,6 +609,10 @@ pub struct ObjectState {
     pub velocity: Vector2,
     pub energy: i32,
     pub action: ActionState,
+    #[serde(default)]
+    pub direction: Direction,
+    #[serde(default)]
+    pub command_direction: CommandDirection,
     pub effects: Vec<EffectState>,
     #[serde(default)]
     pub container: Option<ObjectId>,
@@ -536,6 +657,12 @@ impl ObjectState {
         }
         if let Some(energy) = delta.energy {
             self.energy = energy;
+        }
+        if let Some(direction) = delta.direction {
+            self.direction = direction;
+        }
+        if let Some(command_direction) = delta.command_direction {
+            self.command_direction = command_direction;
         }
         if let Some(action) = &delta.action {
             let requested_name_change = action.name.is_some();
@@ -585,6 +712,8 @@ struct ObjectDelta {
     position: Option<Vector2>,
     velocity: Option<Vector2>,
     energy: Option<i32>,
+    direction: Option<Direction>,
+    command_direction: Option<CommandDirection>,
     action: Option<ActionUpdate>,
     status: Option<ObjectStatus>,
     owner: Option<i32>,
@@ -602,6 +731,12 @@ impl ObjectDelta {
         }
         if let Some(energy) = update.energy {
             self.energy = Some(energy);
+        }
+        if let Some(direction) = update.direction {
+            self.direction = Some(direction);
+        }
+        if let Some(command_direction) = update.command_direction {
+            self.command_direction = Some(command_direction);
         }
         if let Some(owner) = update.owner {
             self.owner = Some(owner);
@@ -630,6 +765,8 @@ impl From<ObjectUpdate> for ObjectDelta {
             position: update.position,
             velocity: update.velocity,
             energy: update.energy,
+            direction: update.direction,
+            command_direction: update.command_direction,
             action: update.action,
             status: update.status,
             owner: update.owner,
@@ -645,6 +782,10 @@ pub struct ObjectUpdate {
     pub velocity: Option<Vector2>,
     pub energy: Option<i32>,
     pub action: Option<ActionUpdate>,
+    #[serde(default)]
+    pub direction: Option<Direction>,
+    #[serde(default)]
+    pub command_direction: Option<CommandDirection>,
     #[serde(default)]
     pub status: Option<ObjectStatus>,
     #[serde(default)]
@@ -672,6 +813,16 @@ impl ObjectUpdate {
 
     pub fn with_energy(mut self, energy: i32) -> Self {
         self.energy = Some(energy);
+        self
+    }
+
+    pub fn with_direction(mut self, direction: Direction) -> Self {
+        self.direction = Some(direction);
+        self
+    }
+
+    pub fn with_command_direction(mut self, command_direction: CommandDirection) -> Self {
+        self.command_direction = Some(command_direction);
         self
     }
 
@@ -730,6 +881,8 @@ impl ObjectUpdate {
         self.position.is_none()
             && self.velocity.is_none()
             && self.energy.is_none()
+            && self.direction.is_none()
+            && self.command_direction.is_none()
             && self.action.is_none()
             && self.status.is_none()
             && self.owner.is_none()
@@ -977,6 +1130,8 @@ impl Object {
             velocity: self.state.velocity,
             energy: self.state.energy,
             action: self.state.action.clone(),
+            direction: self.state.direction,
+            command_direction: self.state.command_direction,
             action_procedure: procedure,
             effects: self.state.effects.clone(),
             container: self.state.container,
@@ -1222,6 +1377,10 @@ pub struct SpawnConfig {
     pub energy: i32,
     pub action: Option<ActionState>,
     #[serde(default)]
+    pub direction: Direction,
+    #[serde(default)]
+    pub command_direction: CommandDirection,
+    #[serde(default)]
     pub effects: Vec<EffectState>,
     pub owner: i32,
     #[serde(default)]
@@ -1240,6 +1399,8 @@ impl SpawnConfig {
             velocity: Vector2::ZERO,
             energy: 0,
             action: None,
+            direction: Direction::default(),
+            command_direction: CommandDirection::default(),
             effects: Vec::new(),
             owner: OWNER_NONE,
             crew_member: None,
@@ -1260,6 +1421,16 @@ impl SpawnConfig {
 
     pub fn with_energy(mut self, energy: i32) -> Self {
         self.energy = energy;
+        self
+    }
+
+    pub fn with_direction(mut self, direction: Direction) -> Self {
+        self.direction = direction;
+        self
+    }
+
+    pub fn with_command_direction(mut self, command_direction: CommandDirection) -> Self {
+        self.command_direction = command_direction;
         self
     }
 
@@ -1308,6 +1479,10 @@ pub struct ObjectSnapshot {
     pub energy: i32,
     #[serde(default)]
     pub action: ActionState,
+    #[serde(default)]
+    pub direction: Direction,
+    #[serde(default)]
+    pub command_direction: CommandDirection,
     #[serde(default)]
     pub action_procedure: Option<String>,
     #[serde(default)]
@@ -1585,6 +1760,8 @@ impl Definition {
                 &state.effects,
                 state.action.name.clone(),
                 self.action_library.clone(),
+                state.direction,
+                state.command_direction,
             )),
             global_effects,
             || self.script.call("Initialize", &args),
@@ -1660,6 +1837,8 @@ impl Definition {
                 &state.effects,
                 state.action.name.clone(),
                 self.action_library.clone(),
+                state.direction,
+                state.command_direction,
             )),
             global_effects,
             || self.script.call("Step", &args),
@@ -1736,6 +1915,8 @@ impl Definition {
                 &state.effects,
                 state.action.name.clone(),
                 self.action_library.clone(),
+                state.direction,
+                state.command_direction,
             )),
             global_effects,
             || self.script.call(function, &args),
@@ -1878,6 +2059,8 @@ impl Definition {
                 &state.effects,
                 state.action.name.clone(),
                 self.action_library.clone(),
+                state.direction,
+                state.command_direction,
             )),
             global_effects,
             || {
@@ -2779,6 +2962,8 @@ impl Engine {
             position,
             velocity,
             energy,
+            direction,
+            command_direction,
             action,
             status,
             owner,
@@ -2810,6 +2995,12 @@ impl Engine {
             }
             if let Some(energy) = energy {
                 object.state.energy = energy;
+            }
+            if let Some(direction) = direction {
+                object.state.direction = direction;
+            }
+            if let Some(command_direction) = command_direction {
+                object.state.command_direction = command_direction;
             }
             if let Some(action) = action {
                 let previous_action = object.state.action.clone();
@@ -3260,6 +3451,8 @@ impl Engine {
                     velocity: snapshot.velocity,
                     energy: snapshot.energy,
                     action: snapshot.action.clone(),
+                    direction: snapshot.direction,
+                    command_direction: snapshot.command_direction,
                     effects: snapshot.effects.clone(),
                     container: None,
                     contents: Vec::new(),
@@ -3776,6 +3969,8 @@ impl Engine {
             velocity,
             energy,
             action,
+            direction,
+            command_direction,
             effects,
             owner,
             crew_member,
@@ -3804,6 +3999,8 @@ impl Engine {
                 velocity,
                 energy,
                 action: initial_action,
+                direction,
+                command_direction,
                 effects: Vec::new(),
                 container: None,
                 contents: Vec::new(),
@@ -3961,6 +4158,14 @@ fn build_state_value(
     map.insert("position".into(), state.position.to_value());
     map.insert("velocity".into(), state.velocity.to_value());
     map.insert("energy".into(), Value::Int(state.energy));
+    map.insert(
+        "direction".into(),
+        Value::Int(state.direction.to_script_value()),
+    );
+    map.insert(
+        "command_direction".into(),
+        Value::Int(state.command_direction.to_script_value()),
+    );
     map.insert("owner".into(), Value::Int(state.owner));
     map.insert("crew_member".into(), Value::Bool(state.crew_member));
     map.insert("status".into(), Value::Int(state.status.to_script_value()));
@@ -4025,6 +4230,14 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
     map.insert("position".into(), snapshot.position.to_value());
     map.insert("velocity".into(), snapshot.velocity.to_value());
     map.insert("energy".into(), Value::Int(snapshot.energy));
+    map.insert(
+        "direction".into(),
+        Value::Int(snapshot.direction.to_script_value()),
+    );
+    map.insert(
+        "command_direction".into(),
+        Value::Int(snapshot.command_direction.to_script_value()),
+    );
     map.insert("owner".into(), Value::Int(snapshot.owner));
     map.insert("crew_member".into(), Value::Bool(snapshot.crew_member));
     map.insert(
@@ -4316,6 +4529,13 @@ fn parse_command_from_proplist(
             "energy" => {
                 batch.delta.energy = Some(value_to_int(definition, function, value)?);
             }
+            "direction" => {
+                batch.delta.direction = Some(value_to_direction(definition, function, value)?);
+            }
+            "command_direction" => {
+                batch.delta.command_direction =
+                    Some(value_to_command_direction(definition, function, value)?);
+            }
             "owner" => {
                 batch.delta.owner = Some(value_to_int(definition, function, value)?);
             }
@@ -4492,6 +4712,32 @@ fn value_to_int(
     }
 }
 
+fn value_to_direction(
+    definition: &str,
+    function: &'static str,
+    value: Value,
+) -> Result<Direction, EngineError> {
+    let raw = value_to_int(definition, function, value)?;
+    Direction::from_script_value(raw).ok_or_else(|| EngineError::InvalidScriptOutput {
+        definition: definition.to_string(),
+        function,
+        detail: format!("unsupported direction value {raw}"),
+    })
+}
+
+fn value_to_command_direction(
+    definition: &str,
+    function: &'static str,
+    value: Value,
+) -> Result<CommandDirection, EngineError> {
+    let raw = value_to_int(definition, function, value)?;
+    CommandDirection::from_script_value(raw).ok_or_else(|| EngineError::InvalidScriptOutput {
+        definition: definition.to_string(),
+        function,
+        detail: format!("unsupported command_direction value {raw}"),
+    })
+}
+
 fn value_to_bool(
     definition: &str,
     function: &'static str,
@@ -4572,6 +4818,16 @@ fn value_to_spawns(
             None => OWNER_NONE,
         };
 
+        let direction = match map.get("direction") {
+            Some(value) => value_to_direction(definition, function, value.clone())?,
+            None => Direction::default(),
+        };
+
+        let command_direction = match map.get("command_direction") {
+            Some(value) => value_to_command_direction(definition, function, value.clone())?,
+            None => CommandDirection::default(),
+        };
+
         let mut action_state = ActionState::default();
         if let Some(value) = map.get("action") {
             if let Some(update) = value_to_action(definition, function, value.clone())? {
@@ -4600,6 +4856,8 @@ fn value_to_spawns(
             .with_position(position)
             .with_velocity(velocity)
             .with_energy(energy)
+            .with_direction(direction)
+            .with_command_direction(command_direction)
             .with_owner(owner);
 
         if let Some(action_state) = action_override {
@@ -4676,6 +4934,13 @@ fn value_to_commands(
                 }
                 "energy" => {
                     update.energy = Some(value_to_int(definition, function, value)?);
+                }
+                "direction" => {
+                    update.direction = Some(value_to_direction(definition, function, value)?);
+                }
+                "command_direction" => {
+                    update.command_direction =
+                        Some(value_to_command_direction(definition, function, value)?);
                 }
                 "action" => {
                     if let Some(action) = value_to_action(definition, function, value)? {

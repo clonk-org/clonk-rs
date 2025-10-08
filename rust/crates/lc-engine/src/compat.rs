@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::{
-    ActionLibrary, ActionUpdate, EnvironmentSettings, ObjectId, ObjectStatus, ObjectUpdate,
-    QueuedCommand,
+    ActionLibrary, ActionUpdate, CommandDirection, Direction, EnvironmentSettings, ObjectId,
+    ObjectStatus, ObjectUpdate, QueuedCommand,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -29,6 +29,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetEffectCount", get_effect_count);
     script.register_host_function("EffectVar", effect_var);
     script.register_host_function("SetAction", set_action);
+    script.register_host_function("SetDir", set_dir);
+    script.register_host_function("GetDir", get_dir);
+    script.register_host_function("SetComDir", set_com_dir);
+    script.register_host_function("GetComDir", get_com_dir);
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("DoEnergy", do_energy);
@@ -65,6 +69,8 @@ pub(crate) struct HostObjectContext<'a> {
     pub effects: &'a [EffectState],
     pub action_name: String,
     pub action_library: ActionLibrary,
+    pub direction: Direction,
+    pub command_direction: CommandDirection,
 }
 
 impl<'a> HostObjectContext<'a> {
@@ -75,6 +81,8 @@ impl<'a> HostObjectContext<'a> {
         effects: &'a [EffectState],
         action_name: impl Into<String>,
         action_library: ActionLibrary,
+        direction: Direction,
+        command_direction: CommandDirection,
     ) -> Self {
         Self {
             id,
@@ -83,6 +91,8 @@ impl<'a> HostObjectContext<'a> {
             effects,
             action_name: action_name.into(),
             action_library,
+            direction,
+            command_direction,
         }
     }
 }
@@ -1244,6 +1254,242 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetDir expects at least 1 argument: direction",
+        ));
+    }
+
+    let raw_direction = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetDir: expected int or nil for direction, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let direction = match Direction::from_script_value(raw_direction) {
+        Some(direction) => direction,
+        None => return Ok(Value::Bool(false)),
+    };
+
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetDir: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetDir requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        object.set_direction(direction);
+        Ok(Value::Bool(true))
+    })
+}
+
+fn get_dir(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "GetDir: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Nil);
+            }
+        }
+
+        Ok(Value::Int(object.direction().to_script_value()))
+    })
+}
+
+fn set_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetComDir expects at least 1 argument: command direction",
+        ));
+    }
+
+    let raw_direction = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetComDir: expected int or nil for command direction, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let command_direction = match CommandDirection::from_script_value(raw_direction) {
+        Some(direction) => direction,
+        None => return Ok(Value::Bool(false)),
+    };
+
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetComDir: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetComDir requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        object.set_command_direction(command_direction);
+        Ok(Value::Bool(true))
+    })
+}
+
+fn get_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "GetComDir: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Nil);
+            }
+        }
+
+        Ok(Value::Int(object.command_direction().to_script_value()))
+    })
+}
+
 fn with_context_mut<R>(
     scope: EffectScope,
     func: impl FnOnce(&mut EffectScopeContext) -> R,
@@ -1613,6 +1859,8 @@ impl EffectHostContext {
                 effects,
                 action_name,
                 action_library,
+                direction,
+                command_direction,
             } = ctx;
             ObjectScopeContext::new(
                 id,
@@ -1621,6 +1869,8 @@ impl EffectHostContext {
                 effects.to_vec(),
                 action_library,
                 action_name,
+                direction,
+                command_direction,
             )
         });
         let global = Some(EffectScopeContext::new(global_effects));
@@ -1830,6 +2080,8 @@ struct ObjectScopeContext {
     current_action_blocks_other_actions: bool,
     current_energy: i32,
     max_energy: i32,
+    current_direction: Direction,
+    current_command_direction: CommandDirection,
 }
 
 impl ObjectScopeContext {
@@ -1840,6 +2092,8 @@ impl ObjectScopeContext {
         effects: Vec<EffectState>,
         action_library: ActionLibrary,
         action_name: String,
+        direction: Direction,
+        command_direction: CommandDirection,
     ) -> Self {
         let blocks_other_actions = action_library.blocks_other_actions(&action_name);
         let max_energy = energy.max(DEFAULT_MAX_ENERGY);
@@ -1855,6 +2109,8 @@ impl ObjectScopeContext {
             current_action_blocks_other_actions: blocks_other_actions,
             current_energy: energy,
             max_energy,
+            current_direction: direction,
+            current_command_direction: command_direction,
         }
     }
 
@@ -1906,6 +2162,34 @@ impl ObjectScopeContext {
         self.pending_update.energy = Some(energy);
     }
 
+    fn direction(&self) -> Direction {
+        self.pending_update
+            .direction
+            .unwrap_or(self.current_direction)
+    }
+
+    fn set_direction(&mut self, direction: Direction) {
+        if self.direction() == direction {
+            return;
+        }
+        self.current_direction = direction;
+        self.pending_update.direction = Some(direction);
+    }
+
+    fn command_direction(&self) -> CommandDirection {
+        self.pending_update
+            .command_direction
+            .unwrap_or(self.current_command_direction)
+    }
+
+    fn set_command_direction(&mut self, command_direction: CommandDirection) {
+        if self.command_direction() == command_direction {
+            return;
+        }
+        self.current_command_direction = command_direction;
+        self.pending_update.command_direction = Some(command_direction);
+    }
+
     fn adjust_energy(&mut self, delta: i32, _exact: bool) -> i32 {
         let mut next = self.energy().saturating_add(delta);
         if next < 0 {
@@ -1943,6 +2227,8 @@ mod tests {
                 &[],
                 "Idle",
                 ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
             )),
             &[],
             func,
@@ -2171,6 +2457,8 @@ mod tests {
                 &[],
                 "Idle",
                 library.clone(),
+                Direction::Left,
+                CommandDirection::Stop,
             )),
             &[],
             || set_action(&[Value::String("Walk".into())]),
@@ -2188,6 +2476,8 @@ mod tests {
                 &[],
                 "Idle",
                 library,
+                Direction::Left,
+                CommandDirection::Stop,
             )),
             &[],
             || set_action(&[Value::String("Idle".into())]),
@@ -2199,6 +2489,55 @@ mod tests {
         let action = update.action.expect("action update recorded");
         assert_eq!(action.name.as_deref(), Some("Idle"));
         assert!(!action.force);
+    }
+
+    #[test]
+    fn set_dir_records_direction_update() {
+        let (result, outcome) = with_object_host_context(|| set_dir(&[Value::Int(1)]));
+        let value = result.expect("SetDir succeeds");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("direction update recorded");
+        assert_eq!(update.direction, Some(Direction::Right));
+    }
+
+    #[test]
+    fn get_dir_observes_effective_direction() {
+        let (result, outcome) = with_object_host_context(|| {
+            set_dir(&[Value::Int(1)])?;
+            get_dir(&[])
+        });
+        let value = result.expect("GetDir succeeds");
+        assert_eq!(value, Value::Int(Direction::Right.to_script_value()));
+        let update = outcome.object_update.expect("direction update recorded");
+        assert_eq!(update.direction, Some(Direction::Right));
+    }
+
+    #[test]
+    fn set_com_dir_records_command_direction_update() {
+        let (result, outcome) = with_object_host_context(|| set_com_dir(&[Value::Int(3)]));
+        let value = result.expect("SetComDir succeeds");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome
+            .object_update
+            .expect("command direction update recorded");
+        assert_eq!(update.command_direction, Some(CommandDirection::Right));
+    }
+
+    #[test]
+    fn get_com_dir_observes_effective_command_direction() {
+        let (result, outcome) = with_object_host_context(|| {
+            set_com_dir(&[Value::Int(4)])?;
+            get_com_dir(&[])
+        });
+        let value = result.expect("GetComDir succeeds");
+        assert_eq!(
+            value,
+            Value::Int(CommandDirection::DownRight.to_script_value())
+        );
+        let update = outcome
+            .object_update
+            .expect("command direction update recorded");
+        assert_eq!(update.command_direction, Some(CommandDirection::DownRight));
     }
 
     #[test]

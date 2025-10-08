@@ -126,6 +126,8 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
         entry.snapshot.action_name = entry.action.c_str();
         entry.snapshot.action_phase = object->Action.Phase;
         entry.snapshot.action_ticks = object->Action.Time;
+        entry.snapshot.direction = object->Action.Dir;
+        entry.snapshot.command_direction = object->Action.ComDir;
 
         if (entry.snapshot.crew_member && entry.snapshot.owner != NO_OWNER) {
             active_owners.insert(entry.snapshot.owner);

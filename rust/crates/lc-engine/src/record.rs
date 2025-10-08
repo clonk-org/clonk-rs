@@ -294,8 +294,8 @@ impl fmt::Display for Recording {
 mod tests {
     use super::*;
     use crate::{
-        ActionState, EnvironmentFrame, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2,
-        OWNER_NONE,
+        ActionState, CommandDirection, Direction, EnvironmentFrame, ObjectSnapshot, ObjectStatus,
+        SimulationSnapshot, Vector2, OWNER_NONE,
     };
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
@@ -311,6 +311,8 @@ mod tests {
                 velocity: Vector2::new(0, 0),
                 energy,
                 action: ActionState::default(),
+                direction: Direction::default(),
+                command_direction: CommandDirection::default(),
                 action_procedure: None,
                 effects: Vec::new(),
                 container: None,

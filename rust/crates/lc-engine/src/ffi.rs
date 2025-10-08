@@ -1,6 +1,7 @@
 use crate::{
-    ActionState, CrewRole, CrewSelectionState, EffectState, EnvironmentFrame, ObjectId,
-    ObjectSnapshot, ObjectStatus, Playback, Recorder, Recording, SimulationSnapshot, Vector2,
+    ActionState, CommandDirection, CrewRole, CrewSelectionState, Direction, EffectState,
+    EnvironmentFrame, ObjectId, ObjectSnapshot, ObjectStatus, Playback, Recorder, Recording,
+    SimulationSnapshot, Vector2,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -32,6 +33,8 @@ pub struct LcEngineObjectSnapshot {
     pub action_name: *const c_char,
     pub action_phase: i32,
     pub action_ticks: i32,
+    pub direction: i32,
+    pub command_direction: i32,
     pub effects: *const LcEngineEffectSnapshot,
     pub effect_count: usize,
 }
@@ -132,6 +135,10 @@ unsafe fn make_snapshot(
             action.ticks = 0;
         }
 
+        let direction = Direction::from_script_value(entry.direction).unwrap_or_default();
+        let command_direction =
+            CommandDirection::from_script_value(entry.command_direction).unwrap_or_default();
+
         let effects_slice: &[LcEngineEffectSnapshot] = if entry.effect_count == 0 {
             &[]
         } else if entry.effects.is_null() {
@@ -165,6 +172,8 @@ unsafe fn make_snapshot(
             velocity: Vector2::new(entry.velocity_x, entry.velocity_y),
             energy: entry.energy,
             action,
+            direction,
+            command_direction,
             action_procedure: None,
             effects,
             container: None,
@@ -553,6 +562,8 @@ mod tests {
             action_name: action.as_ptr(),
             action_phase: 3,
             action_ticks: 2,
+            direction: 1,
+            command_direction: 3,
             effects: &effect_snapshot,
             effect_count: 1,
         };
