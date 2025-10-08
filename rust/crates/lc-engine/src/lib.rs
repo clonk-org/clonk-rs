@@ -437,9 +437,12 @@ impl Default for PhysicsSettings {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MovementProfile {
     pub float_speed: i32,
     pub float_acceleration: i32,
+    pub swim_speed: i32,
+    pub swim_acceleration: i32,
 }
 
 impl MovementProfile {
@@ -447,6 +450,8 @@ impl MovementProfile {
         Self {
             float_speed,
             float_acceleration,
+            swim_speed: 6,
+            swim_acceleration: 1,
         }
     }
 
@@ -459,6 +464,16 @@ impl MovementProfile {
         self.float_acceleration = float_acceleration;
         self
     }
+
+    pub fn with_swim_speed(mut self, swim_speed: i32) -> Self {
+        self.swim_speed = swim_speed;
+        self
+    }
+
+    pub fn with_swim_acceleration(mut self, swim_acceleration: i32) -> Self {
+        self.swim_acceleration = swim_acceleration;
+        self
+    }
 }
 
 impl Default for MovementProfile {
@@ -466,6 +481,8 @@ impl Default for MovementProfile {
         Self {
             float_speed: 6,
             float_acceleration: 1,
+            swim_speed: 6,
+            swim_acceleration: 1,
         }
     }
 }
@@ -2451,6 +2468,54 @@ fn apply_float_command_movement(
     }
 }
 
+fn decelerate_toward_zero(value: i32, accel: i32) -> i32 {
+    if accel <= 0 {
+        return value;
+    }
+    if value > 0 {
+        (value - accel).max(0)
+    } else if value < 0 {
+        (value + accel).min(0)
+    } else {
+        0
+    }
+}
+
+fn apply_swim_command_movement(
+    velocity: &mut Vector2,
+    command_direction: CommandDirection,
+    profile: MovementProfile,
+    gravity_component: i32,
+) {
+    let accel = profile.swim_acceleration.max(0);
+    let limit = profile.swim_speed;
+
+    match command_direction {
+        CommandDirection::Stop => {
+            if accel > 0 {
+                velocity.x = decelerate_toward_zero(velocity.x, accel);
+                let vertical_without_gravity = velocity.y - gravity_component;
+                let decelerated = decelerate_toward_zero(vertical_without_gravity, accel);
+                velocity.y = decelerated + gravity_component;
+            }
+        }
+        _ => {
+            if accel > 0 {
+                let (dx, dy) = command_direction.axis_components();
+                if dx != 0 {
+                    velocity.x = velocity.x.saturating_add(dx * accel);
+                }
+                if dy != 0 {
+                    velocity.y = velocity.y.saturating_add(dy * accel);
+                }
+            }
+        }
+    }
+
+    velocity.x = clamp_to_limit(velocity.x, limit);
+    velocity.y = clamp_to_limit(velocity.y, limit);
+}
+
 impl Engine {
     pub fn new() -> Self {
         Self::with_seed(0)
@@ -4042,6 +4107,13 @@ impl Engine {
                 &mut object.state.velocity,
                 object.state.command_direction,
                 movement_profile,
+            );
+        } else if matches!(procedure, ActionProcedure::Swim) {
+            apply_swim_command_movement(
+                &mut object.state.velocity,
+                object.state.command_direction,
+                movement_profile,
+                gravity_component,
             );
         }
         match procedure {
@@ -6684,6 +6756,65 @@ mod tests {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity.y, 3);
         assert_eq!(object.velocity.x, 0);
+    }
+
+    #[test]
+    fn swim_command_direction_updates_velocity_and_stop_decelerates() {
+        let mut definition =
+            Definition::from_script("Swimmer", "Swimmer", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Swim".to_string(),
+            ActionSpec::default().with_procedure("swim"),
+        );
+        definition.configure_actions(Some("Swim".to_string()), actions);
+        definition.set_movement_profile(
+            MovementProfile::default()
+                .with_swim_speed(10)
+                .with_swim_acceleration(2),
+        );
+
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let physics = PhysicsSettings::checked(0, 20, -20)
+            .expect("physics settings valid")
+            .with_max_horizontal_speed(20)
+            .expect("horizontal speed valid");
+        engine.set_physics(physics);
+        engine.set_environment(EnvironmentSettings::new(0));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Swimmer").with_command_direction(CommandDirection::DownRight),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("first tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::new(2, 2));
+
+        let snapshot = engine.tick().expect("second tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::new(4, 4));
+
+        engine
+            .apply_object_update(
+                id,
+                ObjectUpdate::new().with_command_direction(CommandDirection::Stop),
+            )
+            .expect("update succeeds");
+
+        let snapshot = engine.tick().expect("third tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::new(2, 2));
+
+        let snapshot = engine.tick().expect("fourth tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::new(0, 0));
     }
 
     #[test]
