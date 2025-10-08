@@ -29,6 +29,7 @@ pub struct LcEngineObjectSnapshot {
     pub crew_member: bool,
     pub action_name: *const c_char,
     pub action_phase: i32,
+    pub action_ticks: i32,
     pub effects: *const LcEngineEffectSnapshot,
     pub effect_count: usize,
 }
@@ -123,6 +124,11 @@ unsafe fn make_snapshot(
         };
         let mut action = ActionState::new(action_name);
         action.phase = entry.action_phase;
+        if entry.action_ticks >= 0 {
+            action.ticks = entry.action_ticks as u32;
+        } else {
+            action.ticks = 0;
+        }
 
         let effects_slice: &[LcEngineEffectSnapshot] = if entry.effect_count == 0 {
             &[]
@@ -536,6 +542,7 @@ mod tests {
             crew_member: true,
             action_name: action.as_ptr(),
             action_phase: 3,
+            action_ticks: 2,
             effects: &effect_snapshot,
             effect_count: 1,
         };
@@ -564,6 +571,7 @@ mod tests {
         assert_eq!(recorded.effects.len(), 1);
         assert_eq!(recorded.owner, -1);
         assert!(recorded.crew_member);
+        assert_eq!(recorded.action.ticks, 2);
 
         let effect = &recorded.effects[0];
         assert_eq!(effect.name, "FxFire");

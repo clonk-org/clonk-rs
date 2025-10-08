@@ -30,6 +30,7 @@ typedef struct LcEngineObjectSnapshot {
     bool crew_member;
     const char *action_name;
     int32_t action_phase;
+    int32_t action_ticks;
     const LcEngineEffectSnapshot *effects;
     size_t effect_count;
 } LcEngineObjectSnapshot;

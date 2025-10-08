@@ -340,6 +340,8 @@ struct ActionManifest {
     name: String,
     #[serde(default)]
     phase: Option<i32>,
+    #[serde(default)]
+    ticks: Option<u32>,
 }
 
 impl ActionManifest {
@@ -347,6 +349,9 @@ impl ActionManifest {
         let mut state = ActionState::new(self.name);
         if let Some(phase) = self.phase {
             state.phase = phase;
+        }
+        if let Some(ticks) = self.ticks {
+            state.ticks = ticks;
         }
         state
     }

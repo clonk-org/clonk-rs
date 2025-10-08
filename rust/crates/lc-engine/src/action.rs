@@ -12,6 +12,8 @@ pub struct ActionSpec {
     pub next: Option<String>,
     #[serde(default)]
     pub procedure: Option<String>,
+    #[serde(default)]
+    pub delay: Option<u32>,
 }
 
 impl ActionSpec {
@@ -20,6 +22,7 @@ impl ActionSpec {
             length,
             next,
             procedure: None,
+            delay: None,
         }
     }
 
@@ -37,6 +40,11 @@ impl ActionSpec {
         self.procedure = Some(procedure.into());
         self
     }
+
+    pub fn with_delay(mut self, delay: u32) -> Self {
+        self.delay = Some(delay);
+        self
+    }
 }
 
 impl Default for ActionSpec {
@@ -45,6 +53,7 @@ impl Default for ActionSpec {
             length: None,
             next: None,
             procedure: None,
+            delay: None,
         }
     }
 }
@@ -184,7 +193,18 @@ impl ActionLibrary {
                 Self::transition(state, spec, library);
                 return;
             }
+        }
 
+        let delay = spec.delay.unwrap_or(1).max(1);
+        if delay > 1 {
+            state.ticks = state.ticks.saturating_add(1);
+            if state.ticks < delay {
+                return;
+            }
+        }
+        state.ticks = 0;
+
+        if let Some(length) = spec.length {
             let next_phase = state.phase.saturating_add(1);
             if next_phase >= length as i32 {
                 Self::transition(state, spec, library);
@@ -209,6 +229,7 @@ impl ActionLibrary {
             state.name = resolved.to_string();
         }
         state.phase = 0;
+        state.ticks = 0;
     }
 }
 
@@ -223,6 +244,8 @@ impl Default for ActionLibrary {
 pub struct ActionState {
     pub name: String,
     pub phase: i32,
+    #[serde(default)]
+    pub ticks: u32,
 }
 
 impl ActionState {
@@ -230,6 +253,7 @@ impl ActionState {
         Self {
             name: name.into(),
             phase: 0,
+            ticks: 0,
         }
     }
 
@@ -237,6 +261,7 @@ impl ActionState {
         if self.phase < i32::MAX {
             self.phase += 1;
         }
+        self.ticks = 0;
     }
 
     pub fn advance_with_library(&mut self, library: &ActionLibrary) {
@@ -245,6 +270,7 @@ impl ActionState {
 
     pub fn reset_phase(&mut self) {
         self.phase = 0;
+        self.ticks = 0;
     }
 
     pub fn apply_update(&mut self, update: &ActionUpdate) {
@@ -252,10 +278,17 @@ impl ActionState {
             if *name != self.name {
                 self.name = name.clone();
                 self.phase = 0;
+                self.ticks = 0;
             }
         }
         if let Some(phase) = update.phase {
             self.phase = phase;
+            if update.ticks.is_none() {
+                self.ticks = 0;
+            }
+        }
+        if let Some(ticks) = update.ticks {
+            self.ticks = ticks;
         }
     }
 }
@@ -271,6 +304,8 @@ impl Default for ActionState {
 pub struct ActionUpdate {
     pub name: Option<String>,
     pub phase: Option<i32>,
+    #[serde(default)]
+    pub ticks: Option<u32>,
 }
 
 impl ActionUpdate {
@@ -284,6 +319,11 @@ impl ActionUpdate {
         self
     }
 
+    pub fn with_ticks(mut self, ticks: u32) -> Self {
+        self.ticks = Some(ticks);
+        self
+    }
+
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = Some(name.into());
     }
@@ -292,12 +332,19 @@ impl ActionUpdate {
         self.phase = Some(phase);
     }
 
+    pub fn set_ticks(&mut self, ticks: u32) {
+        self.ticks = Some(ticks);
+    }
+
     pub fn merge(&mut self, other: ActionUpdate) {
         if other.name.is_some() {
             self.name = other.name;
         }
         if other.phase.is_some() {
             self.phase = other.phase;
+        }
+        if other.ticks.is_some() {
+            self.ticks = other.ticks;
         }
     }
 }

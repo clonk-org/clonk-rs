@@ -421,6 +421,13 @@ impl ObjectUpdate {
         self
     }
 
+    pub fn with_action_ticks(mut self, ticks: u32) -> Self {
+        let mut update = self.action.unwrap_or_default();
+        update.set_ticks(ticks);
+        self.action = Some(update);
+        self
+    }
+
     pub fn with_action_update(mut self, update: ActionUpdate) -> Self {
         self.action = Some(update);
         self
@@ -2402,9 +2409,11 @@ fn build_state_value(
     map.insert("energy".into(), Value::Int(state.energy));
     map.insert("owner".into(), Value::Int(state.owner));
     map.insert("crew_member".into(), Value::Bool(state.crew_member));
-    let mut action = HashMap::with_capacity(3);
+    let mut action = HashMap::with_capacity(4);
     action.insert("name".into(), Value::String(state.action.name.clone()));
     action.insert("phase".into(), Value::Int(state.action.phase));
+    let ticks = (state.action.ticks).min(i32::MAX as u32) as i32;
+    action.insert("ticks".into(), Value::Int(ticks));
     if let Some(procedure) = library.procedure_name_for_action(&state.action.name) {
         action.insert("procedure".into(), Value::String(procedure.to_string()));
     }
@@ -2637,6 +2646,17 @@ fn parse_action_update(
             "phase" => {
                 let phase = value_to_int(definition, function, value)?;
                 update.set_phase(phase);
+            }
+            "ticks" => {
+                let ticks = value_to_int(definition, function, value)?;
+                if ticks < 0 {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: definition.to_string(),
+                        function,
+                        detail: "action.ticks must be >= 0".to_string(),
+                    });
+                }
+                update.set_ticks(ticks as u32);
             }
             other => {
                 return Err(EngineError::InvalidScriptOutput {
@@ -3322,16 +3342,65 @@ mod tests {
             .expect("object snapshot available");
         assert_eq!(snapshot.action.name, "Walk");
         assert_eq!(snapshot.action.phase, 0);
+        assert_eq!(snapshot.action.ticks, 0);
 
         let snapshot = engine.tick().expect("first tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.action.name, "Walk");
         assert_eq!(object.action.phase, 1);
+        assert_eq!(object.action.ticks, 0);
 
         let snapshot = engine.tick().expect("second tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.action.name, "Idle");
         assert_eq!(object.action.phase, 0);
+        assert_eq!(object.action.ticks, 0);
+    }
+
+    #[test]
+    fn action_delay_requires_multiple_ticks() {
+        let mut definition = build_definition();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Loop".to_string(),
+            ActionSpec::default().with_length(3).with_delay(2),
+        );
+        definition.configure_actions(Some("Loop".to_string()), actions);
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Test"))
+            .expect("spawn succeeds");
+
+        let initial = engine
+            .object_snapshot(id)
+            .expect("object snapshot available");
+        assert_eq!(initial.action.phase, 0);
+        assert_eq!(initial.action.ticks, 0);
+
+        let after_first = engine.tick().expect("first tick succeeds");
+        let object = after_first.object(id).expect("object present");
+        assert_eq!(object.action.phase, 0);
+        assert_eq!(object.action.ticks, 1);
+
+        let after_second = engine.tick().expect("second tick succeeds");
+        let object = after_second.object(id).expect("object present");
+        assert_eq!(object.action.phase, 1);
+        assert_eq!(object.action.ticks, 0);
+
+        let after_third = engine.tick().expect("third tick succeeds");
+        let object = after_third.object(id).expect("object present");
+        assert_eq!(object.action.phase, 1);
+        assert_eq!(object.action.ticks, 1);
+
+        let after_fourth = engine.tick().expect("fourth tick succeeds");
+        let object = after_fourth.object(id).expect("object present");
+        assert_eq!(object.action.phase, 2);
+        assert_eq!(object.action.ticks, 0);
     }
 
     #[test]
