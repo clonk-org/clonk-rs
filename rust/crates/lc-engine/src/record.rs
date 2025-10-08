@@ -315,6 +315,7 @@ mod tests {
                 command_direction: CommandDirection::default(),
                 action_procedure: None,
                 effects: Vec::new(),
+                vertices: Vec::new(),
                 container: None,
                 contents: Vec::new(),
                 status: ObjectStatus::Normal,

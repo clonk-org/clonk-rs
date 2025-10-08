@@ -37,6 +37,15 @@ pub type DefinitionId = String;
 
 pub const OWNER_NONE: i32 = -1;
 
+pub const CNAT_NONE: u32 = 0;
+pub const CNAT_LEFT: u32 = 1;
+pub const CNAT_RIGHT: u32 = 2;
+pub const CNAT_TOP: u32 = 4;
+pub const CNAT_BOTTOM: u32 = 8;
+pub const CNAT_CENTER: u32 = 16;
+pub const CNAT_MULTI_ATTACH: u32 = 32;
+pub const CNAT_NO_COLLISION: u32 = 64;
+
 fn default_rng() -> ChaCha8Rng {
     ChaCha8Rng::seed_from_u64(0)
 }
@@ -302,6 +311,37 @@ impl AddAssign<Vector2> for Vector2 {
     fn add_assign(&mut self, rhs: Vector2) {
         self.x += rhs.x;
         self.y += rhs.y;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ObjectVertex {
+    pub x: i32,
+    pub y: i32,
+    #[serde(default)]
+    pub cnat: u32,
+    #[serde(default)]
+    pub friction: i32,
+}
+
+impl ObjectVertex {
+    pub fn new(x: i32, y: i32) -> Self {
+        Self {
+            x,
+            y,
+            cnat: CNAT_NONE,
+            friction: 0,
+        }
+    }
+
+    pub fn with_cnat(mut self, cnat: u32) -> Self {
+        self.cnat = cnat;
+        self
+    }
+
+    pub fn with_friction(mut self, friction: i32) -> Self {
+        self.friction = friction;
+        self
     }
 }
 
@@ -616,6 +656,8 @@ pub struct ObjectState {
     pub command_direction: CommandDirection,
     pub effects: Vec<EffectState>,
     #[serde(default)]
+    pub vertices: Vec<ObjectVertex>,
+    #[serde(default)]
     pub container: Option<ObjectId>,
     #[serde(default)]
     pub contents: Vec<ObjectId>,
@@ -678,6 +720,9 @@ impl ObjectState {
         } else {
             self.action.reconcile_with_library(library);
         }
+        if let Some(vertices) = &delta.vertices {
+            self.vertices = vertices.clone();
+        }
         if let Some(owner) = delta.owner {
             self.owner = owner;
         }
@@ -720,6 +765,7 @@ struct ObjectDelta {
     owner: Option<i32>,
     crew_member: Option<bool>,
     container: Option<Option<ObjectId>>,
+    vertices: Option<Vec<ObjectVertex>>,
 }
 
 impl ObjectDelta {
@@ -751,6 +797,9 @@ impl ObjectDelta {
         if let Some(status) = update.status {
             self.status = Some(status);
         }
+        if let Some(vertices) = update.vertices {
+            self.vertices = Some(vertices);
+        }
         if let Some(action) = update.action {
             match &mut self.action {
                 Some(existing) => existing.merge(action),
@@ -773,6 +822,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             owner: update.owner,
             crew_member: update.crew_member,
             container: update.container,
+            vertices: update.vertices,
         }
     }
 }
@@ -795,6 +845,8 @@ pub struct ObjectUpdate {
     pub crew_member: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<Option<ObjectId>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertices: Option<Vec<ObjectVertex>>,
 }
 
 impl ObjectUpdate {
@@ -1135,6 +1187,7 @@ impl Object {
             command_direction: self.state.command_direction,
             action_procedure: procedure,
             effects: self.state.effects.clone(),
+            vertices: self.state.vertices.clone(),
             container: self.state.container,
             contents: self.state.contents.clone(),
             status: self.state.status,
@@ -1383,6 +1436,8 @@ pub struct SpawnConfig {
     pub command_direction: CommandDirection,
     #[serde(default)]
     pub effects: Vec<EffectState>,
+    #[serde(default)]
+    pub vertices: Vec<ObjectVertex>,
     pub owner: i32,
     #[serde(default)]
     pub crew_member: Option<bool>,
@@ -1403,6 +1458,7 @@ impl SpawnConfig {
             direction: Direction::default(),
             command_direction: CommandDirection::default(),
             effects: Vec::new(),
+            vertices: Vec::new(),
             owner: OWNER_NONE,
             crew_member: None,
             status: None,
@@ -1450,6 +1506,16 @@ impl SpawnConfig {
         self
     }
 
+    pub fn with_vertices(mut self, vertices: Vec<ObjectVertex>) -> Self {
+        self.vertices = vertices;
+        self
+    }
+
+    pub fn add_vertex(mut self, vertex: ObjectVertex) -> Self {
+        self.vertices.push(vertex);
+        self
+    }
+
     pub fn with_owner(mut self, owner: i32) -> Self {
         self.owner = owner;
         self
@@ -1488,6 +1554,8 @@ pub struct ObjectSnapshot {
     pub action_procedure: Option<String>,
     #[serde(default)]
     pub effects: Vec<EffectState>,
+    #[serde(default)]
+    pub vertices: Vec<ObjectVertex>,
     #[serde(default)]
     pub container: Option<ObjectId>,
     #[serde(default)]
@@ -1759,6 +1827,7 @@ impl Definition {
                 object_id,
                 state.status,
                 state.energy,
+                state.position,
                 &state.effects,
                 state.action.name.clone(),
                 self.action_library.clone(),
@@ -1766,6 +1835,7 @@ impl Definition {
                 state.command_direction,
                 state.action.target,
                 state.action.target2,
+                &state.vertices,
             )),
             global_effects,
             world,
@@ -1840,6 +1910,7 @@ impl Definition {
                 object_id,
                 state.status,
                 state.energy,
+                state.position,
                 &state.effects,
                 state.action.name.clone(),
                 self.action_library.clone(),
@@ -1847,6 +1918,7 @@ impl Definition {
                 state.command_direction,
                 state.action.target,
                 state.action.target2,
+                &state.vertices,
             )),
             global_effects,
             world,
@@ -1922,6 +1994,7 @@ impl Definition {
                 object_id,
                 state.status,
                 state.energy,
+                state.position,
                 &state.effects,
                 state.action.name.clone(),
                 self.action_library.clone(),
@@ -1929,6 +2002,7 @@ impl Definition {
                 state.command_direction,
                 state.action.target,
                 state.action.target2,
+                &state.vertices,
             )),
             global_effects,
             world,
@@ -2076,6 +2150,7 @@ impl Definition {
                 object_id,
                 state.status,
                 state.energy,
+                state.position,
                 &state.effects,
                 state.action.name.clone(),
                 self.action_library.clone(),
@@ -2083,6 +2158,7 @@ impl Definition {
                 state.command_direction,
                 state.action.target,
                 state.action.target2,
+                &state.vertices,
             )),
             global_effects,
             world,
@@ -2344,24 +2420,30 @@ impl Engine {
     }
 
     fn host_world_context(&self) -> HostWorldContext {
-        HostWorldContext::from_objects(self.objects.iter().map(|object| {
-            let procedure = self
-                .definitions
-                .get(&object.definition_id)
-                .and_then(|definition| {
-                    definition
-                        .action_library()
-                        .procedure_name_for_action(&object.state.action.name)
-                })
-                .map(|name| name.to_string());
-            HostWorldObject::new(
-                object.id,
-                object.state.action.name.clone(),
-                object.state.action.target,
-                object.state.action.target2,
-                procedure,
-            )
-        }))
+        let landscape = self.landscape.clone();
+        HostWorldContext::with_landscape(
+            self.objects.iter().map(|object| {
+                let procedure = self
+                    .definitions
+                    .get(&object.definition_id)
+                    .and_then(|definition| {
+                        definition
+                            .action_library()
+                            .procedure_name_for_action(&object.state.action.name)
+                    })
+                    .map(|name| name.to_string());
+                HostWorldObject::new(
+                    object.id,
+                    object.state.action.name.clone(),
+                    object.state.action.target,
+                    object.state.action.target2,
+                    procedure,
+                    object.state.position,
+                    object.state.vertices.clone(),
+                )
+            }),
+            landscape,
+        )
     }
 
     pub fn clear_scenario_script(&mut self) {
@@ -3023,6 +3105,7 @@ impl Engine {
             owner,
             crew_member,
             container,
+            vertices,
         } = update;
 
         let definition_id = self.objects[index].definition_id.clone();
@@ -3085,6 +3168,9 @@ impl Engine {
                     object.state.container = container_update;
                     container_change = Some((previous_container, object.state.container));
                 }
+            }
+            if let Some(vertices) = vertices {
+                object.state.vertices = vertices;
             }
 
             self.physics.clamp_velocity(&mut object.state.velocity);
@@ -3515,6 +3601,7 @@ impl Engine {
                     direction: snapshot.direction,
                     command_direction: snapshot.command_direction,
                     effects: snapshot.effects.clone(),
+                    vertices: snapshot.vertices.clone(),
                     container: None,
                     contents: Vec::new(),
                     status: snapshot.status,
@@ -4037,6 +4124,7 @@ impl Engine {
             direction,
             command_direction,
             effects,
+            vertices,
             owner,
             crew_member,
             status,
@@ -4067,6 +4155,7 @@ impl Engine {
                 direction,
                 command_direction,
                 effects: Vec::new(),
+                vertices,
                 container: None,
                 contents: Vec::new(),
                 status: status.unwrap_or_default(),
@@ -4390,15 +4479,20 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
 }
 
 fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldContext {
-    HostWorldContext::from_objects(snapshot.objects.iter().map(|object| {
-        HostWorldObject::new(
-            object.id,
-            object.action.name.clone(),
-            object.action.target,
-            object.action.target2,
-            object.action_procedure.clone(),
-        )
-    }))
+    HostWorldContext::with_landscape(
+        snapshot.objects.iter().map(|object| {
+            HostWorldObject::new(
+                object.id,
+                object.action.name.clone(),
+                object.action.target,
+                object.action.target2,
+                object.action_procedure.clone(),
+                object.position,
+                object.vertices.clone(),
+            )
+        }),
+        snapshot.landscape.clone(),
+    )
 }
 
 fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {

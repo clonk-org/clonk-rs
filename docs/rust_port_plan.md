@@ -16,6 +16,7 @@
 - Command batches now support landscape lowering operations so queued dig commands can carve tunnels into the simulated height map before physics runs, keeping scripted excavation flows deterministic.
 - The demo viewport now scrolls horizontally across loaded landscapes and keeps the focus object in view so larger scenarios are observable inside the harness.
 - Object snapshots now surface each object's action name, phase, and resolved procedure, scripts can request action transitions, and the C++ validation bridge records the same metadata so playback parity covers basic action state changes.
+- Object snapshots now persist per-object vertex definitions and Rust host helpers implement C4-style `GetVertex*`/`GetContact` queries with landscape-aware collision checks so attach procedures can leverage identical contact data.
 - Scenario manifests now declare per-definition action maps with default actions plus length/next transitions, and the Rust engine advances phases through those maps to mirror simple C4 procedure loops; manifests can now seed per-object action phases, effect stacks, and initial statuses so spawns enter the lifecycle with the expected scaffolding. Action specs now accept optional start/end/abort callbacks, and the engine invokes them when objects spawn or transition actions while honoring host-command side effects; forced action changes now route through abort callbacks so script-driven `SetAction` matches C4 semantics.
 - Action specifications now honor per-phase delay values, `ActionState` tracks the tick counter for the active phase, and manifest or script updates can inspect or override the counter so phase timing mirrors `ActMap.Delay` expectations.
 - Action specifications now expose configurable phase step counts and optional phase callbacks; the engine fires those callbacks on each phase advance before transitions so scripts can mirror `ActMap.PhaseCall` behaviour.
@@ -51,7 +52,7 @@
 ## Priority Focus
 - ✅ Expose the C++ `GetAction`/`GetActionTarget` host helpers in `lc-engine` and wire `SetActionTargets` so AUL scripts can inspect and mutate current action names/targets during Rust parity runs, including cross-object lookups backed by the engine snapshot.
 - ✅ Export `GetProcedure` from `lc-engine` so scripts can query active procedures for the focused object or world lookups without diverging from C++ behaviour.
-- ⏳ Implement object vertex state and queries in `lc-engine` so grounded/attach procedures can match C4 collision handling.
+- ✅ Implement object vertex state and queries in `lc-engine` so grounded/attach procedures can match C4 collision handling.
 
 ## Rust Workspace Scope
 - `lc-core`, `lc-resources`, `lc-script`, `lc-engine`, `lc-graphics`, `lc-audio`, `lc-network`, `lc-gui`, `lc-platform`, and `lc-app` provide demo-friendly utilities, parsers, in-memory surfaces, a toy physics loop, and basic networking abstractions.

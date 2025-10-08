@@ -5,8 +5,9 @@ use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::{
-    ActionLibrary, ActionUpdate, CommandDirection, Direction, EnvironmentSettings, ObjectId,
-    ObjectStatus, ObjectUpdate, QueuedCommand,
+    ActionLibrary, ActionUpdate, CommandDirection, Direction, EnvironmentSettings, Landscape,
+    ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex, QueuedCommand, Vector2, CNAT_BOTTOM,
+    CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -27,6 +28,8 @@ pub(crate) struct HostWorldObject {
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
     pub action_procedure: Option<String>,
+    pub position: Vector2,
+    pub vertices: Vec<ObjectVertex>,
 }
 
 impl HostWorldObject {
@@ -36,6 +39,8 @@ impl HostWorldObject {
         action_target: Option<ObjectId>,
         action_target2: Option<ObjectId>,
         action_procedure: Option<String>,
+        position: Vector2,
+        vertices: Vec<ObjectVertex>,
     ) -> Self {
         Self {
             id,
@@ -43,6 +48,8 @@ impl HostWorldObject {
             action_target,
             action_target2,
             action_procedure,
+            position,
+            vertices,
         }
     }
 
@@ -57,15 +64,41 @@ impl HostWorldObject {
     pub fn procedure_name(&self) -> Option<&str> {
         self.action_procedure.as_deref()
     }
+
+    pub fn position(&self) -> Vector2 {
+        self.position
+    }
+
+    pub fn vertices(&self) -> &[ObjectVertex] {
+        &self.vertices
+    }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct HostWorldContext {
     objects: Rc<HashMap<ObjectId, HostWorldObject>>,
+    landscape: Option<Rc<Landscape>>,
+}
+
+impl Default for HostWorldContext {
+    fn default() -> Self {
+        Self {
+            objects: Rc::new(HashMap::new()),
+            landscape: None,
+        }
+    }
 }
 
 impl HostWorldContext {
+    #[cfg(test)]
     pub(crate) fn from_objects<I>(objects: I) -> Self
+    where
+        I: IntoIterator<Item = HostWorldObject>,
+    {
+        Self::with_landscape(objects, None)
+    }
+
+    pub(crate) fn with_landscape<I>(objects: I, landscape: Option<Landscape>) -> Self
     where
         I: IntoIterator<Item = HostWorldObject>,
     {
@@ -75,11 +108,16 @@ impl HostWorldContext {
             .collect();
         Self {
             objects: Rc::new(map),
+            landscape: landscape.map(Rc::new),
         }
     }
 
     pub(crate) fn get(&self, id: ObjectId) -> Option<&HostWorldObject> {
         self.objects.get(&id)
+    }
+
+    pub(crate) fn landscape_ref(&self) -> Option<&Landscape> {
+        self.landscape.as_deref()
     }
 }
 
@@ -118,6 +156,84 @@ fn parse_object_reference_argument(
     }
 }
 
+fn value_to_i32(value: &Value, function: &str, parameter: &str) -> Result<i32, RuntimeError> {
+    match value {
+        Value::Int(int) => Ok(*int),
+        other => Err(RuntimeError::new(format!(
+            "{}: expected integer for {}, got {}",
+            function,
+            parameter,
+            other.type_name()
+        ))),
+    }
+}
+
+const CONTACT_DIRECTION_MASK: u32 = CNAT_LEFT | CNAT_RIGHT | CNAT_TOP | CNAT_BOTTOM | CNAT_CENTER;
+
+fn compute_vertex_contact(
+    landscape: Option<&Landscape>,
+    position: Vector2,
+    vertex: &ObjectVertex,
+    check_mask: u32,
+) -> u32 {
+    if vertex.cnat & CNAT_NO_COLLISION != 0 {
+        return 0;
+    }
+    let mask = if check_mask == 0 {
+        vertex.cnat
+    } else {
+        check_mask
+    };
+    let mask = mask & CONTACT_DIRECTION_MASK;
+    if mask == 0 {
+        return 0;
+    }
+    let landscape = match landscape {
+        Some(value) => value,
+        None => return 0,
+    };
+    let world_x = position.x.saturating_add(vertex.x);
+    let world_y = position.y.saturating_add(vertex.y);
+    let mut contact = 0;
+    if (mask & CNAT_CENTER) != 0 && landscape.is_solid_at(world_x, world_y) {
+        contact |= CNAT_CENTER;
+    }
+    if (mask & CNAT_LEFT) != 0 && landscape.is_solid_at(world_x - 1, world_y) {
+        contact |= CNAT_LEFT;
+    }
+    if (mask & CNAT_RIGHT) != 0 && landscape.is_solid_at(world_x + 1, world_y) {
+        contact |= CNAT_RIGHT;
+    }
+    if (mask & CNAT_TOP) != 0 && landscape.is_solid_at(world_x, world_y - 1) {
+        contact |= CNAT_TOP;
+    }
+    if (mask & CNAT_BOTTOM) != 0 && landscape.is_solid_at(world_x, world_y + 1) {
+        contact |= CNAT_BOTTOM;
+    }
+    contact
+}
+
+fn resolve_vertices<'a>(
+    context: &'a EffectHostContext,
+    target: Option<ObjectId>,
+) -> Option<(Vector2, &'a [ObjectVertex])> {
+    if let Some(target_id) = target {
+        if let Some(object) = context.object_context() {
+            if object.id() == target_id {
+                return Some((object.effective_position(), object.vertices()));
+            }
+        }
+        context
+            .world
+            .get(target_id)
+            .map(|other| (other.position(), other.vertices()))
+    } else {
+        context
+            .object_context()
+            .map(|object| (object.effective_position(), object.vertices()))
+    }
+}
+
 const DEFAULT_MAX_ENERGY: i32 = 100;
 
 pub fn register_host_functions(script: &mut ScriptEngine) {
@@ -131,6 +247,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetProcedure", get_procedure);
     script.register_host_function("SetActionTargets", set_action_targets);
     script.register_host_function("GetActionTarget", get_action_target);
+    script.register_host_function("GetVertexNum", get_vertex_num);
+    script.register_host_function("GetVertex", get_vertex);
+    script.register_host_function("GetVertexContact", get_vertex_contact);
+    script.register_host_function("GetContact", get_contact);
     script.register_host_function("SetDir", set_dir);
     script.register_host_function("GetDir", get_dir);
     script.register_host_function("SetComDir", set_com_dir);
@@ -168,6 +288,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub id: ObjectId,
     pub status: ObjectStatus,
     pub energy: i32,
+    pub position: Vector2,
     pub effects: &'a [EffectState],
     pub action_name: String,
     pub action_library: ActionLibrary,
@@ -175,6 +296,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub command_direction: CommandDirection,
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
+    pub vertices: &'a [ObjectVertex],
 }
 
 impl<'a> HostObjectContext<'a> {
@@ -182,6 +304,7 @@ impl<'a> HostObjectContext<'a> {
         id: ObjectId,
         status: ObjectStatus,
         energy: i32,
+        position: Vector2,
         effects: &'a [EffectState],
         action_name: impl Into<String>,
         action_library: ActionLibrary,
@@ -189,11 +312,13 @@ impl<'a> HostObjectContext<'a> {
         command_direction: CommandDirection,
         action_target: Option<ObjectId>,
         action_target2: Option<ObjectId>,
+        vertices: &'a [ObjectVertex],
     ) -> Self {
         Self {
             id,
             status,
             energy,
+            position,
             effects,
             action_name: action_name.into(),
             action_library,
@@ -201,6 +326,7 @@ impl<'a> HostObjectContext<'a> {
             command_direction,
             action_target,
             action_target2,
+            vertices,
         }
     }
 }
@@ -1634,6 +1760,245 @@ fn get_action_target(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn get_vertex_num(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(_) | Value::Nil => {
+                target_id = parse_object_reference_argument(arg, "GetVertexNum", "object")?;
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "GetVertexNum: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        match resolve_vertices(context, target_id) {
+            Some((_position, vertices)) => Ok(Value::Int(truncate_to_i32(vertices.len() as u64))),
+            None => Ok(Value::Nil),
+        }
+    })
+}
+
+fn get_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "GetVertex: requires at least an index argument",
+        ));
+    }
+
+    let index_value = value_to_i32(&args[0], "GetVertex", "index")?;
+    let mut arg_index = 1;
+    let mut attribute = 1;
+
+    if let Some(arg) = args.get(arg_index) {
+        match arg {
+            Value::Int(value) => {
+                attribute = *value;
+                arg_index += 1;
+            }
+            Value::Nil => {
+                arg_index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(arg_index) {
+        target_id = parse_object_reference_argument(arg, "GetVertex", "object")?;
+        arg_index += 1;
+    }
+
+    if arg_index < args.len() {
+        return Err(RuntimeError::new(
+            "GetVertex: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let (_position, vertices) = match resolve_vertices(context, target_id) {
+            Some(value) => value,
+            None => return Ok(Value::Nil),
+        };
+
+        if vertices.is_empty() {
+            return Ok(Value::Nil);
+        }
+
+        let limit = vertices.len() as i32 - 1;
+        let mut clamped = index_value;
+        if clamped < 0 {
+            clamped = 0;
+        } else if clamped > limit {
+            clamped = limit;
+        }
+        let vertex = &vertices[clamped as usize];
+        let result = match attribute {
+            0 => vertex.x,
+            1 => vertex.y,
+            2 => truncate_to_i32(vertex.cnat as u64),
+            3 => vertex.friction,
+            _ => vertex.y,
+        };
+        Ok(Value::Int(result))
+    })
+}
+
+fn get_vertex_contact(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "GetVertexContact: requires a vertex index argument",
+        ));
+    }
+
+    let vertex_index = value_to_i32(&args[0], "GetVertexContact", "index")?;
+    let mut arg_index = 1;
+    let mut mask: u32 = 0;
+
+    if let Some(arg) = args.get(arg_index) {
+        match arg {
+            Value::Int(value) => {
+                if *value > 0 {
+                    mask = *value as u32;
+                }
+                arg_index += 1;
+            }
+            Value::Nil => {
+                arg_index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(arg_index) {
+        target_id = parse_object_reference_argument(arg, "GetVertexContact", "object")?;
+        arg_index += 1;
+    }
+
+    if arg_index < args.len() {
+        return Err(RuntimeError::new(
+            "GetVertexContact: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let (position, vertices) = match resolve_vertices(context, target_id) {
+            Some(value) => value,
+            None => return Ok(Value::Nil),
+        };
+
+        if vertex_index < 0 || (vertex_index as usize) >= vertices.len() {
+            return Ok(Value::Nil);
+        }
+
+        let landscape = context.world.landscape_ref();
+        let contact =
+            compute_vertex_contact(landscape, position, &vertices[vertex_index as usize], mask);
+        Ok(Value::Int(contact as i32))
+    })
+}
+
+fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "GetContact: requires a vertex index argument",
+        ));
+    }
+
+    let vertex_index = value_to_i32(&args[0], "GetContact", "index")?;
+    let mut arg_index = 1;
+    let mut mask: u32 = 0;
+
+    if let Some(arg) = args.get(arg_index) {
+        match arg {
+            Value::Int(value) => {
+                if *value > 0 {
+                    mask = *value as u32;
+                }
+                arg_index += 1;
+            }
+            Value::Nil => {
+                arg_index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(arg_index) {
+        target_id = parse_object_reference_argument(arg, "GetContact", "object")?;
+        arg_index += 1;
+    }
+
+    if arg_index < args.len() {
+        return Err(RuntimeError::new(
+            "GetContact: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let (position, vertices) = match resolve_vertices(context, target_id) {
+            Some(value) => value,
+            None => return Ok(Value::Nil),
+        };
+
+        let landscape = context.world.landscape_ref();
+
+        if vertex_index == -1 {
+            if vertices.is_empty() {
+                return Ok(Value::Int(0));
+            }
+            let mut result = 0u32;
+            for vertex in vertices {
+                result |= compute_vertex_contact(landscape, position, vertex, mask);
+            }
+            return Ok(Value::Int(result as i32));
+        }
+
+        if vertex_index < 0 || (vertex_index as usize) >= vertices.len() {
+            return Ok(Value::Nil);
+        }
+
+        let contact =
+            compute_vertex_contact(landscape, position, &vertices[vertex_index as usize], mask);
+        Ok(Value::Int(contact as i32))
+    })
+}
+
 fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() {
         return Err(RuntimeError::new(
@@ -2241,6 +2606,7 @@ impl EffectHostContext {
                 id,
                 status,
                 energy,
+                position,
                 effects,
                 action_name,
                 action_library,
@@ -2248,11 +2614,13 @@ impl EffectHostContext {
                 command_direction,
                 action_target,
                 action_target2,
+                vertices,
             } = ctx;
             ObjectScopeContext::new(
                 id,
                 status,
                 energy,
+                position,
                 effects.to_vec(),
                 action_library,
                 action_name,
@@ -2260,6 +2628,7 @@ impl EffectHostContext {
                 command_direction,
                 action_target,
                 action_target2,
+                vertices.to_vec(),
             )
         });
         let global = Some(EffectScopeContext::new(global_effects));
@@ -2477,6 +2846,8 @@ struct ObjectScopeContext {
     max_energy: i32,
     current_direction: Direction,
     current_command_direction: CommandDirection,
+    current_position: Vector2,
+    vertices: Vec<ObjectVertex>,
 }
 
 impl ObjectScopeContext {
@@ -2484,6 +2855,7 @@ impl ObjectScopeContext {
         id: ObjectId,
         status: ObjectStatus,
         energy: i32,
+        position: Vector2,
         effects: Vec<EffectState>,
         action_library: ActionLibrary,
         action_name: String,
@@ -2491,6 +2863,7 @@ impl ObjectScopeContext {
         command_direction: CommandDirection,
         action_target: Option<ObjectId>,
         action_target2: Option<ObjectId>,
+        vertices: Vec<ObjectVertex>,
     ) -> Self {
         let blocks_other_actions = action_library.blocks_other_actions(&action_name);
         let max_energy = energy.max(DEFAULT_MAX_ENERGY);
@@ -2510,6 +2883,8 @@ impl ObjectScopeContext {
             max_energy,
             current_direction: direction,
             current_command_direction: command_direction,
+            current_position: position,
+            vertices,
         }
     }
 
@@ -2618,6 +2993,20 @@ impl ObjectScopeContext {
         self.pending_update.command_direction = Some(command_direction);
     }
 
+    fn effective_position(&self) -> Vector2 {
+        self.pending_update
+            .position
+            .unwrap_or(self.current_position)
+    }
+
+    fn vertices(&self) -> &[ObjectVertex] {
+        if let Some(vertices) = self.pending_update.vertices.as_ref() {
+            vertices
+        } else {
+            &self.vertices
+        }
+    }
+
     fn set_action_target(&mut self, index: usize, target: Option<ObjectId>) {
         let update = self
             .pending_update
@@ -2680,6 +3069,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 ActionLibrary::default(),
@@ -2687,6 +3077,7 @@ mod tests {
                 CommandDirection::Stop,
                 None,
                 None,
+                &[],
             )),
             &[],
             world,
@@ -2913,6 +3304,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 library.clone(),
@@ -2920,6 +3312,7 @@ mod tests {
                 CommandDirection::Stop,
                 None,
                 None,
+                &[],
             )),
             &[],
             HostWorldContext::default(),
@@ -2935,6 +3328,7 @@ mod tests {
                 ObjectId::new(2),
                 ObjectStatus::Normal,
                 100,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 library,
@@ -2942,6 +3336,7 @@ mod tests {
                 CommandDirection::Stop,
                 None,
                 None,
+                &[],
             )),
             &[],
             HostWorldContext::default(),
@@ -2976,6 +3371,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 library,
@@ -2983,6 +3379,7 @@ mod tests {
                 CommandDirection::Stop,
                 None,
                 None,
+                &[],
             )),
             &[],
             HostWorldContext::default(),
@@ -3010,6 +3407,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 library,
@@ -3017,6 +3415,7 @@ mod tests {
                 CommandDirection::Stop,
                 None,
                 None,
+                &[],
             )),
             &[],
             HostWorldContext::default(),
@@ -3041,6 +3440,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 library,
@@ -3048,6 +3448,7 @@ mod tests {
                 CommandDirection::Stop,
                 None,
                 None,
+                &[],
             )),
             &[],
             HostWorldContext::default(),
@@ -3076,6 +3477,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 library,
@@ -3083,6 +3485,7 @@ mod tests {
                 CommandDirection::Stop,
                 None,
                 None,
+                &[],
             )),
             &[],
             HostWorldContext::default(),
@@ -3104,6 +3507,8 @@ mod tests {
             None,
             None,
             Some("swim".to_string()),
+            Vector2::ZERO,
+            Vec::new(),
         )]);
         let (result, _) = with_effect_context(None, &[], world, || {
             let mut target = HashMap::new();
@@ -3130,7 +3535,15 @@ mod tests {
 
     #[test]
     fn get_action_reads_other_object_from_world() {
-        let other = HostWorldObject::new(ObjectId::new(99), "Walk", None, None, None);
+        let other = HostWorldObject::new(
+            ObjectId::new(99),
+            "Walk",
+            None,
+            None,
+            None,
+            Vector2::ZERO,
+            Vec::new(),
+        );
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_object_host_context_with_world(world, || {
             let mut target = HashMap::new();
@@ -3150,6 +3563,8 @@ mod tests {
             None,
             None,
             None,
+            Vector2::ZERO,
+            Vec::new(),
         )]);
         let (result, _) = with_effect_context(None, &[], world, || {
             let mut target = HashMap::new();
@@ -3165,6 +3580,185 @@ mod tests {
     fn get_action_returns_nil_without_context() {
         let value = get_action(&[]).expect("GetAction succeeds without context");
         assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn get_vertex_num_counts_vertices() {
+        let vertices = [ObjectVertex::new(0, 0), ObjectVertex::new(1, -1)];
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &vertices,
+            )),
+            &[],
+            HostWorldContext::default(),
+            || get_vertex_num(&[]),
+        );
+
+        let value = result.expect("GetVertexNum succeeds");
+        assert_eq!(value, Value::Int(2));
+    }
+
+    #[test]
+    fn get_vertex_returns_requested_attributes() {
+        let vertex = ObjectVertex::new(2, -3)
+            .with_cnat(CNAT_CENTER | CNAT_BOTTOM)
+            .with_friction(7);
+        let vertices = [vertex];
+        let (x, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &vertices,
+            )),
+            &[],
+            HostWorldContext::default(),
+            || get_vertex(&[Value::Int(0), Value::Int(0)]),
+        );
+        assert_eq!(x.expect("x succeeds"), Value::Int(2));
+        let (y, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &vertices,
+            )),
+            &[],
+            HostWorldContext::default(),
+            || get_vertex(&[Value::Int(0), Value::Int(1)]),
+        );
+        assert_eq!(y.expect("y succeeds"), Value::Int(-3));
+        let (cnat, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &vertices,
+            )),
+            &[],
+            HostWorldContext::default(),
+            || get_vertex(&[Value::Int(0), Value::Int(2)]),
+        );
+        assert_eq!(
+            cnat.expect("cnat succeeds"),
+            Value::Int((CNAT_CENTER | CNAT_BOTTOM) as i32)
+        );
+        let (friction, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &vertices,
+            )),
+            &[],
+            HostWorldContext::default(),
+            || get_vertex(&[Value::Int(0), Value::Int(3)]),
+        );
+        assert_eq!(friction.expect("friction succeeds"), Value::Int(7));
+    }
+
+    #[test]
+    fn get_vertex_contact_uses_landscape_sampling() {
+        let vertices = [ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER | CNAT_BOTTOM)];
+        let landscape = Landscape::flat(8, 0);
+        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape));
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &vertices,
+            )),
+            &[],
+            world,
+            || get_vertex_contact(&[Value::Int(0)]),
+        );
+
+        let value = result.expect("GetVertexContact succeeds");
+        assert_eq!(value, Value::Int((CNAT_CENTER | CNAT_BOTTOM) as i32));
+    }
+
+    #[test]
+    fn get_contact_aggregates_vertices() {
+        let vertices = [
+            ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER | CNAT_BOTTOM),
+            ObjectVertex::new(0, -5).with_cnat(CNAT_TOP),
+        ];
+        let landscape = Landscape::flat(4, 0);
+        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape));
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &vertices,
+            )),
+            &[],
+            world,
+            || get_contact(&[Value::Int(-1)]),
+        );
+
+        let value = result.expect("GetContact succeeds");
+        assert_eq!(value, Value::Int((CNAT_CENTER | CNAT_BOTTOM) as i32));
     }
 
     #[test]
@@ -3240,6 +3834,8 @@ mod tests {
             Some(ObjectId::new(77)),
             None,
             None,
+            Vector2::ZERO,
+            Vec::new(),
         );
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_object_host_context_with_world(world, || {

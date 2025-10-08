@@ -176,6 +176,7 @@ unsafe fn make_snapshot(
             command_direction,
             action_procedure: None,
             effects,
+            vertices: Vec::new(),
             container: None,
             contents: Vec::new(),
             status: ObjectStatus::Normal,

@@ -85,6 +85,13 @@ impl Landscape {
         self.surface.get(x as usize).copied()
     }
 
+    pub fn is_solid_at(&self, x: i32, y: i32) -> bool {
+        match self.surface_height(x) {
+            Some(surface_y) => y >= surface_y,
+            None => false,
+        }
+    }
+
     pub fn resolve_collision(&self, position: Vector2, velocity: Vector2) -> CollisionResolution {
         match self.surface_height(position.x) {
             Some(surface_y) if position.y > surface_y => {
