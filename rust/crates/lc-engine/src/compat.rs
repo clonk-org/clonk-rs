@@ -382,9 +382,11 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
+    let mut no_callbacks = false;
     if let Some(flag) = args.get(3) {
         match flag {
-            Value::Bool(_) | Value::Nil => {}
+            Value::Bool(value) => no_callbacks = *value,
+            Value::Nil => {}
             other => {
                 return Err(RuntimeError::new(format!(
                     "RemoveEffect: expected bool or nil for no-call flag, got {}",
@@ -395,7 +397,7 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let removed = with_context_mut(scope, |ctx| {
-        ctx.remove_effect(name_filter.as_deref(), index)
+        ctx.remove_effect(name_filter.as_deref(), index, no_callbacks)
     })?;
     Ok(Value::Bool(removed))
 }
@@ -1149,7 +1151,12 @@ impl EffectScopeContext {
         (insert_pos + 1) as i32
     }
 
-    fn remove_effect(&mut self, name_filter: Option<&str>, index: usize) -> bool {
+    fn remove_effect(
+        &mut self,
+        name_filter: Option<&str>,
+        index: usize,
+        no_callbacks: bool,
+    ) -> bool {
         let position = if let Some(name) = name_filter {
             let mut remaining = index;
             self.effects.iter().position(|effect| {
@@ -1185,7 +1192,12 @@ impl EffectScopeContext {
         };
 
         let effect = self.effects.remove(position);
-        self.commands.push(EffectCommand::remove(effect.name));
+        let command = if no_callbacks {
+            EffectCommand::remove_without_callbacks(effect.name)
+        } else {
+            EffectCommand::remove(effect.name)
+        };
+        self.commands.push(command);
         true
     }
 
@@ -1331,7 +1343,39 @@ mod tests {
         assert_eq!(value, Value::Bool(true));
         assert_eq!(outcome.object.len(), 2);
         assert!(matches!(outcome.object[0], EffectCommand::Add(_)));
-        assert!(matches!(outcome.object[1], EffectCommand::Remove { .. }));
+        assert!(matches!(
+            outcome.object[1],
+            EffectCommand::Remove {
+                no_callbacks: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn remove_effect_can_skip_callbacks() {
+        let state = empty_state();
+        let (result, outcome) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[Value::String("Glow".into()), state.clone()])?;
+            remove_effect(&[
+                Value::String("Glow".into()),
+                state.clone(),
+                Value::Int(0),
+                Value::Bool(true),
+            ])
+        });
+
+        let value = result.expect("calls succeed");
+        assert_eq!(value, Value::Bool(true));
+        assert_eq!(outcome.object.len(), 2);
+        assert!(matches!(outcome.object[0], EffectCommand::Add(_)));
+        assert!(matches!(
+            outcome.object[1],
+            EffectCommand::Remove {
+                no_callbacks: true,
+                ..
+            }
+        ));
     }
 
     #[test]

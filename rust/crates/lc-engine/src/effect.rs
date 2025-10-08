@@ -82,7 +82,7 @@ impl Default for EffectState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectCommand {
     Add(EffectState),
-    Remove { name: String },
+    Remove { name: String, no_callbacks: bool },
     Clear,
 }
 
@@ -92,7 +92,17 @@ impl EffectCommand {
     }
 
     pub fn remove(name: impl Into<String>) -> Self {
-        Self::Remove { name: name.into() }
+        Self::Remove {
+            name: name.into(),
+            no_callbacks: false,
+        }
+    }
+
+    pub fn remove_without_callbacks(name: impl Into<String>) -> Self {
+        Self::Remove {
+            name: name.into(),
+            no_callbacks: true,
+        }
     }
 }
 

@@ -886,9 +886,17 @@ impl Object {
                     }
                     events.push(EffectEvent::started(inserted));
                 }
-                EffectCommand::Remove { name } => {
+                EffectCommand::Remove {
+                    name,
+                    no_callbacks,
+                } => {
                     if let Some(removed) = self.remove_effect(name) {
-                        events.push(EffectEvent::stopped(removed, EffectStopReason::Removed));
+                        if !no_callbacks {
+                            events.push(EffectEvent::stopped(
+                                removed,
+                                EffectStopReason::Removed,
+                            ));
+                        }
                     }
                 }
                 EffectCommand::Clear => {
@@ -3484,7 +3492,7 @@ fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[Eff
     for command in commands {
         match command {
             EffectCommand::Add(effect) => insert_effect_into_stack(target, effect.clone()),
-            EffectCommand::Remove { name } => {
+            EffectCommand::Remove { name, .. } => {
                 if let Some(index) = target.iter().position(|existing| &existing.name == name) {
                     target.remove(index);
                 }
@@ -5822,6 +5830,74 @@ mod tests {
         assert_eq!(start_calls, 1);
         assert!(timer_calls >= 1);
         assert_eq!(stop_calls, 1);
+    }
+
+    #[test]
+    fn remove_effect_no_calls_skips_stop_callback() {
+        let script = r#"
+        global func Initialize(state, random)
+        {
+            AddEffect("Pulse", state);
+            return nil;
+        }
+
+        global func FxPulseStart(state, effect)
+        {
+            return nil;
+        }
+
+        global func FxPulseTimer(state, effect, timer)
+        {
+            if (GetEffect("Pulse", state))
+            {
+                RemoveEffect("Pulse", state, 0, true);
+            }
+            return nil;
+        }
+
+        global func FxPulseStop(state, effect, reason)
+        {
+            return nil;
+        }
+
+        global func Step(state, frame, random)
+        {
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert!(object.effects.is_empty());
+
+        let calls = call_log.lock().unwrap().clone();
+        let timer_calls = calls.iter().filter(|name| *name == "FxPulseTimer").count();
+        let stop_calls = calls.iter().filter(|name| *name == "FxPulseStop").count();
+
+        assert!(timer_calls >= 1);
+        assert_eq!(stop_calls, 0);
     }
 
     #[test]
