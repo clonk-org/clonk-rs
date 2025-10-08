@@ -481,6 +481,7 @@ bool C4Game::Init()
 
 	// Final init
 	if (!InitGameFinal()) return false;
+	RustEngineBridge::OnGameStart(*this);
 	SetInitProgress(99);
 
 	// Color palette

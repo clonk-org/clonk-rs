@@ -9,8 +9,9 @@
 ## Priority Backlog
 1. ✅ Walk procedure command movement parity (Rust engine accelerates/decelerates via per-definition walk profiles and exposes `movement.walk.*` manifest knobs).
 2. ✅ Expand grounded procedure parity (Scale/Hangle/Dig command handling) so climbing and digging match C++ behaviour.
-3. ⬜ Wire the Rust gameplay loop into the main C++ runtime behind a feature toggle to validate parity during live rounds (inputs, HUD, save/load).
+3. ✅ Wire the Rust gameplay loop into the main C++ runtime behind a feature toggle to validate parity during live rounds (inputs, HUD, save/load).
 
 ## Notes
 - Scenario manifests can now provide `movement.walk.speed` and `movement.walk.acceleration` to tune procedures per definition.
 - Additional knobs: `movement.scale.*`, `movement.hangle.*`, and `movement.dig.speed` feed the new grounded procedure parity.
+- Runtime parity toggle `LC_RUST_ENGINE_RUNTIME` now boots the Rust engine alongside the C++ loop and compares live snapshots per frame, reinitialising with scenario seeds during startup.

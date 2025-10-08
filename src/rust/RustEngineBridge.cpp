@@ -41,8 +41,17 @@ struct PlaybackDeleter {
     }
 };
 
+struct RuntimeDeleter {
+    void operator()(LcEngineRuntimeHandle *handle) const {
+        if (handle) {
+            lc_engine_runtime_free(handle);
+        }
+    }
+};
+
 using RecorderPtr = std::unique_ptr<LcEngineRecorderHandle, RecorderDeleter>;
 using PlaybackPtr = std::unique_ptr<LcEnginePlaybackHandle, PlaybackDeleter>;
+using RuntimePtr = std::unique_ptr<LcEngineRuntimeHandle, RuntimeDeleter>;
 using RustStringPtr = std::unique_ptr<char, decltype(&lc_engine_string_free)>;
 
 struct SnapshotEntry {
@@ -83,6 +92,9 @@ bool g_disabled = false;
 RecorderPtr g_recorder;
 PlaybackPtr g_playback;
 std::string g_record_path;
+RuntimePtr g_runtime;
+bool g_runtime_requested = false;
+bool g_runtime_disabled = false;
 
 RustStringPtr MakeString(char *raw) {
     return RustStringPtr(raw, lc_engine_string_free);
@@ -102,6 +114,55 @@ std::string LoadFile(const std::string &path) {
         return {};
     }
     return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+}
+
+std::string DetermineScenarioPath(const C4Game &game) {
+    const StdStrBuf full_name = game.ScenarioFile.GetFullName();
+    if (full_name.getLength()) {
+        return std::string(full_name.getData());
+    }
+    if (game.ScenarioFilename[0]) {
+        return std::string(game.ScenarioFilename);
+    }
+    return {};
+}
+
+bool InitialiseRuntime(C4Game &game) {
+    if (!g_runtime_requested || g_runtime_disabled) {
+        return false;
+    }
+
+    RuntimePtr runtime(lc_engine_runtime_new());
+    if (!runtime) {
+        LogWarning("Rust runtime could not be created");
+        g_runtime_disabled = true;
+        return false;
+    }
+
+    const std::string scenario_path = DetermineScenarioPath(game);
+    if (scenario_path.empty()) {
+        LogWarning("Rust runtime could not determine scenario path");
+        g_runtime_disabled = true;
+        return false;
+    }
+
+    char *error_message = nullptr;
+    const uint64_t seed =
+        static_cast<uint64_t>(static_cast<uint32_t>(game.Parameters.RandomSeed));
+    if (!lc_engine_runtime_load_scenario(runtime.get(), scenario_path.c_str(), seed, &error_message)) {
+        RustStringPtr error = MakeString(error_message);
+        if (error) {
+            LogError(std::string("Rust runtime failed to load scenario: ") + error.get());
+        } else {
+            LogError("Rust runtime failed to load scenario (no detail)");
+        }
+        g_runtime_disabled = true;
+        return false;
+    }
+
+    g_runtime = std::move(runtime);
+    g_runtime_disabled = false;
+    return true;
 }
 
 SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
@@ -319,9 +380,18 @@ void EnsureInitialised() {
     }
     g_initialised = true;
 
+    g_runtime_requested = false;
+    g_runtime_disabled = false;
+
     const char *record_path = std::getenv("LC_RUST_ENGINE_RECORD");
     if (record_path && *record_path) {
         InitialiseRecorder(record_path);
+    }
+
+    if (const char *runtime_toggle = std::getenv("LC_RUST_ENGINE_RUNTIME")) {
+        if (*runtime_toggle) {
+            g_runtime_requested = true;
+        }
     }
 
     if (const char *playback_path = std::getenv("LC_RUST_ENGINE_PLAYBACK")) {
@@ -333,7 +403,7 @@ void EnsureInitialised() {
         }
     }
 
-    if (!g_recorder && !g_playback) {
+    if (!g_recorder && !g_playback && !g_runtime_requested) {
         g_disabled = true;
     }
 }
@@ -392,7 +462,22 @@ namespace RustEngineBridge {
 bool IsActive() {
     std::lock_guard<std::mutex> lock(g_mutex);
     EnsureInitialised();
-    return !g_disabled && (g_recorder || g_playback);
+    const bool runtime_active = g_runtime_requested && !g_runtime_disabled;
+    return (!g_disabled && (g_recorder || g_playback)) || runtime_active;
+}
+
+void OnGameStart(C4Game &game) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    EnsureInitialised();
+    if (!g_runtime_requested) {
+        return;
+    }
+
+    g_runtime.reset();
+    g_runtime_disabled = false;
+    if (!InitialiseRuntime(game)) {
+        g_runtime.reset();
+    }
 }
 
 void OnFrame(C4Game &game) {
@@ -467,6 +552,35 @@ void OnFrame(C4Game &game) {
             eliminated_owners,
             buffer.eliminated_crew_owners.size());
     }
+
+    if (g_runtime && !g_runtime_disabled) {
+        char *error_message = nullptr;
+        if (!lc_engine_runtime_compare_snapshot(
+                g_runtime.get(),
+                frame,
+                object_data,
+                raw.size(),
+                global_effect_data,
+                global_effects.size(),
+                crew_selection_data,
+                crew_selection.size(),
+                crew_role_data,
+                crew_roles.size(),
+                known_owners,
+                buffer.known_crew_owners.size(),
+                eliminated_owners,
+                buffer.eliminated_crew_owners.size(),
+                &error_message)) {
+            RustStringPtr error = MakeString(error_message);
+            if (error) {
+                LogError(std::string("Rust runtime parity mismatch: ") + error.get());
+            } else {
+                LogError("Rust runtime parity mismatch (no detail)");
+            }
+            g_runtime.reset();
+            g_runtime_disabled = true;
+        }
+    }
 }
 
 void Shutdown() {
@@ -480,6 +594,8 @@ void Shutdown() {
     ResetRecorder();
     g_initialised = false;
     g_disabled = false;
+    g_runtime.reset();
+    g_runtime_disabled = false;
 }
 
 } // namespace RustEngineBridge

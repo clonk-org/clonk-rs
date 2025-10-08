@@ -1,13 +1,14 @@
 use crate::{
-    ActionState, CommandDirection, CrewRole, CrewSelectionState, Direction, EffectState,
+    ActionState, CommandDirection, CrewRole, CrewSelectionState, Direction, EffectState, Engine,
     EnvironmentFrame, ObjectId, ObjectSnapshot, ObjectStatus, Playback, Recorder, Recording,
-    SimulationSnapshot, Vector2,
+    Scenario, SimulationSnapshot, Vector2,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::path::PathBuf;
 use std::ptr;
 use std::slice;
 
@@ -69,6 +70,13 @@ pub struct PlaybackHandle {
     playback: Playback,
 }
 
+pub struct RuntimeHandle {
+    engine: Engine,
+    scenario_path: Option<PathBuf>,
+    seed: u64,
+    last_frame: u64,
+}
+
 impl RecorderHandle {
     fn new() -> Self {
         Self {
@@ -80,6 +88,17 @@ impl RecorderHandle {
 impl PlaybackHandle {
     fn new(playback: Playback) -> Self {
         Self { playback }
+    }
+}
+
+impl RuntimeHandle {
+    fn new() -> Self {
+        Self {
+            engine: Engine::with_seed(0),
+            scenario_path: None,
+            seed: 0,
+            last_frame: 0,
+        }
     }
 }
 
@@ -311,6 +330,329 @@ fn set_error(error_out: *mut *mut c_char, message: String) {
     unsafe {
         *error_out = c_string.into_raw();
     }
+}
+
+fn runtime_snapshot_mismatch(
+    expected: &SimulationSnapshot,
+    actual: &SimulationSnapshot,
+) -> Option<String> {
+    if expected.frame != actual.frame {
+        return Some(format!(
+            "expected frame {}, got {}",
+            expected.frame, actual.frame
+        ));
+    }
+
+    if expected.objects.len() != actual.objects.len() {
+        return Some(format!(
+            "object count mismatch (expected {}, got {})",
+            expected.objects.len(),
+            actual.objects.len()
+        ));
+    }
+
+    let expected_objects: HashMap<_, _> = expected
+        .objects
+        .iter()
+        .map(|object| (object.id, object))
+        .collect();
+    let actual_objects: HashMap<_, _> = actual
+        .objects
+        .iter()
+        .map(|object| (object.id, object))
+        .collect();
+
+    let mut problems = Vec::new();
+
+    for (&id, expected_object) in &expected_objects {
+        match actual_objects.get(&id) {
+            Some(actual_object) => {
+                if expected_object.position != actual_object.position {
+                    problems.push(format!(
+                        "object {} position expected {:?}, got {:?}",
+                        id, expected_object.position, actual_object.position
+                    ));
+                }
+                if expected_object.velocity != actual_object.velocity {
+                    problems.push(format!(
+                        "object {} velocity expected {:?}, got {:?}",
+                        id, expected_object.velocity, actual_object.velocity
+                    ));
+                }
+                if expected_object.energy != actual_object.energy {
+                    problems.push(format!(
+                        "object {} energy expected {}, got {}",
+                        id, expected_object.energy, actual_object.energy
+                    ));
+                }
+                if expected_object.owner != actual_object.owner {
+                    problems.push(format!(
+                        "object {} owner expected {}, got {}",
+                        id, expected_object.owner, actual_object.owner
+                    ));
+                }
+                if expected_object.crew_member != actual_object.crew_member {
+                    problems.push(format!(
+                        "object {} crew member expected {}, got {}",
+                        id, expected_object.crew_member, actual_object.crew_member
+                    ));
+                }
+                if expected_object.action.name != actual_object.action.name {
+                    problems.push(format!(
+                        "object {} action expected {}, got {}",
+                        id, expected_object.action.name, actual_object.action.name
+                    ));
+                }
+                if expected_object.action.phase != actual_object.action.phase {
+                    problems.push(format!(
+                        "object {} action phase expected {}, got {}",
+                        id, expected_object.action.phase, actual_object.action.phase
+                    ));
+                }
+                if expected_object.command_direction != actual_object.command_direction {
+                    problems.push(format!(
+                        "object {} command direction expected {:?}, got {:?}",
+                        id, expected_object.command_direction, actual_object.command_direction
+                    ));
+                }
+                if expected_object.effects != actual_object.effects {
+                    problems.push(format!("object {} effects differed", id));
+                }
+            }
+            None => problems.push(format!("missing object {}", id)),
+        }
+    }
+
+    for id in actual_objects.keys() {
+        if !expected_objects.contains_key(id) {
+            problems.push(format!("unexpected object {}", id));
+        }
+    }
+
+    if expected.global_effects != actual.global_effects {
+        problems.push("global effects mismatch".into());
+    }
+
+    if expected.crew_selection != actual.crew_selection {
+        problems.push(format!(
+            "crew selection mismatch (expected {:?}, got {:?})",
+            expected.crew_selection, actual.crew_selection
+        ));
+    }
+
+    if expected.crew_roles != actual.crew_roles {
+        problems.push(format!(
+            "crew roles mismatch (expected {:?}, got {:?})",
+            expected.crew_roles, actual.crew_roles
+        ));
+    }
+
+    if expected.known_crew_owners != actual.known_crew_owners {
+        problems.push(format!(
+            "known crew owners mismatch (expected {:?}, got {:?})",
+            expected.known_crew_owners, actual.known_crew_owners
+        ));
+    }
+
+    if expected.eliminated_crew_owners != actual.eliminated_crew_owners {
+        problems.push(format!(
+            "eliminated crew owners mismatch (expected {:?}, got {:?})",
+            expected.eliminated_crew_owners, actual.eliminated_crew_owners
+        ));
+    }
+
+    if problems.is_empty() {
+        None
+    } else {
+        Some(problems.join(", "))
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_new() -> *mut RuntimeHandle {
+    Box::into_raw(Box::new(RuntimeHandle::new()))
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_free(handle: *mut RuntimeHandle) {
+    if handle.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(handle));
+    }
+}
+
+fn load_scenario_into_runtime(
+    runtime: &mut RuntimeHandle,
+    path: &PathBuf,
+    seed: u64,
+) -> Result<(), String> {
+    let scenario = Scenario::load_from_path(path)
+        .map_err(|error| format!("failed to load scenario: {error}"))?;
+    runtime.engine = Engine::with_seed(seed);
+    scenario
+        .apply(&mut runtime.engine)
+        .map_err(|error| format!("failed to apply scenario: {error}"))?;
+    runtime.seed = seed;
+    runtime.last_frame = runtime.engine.frame();
+    runtime.scenario_path = Some(path.clone());
+    Ok(())
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_load_scenario(
+    handle: *mut RuntimeHandle,
+    path: *const c_char,
+    seed: u64,
+    error_out: *mut *mut c_char,
+) -> bool {
+    let Some(runtime) = (unsafe { handle.as_mut() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return false;
+    };
+
+    if path.is_null() {
+        set_error(error_out, "scenario path is null".into());
+        return false;
+    }
+
+    let path_cstr = unsafe { CStr::from_ptr(path) };
+    let path_str = match path_cstr.to_str() {
+        Ok(value) => value.to_string(),
+        Err(_) => path_cstr.to_string_lossy().into_owned(),
+    };
+    let scenario_path = PathBuf::from(path_str);
+
+    match load_scenario_into_runtime(runtime, &scenario_path, seed) {
+        Ok(()) => true,
+        Err(message) => {
+            set_error(error_out, message);
+            false
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_reset(
+    handle: *mut RuntimeHandle,
+    error_out: *mut *mut c_char,
+) -> bool {
+    let Some(runtime) = (unsafe { handle.as_mut() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return false;
+    };
+
+    let Some(path) = runtime.scenario_path.clone() else {
+        runtime.engine = Engine::with_seed(runtime.seed);
+        runtime.last_frame = runtime.engine.frame();
+        return true;
+    };
+
+    match load_scenario_into_runtime(runtime, &path, runtime.seed) {
+        Ok(()) => true,
+        Err(message) => {
+            set_error(error_out, message);
+            false
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_compare_snapshot(
+    handle: *mut RuntimeHandle,
+    frame: u64,
+    objects: *const LcEngineObjectSnapshot,
+    object_count: usize,
+    global_effects: *const LcEngineEffectSnapshot,
+    global_effect_count: usize,
+    crew_selection: *const LcEngineCrewSelectionSnapshot,
+    crew_selection_count: usize,
+    crew_roles: *const LcEngineCrewRoleSnapshot,
+    crew_role_count: usize,
+    known_crew_owners: *const i32,
+    known_crew_owner_count: usize,
+    eliminated_crew_owners: *const i32,
+    eliminated_crew_owner_count: usize,
+    error_out: *mut *mut c_char,
+) -> bool {
+    let Some(runtime) = (unsafe { handle.as_mut() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return false;
+    };
+
+    let snapshot = match unsafe {
+        make_snapshot(
+            frame,
+            objects,
+            object_count,
+            global_effects,
+            global_effect_count,
+            crew_selection,
+            crew_selection_count,
+            crew_roles,
+            crew_role_count,
+            known_crew_owners,
+            known_crew_owner_count,
+            eliminated_crew_owners,
+            eliminated_crew_owner_count,
+        )
+    } {
+        Some(snapshot) => snapshot,
+        None => {
+            set_error(error_out, "invalid snapshot input".into());
+            return false;
+        }
+    };
+
+    if frame == 0 && runtime.engine.frame() == 0 {
+        let expected = runtime.engine.snapshot();
+        if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
+            set_error(error_out, detail);
+            return false;
+        }
+        runtime.last_frame = 0;
+        return true;
+    }
+
+    if frame <= runtime.last_frame {
+        set_error(
+            error_out,
+            format!(
+                "frame {} out of order (last validated frame {})",
+                frame, runtime.last_frame
+            ),
+        );
+        return false;
+    }
+
+    while runtime.engine.frame() < frame {
+        if let Err(error) = runtime.engine.tick() {
+            set_error(error_out, format!("engine tick failed: {error}"));
+            return false;
+        }
+    }
+
+    if runtime.engine.frame() != frame {
+        set_error(
+            error_out,
+            format!(
+                "engine advanced to frame {} while validating frame {}",
+                runtime.engine.frame(),
+                frame
+            ),
+        );
+        return false;
+    }
+
+    let expected = runtime.engine.snapshot();
+    if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
+        set_error(error_out, detail);
+        return false;
+    }
+
+    runtime.last_frame = frame;
+    true
 }
 
 #[no_mangle]

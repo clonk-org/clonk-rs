@@ -7,6 +7,7 @@ class C4Game;
 namespace RustEngineBridge {
 
 void OnFrame(C4Game &game);
+void OnGameStart(C4Game &game);
 void Shutdown();
 bool IsActive();
 
@@ -17,6 +18,7 @@ bool IsActive();
 namespace RustEngineBridge {
 
 inline void OnFrame(C4Game &) {}
+inline void OnGameStart(C4Game &) {}
 inline void Shutdown() {}
 inline bool IsActive() { return false; }
 

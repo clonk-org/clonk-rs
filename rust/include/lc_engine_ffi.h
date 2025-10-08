@@ -10,6 +10,7 @@ extern "C" {
 
 typedef struct LcEngineRecorderHandle LcEngineRecorderHandle;
 typedef struct LcEnginePlaybackHandle LcEnginePlaybackHandle;
+typedef struct LcEngineRuntimeHandle LcEngineRuntimeHandle;
 
 typedef struct LcEngineEffectSnapshot {
     const char *name;
@@ -97,6 +98,31 @@ bool lc_engine_playback_finish(LcEnginePlaybackHandle *handle, char **error_mess
 void lc_engine_playback_free(LcEnginePlaybackHandle *handle);
 
 void lc_engine_string_free(char *value);
+
+LcEngineRuntimeHandle *lc_engine_runtime_new(void);
+void lc_engine_runtime_free(LcEngineRuntimeHandle *handle);
+bool lc_engine_runtime_load_scenario(
+    LcEngineRuntimeHandle *handle,
+    const char *path,
+    uint64_t seed,
+    char **error_message);
+bool lc_engine_runtime_reset(LcEngineRuntimeHandle *handle, char **error_message);
+bool lc_engine_runtime_compare_snapshot(
+    LcEngineRuntimeHandle *handle,
+    uint64_t frame,
+    const LcEngineObjectSnapshot *objects,
+    size_t object_count,
+    const LcEngineEffectSnapshot *global_effects,
+    size_t global_effect_count,
+    const LcEngineCrewSelectionSnapshot *crew_selection,
+    size_t crew_selection_count,
+    const LcEngineCrewRoleSnapshot *crew_roles,
+    size_t crew_role_count,
+    const int32_t *known_crew_owners,
+    size_t known_crew_owner_count,
+    const int32_t *eliminated_crew_owners,
+    size_t eliminated_crew_owner_count,
+    char **error_message);
 
 #ifdef __cplusplus
 }
