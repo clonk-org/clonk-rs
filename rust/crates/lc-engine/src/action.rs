@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::ObjectId;
+
 const DEFAULT_ACTION_NAME: &str = "Idle";
 
 /// Configuration for how an action should advance and transition.
@@ -433,6 +435,10 @@ pub struct ActionState {
     pub phase: i32,
     #[serde(default)]
     pub ticks: u32,
+    #[serde(default)]
+    pub target: Option<ObjectId>,
+    #[serde(default)]
+    pub target2: Option<ObjectId>,
 }
 
 impl ActionState {
@@ -441,6 +447,8 @@ impl ActionState {
             name: name.into(),
             phase: 0,
             ticks: 0,
+            target: None,
+            target2: None,
         }
     }
 
@@ -476,6 +484,12 @@ impl ActionState {
         }
         if let Some(ticks) = update.ticks {
             self.ticks = ticks;
+        }
+        if let Some(target) = update.target {
+            self.target = target;
+        }
+        if let Some(target2) = update.target2 {
+            self.target2 = target2;
         }
     }
 
@@ -527,6 +541,10 @@ pub struct ActionUpdate {
     pub ticks: Option<u32>,
     #[serde(default = "ActionUpdate::default_force")]
     pub force: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<Option<ObjectId>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target2: Option<Option<ObjectId>>,
 }
 
 impl ActionUpdate {
@@ -566,6 +584,24 @@ impl ActionUpdate {
         self.force = force;
     }
 
+    pub fn with_target(mut self, target: Option<ObjectId>) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    pub fn with_target2(mut self, target: Option<ObjectId>) -> Self {
+        self.target2 = Some(target);
+        self
+    }
+
+    pub fn set_target(&mut self, target: Option<ObjectId>) {
+        self.target = Some(target);
+    }
+
+    pub fn set_target2(&mut self, target: Option<ObjectId>) {
+        self.target2 = Some(target);
+    }
+
     pub fn merge(&mut self, other: ActionUpdate) {
         if other.name.is_some() {
             self.name = other.name;
@@ -578,6 +614,12 @@ impl ActionUpdate {
         }
         if !other.force {
             self.force = false;
+        }
+        if other.target.is_some() {
+            self.target = other.target;
+        }
+        if other.target2.is_some() {
+            self.target2 = other.target2;
         }
     }
 
@@ -593,6 +635,8 @@ impl Default for ActionUpdate {
             phase: None,
             ticks: None,
             force: true,
+            target: None,
+            target2: None,
         }
     }
 }

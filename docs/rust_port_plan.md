@@ -34,7 +34,7 @@
 - Global effect stacks now mirror object helpers: `AddEffect`/`RemoveEffect`/`GetEffect` accept `nil` targets, the engine records and advances global effects each tick, snapshots include the global stack, queued commands from callbacks apply to both object and global scopes, and the C++ validation bridge now records global effects so playback parity covers object and global stacks alike.
 - The AUL runtime now exposes a host function registry so Rust subsystems can publish native helpers to scripts, completing the foundational engine call map and piping debugger hooks through those callbacks.
 - Script host helpers now include `Random` (deterministic RNG access) and `DoEnergy` (script-driven energy deltas that clamp against engine limits).
-- `GetAction` now mirrors the C++ helper for both the focused object and arbitrary targets by consulting the engine snapshot, so scenario scripts and effect callbacks can inspect action names without extra plumbing.
+- `GetAction`/`GetActionTarget` now mirror the C++ helpers for both the focused object and arbitrary targets by consulting the engine snapshot, and `SetActionTargets` mutates the pending state so scenario scripts and effect callbacks can inspect and adjust action names/targets without extra plumbing.
 - The AUL runtime now supports assigning to proplist properties (including nested entries), so script-side mutation semantics match the baseline expectations of C4-style proplists.
 - Engine objects now carry owner identifiers across scenario manifests, runtime snapshots, command queues, and the C++ validation bridge so crew ownership mismatches are detectable in recordings and parity checks.
 - Definitions and scenario manifests can now flag crew members; engine snapshots record the crew flag, and the Rust engine can enumerate owned crew objects so validation tooling can line up with C++ crew state.
@@ -48,7 +48,7 @@
 - Simulation snapshots now capture landscape height maps and the engine RNG state so restored runs resume with matching terrain context and deterministic random sequences.
 
 ## Priority Focus
-- ✅ Expose the C++ `GetAction` host helper in `lc-engine` so AUL scripts can inspect current action names during Rust parity runs, including cross-object lookups backed by the engine snapshot.
+- ✅ Expose the C++ `GetAction`/`GetActionTarget` host helpers in `lc-engine` and wire `SetActionTargets` so AUL scripts can inspect and mutate current action names/targets during Rust parity runs, including cross-object lookups backed by the engine snapshot.
 
 ## Rust Workspace Scope
 - `lc-core`, `lc-resources`, `lc-script`, `lc-engine`, `lc-graphics`, `lc-audio`, `lc-network`, `lc-gui`, `lc-platform`, and `lc-app` provide demo-friendly utilities, parsers, in-memory surfaces, a toy physics loop, and basic networking abstractions.

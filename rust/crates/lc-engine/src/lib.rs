@@ -1764,6 +1764,8 @@ impl Definition {
                 self.action_library.clone(),
                 state.direction,
                 state.command_direction,
+                state.action.target,
+                state.action.target2,
             )),
             global_effects,
             world,
@@ -1843,6 +1845,8 @@ impl Definition {
                 self.action_library.clone(),
                 state.direction,
                 state.command_direction,
+                state.action.target,
+                state.action.target2,
             )),
             global_effects,
             world,
@@ -1923,6 +1927,8 @@ impl Definition {
                 self.action_library.clone(),
                 state.direction,
                 state.command_direction,
+                state.action.target,
+                state.action.target2,
             )),
             global_effects,
             world,
@@ -2075,6 +2081,8 @@ impl Definition {
                 self.action_library.clone(),
                 state.direction,
                 state.command_direction,
+                state.action.target,
+                state.action.target2,
             )),
             global_effects,
             world,
@@ -2336,11 +2344,14 @@ impl Engine {
     }
 
     fn host_world_context(&self) -> HostWorldContext {
-        HostWorldContext::from_objects(
-            self.objects
-                .iter()
-                .map(|object| HostWorldObject::new(object.id, object.state.action.name.clone())),
-        )
+        HostWorldContext::from_objects(self.objects.iter().map(|object| {
+            HostWorldObject::new(
+                object.id,
+                object.state.action.name.clone(),
+                object.state.action.target,
+                object.state.action.target2,
+            )
+        }))
     }
 
     pub fn clear_scenario_script(&mut self) {
@@ -4235,11 +4246,33 @@ fn build_state_value(
         .map(|id| Value::Int(truncate_to_i32(id.as_u64())))
         .collect();
     map.insert("contents".into(), Value::Array(contents));
-    let mut action = HashMap::with_capacity(4);
+    let mut action = HashMap::with_capacity(6);
     action.insert("name".into(), Value::String(state.action.name.clone()));
     action.insert("phase".into(), Value::Int(state.action.phase));
     let ticks = (state.action.ticks).min(i32::MAX as u32) as i32;
     action.insert("ticks".into(), Value::Int(ticks));
+    match state.action.target {
+        Some(target) => {
+            action.insert(
+                "target".into(),
+                Value::Int(truncate_to_i32(target.as_u64())),
+            );
+        }
+        None => {
+            action.insert("target".into(), Value::Nil);
+        }
+    }
+    match state.action.target2 {
+        Some(target) => {
+            action.insert(
+                "target2".into(),
+                Value::Int(truncate_to_i32(target.as_u64())),
+            );
+        }
+        None => {
+            action.insert("target2".into(), Value::Nil);
+        }
+    }
     if let Some(procedure) = library.procedure_name_for_action(&state.action.name) {
         action.insert("procedure".into(), Value::String(procedure.to_string()));
     }
@@ -4310,11 +4343,33 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
         .map(|id| Value::Int(truncate_to_i32(id.as_u64())))
         .collect();
     map.insert("contents".into(), Value::Array(contents));
-    let mut action = HashMap::with_capacity(4);
+    let mut action = HashMap::with_capacity(6);
     action.insert("name".into(), Value::String(snapshot.action.name.clone()));
     action.insert("phase".into(), Value::Int(snapshot.action.phase));
     let ticks = snapshot.action.ticks.min(i32::MAX as u32) as i32;
     action.insert("ticks".into(), Value::Int(ticks));
+    match snapshot.action.target {
+        Some(target) => {
+            action.insert(
+                "target".into(),
+                Value::Int(truncate_to_i32(target.as_u64())),
+            );
+        }
+        None => {
+            action.insert("target".into(), Value::Nil);
+        }
+    }
+    match snapshot.action.target2 {
+        Some(target) => {
+            action.insert(
+                "target2".into(),
+                Value::Int(truncate_to_i32(target.as_u64())),
+            );
+        }
+        None => {
+            action.insert("target2".into(), Value::Nil);
+        }
+    }
     if let Some(procedure) = &snapshot.action_procedure {
         action.insert("procedure".into(), Value::String(procedure.clone()));
     }
@@ -4325,12 +4380,14 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
 }
 
 fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldContext {
-    HostWorldContext::from_objects(
-        snapshot
-            .objects
-            .iter()
-            .map(|object| HostWorldObject::new(object.id, object.action.name.clone())),
-    )
+    HostWorldContext::from_objects(snapshot.objects.iter().map(|object| {
+        HostWorldObject::new(
+            object.id,
+            object.action.name.clone(),
+            object.action.target,
+            object.action.target2,
+        )
+    }))
 }
 
 fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {
@@ -4706,6 +4763,14 @@ fn parse_action_update(
                 }
                 update.set_ticks(ticks as u32);
             }
+            "target" => {
+                let target = value_to_object_reference(definition, function, "target", value)?;
+                update.set_target(target);
+            }
+            "target2" => {
+                let target = value_to_object_reference(definition, function, "target2", value)?;
+                update.set_target2(target);
+            }
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
@@ -4794,6 +4859,45 @@ fn value_to_command_direction(
         function,
         detail: format!("unsupported command_direction value {raw}"),
     })
+}
+
+fn value_to_object_reference(
+    definition: &str,
+    function: &'static str,
+    field: &str,
+    value: Value,
+) -> Result<Option<ObjectId>, EngineError> {
+    match value {
+        Value::Nil => Ok(None),
+        Value::Int(id) => {
+            if id < 0 {
+                Ok(None)
+            } else {
+                Ok(Some(ObjectId::new(id as u64)))
+            }
+        }
+        Value::Proplist(map) => match map.get("id") {
+            Some(Value::Int(id)) if *id >= 0 => Ok(Some(ObjectId::new(*id as u64))),
+            Some(other) => Err(EngineError::InvalidScriptOutput {
+                definition: definition.to_string(),
+                function,
+                detail: format!(
+                    "expected int for action.{} proplist id, got {}",
+                    field,
+                    other.type_name()
+                ),
+            }),
+            None => Ok(None),
+        },
+        other => Err(EngineError::InvalidScriptOutput {
+            definition: definition.to_string(),
+            function,
+            detail: format!(
+                "expected int, proplist, or nil for action.{field}, got {}",
+                other.type_name()
+            ),
+        }),
+    }
 }
 
 fn value_to_bool(

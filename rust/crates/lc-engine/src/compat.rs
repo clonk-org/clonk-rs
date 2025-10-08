@@ -24,13 +24,30 @@ thread_local! {
 pub(crate) struct HostWorldObject {
     pub id: ObjectId,
     pub action_name: String,
+    pub action_target: Option<ObjectId>,
+    pub action_target2: Option<ObjectId>,
 }
 
 impl HostWorldObject {
-    pub(crate) fn new(id: ObjectId, action_name: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        id: ObjectId,
+        action_name: impl Into<String>,
+        action_target: Option<ObjectId>,
+        action_target2: Option<ObjectId>,
+    ) -> Self {
         Self {
             id,
             action_name: action_name.into(),
+            action_target,
+            action_target2,
+        }
+    }
+
+    pub fn action_target(&self, index: usize) -> Option<ObjectId> {
+        match index {
+            0 => self.action_target,
+            1 => self.action_target2,
+            _ => None,
         }
     }
 }
@@ -59,6 +76,41 @@ impl HostWorldContext {
     }
 }
 
+fn truncate_to_i32(value: u64) -> i32 {
+    if value > i32::MAX as u64 {
+        i32::MAX
+    } else {
+        value as i32
+    }
+}
+
+fn object_reference_value(id: ObjectId) -> Value {
+    let mut map = HashMap::new();
+    map.insert("id".into(), Value::Int(truncate_to_i32(id.as_u64())));
+    Value::Proplist(map)
+}
+
+fn parse_object_reference_argument(
+    value: &Value,
+    function: &str,
+    parameter: &str,
+) -> Result<Option<ObjectId>, RuntimeError> {
+    match value {
+        Value::Proplist(map) => match map.get("id") {
+            Some(Value::Int(id)) if *id >= 0 => Ok(Some(ObjectId::new(*id as u64))),
+            _ => Ok(None),
+        },
+        Value::Nil => Ok(None),
+        Value::Int(id) if *id == 0 => Ok(None),
+        other => Err(RuntimeError::new(format!(
+            "{}: expected proplist, nil, or 0 for {}, got {}",
+            function,
+            parameter,
+            other.type_name()
+        ))),
+    }
+}
+
 const DEFAULT_MAX_ENERGY: i32 = 100;
 
 pub fn register_host_functions(script: &mut ScriptEngine) {
@@ -69,6 +121,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("EffectVar", effect_var);
     script.register_host_function("SetAction", set_action);
     script.register_host_function("GetAction", get_action);
+    script.register_host_function("SetActionTargets", set_action_targets);
+    script.register_host_function("GetActionTarget", get_action_target);
     script.register_host_function("SetDir", set_dir);
     script.register_host_function("GetDir", get_dir);
     script.register_host_function("SetComDir", set_com_dir);
@@ -111,6 +165,8 @@ pub(crate) struct HostObjectContext<'a> {
     pub action_library: ActionLibrary,
     pub direction: Direction,
     pub command_direction: CommandDirection,
+    pub action_target: Option<ObjectId>,
+    pub action_target2: Option<ObjectId>,
 }
 
 impl<'a> HostObjectContext<'a> {
@@ -123,6 +179,8 @@ impl<'a> HostObjectContext<'a> {
         action_library: ActionLibrary,
         direction: Direction,
         command_direction: CommandDirection,
+        action_target: Option<ObjectId>,
+        action_target2: Option<ObjectId>,
     ) -> Self {
         Self {
             id,
@@ -133,6 +191,8 @@ impl<'a> HostObjectContext<'a> {
             action_library,
             direction,
             command_direction,
+            action_target,
+            action_target2,
         }
     }
 }
@@ -1299,6 +1359,64 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn set_action_targets(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+
+    let (target1, update_target1) = if let Some(arg) = args.get(index) {
+        let target = parse_object_reference_argument(arg, "SetActionTargets", "target1")?;
+        index += 1;
+        (target, true)
+    } else {
+        (None, false)
+    };
+
+    let (target2, update_target2) = if let Some(arg) = args.get(index) {
+        let target = parse_object_reference_argument(arg, "SetActionTargets", "target2")?;
+        index += 1;
+        (target, true)
+    } else {
+        (None, false)
+    };
+
+    let mut object_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(index) {
+        object_id = parse_object_reference_argument(arg, "SetActionTargets", "object")?;
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetActionTargets: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("SetActionTargets requires an active engine context")
+        })?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = object_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        if update_target1 {
+            object.set_action_target(0, target1);
+        }
+        if update_target2 {
+            object.set_action_target(1, target2);
+        }
+
+        Ok(Value::Bool(true))
+    })
+}
+
 fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let mut target_id: Option<ObjectId> = None;
@@ -1370,6 +1488,77 @@ fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
             action_name
         };
         Ok(Value::String(resolved.to_string()))
+    })
+}
+
+fn get_action_target(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let mut target_index = 0;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Int(value) => {
+                target_index = *value;
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let mut object_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(index) {
+        object_id = parse_object_reference_argument(arg, "GetActionTarget", "object")?;
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "GetActionTarget: additional arguments are not supported",
+        ));
+    }
+
+    if target_index < 0 {
+        return Ok(Value::Nil);
+    }
+
+    let slot = target_index as usize;
+    if slot > 1 {
+        return Ok(Value::Nil);
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(target) = object_id {
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    let target_value = object.effective_action_target(slot);
+                    return Ok(target_value.map_or(Value::Nil, object_reference_value));
+                }
+            }
+
+            if let Some(other) = context.world.get(target) {
+                let target_value = other.action_target(slot);
+                return Ok(target_value.map_or(Value::Nil, object_reference_value));
+            }
+
+            return Ok(Value::Nil);
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        let target_value = object.effective_action_target(slot);
+        Ok(target_value.map_or(Value::Nil, object_reference_value))
     })
 }
 
@@ -1985,6 +2174,8 @@ impl EffectHostContext {
                 action_library,
                 direction,
                 command_direction,
+                action_target,
+                action_target2,
             } = ctx;
             ObjectScopeContext::new(
                 id,
@@ -1995,6 +2186,8 @@ impl EffectHostContext {
                 action_name,
                 direction,
                 command_direction,
+                action_target,
+                action_target2,
             )
         });
         let global = Some(EffectScopeContext::new(global_effects));
@@ -2206,6 +2399,8 @@ struct ObjectScopeContext {
     action_library: ActionLibrary,
     current_action_name: String,
     current_action_blocks_other_actions: bool,
+    current_action_target: Option<ObjectId>,
+    current_action_target2: Option<ObjectId>,
     current_energy: i32,
     max_energy: i32,
     current_direction: Direction,
@@ -2222,6 +2417,8 @@ impl ObjectScopeContext {
         action_name: String,
         direction: Direction,
         command_direction: CommandDirection,
+        action_target: Option<ObjectId>,
+        action_target2: Option<ObjectId>,
     ) -> Self {
         let blocks_other_actions = action_library.blocks_other_actions(&action_name);
         let max_energy = energy.max(DEFAULT_MAX_ENERGY);
@@ -2235,6 +2432,8 @@ impl ObjectScopeContext {
             action_library,
             current_action_name: action_name,
             current_action_blocks_other_actions: blocks_other_actions,
+            current_action_target: action_target,
+            current_action_target2: action_target2,
             current_energy: energy,
             max_energy,
             current_direction: direction,
@@ -2278,6 +2477,30 @@ impl ObjectScopeContext {
         self.current_action_blocks_other_actions
     }
 
+    fn effective_action_target(&self, index: usize) -> Option<ObjectId> {
+        if let Some(update) = self.pending_update.action.as_ref() {
+            match index {
+                0 => {
+                    if let Some(target) = update.target {
+                        return target;
+                    }
+                }
+                1 => {
+                    if let Some(target) = update.target2 {
+                        return target;
+                    }
+                }
+                _ => return None,
+            }
+        }
+
+        match index {
+            0 => self.current_action_target,
+            1 => self.current_action_target2,
+            _ => None,
+        }
+    }
+
     fn energy(&self) -> i32 {
         self.pending_update.energy.unwrap_or(self.current_energy)
     }
@@ -2316,6 +2539,24 @@ impl ObjectScopeContext {
         }
         self.current_command_direction = command_direction;
         self.pending_update.command_direction = Some(command_direction);
+    }
+
+    fn set_action_target(&mut self, index: usize, target: Option<ObjectId>) {
+        let update = self
+            .pending_update
+            .action
+            .get_or_insert_with(ActionUpdate::default);
+        match index {
+            0 => {
+                update.set_target(target);
+                self.current_action_target = target;
+            }
+            1 => {
+                update.set_target2(target);
+                self.current_action_target2 = target;
+            }
+            _ => {}
+        }
     }
 
     fn adjust_energy(&mut self, delta: i32, _exact: bool) -> i32 {
@@ -2367,6 +2608,8 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                None,
+                None,
             )),
             &[],
             world,
@@ -2598,6 +2841,8 @@ mod tests {
                 library.clone(),
                 Direction::Left,
                 CommandDirection::Stop,
+                None,
+                None,
             )),
             &[],
             HostWorldContext::default(),
@@ -2618,6 +2863,8 @@ mod tests {
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
+                None,
+                None,
             )),
             &[],
             HostWorldContext::default(),
@@ -2657,6 +2904,8 @@ mod tests {
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
+                None,
+                None,
             )),
             &[],
             HostWorldContext::default(),
@@ -2688,7 +2937,7 @@ mod tests {
 
     #[test]
     fn get_action_reads_other_object_from_world() {
-        let other = HostWorldObject::new(ObjectId::new(99), "Walk");
+        let other = HostWorldObject::new(ObjectId::new(99), "Walk", None, None);
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_object_host_context_with_world(world, || {
             let mut target = HashMap::new();
@@ -2702,8 +2951,12 @@ mod tests {
 
     #[test]
     fn get_action_uses_world_without_context() {
-        let world =
-            HostWorldContext::from_objects(vec![HostWorldObject::new(ObjectId::new(7), "Dig")]);
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            ObjectId::new(7),
+            "Dig",
+            None,
+            None,
+        )]);
         let (result, _) = with_effect_context(None, &[], world, || {
             let mut target = HashMap::new();
             target.insert("id".into(), Value::Int(7));
@@ -2717,6 +2970,98 @@ mod tests {
     #[test]
     fn get_action_returns_nil_without_context() {
         let value = get_action(&[]).expect("GetAction succeeds without context");
+        assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn set_action_targets_records_target_updates() {
+        let mut target_map = HashMap::new();
+        target_map.insert("id".into(), Value::Int(42));
+
+        let (result, outcome) =
+            with_object_host_context(|| set_action_targets(&[Value::Proplist(target_map.clone())]));
+
+        let value = result.expect("SetActionTargets succeeds");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("object update recorded");
+        let action = update.action.expect("action update exists");
+        assert_eq!(
+            action.target,
+            Some(Some(ObjectId::new(42))),
+            "target update recorded",
+        );
+        assert!(action.target2.is_none(), "second target untouched");
+    }
+
+    #[test]
+    fn set_action_targets_updates_second_slot_when_provided() {
+        let mut first = HashMap::new();
+        first.insert("id".into(), Value::Int(5));
+        let mut second = HashMap::new();
+        second.insert("id".into(), Value::Int(6));
+
+        let (result, outcome) = with_object_host_context(|| {
+            set_action_targets(&[
+                Value::Proplist(first.clone()),
+                Value::Proplist(second.clone()),
+            ])
+        });
+
+        let value = result.expect("SetActionTargets succeeds");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("object update recorded");
+        let action = update.action.expect("action update exists");
+        assert_eq!(action.target, Some(Some(ObjectId::new(5))));
+        assert_eq!(action.target2, Some(Some(ObjectId::new(6))));
+    }
+
+    #[test]
+    fn get_action_target_reflects_pending_update() {
+        let mut target_map = HashMap::new();
+        target_map.insert("id".into(), Value::Int(12));
+
+        let (result, outcome) = with_object_host_context(|| {
+            set_action_targets(&[Value::Proplist(target_map.clone())])?;
+            get_action_target(&[Value::Int(0)])
+        });
+
+        let value = result.expect("GetActionTarget succeeds");
+        match value {
+            Value::Proplist(map) => {
+                assert_eq!(map.get("id"), Some(&Value::Int(12)));
+            }
+            other => panic!("expected proplist, got {:?}", other),
+        }
+
+        let update = outcome.object_update.expect("object update recorded");
+        let action = update.action.expect("action update exists");
+        assert_eq!(action.target, Some(Some(ObjectId::new(12))));
+    }
+
+    #[test]
+    fn get_action_target_reads_world_context() {
+        let other = HostWorldObject::new(ObjectId::new(99), "Walk", Some(ObjectId::new(77)), None);
+        let world = HostWorldContext::from_objects(vec![other]);
+        let (result, _) = with_object_host_context_with_world(world, || {
+            let mut target = HashMap::new();
+            target.insert("id".into(), Value::Int(99));
+            get_action_target(&[Value::Int(0), Value::Proplist(target)])
+        });
+
+        let value = result.expect("GetActionTarget succeeds");
+        match value {
+            Value::Proplist(map) => {
+                assert_eq!(map.get("id"), Some(&Value::Int(77)));
+            }
+            other => panic!("expected proplist, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn get_action_target_returns_nil_for_out_of_range_index() {
+        let value = with_object_host_context(|| get_action_target(&[Value::Int(2)]))
+            .0
+            .expect("GetActionTarget succeeds");
         assert_eq!(value, Value::Nil);
     }
 
