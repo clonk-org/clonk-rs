@@ -269,6 +269,14 @@ fn describe_snapshot_mismatch(
         ));
     }
 
+    if expected.landscape != actual.landscape {
+        problems.push("landscape mismatch".into());
+    }
+
+    if expected.rng != actual.rng {
+        problems.push("rng mismatch".into());
+    }
+
     if problems.is_empty() {
         "unknown mismatch".into()
     } else {
@@ -289,6 +297,8 @@ mod tests {
         ActionState, EnvironmentFrame, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2,
         OWNER_NONE,
     };
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
 
     fn make_snapshot(frame: u64, energy: i32) -> SimulationSnapshot {
         SimulationSnapshot {
@@ -315,6 +325,8 @@ mod tests {
             crew_roles: HashMap::new(),
             known_crew_owners: Vec::new(),
             eliminated_crew_owners: Vec::new(),
+            landscape: None,
+            rng: ChaCha8Rng::seed_from_u64(frame),
         }
     }
 

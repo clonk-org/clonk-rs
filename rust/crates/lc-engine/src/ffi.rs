@@ -2,6 +2,8 @@ use crate::{
     ActionState, CrewRole, CrewSelectionState, EffectState, EnvironmentFrame, ObjectId,
     ObjectSnapshot, ObjectStatus, Playback, Recorder, Recording, SimulationSnapshot, Vector2,
 };
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -285,6 +287,8 @@ unsafe fn make_snapshot(
         crew_roles: crew_role_map,
         known_crew_owners,
         eliminated_crew_owners,
+        landscape: None,
+        rng: ChaCha8Rng::seed_from_u64(frame),
     })
 }
 

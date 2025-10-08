@@ -32,6 +32,10 @@ pub type DefinitionId = String;
 
 pub const OWNER_NONE: i32 = -1;
 
+fn default_rng() -> ChaCha8Rng {
+    ChaCha8Rng::seed_from_u64(0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ObjectId(u64);
 
@@ -1208,6 +1212,10 @@ pub struct SimulationSnapshot {
     pub known_crew_owners: Vec<i32>,
     #[serde(default)]
     pub eliminated_crew_owners: Vec<i32>,
+    #[serde(default)]
+    pub landscape: Option<Landscape>,
+    #[serde(default = "default_rng")]
+    pub rng: ChaCha8Rng,
 }
 
 impl SimulationSnapshot {
@@ -1313,14 +1321,14 @@ impl EngineState {
             physics,
             environment: snapshot.environment.settings,
             next_object_id,
-            landscape: None,
+            landscape: snapshot.landscape.clone(),
             objects,
             crew_selection: snapshot.crew_selection.clone(),
             crew_roles: snapshot.crew_roles.clone(),
             global_effects: snapshot.global_effects.clone(),
             known_crew_owners,
             eliminated_crew_owners,
-            rng: ChaCha8Rng::seed_from_u64(snapshot.frame),
+            rng: snapshot.rng.clone(),
         }
     }
 }
@@ -2647,6 +2655,8 @@ impl Engine {
             crew_roles,
             known_crew_owners,
             eliminated_crew_owners,
+            landscape: self.landscape.clone(),
+            rng: self.rng.clone(),
         }
     }
 
