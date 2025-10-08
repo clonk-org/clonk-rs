@@ -369,6 +369,32 @@ struct ObjectDelta {
     crew_member: Option<bool>,
 }
 
+impl ObjectDelta {
+    fn merge_update(&mut self, update: ObjectUpdate) {
+        if let Some(position) = update.position {
+            self.position = Some(position);
+        }
+        if let Some(velocity) = update.velocity {
+            self.velocity = Some(velocity);
+        }
+        if let Some(energy) = update.energy {
+            self.energy = Some(energy);
+        }
+        if let Some(owner) = update.owner {
+            self.owner = Some(owner);
+        }
+        if let Some(crew_member) = update.crew_member {
+            self.crew_member = Some(crew_member);
+        }
+        if let Some(action) = update.action {
+            match &mut self.action {
+                Some(existing) => existing.merge(action),
+                None => self.action = Some(action),
+            }
+        }
+    }
+}
+
 impl From<ObjectUpdate> for ObjectDelta {
     fn from(update: ObjectUpdate) -> Self {
         Self {
@@ -448,6 +474,15 @@ impl ObjectUpdate {
     pub fn with_crew_member(mut self, crew_member: bool) -> Self {
         self.crew_member = Some(crew_member);
         self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.position.is_none()
+            && self.velocity.is_none()
+            && self.energy.is_none()
+            && self.action.is_none()
+            && self.owner.is_none()
+            && self.crew_member.is_none()
     }
 }
 
@@ -1101,10 +1136,11 @@ impl Definition {
             Value::Int(random),
         ];
         let guard = enter_random_context(rng);
-        let (result, host_effects) =
-            compat::with_effect_context(&state.effects, global_effects, || {
-                self.script.call("Initialize", &args)
-            });
+        let (result, host_effects) = compat::with_effect_context(
+            Some(compat::HostObjectContext::new(object_id, &state.effects)),
+            global_effects,
+            || self.script.call("Initialize", &args),
+        );
         let rng = guard.finish();
         let result = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
@@ -1112,11 +1148,28 @@ impl Definition {
             source,
         })?;
         let mut batch = parse_command(&self.id, "Initialize", result)?;
-        if !host_effects.object.is_empty() {
-            batch.effects.extend(host_effects.object);
+        let compat::EffectContextOutcome {
+            object: host_object_effects,
+            global: host_global_effects,
+            object_update,
+            object_commands,
+            destroy_object,
+        } = host_effects;
+
+        if let Some(update) = object_update {
+            batch.delta.merge_update(update);
         }
-        if !host_effects.global.is_empty() {
-            batch.global_effects.extend(host_effects.global);
+        if !object_commands.is_empty() {
+            batch.commands.extend(object_commands);
+        }
+        if destroy_object {
+            batch.destroy = true;
+        }
+        if !host_object_effects.is_empty() {
+            batch.effects.extend(host_object_effects);
+        }
+        if !host_global_effects.is_empty() {
+            batch.global_effects.extend(host_global_effects);
         }
         Ok((batch, rng))
     }
@@ -1144,10 +1197,11 @@ impl Definition {
             Value::Int(random),
         ];
         let guard = enter_random_context(rng);
-        let (result, host_effects) =
-            compat::with_effect_context(&state.effects, global_effects, || {
-                self.script.call("Step", &args)
-            });
+        let (result, host_effects) = compat::with_effect_context(
+            Some(compat::HostObjectContext::new(object_id, &state.effects)),
+            global_effects,
+            || self.script.call("Step", &args),
+        );
         let rng = guard.finish();
         let result = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
@@ -1155,11 +1209,28 @@ impl Definition {
             source,
         })?;
         let mut batch = parse_command(&self.id, "Step", result)?;
-        if !host_effects.object.is_empty() {
-            batch.effects.extend(host_effects.object);
+        let compat::EffectContextOutcome {
+            object: host_object_effects,
+            global: host_global_effects,
+            object_update,
+            object_commands,
+            destroy_object,
+        } = host_effects;
+
+        if let Some(update) = object_update {
+            batch.delta.merge_update(update);
         }
-        if !host_effects.global.is_empty() {
-            batch.global_effects.extend(host_effects.global);
+        if !object_commands.is_empty() {
+            batch.commands.extend(object_commands);
+        }
+        if destroy_object {
+            batch.destroy = true;
+        }
+        if !host_object_effects.is_empty() {
+            batch.effects.extend(host_object_effects);
+        }
+        if !host_global_effects.is_empty() {
+            batch.global_effects.extend(host_global_effects);
         }
         Ok((batch, rng))
     }
@@ -1251,12 +1322,15 @@ impl Definition {
         args.append(&mut extras);
 
         let guard = enter_random_context(rng);
-        let (result, commands) =
-            compat::with_effect_context(&state.effects, global_effects, || {
+        let (result, commands) = compat::with_effect_context(
+            Some(compat::HostObjectContext::new(object_id, &state.effects)),
+            global_effects,
+            || {
                 self.script
                     .call_effect_callback(&effect.name, event, &args)
                     .map(|_| ())
-            });
+            },
+        );
         let rng = guard.finish();
 
         result
@@ -2090,7 +2164,7 @@ impl Engine {
 
         while let Some(event) = queue.pop_front() {
             let snapshot_for_call = state_snapshot.clone();
-            let (mut outcome, new_rng) = match event.kind {
+            let (outcome, new_rng) = match event.kind {
                 EffectEventKind::Started => definition.call_effect_start(
                     &snapshot_for_call,
                     object_id,
@@ -2116,17 +2190,45 @@ impl Engine {
             };
             rng = new_rng;
 
-            if !outcome.object.is_empty() {
-                let mut generated = object.apply_effect_commands(&outcome.object);
+            let compat::EffectContextOutcome {
+                object: object_effect_commands,
+                global: mut global_effect_commands,
+                object_update,
+                object_commands,
+                destroy_object,
+            } = outcome;
+
+            if let Some(update) = object_update {
+                let mut delta = ObjectDelta::default();
+                delta.merge_update(update);
+                object
+                    .state
+                    .apply_delta(&delta, definition.action_library());
+                state_snapshot = object.state.clone();
+            }
+
+            if !object_commands.is_empty() {
+                object.enqueue_commands(object_commands);
+            }
+
+            if destroy_object {
+                let mut generated = object.mark_destroyed();
+                if !generated.is_empty() {
+                    queue.extend(generated.drain(..));
+                }
+            }
+
+            if !object_effect_commands.is_empty() {
+                let mut generated = object.apply_effect_commands(&object_effect_commands);
                 state_snapshot = object.state.clone();
                 if !generated.is_empty() {
                     queue.extend(generated.drain(..));
                 }
             }
 
-            if !outcome.global.is_empty() {
-                apply_effect_commands_to_stack(&mut global_view, &outcome.global);
-                global_commands.append(&mut outcome.global);
+            if !global_effect_commands.is_empty() {
+                apply_effect_commands_to_stack(&mut global_view, &global_effect_commands);
+                global_commands.append(&mut global_effect_commands);
             }
         }
 

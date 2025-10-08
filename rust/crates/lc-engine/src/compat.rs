@@ -4,6 +4,7 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState};
+use crate::{ActionUpdate, ObjectId, ObjectUpdate, QueuedCommand};
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
@@ -18,6 +19,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("RemoveEffect", remove_effect);
     script.register_host_function("GetEffect", get_effect);
     script.register_host_function("GetEffectCount", get_effect_count);
+    script.register_host_function("SetAction", set_action);
     script.register_host_function("Random", random);
 }
 
@@ -37,8 +39,20 @@ pub(crate) fn enter_random_context(rng: ChaCha8Rng) -> RandomContextGuard {
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HostObjectContext<'a> {
+    pub id: ObjectId,
+    pub effects: &'a [EffectState],
+}
+
+impl<'a> HostObjectContext<'a> {
+    pub fn new(id: ObjectId, effects: &'a [EffectState]) -> Self {
+        Self { id, effects }
+    }
+}
+
 pub(crate) fn with_effect_context<F, T, E>(
-    object_effects: &[EffectState],
+    object: Option<HostObjectContext<'_>>,
     global_effects: &[EffectState],
     func: F,
 ) -> (Result<T, E>, EffectContextOutcome)
@@ -50,10 +64,7 @@ where
             cell.borrow().is_none(),
             "nested effect contexts are not supported"
         );
-        *cell.borrow_mut() = Some(EffectHostContext::new(
-            object_effects.to_vec(),
-            global_effects.to_vec(),
-        ));
+        *cell.borrow_mut() = Some(EffectHostContext::new(object, global_effects.to_vec()));
         let result = func();
         let context = cell
             .borrow_mut()
@@ -67,17 +78,35 @@ where
 pub(crate) struct EffectContextOutcome {
     pub object: Vec<EffectCommand>,
     pub global: Vec<EffectCommand>,
+    pub object_update: Option<ObjectUpdate>,
+    pub object_commands: Vec<QueuedCommand>,
+    pub destroy_object: bool,
 }
 
 impl EffectContextOutcome {
-    fn new(object: Vec<EffectCommand>, global: Vec<EffectCommand>) -> Self {
-        Self { object, global }
+    fn new(
+        object: Vec<EffectCommand>,
+        global: Vec<EffectCommand>,
+        object_update: Option<ObjectUpdate>,
+        object_commands: Vec<QueuedCommand>,
+        destroy_object: bool,
+    ) -> Self {
+        Self {
+            object,
+            global,
+            object_update,
+            object_commands,
+            destroy_object,
+        }
     }
 
     pub(crate) fn empty() -> Self {
         Self {
             object: Vec::new(),
             global: Vec::new(),
+            object_update: None,
+            object_commands: Vec::new(),
+            destroy_object: false,
         }
     }
 }
@@ -573,6 +602,130 @@ fn random(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetAction expects at least 1 argument: action name",
+        ));
+    }
+
+    let action_name = match &args[0] {
+        Value::String(name) if !name.is_empty() => Some(name.clone()),
+        Value::String(_) | Value::Nil => None,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetAction: expected string or nil for action name, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let mut phase: Option<i32> = None;
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Int(value) => {
+                phase = Some(*value);
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {
+                return Err(RuntimeError::new(format!(
+                    "SetAction: expected int or nil for phase, got {}",
+                    arg.type_name()
+                )))
+            }
+        }
+    }
+
+    let mut ticks: Option<u32> = None;
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Int(value) if *value >= 0 => {
+                ticks = Some(*value as u32);
+                index += 1;
+            }
+            Value::Int(_) => {
+                return Err(RuntimeError::new(
+                    "SetAction: ticks must be >= 0 when provided",
+                ));
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {
+                return Err(RuntimeError::new(format!(
+                    "SetAction: expected int or nil for ticks, got {}",
+                    arg.type_name()
+                )))
+            }
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetAction: additional arguments are not supported",
+        ));
+    }
+
+    let name = match action_name {
+        Some(name) => name,
+        None => return Ok(Value::Bool(false)),
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetAction requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        let update = object
+            .pending_update
+            .action
+            .get_or_insert_with(ActionUpdate::default);
+        update.set_name(name);
+        if let Some(phase) = phase {
+            update.set_phase(phase);
+        }
+        if let Some(ticks) = ticks {
+            update.set_ticks(ticks);
+        }
+
+        Ok(Value::Bool(true))
+    })
+}
+
 fn with_context_mut<R>(
     scope: EffectScope,
     func: impl FnOnce(&mut EffectScopeContext) -> R,
@@ -727,21 +880,29 @@ fn parse_timer_from_int(value: i32) -> Result<i32, RuntimeError> {
 }
 
 struct EffectHostContext {
-    object: EffectScopeContext,
+    object: Option<ObjectScopeContext>,
     global: Option<EffectScopeContext>,
 }
 
 impl EffectHostContext {
-    fn new(object_effects: Vec<EffectState>, global_effects: Vec<EffectState>) -> Self {
-        Self {
-            object: EffectScopeContext::new(object_effects),
-            global: Some(EffectScopeContext::new(global_effects)),
-        }
+    fn new(object: Option<HostObjectContext<'_>>, global_effects: Vec<EffectState>) -> Self {
+        let object = object.map(|ctx| ObjectScopeContext::new(ctx.id, ctx.effects.to_vec()));
+        let global = Some(EffectScopeContext::new(global_effects));
+        Self { object, global }
     }
 
     fn scope_mut(&mut self, scope: EffectScope) -> Result<&mut EffectScopeContext, RuntimeError> {
         match scope {
-            EffectScope::Object => Ok(&mut self.object),
+            EffectScope::Object => {
+                self.object
+                    .as_mut()
+                    .map(|ctx| &mut ctx.effects)
+                    .ok_or_else(|| {
+                        RuntimeError::new(
+                            "object effect operations require an active engine context",
+                        )
+                    })
+            }
             EffectScope::Global => self.global.as_mut().ok_or_else(|| {
                 RuntimeError::new("global effect operations require an active engine context")
             }),
@@ -750,17 +911,45 @@ impl EffectHostContext {
 
     fn snapshot(&self, scope: EffectScope) -> Option<Vec<EffectState>> {
         match scope {
-            EffectScope::Object => Some(self.object.snapshot()),
+            EffectScope::Object => self.object.as_ref().map(|ctx| ctx.effects.snapshot()),
             EffectScope::Global => self.global.as_ref().map(EffectScopeContext::snapshot),
         }
     }
 
+    fn object_context_mut(&mut self) -> Option<&mut ObjectScopeContext> {
+        self.object.as_mut()
+    }
+
     fn into_commands(self) -> EffectContextOutcome {
+        let (object_effects, object_update, object_commands, destroy) = match self.object {
+            Some(object) => {
+                let update = if object.pending_update.is_empty() {
+                    None
+                } else {
+                    Some(object.pending_update)
+                };
+                (
+                    object.effects.into_commands(),
+                    update,
+                    object.queued_commands,
+                    object.destroy,
+                )
+            }
+            None => (Vec::new(), None, Vec::new(), false),
+        };
+
         let global = self
             .global
             .map(EffectScopeContext::into_commands)
             .unwrap_or_default();
-        EffectContextOutcome::new(self.object.into_commands(), global)
+
+        EffectContextOutcome::new(
+            object_effects,
+            global,
+            object_update,
+            object_commands,
+            destroy,
+        )
     }
 }
 
@@ -856,6 +1045,30 @@ impl EffectScopeContext {
     }
 }
 
+struct ObjectScopeContext {
+    id: ObjectId,
+    effects: EffectScopeContext,
+    pending_update: ObjectUpdate,
+    queued_commands: Vec<QueuedCommand>,
+    destroy: bool,
+}
+
+impl ObjectScopeContext {
+    fn new(id: ObjectId, effects: Vec<EffectState>) -> Self {
+        Self {
+            id,
+            effects: EffectScopeContext::new(effects),
+            pending_update: ObjectUpdate::default(),
+            queued_commands: Vec::new(),
+            destroy: false,
+        }
+    }
+
+    fn id(&self) -> ObjectId {
+        self.id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -866,10 +1079,21 @@ mod tests {
         Value::Proplist(map)
     }
 
+    fn with_object_host_context<F, T>(func: F) -> (Result<T, RuntimeError>, EffectContextOutcome)
+    where
+        F: FnOnce() -> Result<T, RuntimeError>,
+    {
+        with_effect_context(
+            Some(HostObjectContext::new(ObjectId::new(1), &[])),
+            &[],
+            func,
+        )
+    }
+
     #[test]
     fn add_effect_registers_command_and_updates_view() {
         let state = empty_state();
-        let (result, outcome) = with_effect_context(&[], &[], || {
+        let (result, outcome) = with_object_host_context(|| {
             add_effect(&[
                 Value::String("Glow".into()),
                 state.clone(),
@@ -899,7 +1123,7 @@ mod tests {
         target_map.insert("id".into(), Value::Int(42));
         let target = Value::Proplist(target_map);
 
-        let (result, outcome) = with_effect_context(&[], &[], || {
+        let (result, outcome) = with_object_host_context(|| {
             add_effect(&[
                 Value::String("Glow".into()),
                 state.clone(),
@@ -925,9 +1149,8 @@ mod tests {
     #[test]
     fn remove_effect_rejects_when_missing() {
         let state = empty_state();
-        let (result, _) = with_effect_context(&[], &[], || {
-            remove_effect(&[Value::Nil, state.clone(), Value::Int(0)])
-        });
+        let (result, _) =
+            with_object_host_context(|| remove_effect(&[Value::Nil, state.clone(), Value::Int(0)]));
         let value = result.expect("RemoveEffect succeeds");
         assert_eq!(value, Value::Bool(false));
     }
@@ -935,7 +1158,7 @@ mod tests {
     #[test]
     fn add_and_remove_effect_flow() {
         let state = empty_state();
-        let (result, outcome) = with_effect_context(&[], &[], || -> Result<Value, RuntimeError> {
+        let (result, outcome) = with_object_host_context(|| -> Result<Value, RuntimeError> {
             add_effect(&[Value::String("Glow".into()), state.clone()])?;
             remove_effect(&[Value::String("Glow".into()), state.clone()])
         });
@@ -950,7 +1173,7 @@ mod tests {
     #[test]
     fn get_effect_uses_context_view() {
         let state = empty_state();
-        let (result, _) = with_effect_context(&[], &[], || {
+        let (result, _) = with_object_host_context(|| {
             add_effect(&[Value::String("Glow".into()), state.clone()])?;
             get_effect(&[
                 Value::String("Glow".into()),
@@ -971,7 +1194,7 @@ mod tests {
         target_map.insert("id".into(), Value::Int(7));
         let target = Value::Proplist(target_map);
 
-        let (result, _) = with_effect_context(&[], &[], || -> Result<Value, RuntimeError> {
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
             add_effect(&[
                 Value::String("Glow".into()),
                 state.clone(),
@@ -990,7 +1213,7 @@ mod tests {
         let value = result.expect("GetEffect command target succeeds");
         assert_eq!(value, Value::Int(7));
 
-        let (result, _) = with_effect_context(&[], &[], || -> Result<Value, RuntimeError> {
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
             add_effect(&[
                 Value::String("Glow".into()),
                 state.clone(),
@@ -1013,7 +1236,7 @@ mod tests {
     #[test]
     fn get_effect_count_filters_by_name_and_priority() {
         let state = empty_state();
-        let (result, _) = with_effect_context(&[], &[], || -> Result<Value, RuntimeError> {
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
             add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
             add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
             add_effect(&[Value::String("Flame".into()), state.clone(), Value::Int(50)])?;
@@ -1022,7 +1245,7 @@ mod tests {
         let value = result.expect("GetEffectCount succeeds");
         assert_eq!(value, Value::Int(3));
 
-        let (result, _) = with_effect_context(&[], &[], || -> Result<Value, RuntimeError> {
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
             add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
             add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
             add_effect(&[Value::String("Flame".into()), state.clone(), Value::Int(50)])?;
@@ -1031,7 +1254,7 @@ mod tests {
         let value = result.expect("GetEffectCount with name succeeds");
         assert_eq!(value, Value::Int(1));
 
-        let (result, _) = with_effect_context(&[], &[], || -> Result<Value, RuntimeError> {
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
             add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
             add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
             add_effect(&[Value::String("Flame".into()), state.clone(), Value::Int(50)])?;
@@ -1074,8 +1297,32 @@ mod tests {
     }
 
     #[test]
+    fn set_action_records_object_update() {
+        let args = vec![Value::String("Walk".into())];
+        let (result, outcome) = with_object_host_context(|| set_action(&args));
+        let value = result.expect("SetAction should succeed");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("action update present");
+        let action = update.action.expect("action delta present");
+        assert_eq!(action.name.as_deref(), Some("Walk"));
+        assert!(outcome.object_commands.is_empty());
+        assert!(!outcome.destroy_object);
+    }
+
+    #[test]
+    fn set_action_respects_target_id() {
+        let mut target_map = HashMap::new();
+        target_map.insert("id".into(), Value::Int(2));
+        let args = vec![Value::String("Jump".into()), Value::Proplist(target_map)];
+        let (result, outcome) = with_object_host_context(|| set_action(&args));
+        let value = result.expect("SetAction returns bool");
+        assert_eq!(value, Value::Bool(false));
+        assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
     fn add_global_effect_records_global_command() {
-        let (result, outcome) = with_effect_context(&[], &[], || {
+        let (result, outcome) = with_effect_context(None, &[], || {
             add_effect(&[Value::String("Glow".into()), Value::Nil, Value::Int(120)])
         });
 
@@ -1094,7 +1341,7 @@ mod tests {
 
     #[test]
     fn global_effect_queries_use_context_view() {
-        let (result, _) = with_effect_context(&[], &[], || -> Result<Value, RuntimeError> {
+        let (result, _) = with_effect_context(None, &[], || -> Result<Value, RuntimeError> {
             add_effect(&[Value::String("Glow".into()), Value::Nil, Value::Int(90)])?;
             get_effect(&[
                 Value::String("Glow".into()),
@@ -1110,7 +1357,7 @@ mod tests {
 
     #[test]
     fn remove_global_effect_handles_missing() {
-        let (result, _) = with_effect_context(&[], &[], || {
+        let (result, _) = with_effect_context(None, &[], || {
             remove_effect(&[Value::Nil, Value::Nil, Value::Int(0)])
         });
 
