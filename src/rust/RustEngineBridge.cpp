@@ -79,6 +79,11 @@ struct CrewRoleEntry {
     std::vector<std::string> role_names;
 };
 
+struct HudPlayerEntry {
+    LcEngineHudPlayerSnapshot snapshot{};
+    std::vector<uint64_t> crew;
+};
+
 enum class ParticleLayer : int32_t {
     Global = 0,
     ObjectFront = 1,
@@ -103,6 +108,8 @@ struct SnapshotBuffer {
     std::vector<LcEngineParticleSnapshot> particle_raw;
     std::vector<int32_t> known_crew_owners;
     std::vector<int32_t> eliminated_crew_owners;
+    std::vector<HudPlayerEntry> hud_players;
+    std::vector<LcEngineHudPlayerSnapshot> hud_player_raw;
 };
 
 std::mutex g_mutex;
@@ -428,6 +435,32 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
             buffer.crew_selections.push_back(std::move(selection_entry));
         }
 
+        HudPlayerEntry hud_entry;
+        hud_entry.snapshot.owner = owner;
+        hud_entry.snapshot.eliminated = player->Eliminated != 0;
+        if (player->Cursor && player->Cursor->Status) {
+            hud_entry.snapshot.has_focus = true;
+            hud_entry.snapshot.focus_object = static_cast<uint64_t>(player->Cursor->Number);
+        } else if (player->ViewTarget && player->ViewTarget->Status) {
+            hud_entry.snapshot.has_focus = true;
+            hud_entry.snapshot.focus_object = static_cast<uint64_t>(player->ViewTarget->Number);
+        } else {
+            hud_entry.snapshot.has_focus = false;
+            hud_entry.snapshot.focus_object = 0;
+        }
+
+        for (C4ObjectLink *link = player->Crew.First; link; link = link->Next) {
+            C4Object *crew = link->Obj;
+            if (!crew || !crew->Status) {
+                continue;
+            }
+            hud_entry.crew.push_back(static_cast<uint64_t>(crew->Number));
+        }
+        std::sort(hud_entry.crew.begin(), hud_entry.crew.end());
+        hud_entry.snapshot.crew = hud_entry.crew.empty() ? nullptr : hud_entry.crew.data();
+        hud_entry.snapshot.crew_count = hud_entry.crew.size();
+        buffer.hud_players.push_back(std::move(hud_entry));
+
         if (player->Eliminated) {
             buffer.eliminated_crew_owners.push_back(owner);
         }
@@ -450,6 +483,12 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
             entry.assignments.empty() ? nullptr : entry.assignments.data();
         entry.snapshot.assignment_count = entry.assignments.size();
         buffer.crew_role_raw.push_back(entry.snapshot);
+        active_owners.insert(entry.snapshot.owner);
+    }
+
+    buffer.hud_player_raw.reserve(buffer.hud_players.size());
+    for (auto &entry : buffer.hud_players) {
+        buffer.hud_player_raw.push_back(entry.snapshot);
         active_owners.insert(entry.snapshot.owner);
     }
 
@@ -676,6 +715,7 @@ void OnFrame(C4Game &game) {
     const auto &crew_selection = buffer.crew_selection_raw;
     const auto &crew_roles = buffer.crew_role_raw;
     const auto &particles = buffer.particle_raw;
+    const auto &hud_players = buffer.hud_player_raw;
     const LcEngineObjectSnapshot *object_data = raw.empty() ? nullptr : raw.data();
     const LcEngineEffectSnapshot *global_effect_data =
         global_effects.empty() ? nullptr : global_effects.data();
@@ -685,6 +725,8 @@ void OnFrame(C4Game &game) {
         crew_selection.empty() ? nullptr : crew_selection.data();
     const LcEngineCrewRoleSnapshot *crew_role_data =
         crew_roles.empty() ? nullptr : crew_roles.data();
+    const LcEngineHudPlayerSnapshot *hud_player_data =
+        hud_players.empty() ? nullptr : hud_players.data();
     const int32_t *known_owners =
         buffer.known_crew_owners.empty() ? nullptr : buffer.known_crew_owners.data();
     const int32_t *eliminated_owners = buffer.eliminated_crew_owners.empty()
@@ -707,6 +749,8 @@ void OnFrame(C4Game &game) {
                 crew_selection.size(),
                 crew_role_data,
                 crew_roles.size(),
+                hud_player_data,
+                hud_players.size(),
                 known_owners,
                 buffer.known_crew_owners.size(),
                 eliminated_owners,
@@ -737,6 +781,8 @@ void OnFrame(C4Game &game) {
             crew_selection.size(),
             crew_role_data,
             crew_roles.size(),
+            hud_player_data,
+            hud_players.size(),
             known_owners,
             buffer.known_crew_owners.size(),
             eliminated_owners,
@@ -758,6 +804,8 @@ void OnFrame(C4Game &game) {
                 crew_selection.size(),
                 crew_role_data,
                 crew_roles.size(),
+                hud_player_data,
+                hud_players.size(),
                 known_owners,
                 buffer.known_crew_owners.size(),
                 eliminated_owners,

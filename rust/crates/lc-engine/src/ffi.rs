@@ -1,7 +1,8 @@
 use crate::{
     ActionState, CommandDirection, CrewRole, CrewSelectionState, Direction, EffectState, Engine,
-    EnvironmentFrame, FloatVector2, ObjectId, ObjectSnapshot, ObjectStatus, ParticleLayer,
-    ParticleSnapshot, Playback, Recorder, Recording, Scenario, SimulationSnapshot, Vector2,
+    EnvironmentFrame, FloatVector2, HudPlayerSnapshot, HudSnapshot, ObjectId, ObjectSnapshot,
+    ObjectStatus, ParticleLayer, ParticleSnapshot, Playback, Recorder, Recording, Scenario,
+    SimulationSnapshot, Vector2,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -82,6 +83,16 @@ pub struct LcEngineCrewRoleSnapshot {
     pub assignment_count: usize,
 }
 
+#[repr(C)]
+pub struct LcEngineHudPlayerSnapshot {
+    pub owner: i32,
+    pub crew: *const u64,
+    pub crew_count: usize,
+    pub has_focus: bool,
+    pub focus_object: u64,
+    pub eliminated: bool,
+}
+
 pub struct RecorderHandle {
     recorder: Recorder,
 }
@@ -140,6 +151,8 @@ unsafe fn make_snapshot(
     known_crew_owner_len: usize,
     eliminated_crew_owners: *const i32,
     eliminated_crew_owner_len: usize,
+    hud_players: *const LcEngineHudPlayerSnapshot,
+    hud_player_len: usize,
 ) -> Option<SimulationSnapshot> {
     let objects_slice: &[LcEngineObjectSnapshot] = if object_len == 0 {
         &[]
@@ -378,6 +391,33 @@ unsafe fn make_snapshot(
     };
     let eliminated_crew_owners = eliminated_crew_slice.to_vec();
 
+    let hud_slice: &[LcEngineHudPlayerSnapshot] = if hud_player_len == 0 {
+        &[]
+    } else if hud_players.is_null() {
+        return None;
+    } else {
+        slice::from_raw_parts(hud_players, hud_player_len)
+    };
+    let mut hud_players_vec = Vec::with_capacity(hud_slice.len());
+    for entry in hud_slice {
+        let crew_slice: &[u64] = if entry.crew_count == 0 {
+            &[]
+        } else if entry.crew.is_null() {
+            return None;
+        } else {
+            slice::from_raw_parts(entry.crew, entry.crew_count)
+        };
+        let mut crew = Vec::with_capacity(crew_slice.len());
+        crew.extend(crew_slice.iter().copied().map(ObjectId::new));
+        let focus = entry.has_focus.then(|| ObjectId::new(entry.focus_object));
+        hud_players_vec.push(HudPlayerSnapshot {
+            owner: entry.owner,
+            crew,
+            focus,
+            eliminated: entry.eliminated,
+        });
+    }
+
     Some(SimulationSnapshot {
         frame,
         physics: None,
@@ -391,6 +431,9 @@ unsafe fn make_snapshot(
         eliminated_crew_owners,
         landscape: None,
         rng: ChaCha8Rng::seed_from_u64(frame),
+        hud: HudSnapshot {
+            players: hud_players_vec,
+        },
     })
 }
 
@@ -539,6 +582,13 @@ fn runtime_snapshot_mismatch(
         problems.push(format!(
             "eliminated crew owners mismatch (expected {:?}, got {:?})",
             expected.eliminated_crew_owners, actual.eliminated_crew_owners
+        ));
+    }
+
+    if expected.hud != actual.hud {
+        problems.push(format!(
+            "hud mismatch (expected {:?}, got {:?})",
+            expected.hud, actual.hud
         ));
     }
 
@@ -710,6 +760,8 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     known_crew_owner_count: usize,
     eliminated_crew_owners: *const i32,
     eliminated_crew_owner_count: usize,
+    hud_players: *const LcEngineHudPlayerSnapshot,
+    hud_player_count: usize,
     error_out: *mut *mut c_char,
 ) -> bool {
     let Some(runtime) = (unsafe { handle.as_mut() }) else {
@@ -734,6 +786,8 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
             known_crew_owner_count,
             eliminated_crew_owners,
             eliminated_crew_owner_count,
+            hud_players,
+            hud_player_count,
         )
     } {
         Some(snapshot) => snapshot,
@@ -879,6 +933,8 @@ pub extern "C" fn lc_engine_recorder_record(
     known_crew_owner_len: usize,
     eliminated_crew_owners: *const i32,
     eliminated_crew_owner_len: usize,
+    hud_players: *const LcEngineHudPlayerSnapshot,
+    hud_player_len: usize,
 ) {
     if handle.is_null() {
         return;
@@ -900,6 +956,8 @@ pub extern "C" fn lc_engine_recorder_record(
             known_crew_owner_len,
             eliminated_crew_owners,
             eliminated_crew_owner_len,
+            hud_players,
+            hud_player_len,
         )
     };
     if let Some(snapshot) = snapshot {
@@ -988,6 +1046,8 @@ pub extern "C" fn lc_engine_playback_compare(
     known_crew_owner_len: usize,
     eliminated_crew_owners: *const i32,
     eliminated_crew_owner_len: usize,
+    hud_players: *const LcEngineHudPlayerSnapshot,
+    hud_player_len: usize,
     error_out: *mut *mut c_char,
 ) -> bool {
     if handle.is_null() {
@@ -1011,6 +1071,8 @@ pub extern "C" fn lc_engine_playback_compare(
             known_crew_owner_len,
             eliminated_crew_owners,
             eliminated_crew_owner_len,
+            hud_players,
+            hud_player_len,
         )
     };
     let Some(snapshot) = snapshot else {
@@ -1130,6 +1192,8 @@ mod tests {
                 0,
                 ptr::null(),
                 0,
+                ptr::null(),
+                0,
             )
         }
         .expect("snapshot should deserialize");
@@ -1166,6 +1230,8 @@ mod tests {
                 0,
                 &effect_snapshot,
                 1,
+                ptr::null(),
+                0,
                 ptr::null(),
                 0,
                 ptr::null(),
@@ -1231,6 +1297,8 @@ mod tests {
                 known.len(),
                 eliminated.as_ptr(),
                 eliminated.len(),
+                ptr::null(),
+                0,
             )
         }
         .expect("snapshot should include crew data");
@@ -1309,6 +1377,8 @@ mod tests {
                 1,
                 objects.as_ptr(),
                 objects.len(),
+                ptr::null(),
+                0,
                 ptr::null(),
                 0,
                 ptr::null(),

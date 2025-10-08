@@ -269,6 +269,13 @@ fn describe_snapshot_mismatch(
         ));
     }
 
+    if expected.hud != actual.hud {
+        problems.push(format!(
+            "hud mismatch (expected {:?}, got {:?})",
+            expected.hud, actual.hud
+        ));
+    }
+
     if expected.landscape != actual.landscape {
         problems.push("landscape mismatch".into());
     }
@@ -294,8 +301,8 @@ impl fmt::Display for Recording {
 mod tests {
     use super::*;
     use crate::{
-        ActionState, CommandDirection, Direction, EnvironmentFrame, ObjectSnapshot, ObjectStatus,
-        SimulationSnapshot, Vector2, OWNER_NONE,
+        ActionState, CommandDirection, Direction, EnvironmentFrame, HudSnapshot, ObjectSnapshot,
+        ObjectStatus, SimulationSnapshot, Vector2, OWNER_NONE,
     };
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
@@ -331,6 +338,7 @@ mod tests {
             eliminated_crew_owners: Vec::new(),
             landscape: None,
             rng: ChaCha8Rng::seed_from_u64(frame),
+            hud: HudSnapshot::default(),
         }
     }
 

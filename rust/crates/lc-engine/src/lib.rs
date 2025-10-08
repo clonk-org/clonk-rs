@@ -409,6 +409,23 @@ impl PartialEq for ParticleSnapshot {
 
 impl Eq for ParticleSnapshot {}
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HudSnapshot {
+    #[serde(default)]
+    pub players: Vec<HudPlayerSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HudPlayerSnapshot {
+    pub owner: i32,
+    #[serde(default)]
+    pub crew: Vec<ObjectId>,
+    #[serde(default)]
+    pub focus: Option<ObjectId>,
+    #[serde(default)]
+    pub eliminated: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ObjectVertex {
     pub x: i32,
@@ -1794,6 +1811,8 @@ pub struct SimulationSnapshot {
     pub landscape: Option<Landscape>,
     #[serde(default = "default_rng")]
     pub rng: ChaCha8Rng,
+    #[serde(default)]
+    pub hud: HudSnapshot,
 }
 
 impl SimulationSnapshot {
@@ -3986,6 +4005,35 @@ impl Engine {
             precipitation: self.environment.precipitation(),
             sky_color: self.environment.sky_color(),
         };
+        let mut owners: Vec<_> = self
+            .known_crew_owners
+            .iter()
+            .chain(self.eliminated_crew_owners.iter())
+            .copied()
+            .collect();
+        owners.sort_unstable();
+        owners.dedup();
+        let mut hud_players = Vec::with_capacity(owners.len());
+        for owner in owners {
+            let mut crew: Vec<_> = self
+                .objects
+                .iter()
+                .filter(|object| object.state.owner == owner && object.state.crew_member)
+                .map(|object| object.id)
+                .collect();
+            crew.sort_unstable();
+            let focus = self
+                .crew_selection
+                .get(&owner)
+                .and_then(|selection| selection.cursor());
+            let eliminated = self.eliminated_crew_owners.contains(&owner);
+            hud_players.push(HudPlayerSnapshot {
+                owner,
+                crew,
+                focus,
+                eliminated,
+            });
+        }
         SimulationSnapshot {
             frame: self.frame,
             physics: Some(self.physics),
@@ -3999,6 +4047,9 @@ impl Engine {
             eliminated_crew_owners,
             landscape: self.landscape.clone(),
             rng: self.rng.clone(),
+            hud: HudSnapshot {
+                players: hud_players,
+            },
         }
     }
 

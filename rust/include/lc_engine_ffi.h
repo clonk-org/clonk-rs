@@ -75,6 +75,15 @@ typedef struct LcEngineCrewRoleSnapshot {
     size_t assignment_count;
 } LcEngineCrewRoleSnapshot;
 
+typedef struct LcEngineHudPlayerSnapshot {
+    int32_t owner;
+    const uint64_t *crew;
+    size_t crew_count;
+    bool has_focus;
+    uint64_t focus_object;
+    bool eliminated;
+} LcEngineHudPlayerSnapshot;
+
 LcEngineRecorderHandle *lc_engine_recorder_new(void);
 void lc_engine_recorder_clear(LcEngineRecorderHandle *handle);
 void lc_engine_recorder_record(
@@ -90,6 +99,8 @@ void lc_engine_recorder_record(
     size_t crew_selection_count,
     const LcEngineCrewRoleSnapshot *crew_roles,
     size_t crew_role_count,
+    const LcEngineHudPlayerSnapshot *hud_players,
+    size_t hud_player_count,
     const int32_t *known_crew_owners,
     size_t known_crew_owner_count,
     const int32_t *eliminated_crew_owners,
@@ -111,6 +122,8 @@ bool lc_engine_playback_compare(
     size_t crew_selection_count,
     const LcEngineCrewRoleSnapshot *crew_roles,
     size_t crew_role_count,
+    const LcEngineHudPlayerSnapshot *hud_players,
+    size_t hud_player_count,
     const int32_t *known_crew_owners,
     size_t known_crew_owner_count,
     const int32_t *eliminated_crew_owners,
@@ -147,6 +160,8 @@ bool lc_engine_runtime_compare_snapshot(
     size_t crew_selection_count,
     const LcEngineCrewRoleSnapshot *crew_roles,
     size_t crew_role_count,
+    const LcEngineHudPlayerSnapshot *hud_players,
+    size_t hud_player_count,
     const int32_t *known_crew_owners,
     size_t known_crew_owner_count,
     const int32_t *eliminated_crew_owners,
