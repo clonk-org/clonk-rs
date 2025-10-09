@@ -7,8 +7,8 @@ use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::{
     ActionLibrary, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, Direction,
     EnvironmentSettings, Landscape, ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex,
-    QueuedCommand, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT,
-    CNAT_TOP, OWNER_NONE,
+    QueuedCommand, SpawnConfig, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION,
+    CNAT_RIGHT, CNAT_TOP, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -148,6 +148,7 @@ pub(crate) struct HostWorldContext {
     objects: Rc<HashMap<ObjectId, HostWorldObject>>,
     order: Rc<Vec<ObjectId>>,
     landscape: Option<Rc<Landscape>>,
+    next_object_id: u64,
 }
 
 impl Default for HostWorldContext {
@@ -156,6 +157,7 @@ impl Default for HostWorldContext {
             objects: Rc::new(HashMap::new()),
             order: Rc::new(Vec::new()),
             landscape: None,
+            next_object_id: 1,
         }
     }
 }
@@ -166,10 +168,14 @@ impl HostWorldContext {
     where
         I: IntoIterator<Item = HostWorldObject>,
     {
-        Self::with_landscape(objects, None)
+        Self::with_landscape(objects, None, 1)
     }
 
-    pub(crate) fn with_landscape<I>(objects: I, landscape: Option<Landscape>) -> Self
+    pub(crate) fn with_landscape<I>(
+        objects: I,
+        landscape: Option<Landscape>,
+        next_object_id: u64,
+    ) -> Self
     where
         I: IntoIterator<Item = HostWorldObject>,
     {
@@ -185,6 +191,7 @@ impl HostWorldContext {
             objects: Rc::new(lookup),
             order: Rc::new(order),
             landscape: landscape.map(Rc::new),
+            next_object_id,
         }
     }
 
@@ -198,6 +205,35 @@ impl HostWorldContext {
 
     pub(crate) fn landscape_ref(&self) -> Option<&Landscape> {
         self.landscape.as_deref()
+    }
+
+    pub(crate) fn next_object_id(&self) -> u64 {
+        self.next_object_id
+    }
+}
+
+trait WorldAccessor {
+    fn get_object(&self, id: ObjectId) -> Option<HostWorldObject>;
+    fn object_ids(&self) -> Vec<ObjectId>;
+}
+
+impl WorldAccessor for HostWorldContext {
+    fn get_object(&self, id: ObjectId) -> Option<HostWorldObject> {
+        self.get(id).cloned()
+    }
+
+    fn object_ids(&self) -> Vec<ObjectId> {
+        self.object_ids().to_vec()
+    }
+}
+
+impl WorldAccessor for EffectHostContext {
+    fn get_object(&self, id: ObjectId) -> Option<HostWorldObject> {
+        self.get_world_object(id)
+    }
+
+    fn object_ids(&self) -> Vec<ObjectId> {
+        self.world_object_ids()
     }
 }
 
@@ -537,9 +573,9 @@ impl FindObjectParams {
         false
     }
 
-    fn reference_distance(&self, world: &HostWorldContext) -> Option<i64> {
+    fn reference_distance(&self, world: &impl WorldAccessor) -> Option<i64> {
         let id = self.find_next?;
-        let object = world.get(id)?;
+        let object = world.get_object(id)?;
         Some(squared_distance(object.position(), self.x, self.y))
     }
 }
@@ -685,6 +721,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetX", get_x);
     script.register_host_function("GetY", get_y);
     script.register_host_function("SetPosition", set_position);
+    script.register_host_function("CreateObject", create_object);
     script.register_host_function("SetOwner", set_owner);
     script.register_host_function("GetOwner", get_owner);
     script.register_host_function("SetObjectStatus", set_object_status);
@@ -908,6 +945,7 @@ pub(crate) fn with_effect_context<F, T, E>(
     object: Option<HostObjectContext<'_>>,
     global_effects: &[EffectState],
     world: HostWorldContext,
+    next_object_id: u64,
     func: F,
 ) -> (Result<T, E>, EffectContextOutcome)
 where
@@ -922,6 +960,7 @@ where
             object,
             global_effects.to_vec(),
             world,
+            next_object_id,
         ));
         let result = func();
         let context = cell
@@ -940,6 +979,8 @@ pub(crate) struct EffectContextOutcome {
     pub object_commands: Vec<QueuedCommand>,
     pub destroy_object: bool,
     pub environment: Option<EnvironmentDelta>,
+    pub spawns: Vec<SpawnConfig>,
+    pub next_object_id: u64,
 }
 
 impl EffectContextOutcome {
@@ -950,6 +991,8 @@ impl EffectContextOutcome {
         object_commands: Vec<QueuedCommand>,
         destroy_object: bool,
         environment: Option<EnvironmentDelta>,
+        spawns: Vec<SpawnConfig>,
+        next_object_id: u64,
     ) -> Self {
         Self {
             object,
@@ -958,10 +1001,12 @@ impl EffectContextOutcome {
             object_commands,
             destroy_object,
             environment,
+            spawns,
+            next_object_id,
         }
     }
 
-    pub(crate) fn empty() -> Self {
+    pub(crate) fn empty(next_object_id: u64) -> Self {
         Self {
             object: Vec::new(),
             global: Vec::new(),
@@ -969,6 +1014,8 @@ impl EffectContextOutcome {
             object_commands: Vec::new(),
             destroy_object: false,
             environment: None,
+            spawns: Vec::new(),
+            next_object_id,
         }
     }
 }
@@ -1707,7 +1754,7 @@ fn get_energy(args: &[Value]) -> Result<Value, RuntimeError> {
                     return Ok(Value::Int(energy_to_script_value(object.energy())));
                 }
             }
-            if let Some(other) = context.world.get(target) {
+            if let Some(other) = context.get_world_object(target) {
                 return Ok(Value::Int(energy_to_script_value(other.energy())));
             }
             return Ok(Value::Nil);
@@ -2153,7 +2200,7 @@ fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
                 }
             }
 
-            if let Some(other) = context.world.get(target) {
+            if let Some(other) = context.get_world_object(target) {
                 let resolved = if other.action_name.is_empty() {
                     "Idle"
                 } else {
@@ -2226,7 +2273,7 @@ fn get_act_time(args: &[Value]) -> Result<Value, RuntimeError> {
                 }
             }
 
-            if let Some(other) = context.world.get(target) {
+            if let Some(other) = context.get_world_object(target) {
                 return Ok(clamp_ticks(other.action_ticks()));
             }
 
@@ -2289,7 +2336,7 @@ fn get_procedure(args: &[Value]) -> Result<Value, RuntimeError> {
                 }
             }
 
-            if let Some(other) = context.world.get(target) {
+            if let Some(other) = context.get_world_object(target) {
                 return Ok(procedure_value(other.procedure_name()));
             }
 
@@ -2359,7 +2406,7 @@ fn get_action_target(args: &[Value]) -> Result<Value, RuntimeError> {
                 }
             }
 
-            if let Some(other) = context.world.get(target) {
+            if let Some(other) = context.get_world_object(target) {
                 let target_value = other.action_target(slot);
                 return Ok(target_value.map_or(Value::Nil, object_reference_value));
             }
@@ -2536,7 +2583,7 @@ fn get_vertex_contact(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         }
 
-        let landscape = context.world.landscape_ref();
+        let landscape = context.landscape_ref();
         let contact =
             compute_vertex_contact(landscape, position, &vertices[vertex_index as usize], mask);
         Ok(Value::Int(contact as i32))
@@ -2593,7 +2640,7 @@ fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
             None => return Ok(Value::Nil),
         };
 
-        let landscape = context.world.landscape_ref();
+        let landscape = context.landscape_ref();
 
         if vertex_index == -1 {
             if vertices.is_empty() {
@@ -2624,11 +2671,10 @@ fn find_object(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(context) => context,
             None => return Ok(Value::Nil),
         };
-        let world = &context.world;
         let result = if params.is_closest_query() {
-            find_object_closest(world, &params)
+            find_object_closest(context, &params)
         } else {
-            find_object_linear(world, &params)
+            find_object_linear(context, &params)
         };
         Ok(match result {
             Some(id) => object_reference_value(id),
@@ -2637,36 +2683,36 @@ fn find_object(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-fn find_object_linear(world: &HostWorldContext, params: &FindObjectParams) -> Option<ObjectId> {
+fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
     let mut skip_until = params.find_next;
     for object_id in world.object_ids() {
-        let Some(object) = world.get(*object_id) else {
+        let Some(object) = world.get_object(object_id) else {
             continue;
         };
         if let Some(target) = skip_until {
-            if object.id == target {
+            if object_id == target {
                 skip_until = None;
             }
             continue;
         }
-        if !params.matches_object(object) {
+        if !params.matches_object(&object) {
             continue;
         }
-        if params.matches_area(object) {
-            return Some(object.id);
+        if params.matches_area(&object) {
+            return Some(object_id);
         }
     }
     None
 }
 
-fn find_object_closest(world: &HostWorldContext, params: &FindObjectParams) -> Option<ObjectId> {
+fn find_object_closest(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
     let reference = params.reference_distance(world);
     let mut best: Option<(ObjectId, i64)> = None;
     for object_id in world.object_ids() {
-        let Some(object) = world.get(*object_id) else {
+        let Some(object) = world.get_object(object_id) else {
             continue;
         };
-        if !params.matches_object(object) {
+        if !params.matches_object(&object) {
             continue;
         }
         let distance = squared_distance(object.position(), params.x, params.y);
@@ -2676,9 +2722,9 @@ fn find_object_closest(world: &HostWorldContext, params: &FindObjectParams) -> O
             }
         }
         match best {
-            None => best = Some((object.id, distance)),
+            None => best = Some((object_id, distance)),
             Some((_, best_distance)) if distance < best_distance => {
-                best = Some((object.id, distance));
+                best = Some((object_id, distance));
             }
             _ => {}
         }
@@ -2694,11 +2740,10 @@ fn find_objects(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(context) => context,
             None => return Ok(Value::Array(Vec::new())),
         };
-        let world = &context.world;
         let ids = if params.is_closest_query() {
-            collect_closest_matches(world, &params)
+            collect_closest_matches(context, &params)
         } else {
-            collect_linear_matches(world, &params)
+            collect_linear_matches(context, &params)
         };
         let values = ids
             .into_iter()
@@ -2708,34 +2753,34 @@ fn find_objects(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-fn collect_linear_matches(world: &HostWorldContext, params: &FindObjectParams) -> Vec<ObjectId> {
+fn collect_linear_matches(world: &impl WorldAccessor, params: &FindObjectParams) -> Vec<ObjectId> {
     let mut matches = Vec::new();
     let mut skip_until = params.find_next;
     for object_id in world.object_ids() {
-        let Some(object) = world.get(*object_id) else {
+        let Some(object) = world.get_object(object_id) else {
             continue;
         };
         if let Some(target) = skip_until {
-            if object.id == target {
+            if object_id == target {
                 skip_until = None;
             }
             continue;
         }
-        if params.matches_object(object) && params.matches_area(object) {
-            matches.push(object.id);
+        if params.matches_object(&object) && params.matches_area(&object) {
+            matches.push(object_id);
         }
     }
     matches
 }
 
-fn collect_closest_matches(world: &HostWorldContext, params: &FindObjectParams) -> Vec<ObjectId> {
+fn collect_closest_matches(world: &impl WorldAccessor, params: &FindObjectParams) -> Vec<ObjectId> {
     let reference = params.reference_distance(world);
     let mut matches = Vec::new();
-    for (order_index, object_id) in world.object_ids().iter().copied().enumerate() {
-        let Some(object) = world.get(object_id) else {
+    for (order_index, object_id) in world.object_ids().into_iter().enumerate() {
+        let Some(object) = world.get_object(object_id) else {
             continue;
         };
-        if !params.matches_object(object) {
+        if !params.matches_object(&object) {
             continue;
         }
         let distance = squared_distance(object.position(), params.x, params.y);
@@ -2744,7 +2789,7 @@ fn collect_closest_matches(world: &HostWorldContext, params: &FindObjectParams) 
                 continue;
             }
         }
-        matches.push((distance, order_index, object.id));
+        matches.push((distance, order_index, object_id));
     }
     matches.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     matches.into_iter().map(|(_, _, id)| id).collect()
@@ -3038,7 +3083,7 @@ fn get_position_component(
                 }
             }
 
-            if let Some(other) = context.world.get(target) {
+            if let Some(other) = context.get_world_object(target) {
                 let position = other.position();
                 return Ok(Value::Int(component.extract(position)));
             }
@@ -3146,7 +3191,7 @@ fn get_velocity_component(
                 }
             }
 
-            if let Some(other) = context.world.get(target) {
+            if let Some(other) = context.get_world_object(target) {
                 return Ok(fetch_velocity(other.velocity()));
             }
 
@@ -3363,7 +3408,7 @@ fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
             .ok_or_else(|| RuntimeError::new("SetPosition requires an active engine context"))?;
 
         let landscape_snapshot = if check_bounds {
-            context.world.landscape_ref().cloned()
+            context.landscape_ref().cloned()
         } else {
             None
         };
@@ -3387,6 +3432,119 @@ fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
 
         object.set_position(position);
         Ok(Value::Bool(true))
+    })
+}
+
+fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "CreateObject expects at least 1 argument: definition",
+        ));
+    }
+
+    let definition = match &args[0] {
+        Value::String(name) if !name.is_empty() => name.clone(),
+        Value::String(_) | Value::Nil => return Ok(Value::Nil),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "CreateObject: expected string for definition, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let mut index = 1;
+
+    let x_offset = if let Some(arg) = args.get(index) {
+        let value = value_to_i32(arg, "CreateObject", "x")?;
+        index += 1;
+        value
+    } else {
+        0
+    };
+
+    let y_offset = if let Some(arg) = args.get(index) {
+        let value = value_to_i32(arg, "CreateObject", "y")?;
+        index += 1;
+        value
+    } else {
+        0
+    };
+
+    let mut owner_override: Option<i32> = None;
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Int(value) => {
+                owner_override = Some(*value);
+                index += 1;
+            }
+            Value::Nil => {
+                owner_override = Some(OWNER_NONE);
+                index += 1;
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "CreateObject: expected int or nil for owner, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "CreateObject: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("CreateObject requires an active engine context"))?;
+
+        let base_position = context
+            .object_context()
+            .map(|object| object.effective_position())
+            .unwrap_or(Vector2::ZERO);
+        let base_owner = context
+            .object_context()
+            .map(|object| object.owner())
+            .unwrap_or(OWNER_NONE);
+
+        let owner = owner_override.unwrap_or(base_owner);
+        let position = Vector2::new(
+            base_position.x.saturating_add(x_offset),
+            base_position.y.saturating_add(y_offset),
+        );
+
+        let id = context.allocate_object_id();
+
+        let spawn = SpawnConfig::new(definition.clone())
+            .with_position(position)
+            .with_owner(owner)
+            .with_id(id);
+
+        let preview = HostWorldObject::new(
+            id,
+            definition,
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            owner,
+            0,
+            position,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        );
+
+        context.register_spawn(spawn, preview);
+        Ok(object_reference_value(id))
     })
 }
 
@@ -3467,7 +3625,7 @@ fn get_owner(args: &[Value]) -> Result<Value, RuntimeError> {
                     return Ok(Value::Int(object.owner()));
                 }
             }
-            if let Some(other) = context.world.get(target) {
+            if let Some(other) = context.get_world_object(target) {
                 return Ok(Value::Int(other.owner()));
             }
             return Ok(Value::Int(OWNER_NONE));
@@ -3840,6 +3998,10 @@ struct EffectHostContext {
     object: Option<ObjectScopeContext>,
     global: Option<EffectScopeContext>,
     world: HostWorldContext,
+    pending_spawns: Vec<SpawnConfig>,
+    pending_objects: HashMap<ObjectId, HostWorldObject>,
+    pending_order: Vec<ObjectId>,
+    next_object_id: u64,
 }
 
 impl EffectHostContext {
@@ -3847,6 +4009,7 @@ impl EffectHostContext {
         object: Option<HostObjectContext<'_>>,
         global_effects: Vec<EffectState>,
         world: HostWorldContext,
+        next_object_id: u64,
     ) -> Self {
         let object = object.map(|ctx| {
             let HostObjectContext {
@@ -3891,6 +4054,10 @@ impl EffectHostContext {
             object,
             global,
             world,
+            pending_spawns: Vec::new(),
+            pending_objects: HashMap::new(),
+            pending_order: Vec::new(),
+            next_object_id,
         }
     }
 
@@ -3910,6 +4077,39 @@ impl EffectHostContext {
                 RuntimeError::new("global effect operations require an active engine context")
             }),
         }
+    }
+
+    fn allocate_object_id(&mut self) -> ObjectId {
+        let id = ObjectId::new(self.next_object_id);
+        self.next_object_id += 1;
+        id
+    }
+
+    fn register_spawn(&mut self, spawn: SpawnConfig, preview: HostWorldObject) {
+        let id = preview.id;
+        if !self.pending_objects.contains_key(&id) {
+            self.pending_order.push(id);
+        }
+        self.pending_objects.insert(id, preview);
+        self.pending_spawns.push(spawn);
+    }
+
+    fn get_world_object(&self, id: ObjectId) -> Option<HostWorldObject> {
+        if let Some(object) = self.pending_objects.get(&id) {
+            Some(object.clone())
+        } else {
+            self.world.get(id).cloned()
+        }
+    }
+
+    fn world_object_ids(&self) -> Vec<ObjectId> {
+        let mut ids = self.world.object_ids().to_vec();
+        ids.extend(self.pending_order.iter().copied());
+        ids
+    }
+
+    fn landscape_ref(&self) -> Option<&Landscape> {
+        self.world.landscape_ref()
     }
 
     fn snapshot(&self, scope: EffectScope) -> Option<Vec<EffectState>> {
@@ -3957,6 +4157,8 @@ impl EffectHostContext {
             object_commands,
             destroy,
             None,
+            self.pending_spawns,
+            self.next_object_id,
         )
     }
 }
@@ -4458,6 +4660,7 @@ mod tests {
             )),
             &[],
             world,
+            1,
             func,
         )
     }
@@ -4787,7 +4990,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || set_action(&[Value::String("Walk".into())]),
         );
 
@@ -4815,7 +5018,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || set_action(&[Value::String("Idle".into())]),
         );
 
@@ -4856,7 +5059,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || set_action_data(&[Value::Int(512)]),
         );
 
@@ -4896,7 +5099,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || set_action_data(&[Value::Int(31 << 8)]),
         );
 
@@ -4931,7 +5134,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || set_action_data(&[Value::Int(5)]),
         );
 
@@ -4975,7 +5178,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || {
                 set_action(&[Value::String("Walk".into())])?;
                 get_action(&[])
@@ -5015,7 +5218,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || get_procedure(&[]),
         );
 
@@ -5052,7 +5255,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || get_procedure(&[]),
         );
 
@@ -5093,7 +5296,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || {
                 set_action(&[Value::String("Float".into())])?;
                 get_procedure(&[])
@@ -5123,7 +5326,7 @@ mod tests {
             0,
             None,
         )]);
-        let (result, _) = with_effect_context(None, &[], world, || {
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
             let mut target = HashMap::new();
             target.insert("id".into(), Value::Int(42));
             get_procedure(&[Value::Proplist(target)])
@@ -5195,7 +5398,7 @@ mod tests {
             0,
             None,
         )]);
-        let (result, _) = with_effect_context(None, &[], world, || {
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
             let mut target = HashMap::new();
             target.insert("id".into(), Value::Int(7));
             get_action(&[Value::Proplist(target)])
@@ -5241,7 +5444,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || {
                 set_action(&[
                     Value::String("Idle".into()),
@@ -5287,7 +5490,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || {
                 set_action(&[Value::String("Walk".into())])?;
                 get_act_time(&[])
@@ -5321,7 +5524,7 @@ mod tests {
             None,
         );
         let world = HostWorldContext::from_objects(vec![other]);
-        let (result, _) = with_effect_context(None, &[], world, || {
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
             let mut target = HashMap::new();
             target.insert("id".into(), Value::Int(23));
             get_act_time(&[Value::Proplist(target)])
@@ -5360,7 +5563,7 @@ mod tests {
                 &vertices,
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || get_vertex_num(&[]),
         );
 
@@ -5394,7 +5597,7 @@ mod tests {
                 &vertices,
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || get_vertex(&[Value::Int(0), Value::Int(0)]),
         );
         assert_eq!(x.expect("x succeeds"), Value::Int(2));
@@ -5418,7 +5621,7 @@ mod tests {
                 &vertices,
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || get_vertex(&[Value::Int(0), Value::Int(1)]),
         );
         assert_eq!(y.expect("y succeeds"), Value::Int(-3));
@@ -5442,7 +5645,7 @@ mod tests {
                 &vertices,
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || get_vertex(&[Value::Int(0), Value::Int(2)]),
         );
         assert_eq!(
@@ -5469,7 +5672,7 @@ mod tests {
                 &vertices,
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || get_vertex(&[Value::Int(0), Value::Int(3)]),
         );
         assert_eq!(friction.expect("friction succeeds"), Value::Int(7));
@@ -5479,7 +5682,7 @@ mod tests {
     fn get_vertex_contact_uses_landscape_sampling() {
         let vertices = [ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER | CNAT_BOTTOM)];
         let landscape = Landscape::flat(8, 0);
-        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape));
+        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape), 1);
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
@@ -5500,7 +5703,7 @@ mod tests {
                 &vertices,
             )),
             &[],
-            world,
+            world, 1,
             || get_vertex_contact(&[Value::Int(0)]),
         );
 
@@ -5515,7 +5718,7 @@ mod tests {
             ObjectVertex::new(0, -5).with_cnat(CNAT_TOP),
         ];
         let landscape = Landscape::flat(4, 0);
-        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape));
+        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape), 1);
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
@@ -5536,7 +5739,7 @@ mod tests {
                 &vertices,
             )),
             &[],
-            world,
+            world, 1,
             || get_contact(&[Value::Int(-1)]),
         );
 
@@ -5723,7 +5926,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || get_x(&[]),
         );
 
@@ -5753,7 +5956,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || get_y(&[]),
         );
 
@@ -5783,7 +5986,7 @@ mod tests {
         let world = HostWorldContext::from_objects(vec![other]);
         let args = [object_reference_value(ObjectId::new(99))];
 
-        let (result, _) = with_effect_context(None, &[], world, || get_x(&args));
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_x(&args));
         let value = result.expect("GetX target succeeds");
         assert_eq!(value, Value::Int(-12));
     }
@@ -5792,7 +5995,7 @@ mod tests {
     fn get_y_returns_nil_for_missing_target() {
         let args = [object_reference_value(ObjectId::new(1234))];
         let (result, _) =
-            with_effect_context(None, &[], HostWorldContext::default(), || get_y(&args));
+            with_effect_context(None, &[], HostWorldContext::default(), 1, || get_y(&args));
         let value = result.expect("GetY handles missing target");
         assert_eq!(value, Value::Nil);
     }
@@ -5818,7 +6021,7 @@ mod tests {
             &[],
         );
         let (result, _) =
-            with_effect_context(Some(context), &[], HostWorldContext::default(), || {
+            with_effect_context(Some(context), &[], HostWorldContext::default(), 1, || {
                 get_x_dir(&[])
             });
         let value = result.expect("GetXDir succeeds");
@@ -5847,7 +6050,7 @@ mod tests {
         );
         let args = [Value::Nil, Value::Int(5)];
         let (result, _) =
-            with_effect_context(Some(context), &[], HostWorldContext::default(), || {
+            with_effect_context(Some(context), &[], HostWorldContext::default(), 1, || {
                 get_y_dir(&args)
             });
         let value = result.expect("GetYDir succeeds");
@@ -5875,7 +6078,7 @@ mod tests {
         );
         let world = HostWorldContext::from_objects(vec![other]);
         let args = [object_reference_value(ObjectId::new(42))];
-        let (result, _) = with_effect_context(None, &[], world, || get_x_dir(&args));
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_x_dir(&args));
         let value = result.expect("GetXDir target succeeds");
         assert_eq!(value, Value::Int(-8));
     }
@@ -5884,7 +6087,7 @@ mod tests {
     fn get_x_dir_returns_nil_for_missing_target() {
         let args = [object_reference_value(ObjectId::new(77))];
         let (result, _) =
-            with_effect_context(None, &[], HostWorldContext::default(), || get_x_dir(&args));
+            with_effect_context(None, &[], HostWorldContext::default(), 1, || get_x_dir(&args));
         let value = result.expect("GetXDir handles missing target");
         assert_eq!(value, Value::Nil);
     }
@@ -5946,7 +6149,7 @@ mod tests {
     #[test]
     fn set_position_clamps_coordinates_when_requested() {
         let landscape = Landscape::flat(4, 6);
-        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape));
+        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape), 1);
         let args = [
             Value::Int(10),
             Value::Int(20),
@@ -5973,7 +6176,7 @@ mod tests {
                 &[ObjectVertex::new(0, 0)],
             )),
             &[],
-            world,
+            world, 1,
             || set_position(&args),
         );
 
@@ -6274,7 +6477,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || get_owner(&[]),
         );
 
@@ -6302,7 +6505,7 @@ mod tests {
             None,
         )]);
         let args = [object_reference_value(ObjectId::new(7))];
-        let (result, _) = with_effect_context(None, &[], world, || get_owner(&args));
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_owner(&args));
 
         let value = result.expect("GetOwner for target succeeds");
         assert_eq!(value, Value::Int(42));
@@ -6330,7 +6533,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || set_owner(&[Value::Int(3)]),
         );
 
@@ -6367,7 +6570,7 @@ mod tests {
                 &[],
             )),
             &[],
-            world,
+            world, 1,
             || set_owner(&args),
         );
 
@@ -6437,7 +6640,7 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || get_energy(&[]),
         );
 
@@ -6465,7 +6668,7 @@ mod tests {
             None,
         )]);
         let args = [object_reference_value(ObjectId::new(55))];
-        let (result, _) = with_effect_context(None, &[], world, || get_energy(&args));
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_energy(&args));
 
         let value = result.expect("GetEnergy target succeeds");
         assert_eq!(value, Value::Int(33));
@@ -6474,7 +6677,7 @@ mod tests {
     #[test]
     fn get_energy_returns_nil_without_context() {
         let (result, _) =
-            with_effect_context(None, &[], HostWorldContext::default(), || get_energy(&[]));
+            with_effect_context(None, &[], HostWorldContext::default(), 1, || get_energy(&[]));
         let value = result.expect("GetEnergy handles missing context");
         assert_eq!(value, Value::Nil);
     }
@@ -6501,12 +6704,27 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || get_energy(&[]),
         );
 
         let value = result.expect("GetEnergy converts raw energy");
         assert_eq!(value, Value::Int(50));
+    }
+
+    #[test]
+    fn create_object_registers_spawn_and_returns_reference() {
+        let args = [Value::String("Clonk".into())];
+        let (result, outcome) = with_object_host_context(|| create_object(&args));
+        let value = result.expect("CreateObject succeeds");
+        assert_eq!(value, object_reference_value(ObjectId::new(1)));
+        assert_eq!(outcome.spawns.len(), 1);
+        let spawn = &outcome.spawns[0];
+        assert_eq!(spawn.definition_id, "Clonk");
+        assert_eq!(spawn.position, Vector2::ZERO);
+        assert_eq!(spawn.owner, OWNER_NONE);
+        assert_eq!(spawn.id, Some(ObjectId::new(1)));
+        assert_eq!(outcome.next_object_id, 2);
     }
 
     #[test]
@@ -6549,7 +6767,7 @@ mod tests {
         ]);
 
         let args = [Value::String("Flag".into())];
-        let (result, _) = with_effect_context(None, &[], world, || find_object(&args));
+        let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
         let value = result.expect("FindObject succeeds");
         assert_eq!(value, object_reference_value(ObjectId::new(1)));
     }
@@ -6605,7 +6823,7 @@ mod tests {
             Value::Nil,
             Value::Int(2),
         ];
-        let (result, _) = with_effect_context(None, &[], world, || find_object(&args));
+        let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
         let value = result.expect("FindObject owner succeeds");
         assert_eq!(value, object_reference_value(ObjectId::new(11)));
     }
@@ -6656,7 +6874,7 @@ mod tests {
             Value::Int(-1),
         ];
         let (first_result, _) =
-            with_effect_context(None, &[], world.clone(), || find_object(&args));
+            with_effect_context(None, &[], world.clone(), 1, || find_object(&args));
         let first_value = first_result.expect("FindObject closest succeeds");
         assert_eq!(first_value, object_reference_value(ObjectId::new(20)));
 
@@ -6677,7 +6895,7 @@ mod tests {
             Value::Proplist(find_next),
         ];
         let (second_result, _) =
-            with_effect_context(None, &[], world, || find_object(&args_with_next));
+            with_effect_context(None, &[], world, 1, || find_object(&args_with_next));
         let second_value = second_result.expect("FindObject closest with next succeeds");
         assert_eq!(second_value, object_reference_value(ObjectId::new(21)));
     }
@@ -6750,7 +6968,7 @@ mod tests {
             Value::Nil,
             Value::Int(ANY_CONTAINER_SENTINEL),
         ];
-        let (result, _) = with_effect_context(None, &[], world, || find_objects(&args));
+        let (result, _) = with_effect_context(None, &[], world, 1, || find_objects(&args));
         let value = result.expect("FindObjects succeeds");
         match value {
             Value::Array(entries) => {
@@ -6814,7 +7032,7 @@ mod tests {
 
     #[test]
     fn add_global_effect_records_global_command() {
-        let (result, outcome) = with_effect_context(None, &[], HostWorldContext::default(), || {
+        let (result, outcome) = with_effect_context(None, &[], HostWorldContext::default(), 1, || {
             add_effect(&[Value::String("Glow".into()), Value::Nil, Value::Int(120)])
         });
 
@@ -6836,7 +7054,7 @@ mod tests {
         let (result, _) = with_effect_context(
             None,
             &[],
-            HostWorldContext::default(),
+            HostWorldContext::default(), 1,
             || -> Result<Value, RuntimeError> {
                 add_effect(&[Value::String("Glow".into()), Value::Nil, Value::Int(90)])?;
                 get_effect(&[
@@ -6854,7 +7072,7 @@ mod tests {
 
     #[test]
     fn remove_global_effect_handles_missing() {
-        let (result, _) = with_effect_context(None, &[], HostWorldContext::default(), || {
+        let (result, _) = with_effect_context(None, &[], HostWorldContext::default(), 1, || {
             remove_effect(&[Value::Nil, Value::Nil, Value::Int(0)])
         });
 

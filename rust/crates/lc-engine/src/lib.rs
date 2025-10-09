@@ -1668,7 +1668,7 @@ pub enum EngineError {
     #[error("crew selection error for owner {owner}: {detail}")]
     CrewSelection { owner: i32, detail: String },
     #[error("crew role error for owner {owner}: {detail}")]
-    CrewRole { owner: i32, detail: String },
+   CrewRole { owner: i32, detail: String },
     #[error("script error in {function} of `{definition}`")]
     Script {
         definition: String,
@@ -1682,6 +1682,8 @@ pub enum EngineError {
         function: &'static str,
         detail: String,
     },
+    #[error("object id `{0}` is already in use")]
+    DuplicateObjectId(ObjectId),
 }
 
 #[derive(Debug, Error)]
@@ -1694,6 +1696,8 @@ pub enum EngineStateIoError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnConfig {
+    #[serde(default)]
+    pub id: Option<ObjectId>,
     pub definition_id: DefinitionId,
     pub position: Vector2,
     pub velocity: Vector2,
@@ -1721,6 +1725,7 @@ pub struct SpawnConfig {
 impl SpawnConfig {
     pub fn new(definition_id: impl Into<String>) -> Self {
         Self {
+            id: None,
             definition_id: definition_id.into(),
             position: Vector2::ZERO,
             velocity: Vector2::ZERO,
@@ -1790,6 +1795,11 @@ impl SpawnConfig {
 
     pub fn with_owner(mut self, owner: i32) -> Self {
         self.owner = owner;
+        self
+    }
+
+    pub fn with_id(mut self, id: ObjectId) -> Self {
+        self.id = Some(id);
         self
     }
 
@@ -2114,9 +2124,9 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
-    ) -> Result<(CommandBatch, ChaCha8Rng), EngineError> {
+    ) -> Result<(CommandBatch, ChaCha8Rng, u64), EngineError> {
         if !self.has_initialize {
-            return Ok((CommandBatch::default(), rng));
+            return Ok((CommandBatch::default(), rng, world.next_object_id()));
         }
         let args = [
             build_state_value(&self.id, object_id, state, &self.action_library),
@@ -2124,6 +2134,7 @@ impl Definition {
         ];
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
+        let next_object_id = world.next_object_id();
         let (result, host_effects) = compat::with_effect_context(
             Some(compat::HostObjectContext::new(
                 object_id,
@@ -2145,6 +2156,7 @@ impl Definition {
             )),
             global_effects,
             world,
+            next_object_id,
             || self.script.call("Initialize", &args),
         );
         let rng = guard.finish();
@@ -2162,6 +2174,8 @@ impl Definition {
             object_commands,
             destroy_object,
             environment: _,
+            spawns: host_spawns,
+            next_object_id,
         } = host_effects;
 
         if let Some(update) = object_update {
@@ -2179,10 +2193,13 @@ impl Definition {
         if !host_global_effects.is_empty() {
             batch.global_effects.extend(host_global_effects);
         }
+        if !host_spawns.is_empty() {
+            batch.spawns.extend(host_spawns);
+        }
         if !environment_delta.is_empty() {
             batch.environment = Some(environment_delta);
         }
-        Ok((batch, rng))
+        Ok((batch, rng, next_object_id))
     }
 
     fn call_step(
@@ -2195,9 +2212,9 @@ impl Definition {
         global_effects: &[EffectState],
         environment: EnvironmentSettings,
         world: HostWorldContext,
-    ) -> Result<(CommandBatch, ChaCha8Rng), EngineError> {
+    ) -> Result<(CommandBatch, ChaCha8Rng, u64), EngineError> {
         if !self.has_step {
-            return Ok((CommandBatch::default(), rng));
+            return Ok((CommandBatch::default(), rng, world.next_object_id()));
         }
         let frame_value = if frame > i32::MAX as u64 {
             i32::MAX
@@ -2211,6 +2228,7 @@ impl Definition {
         ];
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
+        let next_object_id = world.next_object_id();
         let (result, host_effects) = compat::with_effect_context(
             Some(compat::HostObjectContext::new(
                 object_id,
@@ -2232,6 +2250,7 @@ impl Definition {
             )),
             global_effects,
             world,
+            next_object_id,
             || self.script.call("Step", &args),
         );
         let rng = guard.finish();
@@ -2249,6 +2268,8 @@ impl Definition {
             object_commands,
             destroy_object,
             environment: _,
+            spawns: host_spawns,
+            next_object_id,
         } = host_effects;
 
         if let Some(update) = object_update {
@@ -2266,10 +2287,13 @@ impl Definition {
         if !host_global_effects.is_empty() {
             batch.global_effects.extend(host_global_effects);
         }
+        if !host_spawns.is_empty() {
+            batch.spawns.extend(host_spawns);
+        }
         if !environment_delta.is_empty() {
             batch.environment = Some(environment_delta);
         }
-        Ok((batch, rng))
+        Ok((batch, rng, next_object_id))
     }
 
     fn call_action_callback(
@@ -2299,6 +2323,7 @@ impl Definition {
         ];
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
+        let next_object_id = world.next_object_id();
         let (result, host_effects) = compat::with_effect_context(
             Some(compat::HostObjectContext::new(
                 object_id,
@@ -2320,6 +2345,7 @@ impl Definition {
             )),
             global_effects,
             world,
+            next_object_id,
             || self.script.call(function, &args),
         );
         let rng = guard.finish();
@@ -2443,8 +2469,9 @@ impl Definition {
         frame: u64,
         world: HostWorldContext,
     ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
+        let next_object_id = world.next_object_id();
         if !self.script.has_effect_callback(&effect.name, event) {
-            return Ok((EffectContextOutcome::empty(), rng));
+            return Ok((EffectContextOutcome::empty(next_object_id), rng));
         }
 
         let mut args = Vec::with_capacity(2 + extras.len());
@@ -2480,6 +2507,7 @@ impl Definition {
             )),
             global_effects,
             world,
+            next_object_id,
             || {
                 self.script
                     .call_effect_callback(&effect.name, event, &args)
@@ -2605,8 +2633,9 @@ impl ScenarioScript {
         let env_guard = enter_environment_context(environment, env_frame);
         let guard = enter_random_context(rng);
         let world = host_world_context_from_snapshot(snapshot);
+        let next_object_id = world.next_object_id();
         let (result, host_effects) =
-            compat::with_effect_context(None, global_effects, world, || {
+            compat::with_effect_context(None, global_effects, world, next_object_id, || {
                 self.script.call(function, &args)
             });
         let rng = guard.finish();
@@ -3036,6 +3065,7 @@ impl Engine {
                 )
             }),
             landscape,
+            self.next_object_id,
         )
     }
 
@@ -3538,7 +3568,7 @@ impl Engine {
             let random = self.next_random_i32();
 
             let rng_state = self.rng.clone();
-            let (command, new_rng) = {
+            let (command, new_rng, next_object_id) = {
                 let definition = self
                     .definitions
                     .get(&definition_id)
@@ -3555,6 +3585,7 @@ impl Engine {
                 )?
             };
             self.rng = new_rng;
+            self.next_object_id = next_object_id;
 
             let CommandBatch {
                 delta,
@@ -3609,8 +3640,7 @@ impl Engine {
             }
 
             if !effect_events.is_empty() {
-                let previous_container;
-                let new_container;
+                let previous_container = self.objects[idx].state.container;
                 let world = self.host_world_context();
                 let global_cmds = {
                     let definition = self
@@ -3618,9 +3648,8 @@ impl Engine {
                         .get(&definition_id)
                         .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
                     let global_view = self.global_effects.clone();
-                    let object = &mut self.objects[idx];
-                    previous_container = object.state.container;
                     let rng_state = self.rng.clone();
+                    let object = &mut self.objects[idx];
                     let (global_cmds, new_rng) = Self::run_effect_events_for_object(
                         definition,
                         rng_state,
@@ -3633,9 +3662,9 @@ impl Engine {
                         world.clone(),
                     )?;
                     self.rng = new_rng;
-                    new_container = object.state.container;
                     global_cmds
                 };
+                let new_container = self.objects[idx].state.container;
                 if !global_cmds.is_empty() {
                     self.apply_global_effect_commands(&global_cmds);
                 }
@@ -3937,10 +3966,17 @@ impl Engine {
             object_commands,
             destroy_object,
             environment,
+            spawns,
+            next_object_id,
         } = outcome;
 
         if let Some(update) = environment {
             update.apply(&mut self.environment);
+        }
+
+        self.next_object_id = next_object_id;
+        if !spawns.is_empty() {
+            self.process_spawn_queue(spawns)?;
         }
 
         let mut effect_events = Vec::new();
@@ -4003,27 +4039,25 @@ impl Engine {
 
         if !effect_events.is_empty() {
             let previous_container = self.objects[index].state.container;
-            let global_view = self.global_effects.clone();
-            let rng_state = self.rng.clone();
             let definition = self
                 .definitions
                 .get(definition_id)
                 .ok_or_else(|| EngineError::UnknownDefinition(definition_id.to_string()))?;
+            let global_view = self.global_effects.clone();
+            let rng_state = self.rng.clone();
             let world = self.host_world_context();
-            let (global_cmds, new_rng) = {
-                let object = &mut self.objects[index];
-                Self::run_effect_events_for_object(
-                    definition,
-                    rng_state,
-                    object_id,
-                    object,
-                    effect_events,
-                    global_view,
-                    &mut self.environment,
-                    self.frame,
-                    world.clone(),
-                )?
-            };
+            let object = &mut self.objects[index];
+            let (global_cmds, new_rng) = Self::run_effect_events_for_object(
+                definition,
+                rng_state,
+                object_id,
+                object,
+                effect_events,
+                global_view,
+                &mut self.environment,
+                self.frame,
+                world.clone(),
+            )?;
             self.rng = new_rng;
             if !global_cmds.is_empty() {
                 self.apply_global_effect_commands(&global_cmds);
@@ -4356,6 +4390,7 @@ impl Engine {
                 object_commands,
                 destroy_object,
                 environment: environment_update,
+                ..
             } = outcome;
 
             if let Some(update) = environment_update {
@@ -5293,6 +5328,7 @@ impl Engine {
         config: SpawnConfig,
     ) -> Result<(ObjectId, Vec<SpawnConfig>), EngineError> {
         let SpawnConfig {
+            id: explicit_id,
             definition_id,
             position,
             velocity,
@@ -5321,7 +5357,19 @@ impl Engine {
         initial_action.reconcile_with_library(&action_library);
         let initial_crew_member = crew_member.unwrap_or_else(|| definition_ref.is_crew());
 
-        let id = self.next_object_id();
+        let id = match explicit_id {
+            Some(explicit) => {
+                if self.objects.iter().any(|object| object.id == explicit) {
+                    return Err(EngineError::DuplicateObjectId(explicit));
+                }
+                let raw = explicit.as_u64();
+                if raw >= self.next_object_id {
+                    self.next_object_id = raw + 1;
+                }
+                explicit
+            }
+            None => self.next_object_id(),
+        };
         let mut object = Object::new(
             id,
             definition_id.clone(),
@@ -5377,6 +5425,7 @@ impl Engine {
                     environment,
                 },
                 new_rng,
+                next_object_id,
             ) = {
                 let definition = self
                     .definitions
@@ -5394,6 +5443,7 @@ impl Engine {
                 )?
             };
             self.rng = new_rng;
+            self.next_object_id = next_object_id;
             if let Some(update) = environment {
                 update.apply(&mut self.environment);
             }
@@ -5432,19 +5482,17 @@ impl Engine {
             let previous_container = object.state.container;
             let rng_state = self.rng.clone();
             let world = self.host_world_context();
-            let (global_cmds, new_rng) = {
-                Self::run_effect_events_for_object(
-                    definition,
-                    rng_state,
-                    id,
-                    &mut object,
-                    effect_events,
-                    global_view,
-                    &mut self.environment,
-                    self.frame,
-                    world,
-                )?
-            };
+            let (global_cmds, new_rng) = Self::run_effect_events_for_object(
+                definition,
+                rng_state,
+                id,
+                &mut object,
+                effect_events,
+                global_view,
+                &mut self.environment,
+                self.frame,
+                world,
+            )?;
             self.rng = new_rng;
             if !global_cmds.is_empty() {
                 self.apply_global_effect_commands(&global_cmds);
@@ -5660,6 +5708,13 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
 }
 
 fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldContext {
+    let next_object_id = snapshot
+        .objects
+        .iter()
+        .map(|object| object.id.as_u64())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
     HostWorldContext::with_landscape(
         snapshot.objects.iter().map(|object| {
             HostWorldObject::new(
@@ -5681,6 +5736,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
             )
         }),
         snapshot.landscape.clone(),
+        next_object_id,
     )
 }
 
