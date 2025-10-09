@@ -349,6 +349,7 @@ mod tests {
                 status: ObjectStatus::Normal,
                 owner: OWNER_NONE,
                 crew_member: false,
+                alive: true,
             }],
             environment: EnvironmentFrame::default(),
             global_effects: Vec::new(),

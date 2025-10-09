@@ -898,6 +898,10 @@ fn default_owner() -> i32 {
     OWNER_NONE
 }
 
+fn default_alive() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectState {
     pub position: Vector2,
@@ -921,6 +925,8 @@ pub struct ObjectState {
     pub owner: i32,
     #[serde(default)]
     pub crew_member: bool,
+    #[serde(default = "default_alive")]
+    pub alive: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1447,6 +1453,7 @@ impl Object {
             status: self.state.status,
             owner: self.state.owner,
             crew_member: self.state.crew_member,
+            alive: self.state.alive,
         }
     }
 
@@ -1699,6 +1706,8 @@ pub struct SpawnConfig {
     pub status: Option<ObjectStatus>,
     #[serde(default)]
     pub container: Option<ObjectId>,
+    #[serde(default)]
+    pub alive: Option<bool>,
 }
 
 impl SpawnConfig {
@@ -1717,6 +1726,7 @@ impl SpawnConfig {
             crew_member: None,
             status: None,
             container: None,
+            alive: None,
         }
     }
 
@@ -1785,6 +1795,11 @@ impl SpawnConfig {
         self
     }
 
+    pub fn with_alive(mut self, alive: bool) -> Self {
+        self.alive = Some(alive);
+        self
+    }
+
     pub fn with_container(mut self, container: ObjectId) -> Self {
         self.container = Some(container);
         self
@@ -1820,6 +1835,8 @@ pub struct ObjectSnapshot {
     pub owner: i32,
     #[serde(default)]
     pub crew_member: bool,
+    #[serde(default = "default_alive")]
+    pub alive: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4207,6 +4224,7 @@ impl Engine {
                     status: snapshot.status,
                     owner: snapshot.owner,
                     crew_member: snapshot.crew_member,
+                    alive: snapshot.alive,
                 },
             );
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
@@ -4501,7 +4519,7 @@ impl Engine {
                 continue;
             }
             self.known_crew_owners.insert(owner);
-            if !object.state.status.is_active() {
+            if !object.state.status.is_active() || !object.state.alive {
                 continue;
             }
             active.insert(owner);
@@ -5274,6 +5292,7 @@ impl Engine {
             crew_member,
             status,
             container,
+            alive,
         } = config;
 
         let definition_ref = self
@@ -5306,6 +5325,7 @@ impl Engine {
                 status: status.unwrap_or_default(),
                 owner,
                 crew_member: initial_crew_member,
+                alive: alive.unwrap_or(true),
             },
         );
         let mut container_changes = Vec::new();

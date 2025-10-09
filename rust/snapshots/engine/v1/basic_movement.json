@@ -31,7 +31,8 @@
         "contents": [],
         "status": "normal",
         "owner": -1,
-        "crew_member": false
+        "crew_member": false,
+        "alive": true
       }
     ],
     "environment": {
@@ -127,7 +128,8 @@
         "contents": [],
         "status": "normal",
         "owner": -1,
-        "crew_member": false
+        "crew_member": false,
+        "alive": true
       }
     ],
     "environment": {
@@ -223,7 +225,8 @@
         "contents": [],
         "status": "normal",
         "owner": -1,
-        "crew_member": false
+        "crew_member": false,
+        "alive": true
       },
       {
         "id": 2,
@@ -248,7 +251,8 @@
         "contents": [],
         "status": "normal",
         "owner": -1,
-        "crew_member": false
+        "crew_member": false,
+        "alive": true
       }
     ],
     "environment": {
@@ -344,7 +348,8 @@
         "contents": [],
         "status": "normal",
         "owner": -1,
-        "crew_member": false
+        "crew_member": false,
+        "alive": true
       },
       {
         "id": 2,
@@ -369,7 +374,8 @@
         "contents": [],
         "status": "normal",
         "owner": -1,
-        "crew_member": false
+        "crew_member": false,
+        "alive": true
       }
     ],
     "environment": {
@@ -465,7 +471,8 @@
         "contents": [],
         "status": "normal",
         "owner": -1,
-        "crew_member": false
+        "crew_member": false,
+        "alive": true
       },
       {
         "id": 2,
@@ -490,7 +497,8 @@
         "contents": [],
         "status": "normal",
         "owner": -1,
-        "crew_member": false
+        "crew_member": false,
+        "alive": true
       }
     ],
     "environment": {

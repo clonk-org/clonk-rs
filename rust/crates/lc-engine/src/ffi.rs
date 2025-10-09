@@ -61,6 +61,7 @@ pub struct LcEngineObjectSnapshot {
     pub energy: i32,
     pub owner: i32,
     pub crew_member: bool,
+    pub alive: bool,
     pub action_name: *const c_char,
     pub action_phase: i32,
     pub action_ticks: i32,
@@ -466,6 +467,7 @@ unsafe fn make_snapshot(
             status: ObjectStatus::Normal,
             owner: entry.owner,
             crew_member: entry.crew_member,
+            alive: entry.alive,
         });
     }
     snapshots.sort_by_key(|object| object.id);
@@ -796,6 +798,12 @@ fn runtime_snapshot_mismatch(
                     problems.push(format!(
                         "object {} crew member expected {}, got {}",
                         id, expected_object.crew_member, actual_object.crew_member
+                    ));
+                }
+                if expected_object.alive != actual_object.alive {
+                    problems.push(format!(
+                        "object {} alive expected {}, got {}",
+                        id, expected_object.alive, actual_object.alive
                     ));
                 }
                 if expected_object.action.name != actual_object.action.name {
@@ -1728,6 +1736,7 @@ mod tests {
             energy: 95,
             owner: -1,
             crew_member: true,
+            alive: true,
             action_name: action.as_ptr(),
             action_phase: 3,
             action_ticks: 2,
@@ -1810,6 +1819,7 @@ mod tests {
             energy: 0,
             owner: -1,
             crew_member: false,
+            alive: true,
             action_name: action.as_ptr(),
             action_phase: 0,
             action_ticks: 0,
@@ -1986,6 +1996,7 @@ mod tests {
             energy: 0,
             owner: -1,
             crew_member: false,
+            alive: true,
             action_name: ptr::null(),
             action_phase: 0,
             action_ticks: 0,
@@ -2011,6 +2022,7 @@ mod tests {
             energy: 0,
             owner: -1,
             crew_member: false,
+            alive: true,
             action_name: ptr::null(),
             action_phase: 0,
             action_ticks: 0,

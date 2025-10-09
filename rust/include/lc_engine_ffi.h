@@ -50,6 +50,7 @@ typedef struct LcEngineObjectSnapshot {
     int32_t energy;
     int32_t owner;
     bool crew_member;
+    bool alive;
     const char *action_name;
     int32_t action_phase;
     int32_t action_ticks;
