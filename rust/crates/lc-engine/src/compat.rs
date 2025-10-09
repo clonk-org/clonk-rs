@@ -5,9 +5,9 @@ use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::{
-    ActionLibrary, ActionUpdate, CommandDirection, Direction, EnvironmentSettings, Landscape,
-    ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex, QueuedCommand, Vector2, CNAT_BOTTOM,
-    CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, OWNER_NONE,
+    ActionLibrary, ActionUpdate, CommandDirection, DefinitionId, Direction, EnvironmentSettings,
+    Landscape, ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex, QueuedCommand, Vector2,
+    CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -21,9 +21,15 @@ thread_local! {
     };
 }
 
+const OWNER_ANY: i32 = -2;
+const ANY_CONTAINER_SENTINEL: i32 = 123;
+const NO_CONTAINER_SENTINEL: i32 = 124;
+
 #[derive(Debug, Clone)]
 pub(crate) struct HostWorldObject {
     pub id: ObjectId,
+    definition_id: DefinitionId,
+    status: ObjectStatus,
     pub action_name: String,
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
@@ -35,11 +41,14 @@ pub(crate) struct HostWorldObject {
     pub velocity: Vector2,
     pub vertices: Vec<ObjectVertex>,
     pub action_ticks: u32,
+    container: Option<ObjectId>,
 }
 
 impl HostWorldObject {
     pub(crate) fn new(
         id: ObjectId,
+        definition_id: impl Into<String>,
+        status: ObjectStatus,
         action_name: impl Into<String>,
         action_target: Option<ObjectId>,
         action_target2: Option<ObjectId>,
@@ -50,9 +59,12 @@ impl HostWorldObject {
         velocity: Vector2,
         vertices: Vec<ObjectVertex>,
         action_ticks: u32,
+        container: Option<ObjectId>,
     ) -> Self {
         Self {
             id,
+            definition_id: definition_id.into(),
+            status,
             action_name: action_name.into(),
             action_target,
             action_target2,
@@ -63,7 +75,16 @@ impl HostWorldObject {
             velocity,
             vertices,
             action_ticks,
+            container,
         }
+    }
+
+    pub fn definition_id(&self) -> &str {
+        &self.definition_id
+    }
+
+    pub fn status(&self) -> ObjectStatus {
+        self.status
     }
 
     pub fn action_target(&self, index: usize) -> Option<ObjectId> {
@@ -86,6 +107,14 @@ impl HostWorldObject {
         self.energy
     }
 
+    pub fn action_name(&self) -> &str {
+        &self.action_name
+    }
+
+    pub fn container(&self) -> Option<ObjectId> {
+        self.container
+    }
+
     pub fn position(&self) -> Vector2 {
         self.position
     }
@@ -106,6 +135,7 @@ impl HostWorldObject {
 #[derive(Debug, Clone)]
 pub(crate) struct HostWorldContext {
     objects: Rc<HashMap<ObjectId, HostWorldObject>>,
+    order: Rc<Vec<ObjectId>>,
     landscape: Option<Rc<Landscape>>,
 }
 
@@ -113,6 +143,7 @@ impl Default for HostWorldContext {
     fn default() -> Self {
         Self {
             objects: Rc::new(HashMap::new()),
+            order: Rc::new(Vec::new()),
             landscape: None,
         }
     }
@@ -131,18 +162,27 @@ impl HostWorldContext {
     where
         I: IntoIterator<Item = HostWorldObject>,
     {
-        let map = objects
-            .into_iter()
-            .map(|object| (object.id, object))
-            .collect();
+        let map = objects.into_iter().collect::<Vec<HostWorldObject>>();
+        let mut order = Vec::with_capacity(map.len());
+        let mut lookup = HashMap::with_capacity(map.len());
+        for object in map {
+            let id = object.id;
+            order.push(id);
+            lookup.insert(id, object);
+        }
         Self {
-            objects: Rc::new(map),
+            objects: Rc::new(lookup),
+            order: Rc::new(order),
             landscape: landscape.map(Rc::new),
         }
     }
 
     pub(crate) fn get(&self, id: ObjectId) -> Option<&HostWorldObject> {
         self.objects.get(&id)
+    }
+
+    pub(crate) fn object_ids(&self) -> &[ObjectId] {
+        self.order.as_ref().as_slice()
     }
 
     pub(crate) fn landscape_ref(&self) -> Option<&Landscape> {
@@ -194,6 +234,302 @@ fn value_to_i32(value: &Value, function: &str, parameter: &str) -> Result<i32, R
             parameter,
             other.type_name()
         ))),
+    }
+}
+
+fn parse_optional_i32(
+    value: Option<&Value>,
+    function: &str,
+    parameter: &str,
+) -> Result<Option<i32>, RuntimeError> {
+    match value {
+        None => Ok(None),
+        Some(Value::Nil) => Ok(None),
+        Some(Value::Int(int)) => Ok(Some(*int)),
+        Some(other) => Err(RuntimeError::new(format!(
+            "{}: expected integer for {}, got {}",
+            function,
+            parameter,
+            other.type_name()
+        ))),
+    }
+}
+
+fn parse_optional_u32(
+    value: Option<&Value>,
+    function: &str,
+    parameter: &str,
+) -> Result<Option<u32>, RuntimeError> {
+    Ok(parse_optional_i32(value, function, parameter)?.map(|raw| raw.max(0) as u32))
+}
+
+fn parse_optional_string(
+    value: Option<&Value>,
+    function: &str,
+    parameter: &str,
+) -> Result<Option<String>, RuntimeError> {
+    match value {
+        None => Ok(None),
+        Some(Value::Nil) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(other) => Err(RuntimeError::new(format!(
+            "{}: expected string for {}, got {}",
+            function,
+            parameter,
+            other.type_name()
+        ))),
+    }
+}
+
+fn c4id_to_definition(id: i32) -> Option<String> {
+    if id == 0 {
+        return None;
+    }
+    if (0..=9999).contains(&id) {
+        return Some(format!("{id:04}"));
+    }
+    let raw = id as u32;
+    let mut bytes = [0u8; 4];
+    bytes[0] = (raw & 0x0000_00FF) as u8;
+    bytes[1] = ((raw & 0x0000_FF00) >> 8) as u8;
+    bytes[2] = ((raw & 0x00FF_0000) >> 16) as u8;
+    bytes[3] = ((raw & 0xFF00_0000) >> 24) as u8;
+    let end = bytes
+        .iter()
+        .rposition(|&b| b != 0)
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    match String::from_utf8(bytes[..end].to_vec()) {
+        Ok(text) if !text.is_empty() => Some(text),
+        _ => None,
+    }
+}
+
+fn parse_definition_argument(
+    value: Option<&Value>,
+    function: &str,
+) -> Result<Option<String>, RuntimeError> {
+    match value {
+        None => Ok(None),
+        Some(Value::Nil) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(Value::Int(id)) => Ok(c4id_to_definition(*id)),
+        Some(other) => Err(RuntimeError::new(format!(
+            "{}: expected definition identifier, got {}",
+            function,
+            other.type_name()
+        ))),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContainerFilter {
+    Any,
+    Exact(ObjectId),
+    RequiresContainer,
+    RequiresNoContainer,
+}
+
+fn parse_container_filter(
+    value: Option<&Value>,
+    function: &str,
+) -> Result<ContainerFilter, RuntimeError> {
+    match value {
+        None => Ok(ContainerFilter::Any),
+        Some(Value::Nil) => Ok(ContainerFilter::Any),
+        Some(Value::Int(raw)) if *raw == ANY_CONTAINER_SENTINEL => {
+            Ok(ContainerFilter::RequiresContainer)
+        }
+        Some(Value::Int(raw)) if *raw == NO_CONTAINER_SENTINEL => {
+            Ok(ContainerFilter::RequiresNoContainer)
+        }
+        Some(Value::Int(raw)) if *raw == 0 => Ok(ContainerFilter::Any),
+        Some(Value::Proplist(map)) => match map.get("id") {
+            Some(Value::Int(id)) if *id > 0 => {
+                Ok(ContainerFilter::Exact(ObjectId::new(*id as u64)))
+            }
+            _ => Err(RuntimeError::new(format!(
+                "{}: expected object reference proplist for container",
+                function
+            ))),
+        },
+        Some(other) => Err(RuntimeError::new(format!(
+            "{}: expected object reference or container sentinel, got {}",
+            function,
+            other.type_name()
+        ))),
+    }
+}
+
+fn squared_distance(position: Vector2, x: i32, y: i32) -> i64 {
+    let dx = position.x as i64 - x as i64;
+    let dy = position.y as i64 - y as i64;
+    dx * dx + dy * dy
+}
+
+struct FindObjectParams {
+    definition: Option<String>,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    _ocf: u32,
+    action: Option<String>,
+    treat_idle: bool,
+    action_target: Option<ObjectId>,
+    exclude: Option<ObjectId>,
+    container: ContainerFilter,
+    owner: i32,
+    find_next: Option<ObjectId>,
+}
+
+impl FindObjectParams {
+    fn parse(args: &[Value]) -> Result<Self, RuntimeError> {
+        if args.len() > 12 {
+            return Err(RuntimeError::new(
+                "FindObject: expected at most 12 arguments",
+            ));
+        }
+
+        let definition = parse_definition_argument(args.get(0), "FindObject")?;
+        let x = parse_optional_i32(args.get(1), "FindObject", "x")?.unwrap_or(0);
+        let y = parse_optional_i32(args.get(2), "FindObject", "y")?.unwrap_or(0);
+        let width = parse_optional_i32(args.get(3), "FindObject", "width")?.unwrap_or(0);
+        let height = parse_optional_i32(args.get(4), "FindObject", "height")?.unwrap_or(0);
+        let ocf = parse_optional_u32(args.get(5), "FindObject", "ocf")?.unwrap_or(u32::MAX);
+        let action = parse_optional_string(args.get(6), "FindObject", "action")?;
+        let treat_idle = matches!(action.as_deref(), Some("Idle") | Some("ActIdle"));
+        let action_target = parse_object_reference_argument(
+            args.get(7).unwrap_or(&Value::Nil),
+            "FindObject",
+            "action_target",
+        )?;
+        let exclude = parse_object_reference_argument(
+            args.get(8).unwrap_or(&Value::Nil),
+            "FindObject",
+            "exclude",
+        )?;
+        let container = parse_container_filter(args.get(9), "FindObject")?;
+        let owner = parse_optional_i32(args.get(10), "FindObject", "owner")?.unwrap_or(OWNER_ANY);
+        let find_next = parse_object_reference_argument(
+            args.get(11).unwrap_or(&Value::Nil),
+            "FindObject",
+            "find_next",
+        )?;
+
+        Ok(Self {
+            definition,
+            x,
+            y,
+            width,
+            height,
+            _ocf: ocf,
+            action,
+            treat_idle,
+            action_target,
+            exclude,
+            container,
+            owner,
+            find_next,
+        })
+    }
+
+    fn is_full_range(&self) -> bool {
+        self.x == 0 && self.y == 0 && self.width == 0 && self.height == 0
+    }
+
+    fn is_closest_query(&self) -> bool {
+        self.width == -1 && self.height == -1
+    }
+
+    fn matches_object(&self, object: &HostWorldObject) -> bool {
+        if matches!(object.status(), ObjectStatus::Deleted) {
+            return false;
+        }
+
+        if let Some(exclude) = self.exclude {
+            if object.id == exclude {
+                return false;
+            }
+        }
+
+        if let Some(definition) = &self.definition {
+            if object.definition_id() != definition {
+                return false;
+            }
+        }
+
+        match self.container {
+            ContainerFilter::Any => {}
+            ContainerFilter::Exact(expected) => {
+                if object.container() != Some(expected) {
+                    return false;
+                }
+            }
+            ContainerFilter::RequiresContainer => {
+                if object.container().is_none() {
+                    return false;
+                }
+            }
+            ContainerFilter::RequiresNoContainer => {
+                if object.container().is_some() {
+                    return false;
+                }
+            }
+        }
+
+        if self.owner != OWNER_ANY && object.owner() != self.owner {
+            return false;
+        }
+
+        if let Some(target) = self.action_target {
+            let matches =
+                object.action_target(0) == Some(target) || object.action_target(1) == Some(target);
+            if !matches {
+                return false;
+            }
+        }
+
+        if let Some(action) = self.action.as_deref() {
+            if !action.is_empty() {
+                if self.treat_idle {
+                    let name = object.action_name();
+                    if name != "Idle" && name != "ActIdle" {
+                        return false;
+                    }
+                } else if object.action_name() != action {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    fn matches_area(&self, object: &HostWorldObject) -> bool {
+        if self.is_full_range() || self.is_closest_query() {
+            return true;
+        }
+
+        if self.width == 0 && self.height == 0 {
+            let position = object.position();
+            return position.x == self.x && position.y == self.y;
+        }
+
+        if self.width > 0 && self.height > 0 {
+            let position = object.position();
+            let dx = position.x - self.x;
+            let dy = position.y - self.y;
+            return dx >= 0 && dx <= self.width - 1 && dy >= 0 && dy <= self.height - 1;
+        }
+
+        false
+    }
+
+    fn reference_distance(&self, world: &HostWorldContext) -> Option<i64> {
+        let id = self.find_next?;
+        let object = world.get(id)?;
+        Some(squared_distance(object.position(), self.x, self.y))
     }
 }
 
@@ -332,6 +668,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetXDir", get_x_dir);
     script.register_host_function("SetYDir", set_y_dir);
     script.register_host_function("GetYDir", get_y_dir);
+    script.register_host_function("FindObject", find_object);
+    script.register_host_function("FindObjects", find_objects);
     script.register_host_function("GetX", get_x);
     script.register_host_function("GetY", get_y);
     script.register_host_function("SetPosition", set_position);
@@ -2195,6 +2533,140 @@ fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
             compute_vertex_contact(landscape, position, &vertices[vertex_index as usize], mask);
         Ok(Value::Int(contact as i32))
     })
+}
+
+fn find_object(args: &[Value]) -> Result<Value, RuntimeError> {
+    let params = FindObjectParams::parse(args)?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+        let world = &context.world;
+        let result = if params.is_closest_query() {
+            find_object_closest(world, &params)
+        } else {
+            find_object_linear(world, &params)
+        };
+        Ok(match result {
+            Some(id) => object_reference_value(id),
+            None => Value::Nil,
+        })
+    })
+}
+
+fn find_object_linear(world: &HostWorldContext, params: &FindObjectParams) -> Option<ObjectId> {
+    let mut skip_until = params.find_next;
+    for object_id in world.object_ids() {
+        let Some(object) = world.get(*object_id) else {
+            continue;
+        };
+        if let Some(target) = skip_until {
+            if object.id == target {
+                skip_until = None;
+            }
+            continue;
+        }
+        if !params.matches_object(object) {
+            continue;
+        }
+        if params.matches_area(object) {
+            return Some(object.id);
+        }
+    }
+    None
+}
+
+fn find_object_closest(world: &HostWorldContext, params: &FindObjectParams) -> Option<ObjectId> {
+    let reference = params.reference_distance(world);
+    let mut best: Option<(ObjectId, i64)> = None;
+    for object_id in world.object_ids() {
+        let Some(object) = world.get(*object_id) else {
+            continue;
+        };
+        if !params.matches_object(object) {
+            continue;
+        }
+        let distance = squared_distance(object.position(), params.x, params.y);
+        if let Some(reference) = reference {
+            if distance <= reference {
+                continue;
+            }
+        }
+        match best {
+            None => best = Some((object.id, distance)),
+            Some((_, best_distance)) if distance < best_distance => {
+                best = Some((object.id, distance));
+            }
+            _ => {}
+        }
+    }
+    best.map(|(id, _)| id)
+}
+
+fn find_objects(args: &[Value]) -> Result<Value, RuntimeError> {
+    let params = FindObjectParams::parse(args)?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Array(Vec::new())),
+        };
+        let world = &context.world;
+        let ids = if params.is_closest_query() {
+            collect_closest_matches(world, &params)
+        } else {
+            collect_linear_matches(world, &params)
+        };
+        let values = ids
+            .into_iter()
+            .map(object_reference_value)
+            .collect::<Vec<_>>();
+        Ok(Value::Array(values))
+    })
+}
+
+fn collect_linear_matches(world: &HostWorldContext, params: &FindObjectParams) -> Vec<ObjectId> {
+    let mut matches = Vec::new();
+    let mut skip_until = params.find_next;
+    for object_id in world.object_ids() {
+        let Some(object) = world.get(*object_id) else {
+            continue;
+        };
+        if let Some(target) = skip_until {
+            if object.id == target {
+                skip_until = None;
+            }
+            continue;
+        }
+        if params.matches_object(object) && params.matches_area(object) {
+            matches.push(object.id);
+        }
+    }
+    matches
+}
+
+fn collect_closest_matches(world: &HostWorldContext, params: &FindObjectParams) -> Vec<ObjectId> {
+    let reference = params.reference_distance(world);
+    let mut matches = Vec::new();
+    for (order_index, object_id) in world.object_ids().iter().copied().enumerate() {
+        let Some(object) = world.get(object_id) else {
+            continue;
+        };
+        if !params.matches_object(object) {
+            continue;
+        }
+        let distance = squared_distance(object.position(), params.x, params.y);
+        if let Some(reference) = reference {
+            if distance <= reference {
+                continue;
+            }
+        }
+        matches.push((distance, order_index, object.id));
+    }
+    matches.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    matches.into_iter().map(|(_, _, id)| id).collect()
 }
 
 fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -4384,6 +4856,8 @@ mod tests {
     fn get_procedure_reads_world_context() {
         let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
             ObjectId::new(42),
+            "Dummy",
+            ObjectStatus::Normal,
             "Swim",
             None,
             None,
@@ -4394,6 +4868,7 @@ mod tests {
             Vector2::ZERO,
             Vec::new(),
             0,
+            None,
         )]);
         let (result, _) = with_effect_context(None, &[], world, || {
             let mut target = HashMap::new();
@@ -4422,6 +4897,8 @@ mod tests {
     fn get_action_reads_other_object_from_world() {
         let other = HostWorldObject::new(
             ObjectId::new(99),
+            "Dummy",
+            ObjectStatus::Normal,
             "Walk",
             None,
             None,
@@ -4432,6 +4909,7 @@ mod tests {
             Vector2::ZERO,
             Vec::new(),
             0,
+            None,
         );
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_object_host_context_with_world(world, || {
@@ -4448,6 +4926,8 @@ mod tests {
     fn get_action_uses_world_without_context() {
         let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
             ObjectId::new(7),
+            "Dummy",
+            ObjectStatus::Normal,
             "Dig",
             None,
             None,
@@ -4458,6 +4938,7 @@ mod tests {
             Vector2::ZERO,
             Vec::new(),
             0,
+            None,
         )]);
         let (result, _) = with_effect_context(None, &[], world, || {
             let mut target = HashMap::new();
@@ -4567,6 +5048,8 @@ mod tests {
     fn get_act_time_reads_world_context() {
         let other = HostWorldObject::new(
             ObjectId::new(23),
+            "Dummy",
+            ObjectStatus::Normal,
             "Walk",
             None,
             None,
@@ -4577,6 +5060,7 @@ mod tests {
             Vector2::ZERO,
             Vec::new(),
             12,
+            None,
         );
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_effect_context(None, &[], world, || {
@@ -4864,6 +5348,8 @@ mod tests {
     fn get_action_target_reads_world_context() {
         let other = HostWorldObject::new(
             ObjectId::new(99),
+            "Dummy",
+            ObjectStatus::Normal,
             "Walk",
             Some(ObjectId::new(77)),
             None,
@@ -4874,6 +5360,7 @@ mod tests {
             Vector2::ZERO,
             Vec::new(),
             0,
+            None,
         );
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_object_host_context_with_world(world, || {
@@ -5010,6 +5497,8 @@ mod tests {
     fn get_x_reads_world_when_target_provided() {
         let other = HostWorldObject::new(
             ObjectId::new(99),
+            "Dummy",
+            ObjectStatus::Normal,
             "Idle",
             None,
             None,
@@ -5020,6 +5509,7 @@ mod tests {
             Vector2::ZERO,
             Vec::new(),
             0,
+            None,
         );
         let world = HostWorldContext::from_objects(vec![other]);
         let args = [object_reference_value(ObjectId::new(99))];
@@ -5097,6 +5587,8 @@ mod tests {
     fn get_x_dir_reads_world_velocity_when_target_provided() {
         let other = HostWorldObject::new(
             ObjectId::new(42),
+            "Dummy",
+            ObjectStatus::Normal,
             "Idle",
             None,
             None,
@@ -5107,6 +5599,7 @@ mod tests {
             Vector2::new(-8, 3),
             Vec::new(),
             0,
+            None,
         );
         let world = HostWorldContext::from_objects(vec![other]);
         let args = [object_reference_value(ObjectId::new(42))];
@@ -5519,6 +6012,8 @@ mod tests {
     fn get_owner_reads_world_when_target_provided() {
         let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
             ObjectId::new(7),
+            "Dummy",
+            ObjectStatus::Normal,
             "Idle",
             None,
             None,
@@ -5529,6 +6024,7 @@ mod tests {
             Vector2::ZERO,
             Vec::new(),
             0,
+            None,
         )]);
         let args = [object_reference_value(ObjectId::new(7))];
         let (result, _) = with_effect_context(None, &[], world, || get_owner(&args));
@@ -5675,6 +6171,8 @@ mod tests {
     fn get_energy_reads_world_when_target_provided() {
         let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
             ObjectId::new(55),
+            "Dummy",
+            ObjectStatus::Normal,
             "Idle",
             None,
             None,
@@ -5685,6 +6183,7 @@ mod tests {
             Vector2::ZERO,
             Vec::new(),
             0,
+            None,
         )]);
         let args = [object_reference_value(ObjectId::new(55))];
         let (result, _) = with_effect_context(None, &[], world, || get_energy(&args));
@@ -5728,6 +6227,250 @@ mod tests {
 
         let value = result.expect("GetEnergy converts raw energy");
         assert_eq!(value, Value::Int(50));
+    }
+
+    #[test]
+    fn find_object_returns_first_matching_definition() {
+        let world = HostWorldContext::from_objects(vec![
+            HostWorldObject::new(
+                ObjectId::new(1),
+                "Flag",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(10, 5),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                None,
+            ),
+            HostWorldObject::new(
+                ObjectId::new(2),
+                "Rock",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(50, 5),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                None,
+            ),
+        ]);
+
+        let args = [Value::String("Flag".into())];
+        let (result, _) = with_effect_context(None, &[], world, || find_object(&args));
+        let value = result.expect("FindObject succeeds");
+        assert_eq!(value, object_reference_value(ObjectId::new(1)));
+    }
+
+    #[test]
+    fn find_object_respects_owner_filter() {
+        let world = HostWorldContext::from_objects(vec![
+            HostWorldObject::new(
+                ObjectId::new(10),
+                "Dummy",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                1,
+                100,
+                Vector2::new(0, 0),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                None,
+            ),
+            HostWorldObject::new(
+                ObjectId::new(11),
+                "Dummy",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                2,
+                100,
+                Vector2::new(5, 0),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                None,
+            ),
+        ]);
+        let args = [
+            Value::String("Dummy".into()),
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Int(2),
+        ];
+        let (result, _) = with_effect_context(None, &[], world, || find_object(&args));
+        let value = result.expect("FindObject owner succeeds");
+        assert_eq!(value, object_reference_value(ObjectId::new(11)));
+    }
+
+    #[test]
+    fn find_object_closest_mode_orders_by_distance() {
+        let world = HostWorldContext::from_objects(vec![
+            HostWorldObject::new(
+                ObjectId::new(20),
+                "Dummy",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(2, 0),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                None,
+            ),
+            HostWorldObject::new(
+                ObjectId::new(21),
+                "Dummy",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(6, 0),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                None,
+            ),
+        ]);
+        let args = [
+            Value::String("Dummy".into()),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(-1),
+            Value::Int(-1),
+        ];
+        let (first_result, _) =
+            with_effect_context(None, &[], world.clone(), || find_object(&args));
+        let first_value = first_result.expect("FindObject closest succeeds");
+        assert_eq!(first_value, object_reference_value(ObjectId::new(20)));
+
+        let mut find_next = HashMap::new();
+        find_next.insert("id".into(), Value::Int(20));
+        let args_with_next = [
+            Value::String("Dummy".into()),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(-1),
+            Value::Int(-1),
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Proplist(find_next),
+        ];
+        let (second_result, _) =
+            with_effect_context(None, &[], world, || find_object(&args_with_next));
+        let second_value = second_result.expect("FindObject closest with next succeeds");
+        assert_eq!(second_value, object_reference_value(ObjectId::new(21)));
+    }
+
+    #[test]
+    fn find_objects_returns_all_matches_in_order() {
+        let container = ObjectId::new(40);
+        let world = HostWorldContext::from_objects(vec![
+            HostWorldObject::new(
+                container,
+                "Container",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(0, 0),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                None,
+            ),
+            HostWorldObject::new(
+                ObjectId::new(41),
+                "Item",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(3, 0),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                Some(container),
+            ),
+            HostWorldObject::new(
+                ObjectId::new(42),
+                "Item",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(5, 0),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                Some(container),
+            ),
+        ]);
+        let args = [
+            Value::String("Item".into()),
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Int(ANY_CONTAINER_SENTINEL),
+        ];
+        let (result, _) = with_effect_context(None, &[], world, || find_objects(&args));
+        let value = result.expect("FindObjects succeeds");
+        match value {
+            Value::Array(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0], object_reference_value(ObjectId::new(41)));
+                assert_eq!(entries[1], object_reference_value(ObjectId::new(42)));
+            }
+            other => panic!("expected array, got {:?}", other),
+        }
     }
 
     proptest! {

@@ -2990,6 +2990,8 @@ impl Engine {
                     .map(|name| name.to_string());
                 HostWorldObject::new(
                     object.id,
+                    object.definition_id.clone(),
+                    object.state.status,
                     object.state.action.name.clone(),
                     object.state.action.target,
                     object.state.action.target2,
@@ -3000,6 +3002,7 @@ impl Engine {
                     object.state.velocity,
                     object.state.vertices.clone(),
                     object.state.action.ticks,
+                    object.state.container,
                 )
             }),
             landscape,
@@ -5625,6 +5628,8 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         snapshot.objects.iter().map(|object| {
             HostWorldObject::new(
                 object.id,
+                object.definition_id.clone(),
+                object.status,
                 object.action.name.clone(),
                 object.action.target,
                 object.action.target2,
@@ -5635,6 +5640,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.velocity,
                 object.vertices.clone(),
                 object.action.ticks,
+                object.container,
             )
         }),
         snapshot.landscape.clone(),
