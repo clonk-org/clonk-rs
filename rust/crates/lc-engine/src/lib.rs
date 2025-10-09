@@ -2867,6 +2867,33 @@ fn step_toward(current: i32, desired: i32, step: i32) -> i32 {
     }
 }
 
+fn horizontal_span(vertices: &[ObjectVertex]) -> i32 {
+    if vertices.is_empty() {
+        return 0;
+    }
+    let mut min_x = vertices[0].x;
+    let mut max_x = vertices[0].x;
+    for vertex in vertices.iter().skip(1) {
+        if vertex.x < min_x {
+            min_x = vertex.x;
+        }
+        if vertex.x > max_x {
+            max_x = vertex.x;
+        }
+    }
+    (max_x - min_x).abs()
+}
+
+fn fight_distance_threshold(
+    fighter_vertices: &[ObjectVertex],
+    target_vertices: &[ObjectVertex],
+) -> i32 {
+    const MIN_THRESHOLD: i32 = 20;
+    let fighter_span = horizontal_span(fighter_vertices);
+    let target_span = horizontal_span(target_vertices);
+    fighter_span.max(target_span).max(MIN_THRESHOLD)
+}
+
 fn apply_float_command_movement(
     velocity: &mut Vector2,
     command_direction: CommandDirection,
@@ -4780,6 +4807,12 @@ impl Engine {
             }
         };
 
+        if matches!(procedure, ActionProcedure::Fight) {
+            if !self.apply_fight_procedure(idx, movement_profile, &definition_id) {
+                return;
+            }
+        }
+
         let mut push_handled = false;
         if matches!(procedure, ActionProcedure::Push) {
             if !self.apply_push_procedure(idx, command_direction, movement_profile, &definition_id)
@@ -4904,6 +4937,13 @@ impl Engine {
                     }
                 }
                 ActionProcedure::Pull => {
+                    if object.state.velocity.x < 0 {
+                        object.state.direction = Direction::Left;
+                    } else if object.state.velocity.x > 0 {
+                        object.state.direction = Direction::Right;
+                    }
+                }
+                ActionProcedure::Fight => {
                     if object.state.velocity.x < 0 {
                         object.state.direction = Direction::Left;
                     } else if object.state.velocity.x > 0 {
@@ -5153,6 +5193,105 @@ impl Engine {
                 return false;
             }
         }
+
+        true
+    }
+
+    fn apply_fight_procedure(
+        &mut self,
+        idx: usize,
+        movement_profile: MovementProfile,
+        definition_id: &DefinitionId,
+    ) -> bool {
+        let Some(target_id) = self.objects[idx].state.action.target else {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        };
+
+        let Some(target_idx) = self.find_object_index(target_id) else {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        };
+
+        if target_idx == idx {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        let target_removed = {
+            let target = &self.objects[target_idx];
+            target.destroyed || !target.state.status.is_active()
+        };
+        if target_removed {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        let target_definition_id = self.objects[target_idx].definition_id.clone();
+        let target_action_name = self.objects[target_idx].state.action.name.clone();
+        let target_procedure = self
+            .definitions
+            .get(&target_definition_id)
+            .map(|definition| {
+                definition
+                    .action_library()
+                    .procedure_for_action(&target_action_name)
+            })
+            .unwrap_or_default();
+        if !matches!(target_procedure, ActionProcedure::Fight) {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        let fighter_container = self.objects[idx].state.container;
+        let target_container = self.objects[target_idx].state.container;
+        if fighter_container != target_container {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        let fighter_position = self.objects[idx].state.position;
+        let target_position = self.objects[target_idx].state.position;
+        let fighter_vertices = self.objects[idx].state.vertices.clone();
+        let target_vertices = self.objects[target_idx].state.vertices.clone();
+        let initial_direction = self.objects[idx].state.direction;
+
+        let threshold = fight_distance_threshold(&fighter_vertices, &target_vertices);
+        if (fighter_position.x - target_position.x).abs() > threshold
+            || (fighter_position.y - target_position.y).abs() > threshold
+        {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        let delta_x = target_position.x - fighter_position.x;
+        let closeness = (threshold / 2).max(1);
+        let walk_speed = movement_profile.walk_speed.max(0);
+        let walk_accel = movement_profile.walk_acceleration.max(0);
+        let physics = self.physics;
+
+        let desired_direction = if delta_x > 0 {
+            Direction::Right
+        } else if delta_x < 0 {
+            Direction::Left
+        } else {
+            initial_direction
+        };
+
+        let desired_velocity = if walk_speed == 0 || delta_x.abs() <= closeness {
+            0
+        } else if delta_x > 0 {
+            walk_speed
+        } else {
+            -walk_speed
+        };
+
+        let fighter = &mut self.objects[idx];
+        fighter.state.direction = desired_direction;
+        let new_velocity = step_toward(fighter.state.velocity.x, desired_velocity, walk_accel);
+        fighter.state.velocity.x = clamp_to_limit(new_velocity, walk_speed);
+        fighter.state.velocity.y = 0;
+        physics.clamp_velocity(&mut fighter.state.velocity);
 
         true
     }
@@ -8830,6 +8969,236 @@ mod tests {
             target_after.position.x > target_initial_position.x,
             "target should advance horizontally",
         );
+    }
+
+    #[test]
+    fn fight_procedure_without_target_resets_to_default() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Fighter", "Fighter", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
+            "Fight".to_string(),
+            ActionSpec::default().with_procedure("fight"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+        definition.set_movement_profile(
+            MovementProfile::default()
+                .with_walk_speed(6)
+                .with_walk_acceleration(3),
+        );
+
+        let mut engine = Engine::with_seed(27);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Fighter")
+                    .with_position(Vector2::new(0, 0))
+                    .with_action(ActionState::new("Fight")),
+            )
+            .expect("fighter spawns");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let fighter = snapshot.object(id).expect("fighter present");
+        assert_eq!(fighter.action.name, "Idle");
+        assert_eq!(fighter.velocity, Vector2::ZERO);
+    }
+
+    #[test]
+    fn fight_procedure_moves_toward_target() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut fighter_definition = Definition::from_script("Fighter", "Fighter", script).unwrap();
+        let mut fighter_actions = HashMap::new();
+        fighter_actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        fighter_actions.insert(
+            "Fight".to_string(),
+            ActionSpec::default().with_procedure("fight"),
+        );
+        fighter_definition.configure_actions(Some("Idle".to_string()), fighter_actions);
+        fighter_definition.set_movement_profile(
+            MovementProfile::default()
+                .with_walk_speed(6)
+                .with_walk_acceleration(3),
+        );
+
+        let mut opponent_definition =
+            Definition::from_script("Opponent", "Opponent", script).unwrap();
+        let mut opponent_actions = HashMap::new();
+        opponent_actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        opponent_actions.insert(
+            "Fight".to_string(),
+            ActionSpec::default().with_procedure("fight"),
+        );
+        opponent_definition.configure_actions(Some("Idle".to_string()), opponent_actions);
+
+        let mut engine = Engine::with_seed(33);
+        engine
+            .register_definition(fighter_definition)
+            .expect("fighter definition registers");
+        engine
+            .register_definition(opponent_definition)
+            .expect("opponent definition registers");
+
+        let vertices = vec![
+            ObjectVertex::new(-8, -8),
+            ObjectVertex::new(8, -8),
+            ObjectVertex::new(8, 8),
+            ObjectVertex::new(-8, 8),
+        ];
+
+        let opponent_id = engine
+            .spawn_object(
+                SpawnConfig::new("Opponent")
+                    .with_position(Vector2::new(12, 0))
+                    .with_vertices(vertices.clone())
+                    .with_action(ActionState::new("Fight")),
+            )
+            .expect("opponent spawns");
+
+        let mut fight_state = ActionState::new("Fight");
+        fight_state.target = Some(opponent_id);
+        let fighter_id = engine
+            .spawn_object(
+                SpawnConfig::new("Fighter")
+                    .with_position(Vector2::new(0, 0))
+                    .with_vertices(vertices.clone())
+                    .with_action(fight_state),
+            )
+            .expect("fighter spawns");
+
+        engine
+            .apply_object_update(
+                opponent_id,
+                ObjectUpdate::new()
+                    .with_action_update(ActionUpdate::default().with_target(Some(fighter_id))),
+            )
+            .expect("opponent target update succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let fighter = snapshot
+            .object(fighter_id)
+            .expect("fighter present after tick");
+        assert_eq!(fighter.action.name, "Fight");
+        assert!(
+            fighter.velocity.x > 0,
+            "fighter should advance towards the opponent"
+        );
+        assert_eq!(fighter.direction, Direction::Right);
+        assert_eq!(fighter.velocity.y, 0);
+        assert!(
+            fighter.position.x > 0,
+            "fighter should have moved horizontally"
+        );
+    }
+
+    #[test]
+    fn fight_procedure_resets_when_target_not_fighting() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut fighter_definition = Definition::from_script("Fighter", "Fighter", script).unwrap();
+        let mut fighter_actions = HashMap::new();
+        fighter_actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        fighter_actions.insert(
+            "Fight".to_string(),
+            ActionSpec::default().with_procedure("fight"),
+        );
+        fighter_definition.configure_actions(Some("Idle".to_string()), fighter_actions);
+        fighter_definition.set_movement_profile(
+            MovementProfile::default()
+                .with_walk_speed(6)
+                .with_walk_acceleration(3),
+        );
+
+        let mut passive_definition = Definition::from_script("Passive", "Passive", script).unwrap();
+        let mut passive_actions = HashMap::new();
+        passive_actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        passive_definition.configure_actions(Some("Idle".to_string()), passive_actions);
+
+        let mut engine = Engine::with_seed(41);
+        engine
+            .register_definition(fighter_definition)
+            .expect("fighter definition registers");
+        engine
+            .register_definition(passive_definition)
+            .expect("passive definition registers");
+
+        let vertices = vec![
+            ObjectVertex::new(-8, -8),
+            ObjectVertex::new(8, -8),
+            ObjectVertex::new(8, 8),
+            ObjectVertex::new(-8, 8),
+        ];
+
+        let passive_id = engine
+            .spawn_object(
+                SpawnConfig::new("Passive")
+                    .with_position(Vector2::new(10, 0))
+                    .with_vertices(vertices.clone())
+                    .with_action(ActionState::new("Idle")),
+            )
+            .expect("passive target spawns");
+
+        let mut fight_state = ActionState::new("Fight");
+        fight_state.target = Some(passive_id);
+        let fighter_id = engine
+            .spawn_object(
+                SpawnConfig::new("Fighter")
+                    .with_position(Vector2::new(0, 0))
+                    .with_vertices(vertices)
+                    .with_action(fight_state),
+            )
+            .expect("fighter spawns");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let fighter = snapshot
+            .object(fighter_id)
+            .expect("fighter present after tick");
+        assert_eq!(fighter.action.name, "Idle");
+        assert_eq!(fighter.velocity, Vector2::ZERO);
     }
 
     #[test]
