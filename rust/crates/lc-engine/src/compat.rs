@@ -714,6 +714,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("EffectVar", effect_var);
     script.register_host_function("SetAction", set_action);
     script.register_host_function("SetActionData", set_action_data);
+    script.register_host_function("GetActionData", get_action_data);
     script.register_host_function("GetAction", get_action);
     script.register_host_function("GetActTime", get_act_time);
     script.register_host_function("GetProcedure", get_procedure);
@@ -2311,6 +2312,63 @@ fn get_act_time(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         Ok(clamp_ticks(object.effective_action_ticks()))
+    })
+}
+
+fn get_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "GetActionData: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    return Ok(Value::Int(object.effective_action_data()));
+                }
+            }
+
+            if let Some(other) = context.get_world_object(target) {
+                return Ok(Value::Int(other.action_data()));
+            }
+
+            return Ok(Value::Nil);
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        Ok(Value::Int(object.effective_action_data()))
     })
 }
 
@@ -5475,6 +5533,100 @@ mod tests {
         let value = result.expect("SetActionData returns bool");
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
+    fn get_action_data_returns_zero_by_default() {
+        let (result, outcome) = with_object_host_context(|| get_action_data(&[]));
+        let value = result.expect("GetActionData succeeds");
+        assert_eq!(value, Value::Int(0));
+        assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
+    fn get_action_data_reflects_pending_update() {
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                None,
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+            )),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || {
+                set_action_data(&[Value::Int(42)])?;
+                get_action_data(&[])
+            },
+        );
+
+        let value = result.expect("GetActionData succeeds");
+        assert_eq!(value, Value::Int(42));
+        let update = outcome.object_update.expect("action update recorded");
+        let action = update.action.expect("action update exists");
+        assert_eq!(action.data, Some(42));
+    }
+
+    #[test]
+    fn get_action_data_reads_world_context() {
+        let other = HostWorldObject::new(
+            ObjectId::new(23),
+            "Dummy",
+            ObjectStatus::Normal,
+            "Walk",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            77,
+            0,
+            None,
+        );
+        let world = HostWorldContext::from_objects(vec![other]);
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            let mut target = HashMap::new();
+            target.insert("id".into(), Value::Int(23));
+            get_action_data(&[Value::Proplist(target)])
+        });
+
+        let value = result.expect("GetActionData succeeds");
+        assert_eq!(value, Value::Int(77));
+    }
+
+    #[test]
+    fn get_action_data_respects_target_filter() {
+        let (result, _) = with_object_host_context(|| {
+            let mut target = HashMap::new();
+            target.insert("id".into(), Value::Int(99));
+            get_action_data(&[Value::Proplist(target)])
+        });
+
+        let value = result.expect("GetActionData succeeds");
+        assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn get_action_data_returns_nil_without_context() {
+        let value = get_action_data(&[]).expect("GetActionData succeeds without context");
+        assert_eq!(value, Value::Nil);
     }
 
     #[test]
