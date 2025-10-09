@@ -83,6 +83,10 @@ impl HostWorldObject {
         self.position
     }
 
+    pub fn velocity(&self) -> Vector2 {
+        self.velocity
+    }
+
     pub fn vertices(&self) -> &[ObjectVertex] {
         &self.vertices
     }
@@ -253,6 +257,38 @@ fn resolve_vertices<'a>(
 }
 
 const DEFAULT_MAX_ENERGY: i32 = 100;
+const DEFAULT_VELOCITY_PRECISION: i32 = 10;
+
+fn normalise_precision(value: i32) -> i32 {
+    let value = if value == 0 {
+        DEFAULT_VELOCITY_PRECISION
+    } else {
+        value
+    };
+    let normalised = value.abs();
+    if normalised == 0 {
+        1
+    } else {
+        normalised
+    }
+}
+
+fn scale_velocity_value(value: i32, from_precision: i32, to_precision: i32) -> i32 {
+    let from = normalise_precision(from_precision);
+    let to = normalise_precision(to_precision);
+    let numerator = i64::from(value) * i64::from(to);
+    let divisor = i64::from(from);
+    if divisor == 0 {
+        return 0;
+    }
+    let adjusted = if numerator >= 0 {
+        numerator + divisor / 2
+    } else {
+        numerator - divisor / 2
+    };
+    let scaled = adjusted / divisor;
+    scaled.max(i64::from(i32::MIN)).min(i64::from(i32::MAX)) as i32
+}
 
 pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("AddEffect", add_effect);
@@ -274,6 +310,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetDir", get_dir);
     script.register_host_function("SetComDir", set_com_dir);
     script.register_host_function("GetComDir", get_com_dir);
+    script.register_host_function("SetXDir", set_x_dir);
+    script.register_host_function("GetXDir", get_x_dir);
+    script.register_host_function("SetYDir", set_y_dir);
+    script.register_host_function("GetYDir", get_y_dir);
     script.register_host_function("GetX", get_x);
     script.register_host_function("GetY", get_y);
     script.register_host_function("SetPosition", set_position);
@@ -2404,6 +2444,191 @@ fn get_position_component(
     })
 }
 
+enum VelocityComponent {
+    X,
+    Y,
+}
+
+impl VelocityComponent {
+    fn get_function_name(&self) -> &'static str {
+        match self {
+            VelocityComponent::X => "GetXDir",
+            VelocityComponent::Y => "GetYDir",
+        }
+    }
+
+    fn set_function_name(&self) -> &'static str {
+        match self {
+            VelocityComponent::X => "SetXDir",
+            VelocityComponent::Y => "SetYDir",
+        }
+    }
+
+    fn extract(&self, velocity: Vector2) -> i32 {
+        match self {
+            VelocityComponent::X => velocity.x,
+            VelocityComponent::Y => velocity.y,
+        }
+    }
+
+    fn assign(&self, velocity: &mut Vector2, value: i32) {
+        match self {
+            VelocityComponent::X => velocity.x = value,
+            VelocityComponent::Y => velocity.y = value,
+        }
+    }
+}
+
+fn get_velocity_component(
+    args: &[Value],
+    component: VelocityComponent,
+) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(format!(
+            "{} expects at most 2 arguments: target, precision",
+            component.get_function_name()
+        )));
+    }
+
+    let mut index = 0;
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(index) {
+        if matches!(arg, Value::Proplist(_) | Value::Nil | Value::Int(0)) {
+            target_id =
+                parse_object_reference_argument(arg, component.get_function_name(), "target")?;
+            index += 1;
+        }
+    }
+
+    let mut precision = DEFAULT_VELOCITY_PRECISION;
+    if let Some(arg) = args.get(index) {
+        precision = value_to_i32(arg, component.get_function_name(), "precision")?;
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(format!(
+            "{}: additional arguments are not supported",
+            component.get_function_name()
+        )));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let fetch_velocity = |object_velocity: Vector2| {
+            let component_value = component.extract(object_velocity);
+            let scaled =
+                scale_velocity_value(component_value, DEFAULT_VELOCITY_PRECISION, precision);
+            Value::Int(scaled)
+        };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    return Ok(fetch_velocity(object.velocity()));
+                }
+            }
+
+            if let Some(other) = context.world.get(target) {
+                return Ok(fetch_velocity(other.velocity()));
+            }
+
+            return Ok(Value::Nil);
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+        Ok(fetch_velocity(object.velocity()))
+    })
+}
+
+fn set_velocity_component(
+    args: &[Value],
+    component: VelocityComponent,
+) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(format!(
+            "{} expects at least 1 argument: value",
+            component.set_function_name()
+        )));
+    }
+
+    let value = value_to_i32(&args[0], component.set_function_name(), "value")?;
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        if matches!(arg, Value::Proplist(_) | Value::Nil | Value::Int(0)) {
+            target_id =
+                parse_object_reference_argument(arg, component.set_function_name(), "target")?;
+            index += 1;
+        }
+    }
+
+    let mut precision = DEFAULT_VELOCITY_PRECISION;
+    if let Some(arg) = args.get(index) {
+        precision = value_to_i32(arg, component.set_function_name(), "precision")?;
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(format!(
+            "{}: additional arguments are not supported",
+            component.set_function_name()
+        )));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new(format!(
+                "{} requires an active engine context",
+                component.set_function_name()
+            ))
+        })?;
+
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        let mut updated_velocity = object.velocity();
+        let scaled = scale_velocity_value(value, precision, DEFAULT_VELOCITY_PRECISION);
+        component.assign(&mut updated_velocity, scaled);
+        object.set_velocity(updated_velocity);
+        Ok(Value::Bool(true))
+    })
+}
+
+fn get_x_dir(args: &[Value]) -> Result<Value, RuntimeError> {
+    get_velocity_component(args, VelocityComponent::X)
+}
+
+fn get_y_dir(args: &[Value]) -> Result<Value, RuntimeError> {
+    get_velocity_component(args, VelocityComponent::Y)
+}
+
+fn set_x_dir(args: &[Value]) -> Result<Value, RuntimeError> {
+    set_velocity_component(args, VelocityComponent::X)
+}
+
+fn set_y_dir(args: &[Value]) -> Result<Value, RuntimeError> {
+    set_velocity_component(args, VelocityComponent::Y)
+}
+
 fn get_x(args: &[Value]) -> Result<Value, RuntimeError> {
     get_position_component(args, PositionComponent::X)
 }
@@ -2427,15 +2652,14 @@ fn apply_position_bounds(
         let (mut min_allowed, mut max_allowed) = if vertices.is_empty() {
             (0, width.saturating_sub(1))
         } else {
-            vertices.iter().fold(
-                (i32::MIN, i32::MAX),
-                |(min_acc, max_acc), vertex| {
+            vertices
+                .iter()
+                .fold((i32::MIN, i32::MAX), |(min_acc, max_acc), vertex| {
                     (
                         min_acc.max(-vertex.x),
                         max_acc.min(width.saturating_sub(1).saturating_sub(vertex.x)),
                     )
-                },
-            )
+                })
         };
 
         if min_allowed == i32::MIN {
@@ -2455,11 +2679,7 @@ fn apply_position_bounds(
     let min_y_allowed = if vertices.is_empty() {
         0
     } else {
-        vertices
-            .iter()
-            .map(|vertex| -vertex.y)
-            .max()
-            .unwrap_or(0)
+        vertices.iter().map(|vertex| -vertex.y).max().unwrap_or(0)
     };
 
     let mut max_y_allowed = i32::MAX;
@@ -3034,16 +3254,16 @@ impl EffectHostContext {
                 action_target2,
                 vertices,
             } = ctx;
-                ObjectScopeContext::new(
-                    id,
-                    status,
-                    energy,
-                    owner,
-                    position,
-                    velocity,
-                    effects.to_vec(),
-                    action_library,
-                    action_name,
+            ObjectScopeContext::new(
+                id,
+                status,
+                energy,
+                owner,
+                position,
+                velocity,
+                effects.to_vec(),
+                action_library,
+                action_name,
                 action_ticks,
                 direction,
                 command_direction,
@@ -3270,7 +3490,6 @@ struct ObjectScopeContext {
     current_direction: Direction,
     current_command_direction: CommandDirection,
     current_position: Vector2,
-    #[allow(dead_code)]
     current_velocity: Vector2,
     vertices: Vec<ObjectVertex>,
 }
@@ -3458,6 +3677,20 @@ impl ObjectScopeContext {
         }
         self.current_command_direction = command_direction;
         self.pending_update.command_direction = Some(command_direction);
+    }
+
+    fn velocity(&self) -> Vector2 {
+        self.pending_update
+            .velocity
+            .unwrap_or(self.current_velocity)
+    }
+
+    fn set_velocity(&mut self, velocity: Vector2) {
+        if self.velocity() == velocity && self.pending_update.velocity.is_none() {
+            return;
+        }
+        self.current_velocity = velocity;
+        self.pending_update.velocity = Some(velocity);
     }
 
     fn effective_position(&self) -> Vector2 {
@@ -4741,6 +4974,122 @@ mod tests {
     }
 
     #[test]
+    fn get_x_dir_returns_object_velocity() {
+        let context = HostObjectContext::new(
+            ObjectId::new(7),
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::new(12, -3),
+            &[],
+            "Idle",
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+        );
+        let (result, _) =
+            with_effect_context(Some(context), &[], HostWorldContext::default(), || {
+                get_x_dir(&[])
+            });
+        let value = result.expect("GetXDir succeeds");
+        assert_eq!(value, Value::Int(12));
+    }
+
+    #[test]
+    fn get_y_dir_applies_precision_scaling() {
+        let context = HostObjectContext::new(
+            ObjectId::new(8),
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::new(0, 25),
+            &[],
+            "Idle",
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+        );
+        let args = [Value::Nil, Value::Int(5)];
+        let (result, _) =
+            with_effect_context(Some(context), &[], HostWorldContext::default(), || {
+                get_y_dir(&args)
+            });
+        let value = result.expect("GetYDir succeeds");
+        assert_eq!(value, Value::Int(13));
+    }
+
+    #[test]
+    fn get_x_dir_reads_world_velocity_when_target_provided() {
+        let other = HostWorldObject::new(
+            ObjectId::new(42),
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::new(-8, 3),
+            Vec::new(),
+            0,
+        );
+        let world = HostWorldContext::from_objects(vec![other]);
+        let args = [object_reference_value(ObjectId::new(42))];
+        let (result, _) = with_effect_context(None, &[], world, || get_x_dir(&args));
+        let value = result.expect("GetXDir target succeeds");
+        assert_eq!(value, Value::Int(-8));
+    }
+
+    #[test]
+    fn get_x_dir_returns_nil_for_missing_target() {
+        let args = [object_reference_value(ObjectId::new(77))];
+        let (result, _) =
+            with_effect_context(None, &[], HostWorldContext::default(), || get_x_dir(&args));
+        let value = result.expect("GetXDir handles missing target");
+        assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn set_x_dir_records_object_update() {
+        let args = [Value::Int(15)];
+        let (result, outcome) = with_object_host_context(|| set_x_dir(&args));
+        let value = result.expect("SetXDir succeeds");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("velocity update recorded");
+        assert_eq!(update.velocity, Some(Vector2::new(15, 0)));
+    }
+
+    #[test]
+    fn set_y_dir_applies_precision_when_recording_update() {
+        let args = [Value::Int(5), Value::Nil, Value::Int(5)];
+        let (result, outcome) = with_object_host_context(|| set_y_dir(&args));
+        let value = result.expect("SetYDir succeeds");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("velocity update recorded");
+        assert_eq!(update.velocity, Some(Vector2::new(0, 10)));
+    }
+
+    #[test]
+    fn set_x_dir_respects_target_filter() {
+        let mut target = HashMap::new();
+        target.insert("id".into(), Value::Int(99));
+        let args = [Value::Int(4), Value::Proplist(target)];
+        let (result, outcome) = with_object_host_context(|| set_x_dir(&args));
+        let value = result.expect("SetXDir returns bool");
+        assert_eq!(value, Value::Bool(false));
+        assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
     fn set_position_records_object_update() {
         let args = [Value::Int(15), Value::Int(27)];
         let (result, outcome) = with_object_host_context(|| set_position(&args));
@@ -4755,11 +5104,7 @@ mod tests {
     fn set_position_respects_target_filter() {
         let mut target = HashMap::new();
         target.insert("id".into(), Value::Int(42));
-        let args = [
-            Value::Int(5),
-            Value::Int(6),
-            Value::Proplist(target),
-        ];
+        let args = [Value::Int(5), Value::Int(6), Value::Proplist(target)];
         let (result, outcome) = with_object_host_context(|| set_position(&args));
 
         let value = result.expect("SetPosition returns bool");
