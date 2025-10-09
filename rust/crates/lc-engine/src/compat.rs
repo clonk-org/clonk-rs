@@ -3152,6 +3152,7 @@ mod tests {
     use super::*;
     use crate::ActionSpec;
     use std::collections::HashMap;
+    use proptest::prelude::*;
 
     fn empty_state() -> Value {
         let mut map = HashMap::new();
@@ -4449,6 +4450,56 @@ mod tests {
             .as_ref()
             .and_then(|update| update.energy)
             .is_some());
+    }
+
+    proptest! {
+        #[test]
+        fn do_energy_sequence_clamps_within_bounds(deltas in proptest::collection::vec(-200..=200i32, 0..16)) {
+            let start_energy = DEFAULT_MAX_ENERGY;
+            let expected = expected_energy_after_sequence(start_energy, &deltas);
+
+            let sequence = deltas.clone();
+            let (result, outcome) = with_object_host_context(move || {
+                for delta in sequence.iter().copied() {
+                    let value = do_energy(&[Value::Int(delta)])?;
+                    match value {
+                        Value::Bool(true) => {}
+                        Value::Bool(false) => {
+                            return Err(RuntimeError::new("DoEnergy rejected update"));
+                        }
+                        other => {
+                            return Err(RuntimeError::new(format!(
+                                "DoEnergy returned unexpected value: {}",
+                                other.type_name()
+                            )));
+                        }
+                    }
+                }
+                Ok(Value::Nil)
+            });
+
+            prop_assert!(result.is_ok());
+
+            let final_energy = outcome
+                .object_update
+                .and_then(|update| update.energy)
+                .unwrap_or(start_energy);
+
+            prop_assert_eq!(final_energy, expected);
+        }
+    }
+
+    fn expected_energy_after_sequence(start: i32, deltas: &[i32]) -> i32 {
+        let mut energy = start;
+        for &delta in deltas {
+            energy = energy.saturating_add(delta);
+            if energy < 0 {
+                energy = 0;
+            } else if energy > DEFAULT_MAX_ENERGY {
+                energy = DEFAULT_MAX_ENERGY;
+            }
+        }
+        energy
     }
 
     #[test]

@@ -41,6 +41,6 @@
 
 ## Validation & Tooling Requirements
 - Maintain deterministic replays across both runtimes, gating merges on replay hashes and rendered frame hashes.
-- Add exhaustive property-based and fixture-driven tests for AUL builtins, scenario loading, particle systems, and network state machines.
+- Add exhaustive property-based and fixture-driven tests for AUL builtins, scenario loading, particle systems, and network state machines. (DoEnergy energy delta clamping now covered via proptest in `lc-engine/src/compat.rs`; expand to remaining APIs and subsystems.)
 - Provide developer toggles to dump cross-runtime diffs (state, HUD layers, audio mix) and integrate them into CI dashboards.
 - Establish performance baselines comparing CPU/GPU usage so regressions surface before release candidates.
