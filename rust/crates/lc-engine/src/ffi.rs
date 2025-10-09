@@ -607,6 +607,13 @@ fn runtime_snapshot_mismatch(
         ));
     }
 
+    if expected.controls != actual.controls {
+        problems.push(format!(
+            "controls mismatch (expected {:?}, got {:?})",
+            expected.controls, actual.controls
+        ));
+    }
+
     if expected.hud != actual.hud {
         problems.push(format!(
             "hud mismatch (expected {:?}, got {:?})",
@@ -824,7 +831,12 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     };
 
     if frame == 0 && runtime.engine.frame() == 0 {
-        let expected = runtime.engine.snapshot();
+        let mut expected = runtime.engine.snapshot();
+        if let Some(entries) = runtime.control_log.get(&frame) {
+            expected.controls = entries.clone();
+        } else {
+            expected.controls.clear();
+        }
         if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
             set_error(error_out, detail);
             return false;
@@ -863,7 +875,22 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
         return false;
     }
 
-    let expected = runtime.engine.snapshot();
+    let mut expected = runtime.engine.snapshot();
+    if let Some(entries) = runtime.control_log.get(&frame) {
+        expected.controls = entries.clone();
+    } else {
+        expected.controls.clear();
+    }
+
+    let stale_frames: Vec<u64> = runtime
+        .control_log
+        .range(..frame)
+        .map(|(&key, _)| key)
+        .collect();
+    for stale in stale_frames {
+        runtime.control_log.remove(&stale);
+    }
+
     if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
         set_error(error_out, detail);
         return false;
@@ -1537,6 +1564,43 @@ mod tests {
         assert_eq!(
             snapshot.controls,
             vec!["[Control]\nType=Player\n".to_string()]
+        );
+    }
+
+    #[test]
+    fn runtime_mismatch_reports_controls_difference() {
+        let snapshot = unsafe {
+            call_make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+
+        let mut expected = snapshot.clone();
+        expected.controls = vec!["[Control]\nPlayer=1\n".to_string()];
+
+        let detail =
+            runtime_snapshot_mismatch(&expected, &snapshot).expect("should report mismatch");
+        assert!(
+            detail.contains("controls mismatch"),
+            "detail did not mention controls: {detail}"
         );
     }
 }

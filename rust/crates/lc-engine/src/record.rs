@@ -269,6 +269,13 @@ fn describe_snapshot_mismatch(
         ));
     }
 
+    if expected.controls != actual.controls {
+        problems.push(format!(
+            "controls mismatch (expected {:?}, got {:?})",
+            expected.controls, actual.controls
+        ));
+    }
+
     if expected.hud != actual.hud {
         problems.push(format!(
             "hud mismatch (expected {:?}, got {:?})",
@@ -362,5 +369,31 @@ mod tests {
         let mut playback = Playback::from_recording(recording);
         let result = playback.validate_snapshot(&make_snapshot(1, 7));
         assert!(matches!(result, Err(PlaybackError::FrameMismatch { .. })));
+    }
+
+    #[test]
+    fn detects_control_mismatch() {
+        let mut expected_snapshot = make_snapshot(1, 5);
+        expected_snapshot.controls = vec!["[Control]\nPlayer=1\n".to_string()];
+        let recording = Recording {
+            frames: vec![expected_snapshot],
+        };
+        let mut playback = Playback::from_recording(recording);
+        let mut actual_snapshot = make_snapshot(1, 5);
+        actual_snapshot.controls = vec!["[Control]\nPlayer=2\n".to_string()];
+
+        let err = playback
+            .validate_snapshot(&actual_snapshot)
+            .expect_err("mismatch expected");
+
+        match err {
+            PlaybackError::FrameMismatch { detail, .. } => {
+                assert!(
+                    detail.contains("controls mismatch"),
+                    "expected controls mismatch detail, got {detail}"
+                );
+            }
+            other => panic!("unexpected error {other:?}"),
+        }
     }
 }
