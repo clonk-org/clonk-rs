@@ -3152,6 +3152,7 @@ mod tests {
     use super::*;
     use crate::ActionSpec;
     use proptest::prelude::*;
+    use rand::{Rng, SeedableRng};
     use std::collections::HashMap;
 
     fn empty_state() -> Value {
@@ -3314,6 +3315,20 @@ mod tests {
         assert_eq!(delta.climate, Some(-50));
     }
 
+    #[test]
+    fn random_requires_context_for_positive_ranges() {
+        let error = random(&[Value::Int(5)]).expect_err("Random without context fails");
+        assert_eq!(error.message(), "Random: host context unavailable");
+    }
+
+    #[test]
+    fn random_zero_or_negative_range_short_circuits() {
+        let zero = random(&[Value::Int(0)]).expect("zero range succeeds");
+        let negative = random(&[Value::Int(-3)]).expect("negative range succeeds");
+        assert_eq!(zero, Value::Int(0));
+        assert_eq!(negative, Value::Int(0));
+    }
+
     proptest! {
         #[test]
         fn set_wind_clamps_across_range(raw in any::<i32>()) {
@@ -3355,6 +3370,39 @@ mod tests {
             prop_assert_eq!(delta.climate, Some(expected));
             prop_assert!(delta.wind.is_none());
             prop_assert!(delta.temperature.is_none());
+        }
+
+        #[test]
+        fn random_matches_chacha_stream(seed in any::<u64>(), range in 1i32..=1024) {
+            let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+            let expected = expected_rng.gen_range(0..(range as u32)) as i32;
+
+            let guard = enter_random_context(ChaCha8Rng::seed_from_u64(seed));
+            let value = random(&[Value::Int(range)]).expect("Random with context succeeds");
+            let _ = guard.finish();
+
+            prop_assert_eq!(value, Value::Int(expected));
+            prop_assert!(expected >= 0 && expected < range);
+        }
+
+        #[test]
+        fn random_sequence_remains_deterministic(seed in any::<u64>()) {
+            let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+            let expected = [
+                expected_rng.gen_range(0..100) as i32,
+                expected_rng.gen_range(0..100) as i32,
+                expected_rng.gen_range(0..100) as i32,
+            ];
+
+            let guard = enter_random_context(ChaCha8Rng::seed_from_u64(seed));
+            let first = random(&[Value::Int(100)]).expect("first draw succeeds");
+            let second = random(&[Value::Int(100)]).expect("second draw succeeds");
+            let third = random(&[Value::Int(100)]).expect("third draw succeeds");
+            let _ = guard.finish();
+
+            prop_assert_eq!(first, Value::Int(expected[0]));
+            prop_assert_eq!(second, Value::Int(expected[1]));
+            prop_assert_eq!(third, Value::Int(expected[2]));
         }
     }
 

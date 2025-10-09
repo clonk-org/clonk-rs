@@ -21,7 +21,7 @@
 ## Port Roadmap (Real Game Focus)
 - **Phase 0 · Parity Harness Expansion**
   - Drive the shipping client through `LC_RUST_ENGINE_RUNTIME` for full matches, capturing snapshots, I/O, particles, and HUD state. (Snapshots now embed per-frame particle state alongside I/O, HUD capture records per-owner focus/crew panels, and the Rust parity harness now fails when control logs diverge.)
-- Record canonical replays and savegames from C++ and ensure the Rust engine can import them losslessly. (`LC_RUST_ENGINE_RUNTIME_STATE` now captures runtime state JSON on shutdown and lc-engine provides export/import FFI with round-trip tests.)
+  - Record canonical replays and savegames from C++ and ensure the Rust engine can import them losslessly. (`LC_RUST_ENGINE_RUNTIME_STATE` now captures runtime state JSON on shutdown and lc-engine provides export/import FFI with round-trip tests.)
   - Extend automated diff tooling to compare network traffic, HUD buffers, and rendered surfaces frame-by-frame. (Recorder/playback snapshots now include per-frame back-buffer hashes from the C++ client and validation checks them.)
 - **Phase 1 · Simulation Authority Flip**
   - Close feature gaps in `lc-engine` (all action procedures, crew AI, physics edge cases, object enumerators, global effects) until the C++ loop can defer object ticking to Rust. (Parity snapshots now include per-vertex collision metadata so physics edge cases surface identically in Rust and C++.)
@@ -41,6 +41,6 @@
 
 ## Validation & Tooling Requirements
 - Maintain deterministic replays across both runtimes, gating merges on replay hashes and rendered frame hashes.
-- Add exhaustive property-based and fixture-driven tests for AUL builtins, scenario loading, particle systems, and network state machines. (DoEnergy and SetWind/SetTemperature/SetClimate clamping now covered via proptest in `lc-engine/src/compat.rs`; expand to remaining APIs and subsystems.)
+- Add exhaustive property-based and fixture-driven tests for AUL builtins, scenario loading, particle systems, and network state machines. (DoEnergy, SetWind/SetTemperature/SetClimate clamping, and Random stream parity now covered via proptest in `lc-engine/src/compat.rs`; expand to remaining APIs and subsystems.)
 - Provide developer toggles to dump cross-runtime diffs (state, HUD layers, audio mix) and integrate them into CI dashboards.
 - Establish performance baselines comparing CPU/GPU usage so regressions surface before release candidates.
