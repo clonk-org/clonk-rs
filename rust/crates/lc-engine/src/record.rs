@@ -283,6 +283,13 @@ fn describe_snapshot_mismatch(
         ));
     }
 
+    if expected.surfaces != actual.surfaces {
+        problems.push(format!(
+            "surface hash mismatch (expected {:?}, got {:?})",
+            expected.surfaces, actual.surfaces
+        ));
+    }
+
     if expected.landscape != actual.landscape {
         problems.push("landscape mismatch".into());
     }
@@ -346,6 +353,7 @@ mod tests {
             landscape: None,
             rng: ChaCha8Rng::seed_from_u64(frame),
             hud: HudSnapshot::default(),
+            surfaces: Vec::new(),
             controls: Vec::new(),
         }
     }

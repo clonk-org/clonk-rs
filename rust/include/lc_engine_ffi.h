@@ -93,6 +93,12 @@ typedef struct LcEngineHudPlayerSnapshot {
     bool eliminated;
 } LcEngineHudPlayerSnapshot;
 
+typedef struct LcEngineSurfaceSnapshot {
+    int32_t width;
+    int32_t height;
+    uint64_t hash;
+} LcEngineSurfaceSnapshot;
+
 LcEngineRecorderHandle *lc_engine_recorder_new(void);
 void lc_engine_recorder_clear(LcEngineRecorderHandle *handle);
 void lc_engine_recorder_record(
@@ -110,6 +116,8 @@ void lc_engine_recorder_record(
     size_t crew_role_count,
     const LcEngineHudPlayerSnapshot *hud_players,
     size_t hud_player_count,
+    const LcEngineSurfaceSnapshot *surfaces,
+    size_t surface_count,
     const char *const *controls,
     size_t control_count,
     const int32_t *known_crew_owners,
@@ -135,6 +143,8 @@ bool lc_engine_playback_compare(
     size_t crew_role_count,
     const LcEngineHudPlayerSnapshot *hud_players,
     size_t hud_player_count,
+    const LcEngineSurfaceSnapshot *surfaces,
+    size_t surface_count,
     const char *const *controls,
     size_t control_count,
     const int32_t *known_crew_owners,
@@ -175,6 +185,8 @@ bool lc_engine_runtime_compare_snapshot(
     size_t crew_role_count,
     const LcEngineHudPlayerSnapshot *hud_players,
     size_t hud_player_count,
+    const LcEngineSurfaceSnapshot *surfaces,
+    size_t surface_count,
     const char *const *controls,
     size_t control_count,
     const int32_t *known_crew_owners,

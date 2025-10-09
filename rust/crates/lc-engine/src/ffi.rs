@@ -2,7 +2,7 @@ use crate::{
     ActionState, CommandDirection, CrewRole, CrewSelectionState, Direction, EffectState, Engine,
     EngineState, EnvironmentFrame, FloatVector2, HudPlayerSnapshot, HudSnapshot, ObjectId,
     ObjectSnapshot, ObjectStatus, ObjectVertex, ParticleLayer, ParticleSnapshot, Playback,
-    Recorder, Recording, Scenario, SimulationSnapshot, Vector2,
+    Recorder, Recording, Scenario, SimulationSnapshot, SurfaceSnapshot, Vector2,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -103,6 +103,13 @@ pub struct LcEngineHudPlayerSnapshot {
     pub eliminated: bool,
 }
 
+#[repr(C)]
+pub struct LcEngineSurfaceSnapshot {
+    pub width: i32,
+    pub height: i32,
+    pub hash: u64,
+}
+
 pub struct RecorderHandle {
     recorder: Recorder,
 }
@@ -163,6 +170,8 @@ unsafe fn make_snapshot(
     eliminated_crew_owner_len: usize,
     hud_players: *const LcEngineHudPlayerSnapshot,
     hud_player_len: usize,
+    surfaces: *const LcEngineSurfaceSnapshot,
+    surface_len: usize,
     controls: *const *const c_char,
     control_len: usize,
 ) -> Option<SimulationSnapshot> {
@@ -446,6 +455,22 @@ unsafe fn make_snapshot(
         });
     }
 
+    let surface_slice: &[LcEngineSurfaceSnapshot] = if surface_len == 0 {
+        &[]
+    } else if surfaces.is_null() {
+        return None;
+    } else {
+        slice::from_raw_parts(surfaces, surface_len)
+    };
+    let mut surface_snapshots = Vec::with_capacity(surface_slice.len());
+    for entry in surface_slice {
+        surface_snapshots.push(SurfaceSnapshot {
+            width: entry.width,
+            height: entry.height,
+            hash: entry.hash,
+        });
+    }
+
     let control_slice: &[*const c_char] = if control_len == 0 {
         &[]
     } else if controls.is_null() {
@@ -481,6 +506,7 @@ unsafe fn make_snapshot(
         hud: HudSnapshot {
             players: hud_players_vec,
         },
+        surfaces: surface_snapshots,
         controls: control_entries,
     })
 }
@@ -650,6 +676,13 @@ fn runtime_snapshot_mismatch(
         problems.push(format!(
             "hud mismatch (expected {:?}, got {:?})",
             expected.hud, actual.hud
+        ));
+    }
+
+    if expected.surfaces != actual.surfaces {
+        problems.push(format!(
+            "surface hash mismatch (expected {:?}, got {:?})",
+            expected.surfaces, actual.surfaces
         ));
     }
 
@@ -823,6 +856,8 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     eliminated_crew_owner_count: usize,
     hud_players: *const LcEngineHudPlayerSnapshot,
     hud_player_count: usize,
+    surfaces: *const LcEngineSurfaceSnapshot,
+    surface_len: usize,
     controls: *const *const c_char,
     control_count: usize,
     error_out: *mut *mut c_char,
@@ -851,6 +886,8 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
             eliminated_crew_owner_count,
             hud_players,
             hud_player_count,
+            surfaces,
+            surface_len,
             controls,
             control_count,
         )
@@ -1118,6 +1155,8 @@ pub extern "C" fn lc_engine_recorder_record(
     eliminated_crew_owner_len: usize,
     hud_players: *const LcEngineHudPlayerSnapshot,
     hud_player_len: usize,
+    surfaces: *const LcEngineSurfaceSnapshot,
+    surface_len: usize,
     controls: *const *const c_char,
     control_len: usize,
 ) {
@@ -1143,6 +1182,8 @@ pub extern "C" fn lc_engine_recorder_record(
             eliminated_crew_owner_len,
             hud_players,
             hud_player_len,
+            surfaces,
+            surface_len,
             controls,
             control_len,
         )
@@ -1235,6 +1276,8 @@ pub extern "C" fn lc_engine_playback_compare(
     eliminated_crew_owner_len: usize,
     hud_players: *const LcEngineHudPlayerSnapshot,
     hud_player_len: usize,
+    surfaces: *const LcEngineSurfaceSnapshot,
+    surface_len: usize,
     controls: *const *const c_char,
     control_len: usize,
     error_out: *mut *mut c_char,
@@ -1262,6 +1305,8 @@ pub extern "C" fn lc_engine_playback_compare(
             eliminated_crew_owner_len,
             hud_players,
             hud_player_len,
+            surfaces,
+            surface_len,
             controls,
             control_len,
         )
@@ -1371,6 +1416,8 @@ mod tests {
             eliminated_crew_owner_len,
             hud_players,
             hud_player_len,
+            ptr::null(),
+            0,
             controls,
             control_len,
         )

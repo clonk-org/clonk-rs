@@ -426,6 +426,13 @@ pub struct HudPlayerSnapshot {
     pub eliminated: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SurfaceSnapshot {
+    pub width: i32,
+    pub height: i32,
+    pub hash: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ObjectVertex {
     pub x: i32,
@@ -1811,6 +1818,8 @@ pub struct SimulationSnapshot {
     pub landscape: Option<Landscape>,
     #[serde(default = "default_rng")]
     pub rng: ChaCha8Rng,
+    #[serde(default)]
+    pub surfaces: Vec<SurfaceSnapshot>,
     #[serde(default)]
     pub hud: HudSnapshot,
     #[serde(default)]
@@ -4049,6 +4058,7 @@ impl Engine {
             eliminated_crew_owners,
             landscape: self.landscape.clone(),
             rng: self.rng.clone(),
+            surfaces: Vec::new(),
             hud: HudSnapshot {
                 players: hud_players,
             },

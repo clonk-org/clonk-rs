@@ -5,6 +5,7 @@
 #include "lc_engine_ffi.h"
 
 #include <C4Include.h>
+#include <C4Application.h>
 #include <C4Control.h>
 #include <C4Game.h>
 #include <C4Log.h>
@@ -19,6 +20,7 @@
 #include <Fixed.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <cstdint>
@@ -61,6 +63,46 @@ using RecorderPtr = std::unique_ptr<LcEngineRecorderHandle, RecorderDeleter>;
 using PlaybackPtr = std::unique_ptr<LcEnginePlaybackHandle, PlaybackDeleter>;
 using RuntimePtr = std::unique_ptr<LcEngineRuntimeHandle, RuntimeDeleter>;
 using RustStringPtr = std::unique_ptr<char, decltype(&lc_engine_string_free)>;
+
+class SurfaceLock {
+public:
+    explicit SurfaceLock(C4Surface *surface)
+        : surface(surface)
+        , locked(false) {
+        if (surface) {
+            locked = surface->Lock();
+        }
+    }
+
+    ~SurfaceLock() {
+        if (locked && surface) {
+            surface->Unlock();
+        }
+    }
+
+    bool IsLocked() const {
+        return locked;
+    }
+
+private:
+    C4Surface *surface;
+    bool locked;
+};
+
+uint64_t HashSurface(C4Surface &surface, int32_t width, int32_t height, float scale) {
+    constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
+    constexpr uint64_t kFnvPrime = 1099511628211ull;
+
+    uint64_t hash = kFnvOffsetBasis;
+    for (int32_t y = 0; y < height; ++y) {
+        for (int32_t x = 0; x < width; ++x) {
+            const uint32_t pixel = surface.GetPixDw(x, y, false, scale);
+            hash ^= static_cast<uint64_t>(pixel);
+            hash *= kFnvPrime;
+        }
+    }
+    return hash;
+}
 
 struct SnapshotEntry {
     LcEngineObjectSnapshot snapshot{};
@@ -114,6 +156,7 @@ struct SnapshotBuffer {
     std::vector<int32_t> eliminated_crew_owners;
     std::vector<HudPlayerEntry> hud_players;
     std::vector<LcEngineHudPlayerSnapshot> hud_player_raw;
+    std::vector<LcEngineSurfaceSnapshot> surface_raw;
 };
 
 std::mutex g_mutex;
@@ -246,7 +289,7 @@ void CollectParticlesFromList(
     }
 }
 
-SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
+SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
     SnapshotBuffer buffer;
     CollectParticlesFromList(
         game.Particles.GlobalParticles,
@@ -528,6 +571,26 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
     buffer.known_crew_owners.assign(known_owners.begin(), known_owners.end());
     std::sort(buffer.known_crew_owners.begin(), buffer.known_crew_owners.end());
 
+    if (capture_surface_hash) {
+        CStdDDraw *ddraw = Application.DDraw;
+        if (ddraw && ddraw->lpBack) {
+            C4Surface *surface = ddraw->lpBack;
+            SurfaceLock lock(surface);
+            if (lock.IsLocked()) {
+                const float scale = Application.GetScale();
+                const int32_t width = static_cast<int32_t>(std::ceil(surface->Wdt * scale));
+                const int32_t height = static_cast<int32_t>(std::ceil(surface->Hgt * scale));
+                if (width > 0 && height > 0) {
+                    LcEngineSurfaceSnapshot snapshot{};
+                    snapshot.width = width;
+                    snapshot.height = height;
+                    snapshot.hash = HashSurface(*surface, width, height, scale);
+                    buffer.surface_raw.push_back(snapshot);
+                }
+            }
+        }
+    }
+
     return buffer;
 }
 
@@ -768,7 +831,8 @@ void OnFrame(C4Game &game) {
         return;
     }
 
-    SnapshotBuffer buffer = CollectSnapshotBuffer(game);
+    const bool capture_surface_hash = (g_recorder != nullptr) || (g_playback != nullptr) || g_runtime_snapshot_enabled;
+    SnapshotBuffer buffer = CollectSnapshotBuffer(game, capture_surface_hash);
     const auto &raw = buffer.raw;
     const auto &global_effects = buffer.global_effects;
     const auto &crew_selection = buffer.crew_selection_raw;
@@ -786,6 +850,10 @@ void OnFrame(C4Game &game) {
         crew_roles.empty() ? nullptr : crew_roles.data();
     const LcEngineHudPlayerSnapshot *hud_player_data =
         hud_players.empty() ? nullptr : hud_players.data();
+    const auto &surfaces = buffer.surface_raw;
+    const LcEngineSurfaceSnapshot *surface_data =
+        surfaces.empty() ? nullptr : surfaces.data();
+    const size_t surface_count = surfaces.size();
     const int32_t *known_owners =
         buffer.known_crew_owners.empty() ? nullptr : buffer.known_crew_owners.data();
     const int32_t *eliminated_owners = buffer.eliminated_crew_owners.empty()
@@ -825,6 +893,8 @@ void OnFrame(C4Game &game) {
                 crew_roles.size(),
                 hud_player_data,
                 hud_players.size(),
+                surface_data,
+                surface_count,
                 control_data,
                 control_count,
                 known_owners,
@@ -859,6 +929,8 @@ void OnFrame(C4Game &game) {
             crew_roles.size(),
             hud_player_data,
             hud_players.size(),
+            surface_data,
+            surface_count,
             control_data,
             control_count,
             known_owners,
@@ -884,6 +956,8 @@ void OnFrame(C4Game &game) {
                 crew_roles.size(),
                 hud_player_data,
                 hud_players.size(),
+                nullptr,
+                0,
                 control_data,
                 control_count,
                 known_owners,
