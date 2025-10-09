@@ -206,6 +206,7 @@ std::string g_record_path;
 RuntimePtr g_runtime;
 bool g_runtime_requested = false;
 bool g_runtime_disabled = false;
+bool g_runtime_authoritative = false;
 std::string g_runtime_state_export_path;
 std::string g_runtime_state_import_path;
 std::ofstream g_runtime_snapshot_stream;
@@ -869,6 +870,7 @@ void EnsureInitialised() {
 
     g_runtime_requested = false;
     g_runtime_disabled = false;
+    g_runtime_authoritative = false;
     g_runtime_state_export_path.clear();
     g_runtime_state_import_path.clear();
 
@@ -880,6 +882,14 @@ void EnsureInitialised() {
     if (const char *runtime_toggle = std::getenv("LC_RUST_ENGINE_RUNTIME")) {
         if (*runtime_toggle) {
             g_runtime_requested = true;
+        }
+    }
+
+    if (const char *authoritative =
+            std::getenv("LC_RUST_ENGINE_RUNTIME_AUTHORITATIVE")) {
+        if (authoritative && *authoritative) {
+            g_runtime_requested = true;
+            g_runtime_authoritative = true;
         }
     }
 
@@ -1234,41 +1244,58 @@ void OnFrame(C4Game &game) {
     }
 
     if (g_runtime && !g_runtime_disabled) {
-        char *error_message = nullptr;
-        if (!lc_engine_runtime_compare_snapshot(
-                g_runtime.get(),
-                frame,
-                object_data,
-                raw.size(),
-                global_effect_data,
-                global_effects.size(),
-                particle_data,
-                particles.size(),
-                crew_selection_data,
-                crew_selection.size(),
-                crew_role_data,
-                crew_roles.size(),
-                hud_player_data,
-                hud_players.size(),
-                surface_data,
-                surface_count,
-                network_data,
-                network_count,
-                control_data,
-                control_count,
-                known_owners,
-                buffer.known_crew_owners.size(),
-                eliminated_owners,
-                buffer.eliminated_crew_owners.size(),
-                &error_message)) {
-            RustStringPtr error = MakeString(error_message);
-            if (error) {
-                LogError(std::string("Rust runtime parity mismatch: ") + error.get());
-            } else {
-                LogError("Rust runtime parity mismatch (no detail)");
+        if (g_runtime_authoritative) {
+            char *error_message = nullptr;
+            if (!lc_engine_runtime_advance_to_frame(
+                    g_runtime.get(),
+                    frame,
+                    &error_message)) {
+                RustStringPtr error = MakeString(error_message);
+                if (error) {
+                    LogError(std::string("Rust runtime advance failed: ") + error.get());
+                } else {
+                    LogError("Rust runtime advance failed (no detail)");
+                }
+                g_runtime.reset();
+                g_runtime_disabled = true;
             }
-            g_runtime.reset();
-            g_runtime_disabled = true;
+        } else {
+            char *error_message = nullptr;
+            if (!lc_engine_runtime_compare_snapshot(
+                    g_runtime.get(),
+                    frame,
+                    object_data,
+                    raw.size(),
+                    global_effect_data,
+                    global_effects.size(),
+                    particle_data,
+                    particles.size(),
+                    crew_selection_data,
+                    crew_selection.size(),
+                    crew_role_data,
+                    crew_roles.size(),
+                    hud_player_data,
+                    hud_players.size(),
+                    surface_data,
+                    surface_count,
+                    network_data,
+                    network_count,
+                    control_data,
+                    control_count,
+                    known_owners,
+                    buffer.known_crew_owners.size(),
+                    eliminated_owners,
+                    buffer.eliminated_crew_owners.size(),
+                    &error_message)) {
+                RustStringPtr error = MakeString(error_message);
+                if (error) {
+                    LogError(std::string("Rust runtime parity mismatch: ") + error.get());
+                } else {
+                    LogError("Rust runtime parity mismatch (no detail)");
+                }
+                g_runtime.reset();
+                g_runtime_disabled = true;
+            }
         }
         if (g_runtime && g_runtime_snapshot_enabled && g_runtime_snapshot_stream) {
             char *snapshot_error = nullptr;

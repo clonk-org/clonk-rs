@@ -326,6 +326,49 @@ impl RuntimeHandle {
         }
         Ok(())
     }
+
+    fn advance_to_frame(&mut self, frame: u64) -> Result<(), String> {
+        let current = self.engine.frame();
+        if frame < current {
+            return Err(format!(
+                "target frame {} precedes current engine frame {}",
+                frame, current
+            ));
+        }
+
+        if frame == 0 && current == 0 {
+            self.apply_control_packets_for_frame(0)?;
+            return Ok(());
+        }
+
+        while self.engine.frame() < frame {
+            let next_frame = self.engine.frame().saturating_add(1);
+            self.apply_control_packets_for_frame(next_frame)?;
+            self.engine
+                .tick()
+                .map_err(|error| format!("engine tick failed: {error}"))?;
+        }
+
+        if self.engine.frame() != frame {
+            return Err(format!(
+                "engine advanced to frame {} while targeting frame {}",
+                self.engine.frame(),
+                frame
+            ));
+        }
+
+        let stale_frames: Vec<u64> = self
+            .control_log_strings
+            .range(..frame)
+            .map(|(&key, _)| key)
+            .collect();
+        for stale in stale_frames {
+            self.control_log_strings.remove(&stale);
+            self.control_packets.remove(&stale);
+        }
+
+        Ok(())
+    }
 }
 
 unsafe fn make_snapshot(
@@ -1086,6 +1129,81 @@ pub extern "C" fn lc_engine_runtime_reset(
 }
 
 #[no_mangle]
+pub extern "C" fn lc_engine_runtime_advance_to_frame(
+    handle: *mut RuntimeHandle,
+    frame: u64,
+    error_out: *mut *mut c_char,
+) -> bool {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    let Some(runtime) = (unsafe { handle.as_mut() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return false;
+    };
+
+    if let Err(message) = runtime.advance_to_frame(frame) {
+        set_error(
+            error_out,
+            format!("failed to advance runtime to frame {frame}: {message}"),
+        );
+        return false;
+    }
+
+    runtime.last_frame = frame;
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_step(
+    handle: *mut RuntimeHandle,
+    error_out: *mut *mut c_char,
+) -> bool {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    let Some(runtime) = (unsafe { handle.as_mut() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return false;
+    };
+
+    let current = runtime.engine.frame();
+    if current == u64::MAX {
+        set_error(
+            error_out,
+            "engine frame counter reached maximum value".into(),
+        );
+        return false;
+    }
+    let target = current + 1;
+
+    if let Err(message) = runtime.advance_to_frame(target) {
+        set_error(
+            error_out,
+            format!("failed to advance runtime to frame {target}: {message}"),
+        );
+        return false;
+    }
+
+    runtime.last_frame = runtime.engine.frame();
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_current_frame(handle: *const RuntimeHandle) -> u64 {
+    let Some(runtime) = (unsafe { handle.as_ref() }) else {
+        return 0;
+    };
+    runtime.engine.frame()
+}
+
+#[no_mangle]
 pub extern "C" fn lc_engine_runtime_compare_snapshot(
     handle: *mut RuntimeHandle,
     frame: u64,
@@ -1153,16 +1271,13 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     };
 
     if frame == 0 && runtime.engine.frame() == 0 {
-        if let Err(message) = runtime.apply_control_packets_for_frame(0) {
+        if let Err(message) = runtime.advance_to_frame(0) {
             set_error(
                 error_out,
-                format!("failed to apply control packets for frame 0: {message}"),
+                format!("failed to prepare runtime for frame 0: {message}"),
             );
             return false;
         }
-    }
-
-    if frame == 0 && runtime.engine.frame() == 0 {
         let mut expected = runtime.engine.snapshot();
         if let Some(entries) = runtime.control_log_strings.get(&frame) {
             expected.controls = entries.clone();
@@ -1188,32 +1303,10 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
         return false;
     }
 
-    while runtime.engine.frame() < frame {
-        let next_frame = runtime.engine.frame().saturating_add(1);
-        if let Err(message) = runtime.apply_control_packets_for_frame(next_frame) {
-            set_error(
-                error_out,
-                format!(
-                    "failed to apply control packets for frame {}: {}",
-                    next_frame, message
-                ),
-            );
-            return false;
-        }
-        if let Err(error) = runtime.engine.tick() {
-            set_error(error_out, format!("engine tick failed: {error}"));
-            return false;
-        }
-    }
-
-    if runtime.engine.frame() != frame {
+    if let Err(message) = runtime.advance_to_frame(frame) {
         set_error(
             error_out,
-            format!(
-                "engine advanced to frame {} while validating frame {}",
-                runtime.engine.frame(),
-                frame
-            ),
+            format!("failed to advance runtime to frame {frame}: {message}"),
         );
         return false;
     }
@@ -1223,16 +1316,6 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
         expected.controls = entries.clone();
     } else {
         expected.controls.clear();
-    }
-
-    let stale_frames: Vec<u64> = runtime
-        .control_log_strings
-        .range(..frame)
-        .map(|(&key, _)| key)
-        .collect();
-    for stale in stale_frames {
-        runtime.control_log_strings.remove(&stale);
-        runtime.control_packets.remove(&stale);
     }
 
     if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
@@ -1765,6 +1848,41 @@ mod tests {
             controls,
             control_len,
         )
+    }
+
+    fn runtime_with_simple_object() -> RuntimeHandle {
+        const STEP_SCRIPT: &str = r#"
+global func Initialize(state, random)
+{
+    return {};
+}
+
+global func Step(state, frame, random)
+{
+    return {
+        velocity = [state.velocity[0] + 1, state.velocity[1] + 2],
+        energy = state.energy - 1,
+    };
+}
+"#;
+
+        let mut runtime = RuntimeHandle::new();
+        let definition =
+            Definition::from_script("Mover", "Mover", STEP_SCRIPT).expect("definition compiles");
+        runtime
+            .engine
+            .register_definition(definition)
+            .expect("register definition");
+        runtime
+            .engine
+            .spawn_object(
+                SpawnConfig::new("Mover")
+                    .with_position(Vector2::new(5, 10))
+                    .with_velocity(Vector2::new(3, -4))
+                    .with_energy(80),
+            )
+            .expect("spawn succeeds");
+        runtime
     }
 
     #[test]
@@ -2524,6 +2642,79 @@ global func Step(state, frame, random)
         let roundtrip_value: Value =
             serde_json::from_str(&roundtrip_json).expect("roundtrip JSON parses");
         assert_eq!(roundtrip_value, original_value);
+    }
+
+    #[test]
+    fn runtime_step_advances_engine_and_exports_snapshot() {
+        let mut runtime = runtime_with_simple_object();
+        let handle: *mut RuntimeHandle = &mut runtime;
+
+        assert_eq!(runtime.engine.frame(), 0, "engine starts at frame 0");
+        assert!(
+            lc_engine_runtime_step(handle, ptr::null_mut()),
+            "step call should succeed"
+        );
+        assert_eq!(
+            runtime.engine.frame(),
+            1,
+            "engine should advance to next frame"
+        );
+        assert_eq!(
+            lc_engine_runtime_current_frame(&runtime),
+            1,
+            "current frame query matches engine"
+        );
+
+        let mut export_error: *mut c_char = ptr::null_mut();
+        let json_ptr = lc_engine_runtime_export_snapshot_json(handle, &mut export_error);
+        assert!(export_error.is_null(), "snapshot export should succeed");
+        assert!(!json_ptr.is_null(), "snapshot JSON pointer expected");
+
+        let json_string = unsafe {
+            let json = CStr::from_ptr(json_ptr)
+                .to_str()
+                .expect("snapshot JSON is UTF-8")
+                .to_owned();
+            lc_engine_string_free(json_ptr);
+            json
+        };
+        let value: Value = serde_json::from_str(&json_string).expect("snapshot JSON parses");
+        assert_eq!(
+            value["snapshot"]["frame"].as_u64(),
+            Some(1),
+            "snapshot reports advanced frame"
+        );
+    }
+
+    #[test]
+    fn runtime_advance_rejects_rewind() {
+        let mut runtime = runtime_with_simple_object();
+        let handle: *mut RuntimeHandle = &mut runtime;
+        assert!(
+            lc_engine_runtime_step(handle, ptr::null_mut()),
+            "initial step succeeds"
+        );
+        assert_eq!(runtime.engine.frame(), 1, "engine advanced to frame 1");
+
+        let mut error_ptr: *mut c_char = ptr::null_mut();
+        let ok = lc_engine_runtime_advance_to_frame(handle, 0, &mut error_ptr);
+        assert!(!ok, "advancing backwards should fail");
+        assert!(
+            !error_ptr.is_null(),
+            "error message should be populated when rewind rejected"
+        );
+        let message = unsafe {
+            let text = CStr::from_ptr(error_ptr)
+                .to_str()
+                .expect("error string valid UTF-8")
+                .to_owned();
+            lc_engine_string_free(error_ptr);
+            text
+        };
+        assert!(
+            message.contains("precedes current engine frame"),
+            "unexpected error wording: {message}"
+        );
     }
 
     #[test]

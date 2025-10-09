@@ -187,6 +187,12 @@ bool lc_engine_runtime_record_control_ini(
     const char *ini_data,
     char **error_message);
 bool lc_engine_runtime_reset(LcEngineRuntimeHandle *handle, char **error_message);
+bool lc_engine_runtime_advance_to_frame(
+    LcEngineRuntimeHandle *handle,
+    uint64_t frame,
+    char **error_message);
+bool lc_engine_runtime_step(LcEngineRuntimeHandle *handle, char **error_message);
+uint64_t lc_engine_runtime_current_frame(const LcEngineRuntimeHandle *handle);
 bool lc_engine_runtime_compare_snapshot(
     LcEngineRuntimeHandle *handle,
     uint64_t frame,

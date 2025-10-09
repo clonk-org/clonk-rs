@@ -25,7 +25,7 @@
   - Extend automated diff tooling to compare network traffic, HUD buffers, and rendered surfaces frame-by-frame. (Recorder/playback snapshots now include per-frame back-buffer hashes from the C++ client with validation, parity captures labelled viewport/upper/message-board HUD surfaces alongside per-frame control logs, and directional network packet hashes keyed by connection for cross-runtime comparison.)
 - **Phase 1 · Simulation Authority Flip**
   - Close feature gaps in `lc-engine` (all action procedures, crew AI, physics edge cases, object enumerators, global effects) until the C++ loop can defer object ticking to Rust. (Parity snapshots now include per-vertex collision metadata so physics edge cases surface identically in Rust and C++.)
-  - Expose every required engine/AUL entry point through FFI so C++ only marshals inputs/outputs while Rust advances world state deterministically.
+  - Expose every required engine/AUL entry point through FFI so C++ only marshals inputs/outputs while Rust advances world state deterministically. (Runtime FFI exports `lc_engine_runtime_advance_to_frame`, `lc_engine_runtime_step`, and `lc_engine_runtime_current_frame`, and the bridge can enable authoritative stepping via `LC_RUST_ENGINE_RUNTIME_AUTHORITATIVE`.)
   - Promote the Rust VM to the primary script runtime, running scenario/system scripts in Rust while shadow-running the C++ VM for audit until clean.
 - **Phase 2 · Frontend and Platform Port**
   - Replace `C4GraphicsSystem`, GUI, and input handling with Rust implementations (SDL/OpenGL or wgpu) that reproduce batching, overlay composition, and device quirks.
