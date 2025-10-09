@@ -831,7 +831,11 @@ void OnFrame(C4Game &game) {
         return;
     }
 
-    const bool capture_surface_hash = (g_recorder != nullptr) || (g_playback != nullptr) || g_runtime_snapshot_enabled;
+    const bool capture_surface_hash =
+        (g_recorder != nullptr) ||
+        (g_playback != nullptr) ||
+        g_runtime_snapshot_enabled ||
+        (g_runtime != nullptr && !g_runtime_disabled);
     SnapshotBuffer buffer = CollectSnapshotBuffer(game, capture_surface_hash);
     const auto &raw = buffer.raw;
     const auto &global_effects = buffer.global_effects;
@@ -956,8 +960,8 @@ void OnFrame(C4Game &game) {
                 crew_roles.size(),
                 hud_player_data,
                 hud_players.size(),
-                nullptr,
-                0,
+                surface_data,
+                surface_count,
                 control_data,
                 control_count,
                 known_owners,
