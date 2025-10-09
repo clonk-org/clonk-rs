@@ -3314,6 +3314,50 @@ mod tests {
         assert_eq!(delta.climate, Some(-50));
     }
 
+    proptest! {
+        #[test]
+        fn set_wind_clamps_across_range(raw in any::<i32>()) {
+            let (result, delta) = with_environment_context(EnvironmentSettings::new(0), 0, || {
+                set_wind(&[Value::Int(raw)])?;
+                get_wind(&[])
+            });
+
+            let expected = raw.clamp(-100, 100);
+            prop_assert!(matches!(result, Ok(Value::Int(value)) if value == expected));
+            prop_assert_eq!(delta.wind, Some(expected));
+            prop_assert!(delta.temperature.is_none());
+            prop_assert!(delta.climate.is_none());
+        }
+
+        #[test]
+        fn set_temperature_clamps_across_range(raw in any::<i32>()) {
+            let (result, delta) = with_environment_context(EnvironmentSettings::new(0), 0, || {
+                set_temperature(&[Value::Int(raw)])?;
+                get_temperature(&[])
+            });
+
+            let expected = raw.clamp(-100, 100);
+            prop_assert!(matches!(result, Ok(Value::Int(value)) if value == expected));
+            prop_assert_eq!(delta.temperature, Some(expected));
+            prop_assert!(delta.wind.is_none());
+            prop_assert!(delta.climate.is_none());
+        }
+
+        #[test]
+        fn set_climate_clamps_across_range(raw in any::<i32>()) {
+            let (result, delta) = with_environment_context(EnvironmentSettings::new(0), 0, || {
+                set_climate(&[Value::Int(raw)])?;
+                get_climate(&[])
+            });
+
+            let expected = raw.clamp(-50, 50);
+            prop_assert!(matches!(result, Ok(Value::Int(value)) if value == expected));
+            prop_assert_eq!(delta.climate, Some(expected));
+            prop_assert!(delta.wind.is_none());
+            prop_assert!(delta.temperature.is_none());
+        }
+    }
+
     #[test]
     fn add_effect_captures_initial_vars() {
         let state = empty_state();
