@@ -30,6 +30,8 @@ pub(crate) struct HostWorldObject {
     pub action_procedure: Option<String>,
     pub owner: i32,
     pub position: Vector2,
+    #[allow(dead_code)]
+    pub velocity: Vector2,
     pub vertices: Vec<ObjectVertex>,
     pub action_ticks: u32,
 }
@@ -43,6 +45,7 @@ impl HostWorldObject {
         action_procedure: Option<String>,
         owner: i32,
         position: Vector2,
+        velocity: Vector2,
         vertices: Vec<ObjectVertex>,
         action_ticks: u32,
     ) -> Self {
@@ -54,6 +57,7 @@ impl HostWorldObject {
             action_procedure,
             owner,
             position,
+            velocity,
             vertices,
             action_ticks,
         }
@@ -272,6 +276,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetComDir", get_com_dir);
     script.register_host_function("GetX", get_x);
     script.register_host_function("GetY", get_y);
+    script.register_host_function("SetPosition", set_position);
     script.register_host_function("SetOwner", set_owner);
     script.register_host_function("GetOwner", get_owner);
     script.register_host_function("SetObjectStatus", set_object_status);
@@ -309,6 +314,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub energy: i32,
     pub owner: i32,
     pub position: Vector2,
+    pub velocity: Vector2,
     pub effects: &'a [EffectState],
     pub action_name: String,
     pub action_ticks: u32,
@@ -327,6 +333,7 @@ impl<'a> HostObjectContext<'a> {
         energy: i32,
         owner: i32,
         position: Vector2,
+        velocity: Vector2,
         effects: &'a [EffectState],
         action_name: impl Into<String>,
         action_ticks: u32,
@@ -343,6 +350,7 @@ impl<'a> HostObjectContext<'a> {
             energy,
             owner,
             position,
+            velocity,
             effects,
             action_name: action_name.into(),
             action_ticks,
@@ -2404,6 +2412,152 @@ fn get_y(args: &[Value]) -> Result<Value, RuntimeError> {
     get_position_component(args, PositionComponent::Y)
 }
 
+fn apply_position_bounds(
+    desired: Vector2,
+    vertices: &[ObjectVertex],
+    landscape: Option<&Landscape>,
+) -> Vector2 {
+    let mut bounded = desired;
+    let Some(landscape) = landscape else {
+        return bounded;
+    };
+
+    let width = landscape.width() as i32;
+    if width > 0 {
+        let (mut min_allowed, mut max_allowed) = if vertices.is_empty() {
+            (0, width.saturating_sub(1))
+        } else {
+            vertices.iter().fold(
+                (i32::MIN, i32::MAX),
+                |(min_acc, max_acc), vertex| {
+                    (
+                        min_acc.max(-vertex.x),
+                        max_acc.min(width.saturating_sub(1).saturating_sub(vertex.x)),
+                    )
+                },
+            )
+        };
+
+        if min_allowed == i32::MIN {
+            min_allowed = 0;
+        }
+        if max_allowed == i32::MAX {
+            max_allowed = width.saturating_sub(1);
+        }
+
+        if min_allowed <= max_allowed {
+            bounded.x = bounded.x.clamp(min_allowed, max_allowed);
+        } else {
+            bounded.x = bounded.x.clamp(0, width.saturating_sub(1));
+        }
+    }
+
+    let min_y_allowed = if vertices.is_empty() {
+        0
+    } else {
+        vertices
+            .iter()
+            .map(|vertex| -vertex.y)
+            .max()
+            .unwrap_or(0)
+    };
+
+    let mut max_y_allowed = i32::MAX;
+    if vertices.is_empty() {
+        if let Some(surface_y) = landscape.surface_height(bounded.x) {
+            max_y_allowed = surface_y;
+        }
+    } else {
+        for vertex in vertices {
+            let world_x = bounded.x.saturating_add(vertex.x);
+            if let Some(surface_y) = landscape.surface_height(world_x) {
+                max_y_allowed = max_y_allowed.min(surface_y - vertex.y);
+            }
+        }
+    }
+
+    if max_y_allowed < min_y_allowed {
+        max_y_allowed = min_y_allowed;
+    }
+
+    bounded.y = bounded.y.clamp(min_y_allowed, max_y_allowed);
+    bounded
+}
+
+fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 2 {
+        return Err(RuntimeError::new(
+            "SetPosition expects at least 2 arguments: x, y",
+        ));
+    }
+
+    let x = value_to_i32(&args[0], "SetPosition", "x")?;
+    let y = value_to_i32(&args[1], "SetPosition", "y")?;
+
+    let mut index = 2;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        target_id = parse_object_reference_argument(arg, "SetPosition", "target")?;
+        index += 1;
+    }
+
+    let mut check_bounds = false;
+    if let Some(arg) = args.get(index) {
+        check_bounds = match arg {
+            Value::Bool(value) => *value,
+            Value::Int(value) => *value != 0,
+            Value::Nil => false,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "SetPosition: expected bool for check_bounds, got {}",
+                    other.type_name()
+                )))
+            }
+        };
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetPosition: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetPosition requires an active engine context"))?;
+
+        let landscape_snapshot = if check_bounds {
+            context.world.landscape_ref().cloned()
+        } else {
+            None
+        };
+
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        let mut position = Vector2::new(x, y);
+        if check_bounds {
+            let vertices: Vec<ObjectVertex> = object.vertices().to_vec();
+            position = apply_position_bounds(position, &vertices, landscape_snapshot.as_ref());
+        }
+
+        object.set_position(position);
+        Ok(Value::Bool(true))
+    })
+}
+
 fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() {
         return Err(RuntimeError::new(
@@ -2869,6 +3023,7 @@ impl EffectHostContext {
                 energy,
                 owner,
                 position,
+                velocity,
                 effects,
                 action_name,
                 action_ticks,
@@ -2879,15 +3034,16 @@ impl EffectHostContext {
                 action_target2,
                 vertices,
             } = ctx;
-            ObjectScopeContext::new(
-                id,
-                status,
-                energy,
-                owner,
-                position,
-                effects.to_vec(),
-                action_library,
-                action_name,
+                ObjectScopeContext::new(
+                    id,
+                    status,
+                    energy,
+                    owner,
+                    position,
+                    velocity,
+                    effects.to_vec(),
+                    action_library,
+                    action_name,
                 action_ticks,
                 direction,
                 command_direction,
@@ -3114,6 +3270,8 @@ struct ObjectScopeContext {
     current_direction: Direction,
     current_command_direction: CommandDirection,
     current_position: Vector2,
+    #[allow(dead_code)]
+    current_velocity: Vector2,
     vertices: Vec<ObjectVertex>,
 }
 
@@ -3124,6 +3282,7 @@ impl ObjectScopeContext {
         energy: i32,
         owner: i32,
         position: Vector2,
+        velocity: Vector2,
         effects: Vec<EffectState>,
         action_library: ActionLibrary,
         action_name: String,
@@ -3155,6 +3314,7 @@ impl ObjectScopeContext {
             current_direction: direction,
             current_command_direction: command_direction,
             current_position: position,
+            current_velocity: velocity,
             vertices,
         }
     }
@@ -3306,6 +3466,14 @@ impl ObjectScopeContext {
             .unwrap_or(self.current_position)
     }
 
+    fn set_position(&mut self, position: Vector2) {
+        if self.effective_position() == position && self.pending_update.position.is_none() {
+            return;
+        }
+        self.current_position = position;
+        self.pending_update.position = Some(position);
+    }
+
     fn vertices(&self) -> &[ObjectVertex] {
         if let Some(vertices) = self.pending_update.vertices.as_ref() {
             vertices
@@ -3379,6 +3547,7 @@ mod tests {
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
+                Vector2::ZERO,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3708,6 +3877,7 @@ mod tests {
                 100,
                 OWNER_NONE,
                 Vector2::ZERO,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 0,
@@ -3733,6 +3903,7 @@ mod tests {
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
+                Vector2::ZERO,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3779,6 +3950,7 @@ mod tests {
                 100,
                 OWNER_NONE,
                 Vector2::ZERO,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 0,
@@ -3817,6 +3989,7 @@ mod tests {
                 100,
                 OWNER_NONE,
                 Vector2::ZERO,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 0,
@@ -3851,6 +4024,7 @@ mod tests {
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
+                Vector2::ZERO,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3891,6 +4065,7 @@ mod tests {
                 100,
                 OWNER_NONE,
                 Vector2::ZERO,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 0,
@@ -3922,6 +4097,7 @@ mod tests {
             None,
             Some("swim".to_string()),
             OWNER_NONE,
+            Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
             0,
@@ -3959,6 +4135,7 @@ mod tests {
             None,
             OWNER_NONE,
             Vector2::ZERO,
+            Vector2::ZERO,
             Vec::new(),
             0,
         );
@@ -3982,6 +4159,7 @@ mod tests {
             None,
             None,
             OWNER_NONE,
+            Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
             0,
@@ -4018,6 +4196,7 @@ mod tests {
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
+                Vector2::ZERO,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -4063,6 +4242,7 @@ mod tests {
                 100,
                 OWNER_NONE,
                 Vector2::ZERO,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 5,
@@ -4098,6 +4278,7 @@ mod tests {
             None,
             OWNER_NONE,
             Vector2::ZERO,
+            Vector2::ZERO,
             Vec::new(),
             12,
         );
@@ -4127,6 +4308,7 @@ mod tests {
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
+                Vector2::ZERO,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -4160,6 +4342,7 @@ mod tests {
                 100,
                 OWNER_NONE,
                 Vector2::ZERO,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 0,
@@ -4182,6 +4365,7 @@ mod tests {
                 100,
                 OWNER_NONE,
                 Vector2::ZERO,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 0,
@@ -4203,6 +4387,7 @@ mod tests {
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
+                Vector2::ZERO,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -4228,6 +4413,7 @@ mod tests {
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
+                Vector2::ZERO,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -4257,6 +4443,7 @@ mod tests {
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
+                Vector2::ZERO,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -4291,6 +4478,7 @@ mod tests {
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
+                Vector2::ZERO,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -4386,6 +4574,7 @@ mod tests {
             None,
             OWNER_NONE,
             Vector2::ZERO,
+            Vector2::ZERO,
             Vec::new(),
             0,
         );
@@ -4471,6 +4660,7 @@ mod tests {
                 100,
                 OWNER_NONE,
                 Vector2::new(42, -7),
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 0,
@@ -4499,6 +4689,7 @@ mod tests {
                 100,
                 OWNER_NONE,
                 Vector2::new(-5, 63),
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 0,
@@ -4528,6 +4719,7 @@ mod tests {
             None,
             OWNER_NONE,
             Vector2::new(-12, 34),
+            Vector2::ZERO,
             Vec::new(),
             0,
         );
@@ -4546,6 +4738,72 @@ mod tests {
             with_effect_context(None, &[], HostWorldContext::default(), || get_y(&args));
         let value = result.expect("GetY handles missing target");
         assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn set_position_records_object_update() {
+        let args = [Value::Int(15), Value::Int(27)];
+        let (result, outcome) = with_object_host_context(|| set_position(&args));
+
+        let value = result.expect("SetPosition succeeds");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("position update recorded");
+        assert_eq!(update.position, Some(Vector2::new(15, 27)));
+    }
+
+    #[test]
+    fn set_position_respects_target_filter() {
+        let mut target = HashMap::new();
+        target.insert("id".into(), Value::Int(42));
+        let args = [
+            Value::Int(5),
+            Value::Int(6),
+            Value::Proplist(target),
+        ];
+        let (result, outcome) = with_object_host_context(|| set_position(&args));
+
+        let value = result.expect("SetPosition returns bool");
+        assert_eq!(value, Value::Bool(false));
+        assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
+    fn set_position_clamps_coordinates_when_requested() {
+        let landscape = Landscape::flat(4, 6);
+        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape));
+        let args = [
+            Value::Int(10),
+            Value::Int(20),
+            Value::Nil,
+            Value::Bool(true),
+        ];
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[ObjectVertex::new(0, 0)],
+            )),
+            &[],
+            world,
+            || set_position(&args),
+        );
+
+        let value = result.expect("SetPosition returns bool");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("position update recorded");
+        assert_eq!(update.position, Some(Vector2::new(3, 6)));
     }
 
     #[test]
@@ -4826,6 +5084,7 @@ mod tests {
                 100,
                 5,
                 Vector2::ZERO,
+                Vector2::ZERO,
                 &[],
                 "Idle",
                 0,
@@ -4855,6 +5114,7 @@ mod tests {
             None,
             42,
             Vector2::ZERO,
+            Vector2::ZERO,
             Vec::new(),
             0,
         )]);
@@ -4873,6 +5133,7 @@ mod tests {
                 ObjectStatus::Normal,
                 100,
                 1,
+                Vector2::ZERO,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -4908,6 +5169,7 @@ mod tests {
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
+                Vector2::ZERO,
                 Vector2::ZERO,
                 &[],
                 "Idle",
