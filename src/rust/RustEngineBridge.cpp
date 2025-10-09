@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <exception>
@@ -67,6 +68,7 @@ struct SnapshotEntry {
     std::string action;
     std::vector<LcEngineEffectSnapshot> effects;
     std::vector<std::string> effect_names;
+    std::vector<LcEngineObjectVertexSnapshot> vertices;
     std::vector<uint64_t> contents;
 };
 
@@ -299,6 +301,18 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
             entry.contents.push_back(static_cast<uint64_t>(contained->Number));
         }
 
+        if (object->Shape.VtxNum > 0) {
+            entry.vertices.reserve(object->Shape.VtxNum);
+            for (int32_t vertex_index = 0; vertex_index < object->Shape.VtxNum; ++vertex_index) {
+                LcEngineObjectVertexSnapshot vertex{};
+                vertex.x = object->Shape.VtxX[vertex_index];
+                vertex.y = object->Shape.VtxY[vertex_index];
+                vertex.cnat = static_cast<uint32_t>(object->Shape.VtxCNAT[vertex_index]);
+                vertex.friction = object->Shape.VtxFriction[vertex_index];
+                entry.vertices.push_back(vertex);
+            }
+        }
+
         if (object->pEffects) {
             size_t effect_count = 0;
             for (C4Effect *effect = object->pEffects; effect; effect = effect->pNext) {
@@ -346,6 +360,8 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game) {
         entry.snapshot.action_name = entry.action.c_str();
         entry.snapshot.effects = entry.effects.empty() ? nullptr : entry.effects.data();
         entry.snapshot.effect_count = entry.effects.size();
+        entry.snapshot.vertices = entry.vertices.empty() ? nullptr : entry.vertices.data();
+        entry.snapshot.vertex_count = entry.vertices.size();
         entry.snapshot.contents = entry.contents.empty() ? nullptr : entry.contents.data();
         entry.snapshot.contents_count = entry.contents.size();
         buffer.raw.push_back(entry.snapshot);

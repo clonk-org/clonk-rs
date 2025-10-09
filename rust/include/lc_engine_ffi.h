@@ -21,7 +21,7 @@ typedef struct LcEngineEffectSnapshot {
 
 typedef struct LcEngineParticleSnapshot {
     const char *definition_id;
-    float x;
+   float x;
     float y;
     float xdir;
     float ydir;
@@ -32,6 +32,13 @@ typedef struct LcEngineParticleSnapshot {
     bool has_owner;
     uint64_t owner_id;
 } LcEngineParticleSnapshot;
+
+typedef struct LcEngineObjectVertexSnapshot {
+    int32_t x;
+    int32_t y;
+    uint32_t cnat;
+    int32_t friction;
+} LcEngineObjectVertexSnapshot;
 
 typedef struct LcEngineObjectSnapshot {
     uint64_t id;
@@ -50,6 +57,8 @@ typedef struct LcEngineObjectSnapshot {
     int32_t command_direction;
     const LcEngineEffectSnapshot *effects;
     size_t effect_count;
+    const LcEngineObjectVertexSnapshot *vertices;
+    size_t vertex_count;
     bool has_container;
     uint64_t container_id;
     const uint64_t *contents;

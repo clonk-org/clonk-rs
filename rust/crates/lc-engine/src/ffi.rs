@@ -1,8 +1,8 @@
 use crate::{
     ActionState, CommandDirection, CrewRole, CrewSelectionState, Direction, EffectState, Engine,
     EngineState, EnvironmentFrame, FloatVector2, HudPlayerSnapshot, HudSnapshot, ObjectId,
-    ObjectSnapshot, ObjectStatus, ParticleLayer, ParticleSnapshot, Playback, Recorder, Recording,
-    Scenario, SimulationSnapshot, Vector2,
+    ObjectSnapshot, ObjectStatus, ObjectVertex, ParticleLayer, ParticleSnapshot, Playback,
+    Recorder, Recording, Scenario, SimulationSnapshot, Vector2,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -38,6 +38,14 @@ pub struct LcEngineParticleSnapshot {
 }
 
 #[repr(C)]
+pub struct LcEngineObjectVertexSnapshot {
+    pub x: i32,
+    pub y: i32,
+    pub cnat: u32,
+    pub friction: i32,
+}
+
+#[repr(C)]
 pub struct LcEngineObjectSnapshot {
     pub id: u64,
     pub definition_id: *const c_char,
@@ -55,6 +63,8 @@ pub struct LcEngineObjectSnapshot {
     pub command_direction: i32,
     pub effects: *const LcEngineEffectSnapshot,
     pub effect_count: usize,
+    pub vertices: *const LcEngineObjectVertexSnapshot,
+    pub vertex_count: usize,
     pub has_container: bool,
     pub container_id: u64,
     pub contents: *const u64,
@@ -223,6 +233,22 @@ unsafe fn make_snapshot(
             effects.push(effect);
         }
 
+        let vertices_slice: &[LcEngineObjectVertexSnapshot] = if entry.vertex_count == 0 {
+            &[]
+        } else if entry.vertices.is_null() {
+            return None;
+        } else {
+            slice::from_raw_parts(entry.vertices, entry.vertex_count)
+        };
+        let mut vertices = Vec::with_capacity(vertices_slice.len());
+        for vertex_entry in vertices_slice {
+            vertices.push(
+                ObjectVertex::new(vertex_entry.x, vertex_entry.y)
+                    .with_cnat(vertex_entry.cnat)
+                    .with_friction(vertex_entry.friction),
+            );
+        }
+
         let container = if entry.has_container {
             Some(ObjectId::new(entry.container_id))
         } else {
@@ -249,7 +275,7 @@ unsafe fn make_snapshot(
             command_direction,
             action_procedure: None,
             effects,
-            vertices: Vec::new(),
+            vertices,
             container,
             contents,
             status: ObjectStatus::Normal,
@@ -555,6 +581,12 @@ fn runtime_snapshot_mismatch(
                 }
                 if expected_object.effects != actual_object.effects {
                     problems.push(format!("object {} effects differed", id));
+                }
+                if expected_object.vertices != actual_object.vertices {
+                    problems.push(format!(
+                        "object {} vertices mismatch (expected {:?}, got {:?})",
+                        id, expected_object.vertices, actual_object.vertices
+                    ));
                 }
             }
             None => problems.push(format!("missing object {}", id)),
@@ -1375,6 +1407,8 @@ mod tests {
             command_direction: 3,
             effects: &effect_snapshot,
             effect_count: 1,
+            vertices: ptr::null(),
+            vertex_count: 0,
             has_container: false,
             container_id: 0,
             contents: ptr::null(),
@@ -1417,6 +1451,87 @@ mod tests {
         assert_eq!(effect.priority, 100);
         assert_eq!(effect.interval, 2);
         assert_eq!(effect.timer, 1);
+    }
+
+    #[test]
+    fn make_snapshot_collects_vertices() {
+        let definition = CString::new("Clonk").unwrap();
+        let action = CString::new("Walk").unwrap();
+        let vertices = [
+            LcEngineObjectVertexSnapshot {
+                x: 1,
+                y: 2,
+                cnat: 3,
+                friction: 4,
+            },
+            LcEngineObjectVertexSnapshot {
+                x: -5,
+                y: 6,
+                cnat: 7,
+                friction: -2,
+            },
+        ];
+
+        let object = LcEngineObjectSnapshot {
+            id: 99,
+            definition_id: definition.as_ptr(),
+            position_x: 0,
+            position_y: 0,
+            velocity_x: 0,
+            velocity_y: 0,
+            energy: 0,
+            owner: -1,
+            crew_member: false,
+            action_name: action.as_ptr(),
+            action_phase: 0,
+            action_ticks: 0,
+            direction: 0,
+            command_direction: 0,
+            effects: ptr::null(),
+            effect_count: 0,
+            vertices: vertices.as_ptr(),
+            vertex_count: vertices.len(),
+            has_container: false,
+            container_id: 0,
+            contents: ptr::null(),
+            contents_len: 0,
+        };
+
+        let snapshot = unsafe {
+            call_make_snapshot(
+                1,
+                &object,
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+
+        assert_eq!(snapshot.objects.len(), 1);
+        let recorded = &snapshot.objects[0];
+        assert_eq!(recorded.vertices.len(), 2);
+        assert_eq!(recorded.vertices[0].x, 1);
+        assert_eq!(recorded.vertices[0].y, 2);
+        assert_eq!(recorded.vertices[0].cnat, 3);
+        assert_eq!(recorded.vertices[0].friction, 4);
+        assert_eq!(recorded.vertices[1].x, -5);
+        assert_eq!(recorded.vertices[1].y, 6);
+        assert_eq!(recorded.vertices[1].cnat, 7);
+        assert_eq!(recorded.vertices[1].friction, -2);
     }
 
     #[test]
@@ -1550,6 +1665,8 @@ mod tests {
             command_direction: 0,
             effects: ptr::null(),
             effect_count: 0,
+            vertices: ptr::null(),
+            vertex_count: 0,
             has_container: false,
             container_id: 0,
             contents: container_contents.as_ptr(),
@@ -1573,6 +1690,8 @@ mod tests {
             command_direction: 0,
             effects: ptr::null(),
             effect_count: 0,
+            vertices: ptr::null(),
+            vertex_count: 0,
             has_container: true,
             container_id: 1,
             contents: ptr::null(),

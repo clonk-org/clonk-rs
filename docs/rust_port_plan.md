@@ -24,7 +24,7 @@
 - Record canonical replays and savegames from C++ and ensure the Rust engine can import them losslessly. (`LC_RUST_ENGINE_RUNTIME_STATE` now captures runtime state JSON on shutdown and lc-engine provides export/import FFI with round-trip tests.)
   - Extend automated diff tooling to compare network traffic, HUD buffers, and rendered surfaces frame-by-frame.
 - **Phase 1 · Simulation Authority Flip**
-  - Close feature gaps in `lc-engine` (all action procedures, crew AI, physics edge cases, object enumerators, global effects) until the C++ loop can defer object ticking to Rust.
+  - Close feature gaps in `lc-engine` (all action procedures, crew AI, physics edge cases, object enumerators, global effects) until the C++ loop can defer object ticking to Rust. (Parity snapshots now include per-vertex collision metadata so physics edge cases surface identically in Rust and C++.)
   - Expose every required engine/AUL entry point through FFI so C++ only marshals inputs/outputs while Rust advances world state deterministically.
   - Promote the Rust VM to the primary script runtime, running scenario/system scripts in Rust while shadow-running the C++ VM for audit until clean.
 - **Phase 2 · Frontend and Platform Port**
