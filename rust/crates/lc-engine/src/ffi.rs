@@ -1,9 +1,13 @@
 use crate::{
-    control::{parse_control_ini, ControlPacket},
-    ActionState, CommandDirection, CrewRole, CrewSelectionState, Direction, EffectState, Engine,
-    EngineState, EnvironmentFrame, FloatVector2, HudPlayerSnapshot, HudSnapshot, ObjectId,
-    ObjectSnapshot, ObjectStatus, ObjectVertex, ParticleLayer, ParticleSnapshot, Playback,
-    Recorder, Recording, Scenario, SimulationSnapshot, SurfaceSnapshot, Vector2,
+    control::{
+        interpret_player_control_command, parse_control_ini, ControlButton, ControlEvent,
+        ControlPacket, PlayerControlData,
+    },
+    ActionState, CommandDirection, CrewCommandTarget, CrewRole, CrewSelectionState, Direction,
+    EffectState, Engine, EngineError, EngineState, EnvironmentFrame, FloatVector2,
+    HudPlayerSnapshot, HudSnapshot, ObjectId, ObjectSnapshot, ObjectStatus, ObjectUpdate,
+    ObjectVertex, ParticleLayer, ParticleSnapshot, Playback, Recorder, Recording, Scenario,
+    SimulationSnapshot, SurfaceSnapshot, Vector2,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -126,6 +130,7 @@ pub struct RuntimeHandle {
     last_frame: u64,
     control_log_strings: BTreeMap<u64, Vec<String>>,
     control_packets: BTreeMap<u64, Vec<ControlPacket>>,
+    player_controls: HashMap<i32, PlayerControlState>,
 }
 
 impl RecorderHandle {
@@ -142,6 +147,90 @@ impl PlaybackHandle {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PlayerControlState {
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
+    last_direction: CommandDirection,
+}
+
+impl Default for PlayerControlState {
+    fn default() -> Self {
+        Self {
+            left: false,
+            right: false,
+            up: false,
+            down: false,
+            last_direction: CommandDirection::Stop,
+        }
+    }
+}
+
+impl PlayerControlState {
+    fn press(&mut self, button: ControlButton) -> Option<CommandDirection> {
+        self.set_button(button, true)
+    }
+
+    fn release(&mut self, button: ControlButton) -> Option<CommandDirection> {
+        self.set_button(button, false)
+    }
+
+    fn clear(&mut self) -> Option<CommandDirection> {
+        self.left = false;
+        self.right = false;
+        self.up = false;
+        self.down = false;
+        self.update_direction(CommandDirection::Stop)
+    }
+
+    fn set_button(&mut self, button: ControlButton, state: bool) -> Option<CommandDirection> {
+        match button {
+            ControlButton::Left => self.left = state,
+            ControlButton::Right => self.right = state,
+            ControlButton::Up => self.up = state,
+            ControlButton::Down => self.down = state,
+        }
+        let direction = self.compute_direction();
+        self.update_direction(direction)
+    }
+
+    fn compute_direction(&self) -> CommandDirection {
+        let horizontal = match (self.left, self.right) {
+            (true, false) => -1,
+            (false, true) => 1,
+            _ => 0,
+        };
+        let vertical = match (self.up, self.down) {
+            (true, false) => -1,
+            (false, true) => 1,
+            _ => 0,
+        };
+        match (horizontal, vertical) {
+            (-1, -1) => CommandDirection::UpLeft,
+            (-1, 0) => CommandDirection::Left,
+            (-1, 1) => CommandDirection::DownLeft,
+            (0, -1) => CommandDirection::Up,
+            (0, 0) => CommandDirection::Stop,
+            (0, 1) => CommandDirection::Down,
+            (1, -1) => CommandDirection::UpRight,
+            (1, 0) => CommandDirection::Right,
+            (1, 1) => CommandDirection::DownRight,
+            _ => CommandDirection::Stop,
+        }
+    }
+
+    fn update_direction(&mut self, direction: CommandDirection) -> Option<CommandDirection> {
+        if direction != self.last_direction {
+            self.last_direction = direction;
+            Some(direction)
+        } else {
+            None
+        }
+    }
+}
+
 impl RuntimeHandle {
     fn new() -> Self {
         Self {
@@ -151,7 +240,77 @@ impl RuntimeHandle {
             last_frame: 0,
             control_log_strings: BTreeMap::new(),
             control_packets: BTreeMap::new(),
+            player_controls: HashMap::new(),
         }
+    }
+
+    fn apply_control_packets_for_frame(&mut self, frame: u64) -> Result<(), String> {
+        let packets = match self.control_packets.remove(&frame) {
+            Some(packets) => packets,
+            None => return Ok(()),
+        };
+        for packet in packets {
+            if let ControlPacket::PlayerControl(data) = packet {
+                self.apply_player_control(&data)
+                    .map_err(|error| format!("{error} (player {})", data.player))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_player_control(&mut self, data: &PlayerControlData) -> Result<(), String> {
+        let player = data.player;
+        if player < 0 {
+            // Ignore observers or invalid players.
+            return Ok(());
+        }
+        let event = match interpret_player_control_command(data.command) {
+            Some(event) => event,
+            None => return Ok(()),
+        };
+        let state = self.player_controls.entry(player).or_default();
+        let maybe_direction = match event {
+            ControlEvent::Press(button) => state.press(button),
+            ControlEvent::Release(button) => state.release(button),
+            ControlEvent::ClearPressed => state.clear(),
+        };
+        if let Some(direction) = maybe_direction {
+            self.set_player_command_direction(player, direction)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn set_player_command_direction(
+        &mut self,
+        owner: i32,
+        direction: CommandDirection,
+    ) -> Result<(), EngineError> {
+        self.ensure_cursor(owner)?;
+        let update = ObjectUpdate::new().with_command_direction(direction);
+        match self
+            .engine
+            .apply_command(owner, CrewCommandTarget::cursor(), update.clone())
+        {
+            Ok(()) => Ok(()),
+            Err(EngineError::CrewSelection { .. }) => {
+                self.engine
+                    .apply_command(owner, CrewCommandTarget::selection(), update)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn ensure_cursor(&mut self, owner: i32) -> Result<(), EngineError> {
+        if self.engine.crew_cursor(owner).is_some() {
+            return Ok(());
+        }
+        let mut crew = self.engine.crew_members(owner);
+        crew.sort_by_key(|id| id.as_u64());
+        if let Some(first) = crew.first().copied() {
+            self.engine.set_crew_cursor(owner, Some(first))?;
+        }
+        Ok(())
     }
 }
 
@@ -727,6 +886,7 @@ fn load_scenario_into_runtime(
     runtime.scenario_path = Some(path.clone());
     runtime.control_log_strings.clear();
     runtime.control_packets.clear();
+    runtime.player_controls.clear();
     Ok(())
 }
 
@@ -846,6 +1006,7 @@ pub extern "C" fn lc_engine_runtime_reset(
         runtime.last_frame = runtime.engine.frame();
         runtime.control_log_strings.clear();
         runtime.control_packets.clear();
+        runtime.player_controls.clear();
         return true;
     };
 
@@ -922,6 +1083,16 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     };
 
     if frame == 0 && runtime.engine.frame() == 0 {
+        if let Err(message) = runtime.apply_control_packets_for_frame(0) {
+            set_error(
+                error_out,
+                format!("failed to apply control packets for frame 0: {message}"),
+            );
+            return false;
+        }
+    }
+
+    if frame == 0 && runtime.engine.frame() == 0 {
         let mut expected = runtime.engine.snapshot();
         if let Some(entries) = runtime.control_log_strings.get(&frame) {
             expected.controls = entries.clone();
@@ -948,6 +1119,17 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     }
 
     while runtime.engine.frame() < frame {
+        let next_frame = runtime.engine.frame().saturating_add(1);
+        if let Err(message) = runtime.apply_control_packets_for_frame(next_frame) {
+            set_error(
+                error_out,
+                format!(
+                    "failed to apply control packets for frame {}: {}",
+                    next_frame, message
+                ),
+            );
+            return false;
+        }
         if let Err(error) = runtime.engine.tick() {
             set_error(error_out, format!("engine tick failed: {error}"));
             return false;
@@ -1140,6 +1322,7 @@ pub extern "C" fn lc_engine_runtime_import_state_json(
     runtime.last_frame = runtime.engine.frame();
     runtime.control_log_strings.clear();
     runtime.control_packets.clear();
+    runtime.player_controls.clear();
 
     true
 }
@@ -1398,7 +1581,10 @@ pub extern "C" fn lc_engine_string_free(value: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Definition, SpawnConfig, Vector2};
+    use crate::{
+        control::{COM_RELEASE_OFFSET, COM_RIGHT},
+        Definition, SpawnConfig, Vector2,
+    };
     use serde_json::Value;
     use std::{ffi::CString, ptr};
 
@@ -1980,5 +2166,63 @@ global func Step(state, frame, random)
         let roundtrip_value: Value =
             serde_json::from_str(&roundtrip_json).expect("roundtrip JSON parses");
         assert_eq!(roundtrip_value, original_value);
+    }
+
+    #[test]
+    fn runtime_control_application_updates_direction() {
+        let mut runtime = RuntimeHandle::new();
+        let mut definition = Definition::from_script("Test", "Test", "").expect("script compiles");
+        definition.set_crew_member(true);
+        runtime
+            .engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let crew = runtime
+            .engine
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_owner(0)
+                    .with_crew_member(true),
+            )
+            .expect("spawn succeeds");
+
+        runtime.control_packets.insert(
+            1,
+            vec![ControlPacket::PlayerControl(PlayerControlData {
+                player: 0,
+                command: i32::from(COM_RIGHT),
+                data: 0,
+                by_client: 0,
+            })],
+        );
+
+        runtime
+            .apply_control_packets_for_frame(1)
+            .expect("controls apply");
+        let snapshot = runtime
+            .engine
+            .object_snapshot(crew)
+            .expect("object snapshot");
+        assert_eq!(snapshot.command_direction, CommandDirection::Right);
+
+        runtime.control_packets.insert(
+            2,
+            vec![ControlPacket::PlayerControl(PlayerControlData {
+                player: 0,
+                command: i32::from(COM_RIGHT) + i32::from(COM_RELEASE_OFFSET),
+                data: 0,
+                by_client: 0,
+            })],
+        );
+
+        runtime
+            .apply_control_packets_for_frame(2)
+            .expect("release apply");
+        let snapshot = runtime
+            .engine
+            .object_snapshot(crew)
+            .expect("object snapshot");
+        assert_eq!(snapshot.command_direction, CommandDirection::Stop);
     }
 }

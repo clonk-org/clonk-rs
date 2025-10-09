@@ -39,6 +39,62 @@ pub struct PlayerControlData {
     pub by_client: i32,
 }
 
+pub const COM_SINGLE: u8 = 64;
+pub const COM_DOUBLE: u8 = 128;
+pub const COM_RELEASE_OFFSET: u8 = 16;
+
+pub const COM_LEFT: u8 = 1;
+pub const COM_RIGHT: u8 = 2;
+pub const COM_UP: u8 = 3;
+pub const COM_DOWN: u8 = 4;
+pub const COM_CLEAR_PRESSED_COMS: u8 = 61;
+
+pub const COM_RELEASE_FIRST: u8 = COM_LEFT + COM_RELEASE_OFFSET;
+pub const COM_RELEASE_LAST: u8 = 14 + COM_RELEASE_OFFSET;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlButton {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlEvent {
+    Press(ControlButton),
+    Release(ControlButton),
+    ClearPressed,
+}
+
+pub fn interpret_player_control_command(command: i32) -> Option<ControlEvent> {
+    if command == i32::from(COM_CLEAR_PRESSED_COMS) {
+        return Some(ControlEvent::ClearPressed);
+    }
+    if command < 0 || command > u8::MAX as i32 {
+        return None;
+    }
+    let mut raw = command as u8;
+    let is_release = raw >= COM_RELEASE_FIRST && raw <= COM_RELEASE_LAST;
+    if is_release {
+        raw = raw.saturating_sub(COM_RELEASE_OFFSET);
+    } else {
+        raw &= !(COM_SINGLE | COM_DOUBLE);
+    }
+    let button = match raw {
+        COM_LEFT => ControlButton::Left,
+        COM_RIGHT => ControlButton::Right,
+        COM_UP => ControlButton::Up,
+        COM_DOWN => ControlButton::Down,
+        _ => return None,
+    };
+    Some(if is_release {
+        ControlEvent::Release(button)
+    } else {
+        ControlEvent::Press(button)
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RawPacket {
     id: Option<u8>,
@@ -318,5 +374,33 @@ mod tests {
             }
             _ => panic!("expected unknown packet"),
         }
+    }
+
+    #[test]
+    fn interprets_press_and_release_events() {
+        let press =
+            interpret_player_control_command(i32::from(COM_LEFT)).expect("press event detected");
+        assert_eq!(press, ControlEvent::Press(ControlButton::Left));
+
+        let release =
+            interpret_player_control_command(i32::from(COM_LEFT) + i32::from(COM_RELEASE_OFFSET))
+                .expect("release event detected");
+        assert_eq!(release, ControlEvent::Release(ControlButton::Left));
+    }
+
+    #[test]
+    fn interprets_clear_pressed_coms() {
+        let event =
+            interpret_player_control_command(i32::from(COM_CLEAR_PRESSED_COMS)).expect("event");
+        assert_eq!(event, ControlEvent::ClearPressed);
+    }
+
+    #[test]
+    fn ignores_unhandled_commands() {
+        assert!(interpret_player_control_command(999).is_none());
+        assert!(interpret_player_control_command(-5).is_none());
+
+        // Menu commands should be ignored.
+        assert!(interpret_player_control_command(38).is_none());
     }
 }
