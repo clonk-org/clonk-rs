@@ -7,9 +7,9 @@ use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::{
     ActionLibrary, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, Direction,
     EnvironmentSettings, FloatVector2, Landscape, ObjectId, ObjectStatus, ObjectUpdate,
-    ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, QueuedCommand,
-    SpawnConfig, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT,
-    CNAT_TOP, OWNER_NONE,
+    ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PhysicsSettings,
+    QueuedCommand, SpawnConfig, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION,
+    CNAT_RIGHT, CNAT_TOP, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -19,6 +19,9 @@ thread_local! {
     static HOST_CONTEXT: RefCell<Option<EffectHostContext>> = const { RefCell::new(None) };
     static RANDOM_CONTEXT: RefCell<Option<Rc<RandomContext>>> = const { RefCell::new(None) };
     static ENVIRONMENT_CONTEXT: RefCell<Option<Rc<EnvironmentContext>>> = const {
+        RefCell::new(None)
+    };
+    static PHYSICS_CONTEXT: RefCell<Option<Rc<PhysicsContext>>> = const {
         RefCell::new(None)
     };
 }
@@ -749,6 +752,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetEnergy", get_energy);
     script.register_host_function("DoEnergy", do_energy);
     script.register_host_function("Random", random);
+    script.register_host_function("SetGravity", set_gravity);
+    script.register_host_function("GetGravity", get_gravity);
     script.register_host_function("SetWind", set_wind);
     script.register_host_function("GetWind", get_wind);
     script.register_host_function("SetTemperature", set_temperature);
@@ -834,6 +839,99 @@ impl<'a> HostObjectContext<'a> {
             vertices,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PhysicsDelta {
+    pub gravity: Option<i32>,
+}
+
+impl PhysicsDelta {
+    pub fn is_empty(&self) -> bool {
+        self.gravity.is_none()
+    }
+
+    pub fn apply(&self, physics: &mut PhysicsSettings) {
+        if let Some(gravity) = self.gravity {
+            physics.gravity = gravity.clamp(-300, 300);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PhysicsContext {
+    settings: RefCell<PhysicsSettings>,
+    pending: RefCell<PhysicsDelta>,
+}
+
+impl PhysicsContext {
+    fn new(settings: PhysicsSettings) -> Self {
+        Self {
+            settings: RefCell::new(settings),
+            pending: RefCell::new(PhysicsDelta::default()),
+        }
+    }
+
+    fn set_gravity(&self, gravity: i32) {
+        let clamped = gravity.clamp(-300, 300);
+        self.settings.borrow_mut().gravity = clamped;
+        self.pending.borrow_mut().gravity = Some(clamped);
+    }
+
+    fn gravity(&self) -> i32 {
+        self.settings.borrow().gravity
+    }
+
+    fn into_delta(self) -> PhysicsDelta {
+        self.pending.into_inner()
+    }
+}
+
+pub(crate) struct PhysicsContextGuard {
+    context: Option<Rc<PhysicsContext>>,
+}
+
+impl PhysicsContextGuard {
+    pub fn finish(mut self) -> PhysicsDelta {
+        let context = self
+            .context
+            .take()
+            .expect("physics context already consumed");
+        PHYSICS_CONTEXT.with(|cell| {
+            let stored = cell
+                .borrow_mut()
+                .take()
+                .expect("physics context must be present");
+            debug_assert!(Rc::ptr_eq(&stored, &context));
+        });
+        Rc::try_unwrap(context)
+            .expect("physics context still referenced")
+            .into_delta()
+    }
+}
+
+impl Drop for PhysicsContextGuard {
+    fn drop(&mut self) {
+        if self.context.is_some() {
+            PHYSICS_CONTEXT.with(|cell| {
+                cell.borrow_mut().take();
+            });
+        }
+    }
+}
+
+pub(crate) fn enter_physics_context(settings: PhysicsSettings) -> PhysicsContextGuard {
+    PHYSICS_CONTEXT.with(|cell| {
+        assert!(
+            cell.borrow().is_none(),
+            "nested physics contexts are not supported",
+        );
+        let context = Rc::new(PhysicsContext::new(settings));
+        *cell.borrow_mut() = Some(context.clone());
+        PhysicsContextGuard {
+            context: Some(context),
+        }
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1002,6 +1100,7 @@ pub(crate) struct EffectContextOutcome {
     pub object_commands: Vec<QueuedCommand>,
     pub destroy_object: bool,
     pub environment: Option<EnvironmentDelta>,
+    pub physics: Option<PhysicsDelta>,
     pub spawns: Vec<SpawnConfig>,
     pub particles: Vec<ParticleCommand>,
     pub next_object_id: u64,
@@ -1015,6 +1114,7 @@ impl EffectContextOutcome {
         object_commands: Vec<QueuedCommand>,
         destroy_object: bool,
         environment: Option<EnvironmentDelta>,
+        physics: Option<PhysicsDelta>,
         spawns: Vec<SpawnConfig>,
         next_object_id: u64,
     ) -> Self {
@@ -1025,6 +1125,7 @@ impl EffectContextOutcome {
             object_commands,
             destroy_object,
             environment,
+            physics,
             spawns,
             particles: Vec::new(),
             next_object_id,
@@ -1039,6 +1140,7 @@ impl EffectContextOutcome {
             object_commands: Vec::new(),
             destroy_object: false,
             environment: None,
+            physics: None,
             spawns: Vec::new(),
             particles: Vec::new(),
             next_object_id,
@@ -1604,6 +1706,50 @@ fn random(args: &[Value]) -> Result<Value, RuntimeError> {
         let upper = range as u32;
         let value = rng.gen_range(0..upper) as i32;
         Ok(Value::Int(value))
+    })
+}
+
+fn set_gravity(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new("SetGravity expects 1 argument: gravity"));
+    }
+
+    let gravity = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetGravity: expected int or nil for gravity, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    PHYSICS_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("SetGravity requires an active engine context"))?
+            .clone();
+        context.set_gravity(gravity);
+        Ok(Value::Nil)
+    })
+}
+
+fn get_gravity(args: &[Value]) -> Result<Value, RuntimeError> {
+    if !args.is_empty() {
+        return Err(RuntimeError::new(
+            "GetGravity does not accept any arguments",
+        ));
+    }
+
+    PHYSICS_CONTEXT.with(|cell| {
+        let context = cell
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("GetGravity requires an active engine context"))?
+            .clone();
+        Ok(Value::Int(context.gravity()))
     })
 }
 
@@ -4513,6 +4659,7 @@ impl EffectHostContext {
             object_commands,
             destroy,
             None,
+            None,
             self.pending_spawns,
             self.next_object_id,
         );
@@ -5061,6 +5208,19 @@ mod tests {
         (result, delta)
     }
 
+    fn with_physics_context<F, T>(
+        settings: PhysicsSettings,
+        func: F,
+    ) -> (Result<T, RuntimeError>, PhysicsDelta)
+    where
+        F: FnOnce() -> Result<T, RuntimeError>,
+    {
+        let guard = enter_physics_context(settings);
+        let result = func();
+        let delta = guard.finish();
+        (result, delta)
+    }
+
     #[test]
     fn add_effect_registers_command_and_updates_view() {
         let state = empty_state();
@@ -5115,6 +5275,35 @@ mod tests {
             }
             other => panic!("unexpected command: {:?}", other),
         }
+    }
+
+    #[test]
+    fn set_gravity_records_physics_update() {
+        let (result, delta) =
+            with_physics_context(PhysicsSettings::default(), || set_gravity(&[Value::Int(5)]));
+        let value = result.expect("SetGravity succeeds");
+        assert_eq!(value, Value::Nil);
+        assert_eq!(delta.gravity, Some(5));
+    }
+
+    #[test]
+    fn set_gravity_clamps_bounds() {
+        let (_, delta) = with_physics_context(PhysicsSettings::default(), || {
+            set_gravity(&[Value::Int(400)])
+        });
+        assert_eq!(delta.gravity, Some(300));
+        let (_, delta) = with_physics_context(PhysicsSettings::default(), || {
+            set_gravity(&[Value::Int(-500)])
+        });
+        assert_eq!(delta.gravity, Some(-300));
+    }
+
+    #[test]
+    fn get_gravity_returns_current_value() {
+        let settings = PhysicsSettings::new(6, 20, -30);
+        let (result, _) = with_physics_context(settings, || get_gravity(&[]));
+        let value = result.expect("GetGravity succeeds");
+        assert_eq!(value, Value::Int(6));
     }
 
     #[test]

@@ -17,8 +17,8 @@ pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
 
 use compat::{
-    enter_environment_context, enter_random_context, EffectContextOutcome, EnvironmentDelta,
-    HostWorldContext, HostWorldObject,
+    enter_environment_context, enter_physics_context, enter_random_context, EffectContextOutcome,
+    EnvironmentDelta, HostWorldContext, HostWorldObject, PhysicsDelta,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -2241,6 +2241,7 @@ impl Definition {
         random: i32,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        physics: PhysicsSettings,
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
@@ -2252,6 +2253,7 @@ impl Definition {
             build_state_value(&self.id, object_id, state, &self.action_library),
             Value::Int(random),
         ];
+        let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
@@ -2281,7 +2283,8 @@ impl Definition {
             || self.script.call("Initialize", &args),
         );
         let rng = guard.finish();
-        let environment_delta = env_guard.finish();
+        let mut physics_delta = physics_guard.finish();
+        let mut environment_delta = env_guard.finish();
         let result = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: "Initialize",
@@ -2294,11 +2297,19 @@ impl Definition {
             object_update,
             object_commands,
             destroy_object,
-            environment: _,
+            environment: environment_from_host,
+            physics: physics_from_host,
             spawns: host_spawns,
             particles: host_particles,
             next_object_id,
         } = host_effects;
+
+        if let Some(delta) = physics_from_host {
+            merge_physics_delta(&mut physics_delta, &delta);
+        }
+        if let Some(update) = environment_from_host {
+            merge_environment_delta(&mut environment_delta, &update);
+        }
 
         if let Some(update) = object_update {
             batch.delta.merge_update(update);
@@ -2324,6 +2335,9 @@ impl Definition {
         if !environment_delta.is_empty() {
             batch.environment = Some(environment_delta);
         }
+        if !physics_delta.is_empty() {
+            batch.physics = Some(physics_delta);
+        }
         Ok((batch, rng, next_object_id))
     }
 
@@ -2335,6 +2349,7 @@ impl Definition {
         random: i32,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        physics: PhysicsSettings,
         environment: EnvironmentSettings,
         world: HostWorldContext,
     ) -> Result<(CommandBatch, ChaCha8Rng, u64), EngineError> {
@@ -2351,6 +2366,7 @@ impl Definition {
             Value::Int(frame_value),
             Value::Int(random),
         ];
+        let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
@@ -2380,7 +2396,8 @@ impl Definition {
             || self.script.call("Step", &args),
         );
         let rng = guard.finish();
-        let environment_delta = env_guard.finish();
+        let mut physics_delta = physics_guard.finish();
+        let mut environment_delta = env_guard.finish();
         let result = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: "Step",
@@ -2393,11 +2410,19 @@ impl Definition {
             object_update,
             object_commands,
             destroy_object,
-            environment: _,
+            environment: environment_from_host,
+            physics: physics_from_host,
             spawns: host_spawns,
             particles: host_particles,
             next_object_id,
         } = host_effects;
+
+        if let Some(delta) = environment_from_host {
+            merge_environment_delta(&mut environment_delta, &delta);
+        }
+        if let Some(delta) = physics_from_host {
+            merge_physics_delta(&mut physics_delta, &delta);
+        }
 
         if let Some(update) = object_update {
             batch.delta.merge_update(update);
@@ -2423,6 +2448,9 @@ impl Definition {
         if !environment_delta.is_empty() {
             batch.environment = Some(environment_delta);
         }
+        if !physics_delta.is_empty() {
+            batch.physics = Some(physics_delta);
+        }
         Ok((batch, rng, next_object_id))
     }
 
@@ -2435,9 +2463,10 @@ impl Definition {
         action_name: &str,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
-        world: HostWorldContext,
+        physics: PhysicsSettings,
         environment: EnvironmentSettings,
         frame: u64,
+        world: HostWorldContext,
     ) -> Result<(compat::EffectContextOutcome, ChaCha8Rng), EngineError> {
         if !self.script.has_function(function) {
             return Err(EngineError::InvalidScriptOutput {
@@ -2451,6 +2480,7 @@ impl Definition {
             build_state_value(&self.id, object_id, state, &self.action_library),
             Value::String(action_name.to_string()),
         ];
+        let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
@@ -2480,6 +2510,7 @@ impl Definition {
             || self.script.call(function, &args),
         );
         let rng = guard.finish();
+        let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
         let value = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
@@ -2503,6 +2534,9 @@ impl Definition {
         if !environment_delta.is_empty() {
             host_effects.environment = Some(environment_delta);
         }
+        if !physics_delta.is_empty() {
+            host_effects.physics = Some(physics_delta);
+        }
 
         Ok((host_effects, rng))
     }
@@ -2514,6 +2548,7 @@ impl Definition {
         effect: &EffectState,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        physics: PhysicsSettings,
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
@@ -2527,6 +2562,7 @@ impl Definition {
             Vec::new(),
             rng,
             global_effects,
+            physics,
             environment,
             frame,
             world,
@@ -2541,6 +2577,7 @@ impl Definition {
         frame: u64,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        physics: PhysicsSettings,
         environment: EnvironmentSettings,
         world: HostWorldContext,
     ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
@@ -2553,6 +2590,7 @@ impl Definition {
             vec![Value::Int(effect.timer)],
             rng,
             global_effects,
+            physics,
             environment,
             frame,
             world,
@@ -2567,6 +2605,7 @@ impl Definition {
         reason: EffectStopReason,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        physics: PhysicsSettings,
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
@@ -2580,6 +2619,7 @@ impl Definition {
             vec![effect_stop_reason_value(reason)],
             rng,
             global_effects,
+            physics,
             environment,
             frame,
             world,
@@ -2596,6 +2636,7 @@ impl Definition {
         mut extras: Vec<Value>,
         rng: ChaCha8Rng,
         global_effects: &[EffectState],
+        physics: PhysicsSettings,
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
@@ -2615,6 +2656,7 @@ impl Definition {
         args.push(build_effect_value(effect));
         args.append(&mut extras);
 
+        let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let (result, mut commands) = compat::with_effect_context(
@@ -2647,12 +2689,16 @@ impl Definition {
             },
         );
         let rng = guard.finish();
+        let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
 
         result
             .map(|_| {
                 if !environment_delta.is_empty() {
                     commands.environment = Some(environment_delta);
+                }
+                if !physics_delta.is_empty() {
+                    commands.physics = Some(physics_delta);
                 }
                 (commands, rng)
             })
@@ -2699,6 +2745,7 @@ impl ScenarioScript {
         rng: ChaCha8Rng,
         random: i32,
         global_effects: &[EffectState],
+        physics: PhysicsSettings,
         environment: EnvironmentSettings,
     ) -> Result<(ScenarioBatch, ChaCha8Rng), EngineError> {
         if !self.has_initialize {
@@ -2711,6 +2758,7 @@ impl ScenarioScript {
             random,
             None,
             global_effects,
+            physics,
             environment,
         )
     }
@@ -2722,6 +2770,7 @@ impl ScenarioScript {
         random: i32,
         frame: u64,
         global_effects: &[EffectState],
+        physics: PhysicsSettings,
         environment: EnvironmentSettings,
     ) -> Result<(ScenarioBatch, ChaCha8Rng), EngineError> {
         if !self.has_step {
@@ -2734,6 +2783,7 @@ impl ScenarioScript {
             random,
             Some(frame),
             global_effects,
+            physics,
             environment,
         )
     }
@@ -2746,6 +2796,7 @@ impl ScenarioScript {
         random: i32,
         frame: Option<u64>,
         global_effects: &[EffectState],
+        physics: PhysicsSettings,
         environment: EnvironmentSettings,
     ) -> Result<(ScenarioBatch, ChaCha8Rng), EngineError> {
         let state_value = build_scenario_state_value(snapshot);
@@ -2762,6 +2813,7 @@ impl ScenarioScript {
         }
         args.push(Value::Int(random));
 
+        let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
         let guard = enter_random_context(rng);
         let world = host_world_context_from_snapshot(snapshot);
@@ -2771,10 +2823,8 @@ impl ScenarioScript {
                 self.script.call(function, &args)
             });
         let rng = guard.finish();
+        let mut physics_delta = physics_guard.finish();
         let mut environment_delta = env_guard.finish();
-        if let Some(delta) = host_effects.environment {
-            merge_environment_delta(&mut environment_delta, &delta);
-        }
         let result = result.map_err(|source| EngineError::Script {
             definition: self.name.clone(),
             function,
@@ -2797,8 +2847,17 @@ impl ScenarioScript {
         if !host_effects.global.is_empty() {
             batch.global_effects.extend(host_effects.global);
         }
+        if let Some(delta) = host_effects.environment {
+            merge_environment_delta(&mut environment_delta, &delta);
+        }
         if !environment_delta.is_empty() {
             batch.environment = Some(environment_delta);
+        }
+        if let Some(delta) = host_effects.physics {
+            merge_physics_delta(&mut physics_delta, &delta);
+        }
+        if !physics_delta.is_empty() {
+            batch.physics = Some(physics_delta);
         }
         if !host_effects.particles.is_empty() {
             batch.particles.extend(host_effects.particles);
@@ -2816,6 +2875,7 @@ struct CommandBatch {
     effects: Vec<EffectCommand>,
     global_effects: Vec<EffectCommand>,
     environment: Option<EnvironmentDelta>,
+    physics: Option<PhysicsDelta>,
     particles: Vec<ParticleCommand>,
 }
 
@@ -2824,6 +2884,7 @@ struct ScenarioBatch {
     spawns: Vec<SpawnConfig>,
     global_effects: Vec<EffectCommand>,
     environment: Option<EnvironmentDelta>,
+    physics: Option<PhysicsDelta>,
     particles: Vec<ParticleCommand>,
 }
 
@@ -3254,6 +3315,7 @@ impl Engine {
             rng_state,
             random,
             &self.global_effects,
+            self.physics,
             self.environment,
         )?;
         self.rng = new_rng;
@@ -3267,11 +3329,15 @@ impl Engine {
             spawns,
             global_effects,
             environment,
+            physics,
             particles,
         } = batch;
 
         if let Some(delta) = environment {
             delta.apply(&mut self.environment);
+        }
+        if let Some(delta) = physics {
+            self.apply_physics_delta(delta);
         }
         if !global_effects.is_empty() {
             self.apply_global_effect_commands(&global_effects);
@@ -3560,6 +3626,7 @@ impl Engine {
                     random,
                     frame,
                     &global_effects,
+                    self.physics,
                     environment,
                 )?
             };
@@ -3616,7 +3683,7 @@ impl Engine {
                 let global_view = self.global_effects.clone();
                 let rng_state = self.rng.clone();
                 let world = self.host_world_context();
-                let (global_cmds, emitted_particles, new_rng) = {
+                let (global_cmds, emitted_particles, physics_delta, new_rng) = {
                     let definition = self
                         .definitions
                         .get(&definition_id)
@@ -3630,11 +3697,15 @@ impl Engine {
                         queue_events,
                         global_view,
                         &mut self.environment,
+                        self.physics,
                         self.frame,
                         world.clone(),
                     )?
                 };
                 self.rng = new_rng;
+                if !physics_delta.is_empty() {
+                    self.apply_physics_delta(physics_delta);
+                }
                 if !global_cmds.is_empty() {
                     self.apply_global_effect_commands(&global_cmds);
                 }
@@ -3663,7 +3734,7 @@ impl Engine {
                 let global_view = self.global_effects.clone();
                 let rng_state = self.rng.clone();
                 let world = self.host_world_context();
-                let (global_cmds, emitted_particles, new_rng) = {
+                let (global_cmds, emitted_particles, physics_delta, new_rng) = {
                     let definition = self
                         .definitions
                         .get(&definition_id)
@@ -3677,11 +3748,15 @@ impl Engine {
                         timer_events,
                         global_view,
                         &mut self.environment,
+                        self.physics,
                         self.frame,
                         world.clone(),
                     )?
                 };
                 self.rng = new_rng;
+                if !physics_delta.is_empty() {
+                    self.apply_physics_delta(physics_delta);
+                }
                 if !global_cmds.is_empty() {
                     self.apply_global_effect_commands(&global_cmds);
                 }
@@ -3751,6 +3826,7 @@ impl Engine {
                     random,
                     rng_state,
                     &self.global_effects,
+                    self.physics,
                     self.environment,
                     self.host_world_context(),
                 )?
@@ -3766,11 +3842,15 @@ impl Engine {
                 effects,
                 global_effects,
                 environment,
+                physics,
                 particles,
             } = command;
 
             if let Some(update) = environment {
                 update.apply(&mut self.environment);
+            }
+            if let Some(delta) = physics {
+                self.apply_physics_delta(delta);
             }
 
             let mut effect_events = Vec::new();
@@ -3816,7 +3896,7 @@ impl Engine {
             if !effect_events.is_empty() {
                 let previous_container = self.objects[idx].state.container;
                 let world = self.host_world_context();
-                let (global_cmds, emitted_particles) = {
+                let (global_cmds, emitted_particles, physics_delta) = {
                     let definition = self
                         .definitions
                         .get(&definition_id)
@@ -3824,7 +3904,7 @@ impl Engine {
                     let global_view = self.global_effects.clone();
                     let rng_state = self.rng.clone();
                     let object = &mut self.objects[idx];
-                    let (global_cmds, emitted_particles, new_rng) =
+                    let (global_cmds, emitted_particles, physics_delta, new_rng) =
                         Self::run_effect_events_for_object(
                             definition,
                             rng_state,
@@ -3833,12 +3913,16 @@ impl Engine {
                             effect_events,
                             global_view,
                             &mut self.environment,
+                            self.physics,
                             self.frame,
                             world.clone(),
                         )?;
                     self.rng = new_rng;
-                    (global_cmds, emitted_particles)
+                    (global_cmds, emitted_particles, physics_delta)
                 };
+                if !physics_delta.is_empty() {
+                    self.apply_physics_delta(physics_delta);
+                }
                 let new_container = self.objects[idx].state.container;
                 if !global_cmds.is_empty() {
                     self.apply_global_effect_commands(&global_cmds);
@@ -4112,9 +4196,10 @@ impl Engine {
             action_name,
             rng_state,
             &global_view,
-            world,
+            self.physics,
             self.environment,
             self.frame,
+            world,
         )?;
         self.rng = new_rng;
 
@@ -4142,6 +4227,7 @@ impl Engine {
             object_commands,
             destroy_object,
             environment,
+            physics,
             spawns,
             particles,
             next_object_id,
@@ -4149,6 +4235,9 @@ impl Engine {
 
         if let Some(update) = environment {
             update.apply(&mut self.environment);
+        }
+        if let Some(delta) = physics {
+            self.apply_physics_delta(delta);
         }
 
         self.next_object_id = next_object_id;
@@ -4225,18 +4314,23 @@ impl Engine {
             let rng_state = self.rng.clone();
             let world = self.host_world_context();
             let object = &mut self.objects[index];
-            let (global_cmds, emitted_particles, new_rng) = Self::run_effect_events_for_object(
-                definition,
-                rng_state,
-                object_id,
-                object,
-                effect_events,
-                global_view,
-                &mut self.environment,
-                self.frame,
-                world.clone(),
-            )?;
+            let (global_cmds, emitted_particles, physics_delta, new_rng) =
+                Self::run_effect_events_for_object(
+                    definition,
+                    rng_state,
+                    object_id,
+                    object,
+                    effect_events,
+                    global_view,
+                    &mut self.environment,
+                    self.physics,
+                    self.frame,
+                    world.clone(),
+                )?;
             self.rng = new_rng;
+            if !physics_delta.is_empty() {
+                self.apply_physics_delta(physics_delta);
+            }
             if !global_cmds.is_empty() {
                 self.apply_global_effect_commands(&global_cmds);
             }
@@ -4529,17 +4623,28 @@ impl Engine {
         events: Vec<EffectEvent>,
         mut global_view: Vec<EffectState>,
         environment: &mut EnvironmentSettings,
+        physics: PhysicsSettings,
         frame: u64,
         world: HostWorldContext,
-    ) -> Result<(Vec<EffectCommand>, Vec<ParticleCommand>, ChaCha8Rng), EngineError> {
+    ) -> Result<
+        (
+            Vec<EffectCommand>,
+            Vec<ParticleCommand>,
+            PhysicsDelta,
+            ChaCha8Rng,
+        ),
+        EngineError,
+    > {
         if events.is_empty() {
-            return Ok((Vec::new(), Vec::new(), rng));
+            return Ok((Vec::new(), Vec::new(), PhysicsDelta::default(), rng));
         }
 
         let mut queue: VecDeque<EffectEvent> = VecDeque::from(events);
         let mut state_snapshot = object.state.clone();
         let mut global_commands = Vec::new();
         let mut current_environment = *environment;
+        let mut current_physics = physics;
+        let mut accumulated_physics = PhysicsDelta::default();
         let mut pending_particles = Vec::new();
 
         while let Some(event) = queue.pop_front() {
@@ -4551,6 +4656,7 @@ impl Engine {
                     &event.effect,
                     rng,
                     &global_view,
+                    current_physics,
                     current_environment,
                     frame,
                     world.clone(),
@@ -4562,6 +4668,7 @@ impl Engine {
                     frame,
                     rng,
                     &global_view,
+                    current_physics,
                     current_environment,
                     world.clone(),
                 )?,
@@ -4572,6 +4679,7 @@ impl Engine {
                     reason,
                     rng,
                     &global_view,
+                    current_physics,
                     current_environment,
                     frame,
                     world.clone(),
@@ -4586,12 +4694,17 @@ impl Engine {
                 object_commands,
                 destroy_object,
                 environment: environment_update,
+                physics: physics_update,
                 particles: mut emitted_particles,
                 ..
             } = outcome;
 
             if let Some(update) = environment_update {
                 update.apply(&mut current_environment);
+            }
+            if let Some(update) = physics_update {
+                merge_physics_delta(&mut accumulated_physics, &update);
+                update.apply(&mut current_physics);
             }
 
             if let Some(update) = object_update {
@@ -4637,7 +4750,16 @@ impl Engine {
 
         *environment = current_environment;
 
-        Ok((global_commands, pending_particles, rng))
+        Ok((global_commands, pending_particles, accumulated_physics, rng))
+    }
+
+    fn apply_physics_delta(&mut self, delta: PhysicsDelta) {
+        if delta.is_empty() {
+            return;
+        }
+        let mut physics = self.physics;
+        delta.apply(&mut physics);
+        self.set_physics(physics);
     }
 
     fn apply_landscape(&self, state: &mut ObjectState) {
@@ -5905,6 +6027,7 @@ impl Engine {
                     effects,
                     global_effects,
                     environment,
+                    physics,
                     particles,
                 },
                 new_rng,
@@ -5920,6 +6043,7 @@ impl Engine {
                     random,
                     rng_state,
                     &self.global_effects,
+                    self.physics,
                     self.environment,
                     self.frame,
                     self.host_world_context(),
@@ -5929,6 +6053,9 @@ impl Engine {
             self.next_object_id = next_object_id;
             if let Some(update) = environment {
                 update.apply(&mut self.environment);
+            }
+            if let Some(delta) = physics {
+                self.apply_physics_delta(delta);
             }
             if destroy {
                 return Err(EngineError::InvalidScriptOutput {
@@ -5966,18 +6093,23 @@ impl Engine {
             let previous_container = object.state.container;
             let rng_state = self.rng.clone();
             let world = self.host_world_context();
-            let (global_cmds, emitted_particles, new_rng) = Self::run_effect_events_for_object(
-                definition,
-                rng_state,
-                id,
-                &mut object,
-                effect_events,
-                global_view,
-                &mut self.environment,
-                self.frame,
-                world,
-            )?;
+            let (global_cmds, emitted_particles, physics_delta, new_rng) =
+                Self::run_effect_events_for_object(
+                    definition,
+                    rng_state,
+                    id,
+                    &mut object,
+                    effect_events,
+                    global_view,
+                    &mut self.environment,
+                    self.physics,
+                    self.frame,
+                    world,
+                )?;
             self.rng = new_rng;
+            if !physics_delta.is_empty() {
+                self.apply_physics_delta(physics_delta);
+            }
             if !global_cmds.is_empty() {
                 self.apply_global_effect_commands(&global_cmds);
             }
@@ -6348,6 +6480,12 @@ fn merge_environment_delta(target: &mut EnvironmentDelta, source: &EnvironmentDe
     }
 }
 
+fn merge_physics_delta(target: &mut PhysicsDelta, source: &PhysicsDelta) {
+    if let Some(gravity) = source.gravity {
+        target.gravity = Some(gravity);
+    }
+}
+
 fn parse_scenario_command(
     definition: &str,
     function: &'static str,
@@ -6368,6 +6506,16 @@ fn parse_scenario_command(
                         batch
                             .global_effects
                             .extend(value_to_effect_commands(definition, function, value)?);
+                    }
+                    "physics" => {
+                        let delta = value_to_physics_delta(definition, function, value)?;
+                        if !delta.is_empty() {
+                            if let Some(existing) = &mut batch.physics {
+                                merge_physics_delta(existing, &delta);
+                            } else {
+                                batch.physics = Some(delta);
+                            }
+                        }
                     }
                     other => {
                         return Err(EngineError::InvalidScriptOutput {
@@ -6522,6 +6670,16 @@ fn parse_command_from_proplist(
                     .global_effects
                     .extend(value_to_effect_commands(definition, function, value)?);
             }
+            "physics" => {
+                let delta = value_to_physics_delta(definition, function, value)?;
+                if !delta.is_empty() {
+                    if let Some(existing) = &mut batch.physics {
+                        merge_physics_delta(existing, &delta);
+                    } else {
+                        batch.physics = Some(delta);
+                    }
+                }
+            }
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
@@ -6654,7 +6812,54 @@ fn value_to_vector(
         other => Err(EngineError::InvalidScriptOutput {
             definition: definition.to_string(),
             function,
-            detail: format!("expected array[2], got {}", other.type_name()),
+            detail: format!("expected array of two ints, got {}", other.type_name()),
+        }),
+    }
+}
+
+fn value_to_physics_delta(
+    definition: &str,
+    function: &'static str,
+    value: Value,
+) -> Result<PhysicsDelta, EngineError> {
+    match value {
+        Value::Nil => Ok(PhysicsDelta::default()),
+        Value::Proplist(map) => {
+            let mut delta = PhysicsDelta::default();
+            for (key, entry) in map.into_iter() {
+                match key.as_str() {
+                    "gravity" => match entry {
+                        Value::Int(val) => delta.gravity = Some(val),
+                        Value::Nil => delta.gravity = Some(0),
+                        other => {
+                            return Err(EngineError::InvalidScriptOutput {
+                                definition: definition.to_string(),
+                                function,
+                                detail: format!(
+                                    "physics.gravity expects int or nil, got {}",
+                                    other.type_name()
+                                ),
+                            })
+                        }
+                    },
+                    other => {
+                        return Err(EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: format!("unexpected physics key `{other}`"),
+                        })
+                    }
+                }
+            }
+            Ok(delta)
+        }
+        other => Err(EngineError::InvalidScriptOutput {
+            definition: definition.to_string(),
+            function,
+            detail: format!(
+                "expected proplist or nil for physics, got {}",
+                other.type_name()
+            ),
         }),
     }
 }
