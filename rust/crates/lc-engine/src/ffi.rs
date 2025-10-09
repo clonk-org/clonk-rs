@@ -1666,6 +1666,59 @@ mod tests {
     use serde_json::Value;
     use std::{ffi::CString, ptr};
 
+    unsafe fn call_make_snapshot_with_io(
+        frame: u64,
+        objects: *const LcEngineObjectSnapshot,
+        object_len: usize,
+        global_effects: *const LcEngineEffectSnapshot,
+        global_effect_len: usize,
+        particles: *const LcEngineParticleSnapshot,
+        particle_len: usize,
+        crew_selection: *const LcEngineCrewSelectionSnapshot,
+        crew_selection_len: usize,
+        crew_roles: *const LcEngineCrewRoleSnapshot,
+        crew_roles_len: usize,
+        known_crew_owners: *const i32,
+        known_crew_owner_len: usize,
+        eliminated_crew_owners: *const i32,
+        eliminated_crew_owner_len: usize,
+        hud_players: *const LcEngineHudPlayerSnapshot,
+        hud_player_len: usize,
+        surfaces: *const LcEngineSurfaceSnapshot,
+        surface_len: usize,
+        network_packets: *const LcEngineNetworkPacketSnapshot,
+        network_packet_len: usize,
+        controls: *const *const c_char,
+        control_len: usize,
+    ) -> SimulationSnapshot {
+        make_snapshot(
+            frame,
+            objects,
+            object_len,
+            global_effects,
+            global_effect_len,
+            particles,
+            particle_len,
+            crew_selection,
+            crew_selection_len,
+            crew_roles,
+            crew_roles_len,
+            known_crew_owners,
+            known_crew_owner_len,
+            eliminated_crew_owners,
+            eliminated_crew_owner_len,
+            hud_players,
+            hud_player_len,
+            surfaces,
+            surface_len,
+            network_packets,
+            network_packet_len,
+            controls,
+            control_len,
+        )
+        .expect("snapshot should deserialize")
+    }
+
     unsafe fn call_make_snapshot(
         frame: u64,
         objects: *const LcEngineObjectSnapshot,
@@ -1687,7 +1740,7 @@ mod tests {
         controls: *const *const c_char,
         control_len: usize,
     ) -> SimulationSnapshot {
-        make_snapshot(
+        call_make_snapshot_with_io(
             frame,
             objects,
             object_len,
@@ -1712,7 +1765,6 @@ mod tests {
             controls,
             control_len,
         )
-        .expect("snapshot should deserialize")
     }
 
     #[test]
@@ -2090,6 +2142,120 @@ mod tests {
     }
 
     #[test]
+    fn make_snapshot_collects_hud_players() {
+        let crew_members = [5u64, 3u64];
+        let hud_entries = [LcEngineHudPlayerSnapshot {
+            owner: 2,
+            crew: crew_members.as_ptr(),
+            crew_count: crew_members.len(),
+            has_focus: true,
+            focus_object: 3,
+            eliminated: true,
+        }];
+
+        let snapshot = unsafe {
+            call_make_snapshot(
+                4,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                hud_entries.as_ptr(),
+                hud_entries.len(),
+                ptr::null(),
+                0,
+            )
+        };
+
+        assert_eq!(snapshot.hud.players.len(), 1);
+        let player = &snapshot.hud.players[0];
+        assert_eq!(player.owner, 2);
+        assert!(player.eliminated);
+        let crew: Vec<_> = player.crew.iter().map(|id| id.as_u64()).collect();
+        assert_eq!(crew, vec![5, 3]);
+        assert_eq!(player.focus.map(|id| id.as_u64()), Some(3));
+    }
+
+    #[test]
+    fn make_snapshot_collects_network_packets() {
+        let packets = [
+            LcEngineNetworkPacketSnapshot {
+                direction: 0,
+                status: 7,
+                reserved: 0,
+                size: 32,
+                hash: 0xDEADBEEFu64,
+                client_id: 4,
+                connection_id: 17,
+            },
+            LcEngineNetworkPacketSnapshot {
+                direction: 1,
+                status: 3,
+                reserved: 0,
+                size: 12,
+                hash: 0xFEEDFACEu64,
+                client_id: 2,
+                connection_id: 9,
+            },
+        ];
+
+        let snapshot = unsafe {
+            call_make_snapshot_with_io(
+                7,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                packets.as_ptr(),
+                packets.len(),
+                ptr::null(),
+                0,
+            )
+        };
+
+        assert_eq!(snapshot.network_packets.len(), 2);
+        let inbound = &snapshot.network_packets[0];
+        assert_eq!(inbound.direction, NetworkPacketDirection::Inbound);
+        assert_eq!(inbound.status, 7);
+        assert_eq!(inbound.size, 32);
+        assert_eq!(inbound.hash, 0xDEADBEEFu64);
+        assert_eq!(inbound.client_id, 4);
+        assert_eq!(inbound.connection_id, 17);
+
+        let outbound = &snapshot.network_packets[1];
+        assert_eq!(outbound.direction, NetworkPacketDirection::Outbound);
+        assert_eq!(outbound.status, 3);
+        assert_eq!(outbound.size, 12);
+        assert_eq!(outbound.hash, 0xFEEDFACEu64);
+        assert_eq!(outbound.client_id, 2);
+        assert_eq!(outbound.connection_id, 9);
+    }
+
+    #[test]
     fn make_snapshot_collects_controls() {
         let control_ini = CString::new("[Control]\nType=Player\n").unwrap();
         let controls = [control_ini.as_ptr()];
@@ -2158,6 +2324,110 @@ mod tests {
         assert!(
             detail.contains("controls mismatch"),
             "detail did not mention controls: {detail}"
+        );
+    }
+
+    #[test]
+    fn runtime_mismatch_reports_hud_difference() {
+        let crew_members = [11u64];
+        let hud_entries = [LcEngineHudPlayerSnapshot {
+            owner: 5,
+            crew: crew_members.as_ptr(),
+            crew_count: crew_members.len(),
+            has_focus: false,
+            focus_object: 0,
+            eliminated: false,
+        }];
+
+        let snapshot = unsafe {
+            call_make_snapshot(
+                2,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                hud_entries.as_ptr(),
+                hud_entries.len(),
+                ptr::null(),
+                0,
+            )
+        };
+
+        let mut expected = snapshot.clone();
+        assert_eq!(expected.hud.players.len(), 1, "baseline missing hud player");
+        expected.hud.players[0].eliminated = true;
+
+        let detail =
+            runtime_snapshot_mismatch(&expected, &snapshot).expect("should report mismatch");
+        assert!(
+            detail.contains("hud mismatch"),
+            "detail did not mention hud: {detail}"
+        );
+    }
+
+    #[test]
+    fn runtime_mismatch_reports_network_difference() {
+        let packets = [LcEngineNetworkPacketSnapshot {
+            direction: 0,
+            status: 4,
+            reserved: 0,
+            size: 48,
+            hash: 0xABCD1234u64,
+            client_id: 6,
+            connection_id: 21,
+        }];
+
+        let snapshot = unsafe {
+            call_make_snapshot_with_io(
+                6,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                packets.as_ptr(),
+                packets.len(),
+                ptr::null(),
+                0,
+            )
+        };
+
+        let mut expected = snapshot.clone();
+        assert_eq!(
+            expected.network_packets.len(),
+            1,
+            "baseline missing network packets"
+        );
+        expected.network_packets[0].hash ^= 1;
+
+        let detail =
+            runtime_snapshot_mismatch(&expected, &snapshot).expect("should report mismatch");
+        assert!(
+            detail.contains("network packets mismatch"),
+            "detail did not mention network packets: {detail}"
         );
     }
 
