@@ -349,6 +349,13 @@ impl PartialEq for FloatVector2 {
 
 impl Eq for FloatVector2 {}
 
+impl AddAssign<FloatVector2> for FloatVector2 {
+    fn add_assign(&mut self, rhs: FloatVector2) {
+        self.x += rhs.x;
+        self.y += rhs.y;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "scope", content = "object")]
 pub enum ParticleLayer {
@@ -409,6 +416,106 @@ impl PartialEq for ParticleSnapshot {
 }
 
 impl Eq for ParticleSnapshot {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParticleScope {
+    Global,
+    Object(ObjectId),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticleConfig {
+    pub definition_id: String,
+    pub position: FloatVector2,
+    pub velocity: FloatVector2,
+    pub life: i32,
+    pub parameter_a: f32,
+    pub parameter_b: i32,
+    pub layer: ParticleLayer,
+}
+
+impl PartialEq for ParticleConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.definition_id == other.definition_id
+            && self.position == other.position
+            && self.velocity == other.velocity
+            && self.life == other.life
+            && self.parameter_a.to_bits() == other.parameter_a.to_bits()
+            && self.parameter_b == other.parameter_b
+            && self.layer == other.layer
+    }
+}
+
+impl Eq for ParticleConfig {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParticleCommand {
+    Create(ParticleConfig),
+    Clear {
+        definition_id: Option<String>,
+        scope: ParticleScope,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ActiveParticle {
+    snapshot: ParticleSnapshot,
+    original_life: i32,
+}
+
+impl ActiveParticle {
+    fn from_config(config: ParticleConfig) -> Self {
+        let ParticleConfig {
+            definition_id,
+            position,
+            velocity,
+            life,
+            parameter_a,
+            parameter_b,
+            layer,
+        } = config;
+        let clamped_life = life.max(0);
+        let snapshot = ParticleSnapshot {
+            definition_id,
+            position,
+            velocity,
+            life: clamped_life,
+            parameter_a,
+            parameter_b,
+            layer,
+        };
+        Self {
+            snapshot,
+            original_life: clamped_life,
+        }
+    }
+
+    fn from_snapshot(mut snapshot: ParticleSnapshot) -> Self {
+        if snapshot.life < 0 {
+            snapshot.life = 0;
+        }
+        let original_life = snapshot.life;
+        Self {
+            snapshot,
+            original_life,
+        }
+    }
+
+    fn tick(&mut self) {
+        self.snapshot.position += self.snapshot.velocity;
+        if self.original_life > 0 && self.snapshot.life > 0 {
+            self.snapshot.life -= 1;
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.original_life > 0 && self.snapshot.life == 0
+    }
+
+    fn snapshot(&self) -> ParticleSnapshot {
+        self.snapshot.clone()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct HudSnapshot {
@@ -1221,6 +1328,8 @@ pub struct QueuedCommand {
     pub spawns: Vec<SpawnConfig>,
     #[serde(default)]
     pub landscape: Vec<LandscapeCommand>,
+    #[serde(default)]
+    pub particles: Vec<ParticleCommand>,
 }
 
 impl QueuedCommand {
@@ -1232,6 +1341,7 @@ impl QueuedCommand {
             destroy: false,
             spawns: Vec::new(),
             landscape: Vec::new(),
+            particles: Vec::new(),
         }
     }
 
@@ -1243,6 +1353,7 @@ impl QueuedCommand {
             destroy: false,
             spawns: Vec::new(),
             landscape: Vec::new(),
+            particles: Vec::new(),
         }
     }
 
@@ -1268,6 +1379,11 @@ impl QueuedCommand {
 
     pub fn with_landscape(mut self, commands: Vec<LandscapeCommand>) -> Self {
         self.landscape = commands;
+        self
+    }
+
+    pub fn with_particles(mut self, particles: Vec<ParticleCommand>) -> Self {
+        self.particles = particles;
         self
     }
 
@@ -1417,6 +1533,7 @@ struct CommandQueueOutcome {
     destroy: bool,
     effect_events: Vec<EffectEvent>,
     container_updates: Vec<ContainerUpdateRecord>,
+    particles: Vec<ParticleCommand>,
 }
 
 impl Object {
@@ -1631,6 +1748,9 @@ impl Object {
             }
             if !command.spawns.is_empty() {
                 outcome.spawns.extend(command.spawns);
+            }
+            if !command.particles.is_empty() {
+                outcome.particles.extend(command.particles);
             }
             if let Some(landscape_ref) = &mut landscape {
                 for op in command.landscape.iter() {
@@ -2176,6 +2296,7 @@ impl Definition {
             destroy_object,
             environment: _,
             spawns: host_spawns,
+            particles: host_particles,
             next_object_id,
         } = host_effects;
 
@@ -2196,6 +2317,9 @@ impl Definition {
         }
         if !host_spawns.is_empty() {
             batch.spawns.extend(host_spawns);
+        }
+        if !host_particles.is_empty() {
+            batch.particles.extend(host_particles);
         }
         if !environment_delta.is_empty() {
             batch.environment = Some(environment_delta);
@@ -2271,6 +2395,7 @@ impl Definition {
             destroy_object,
             environment: _,
             spawns: host_spawns,
+            particles: host_particles,
             next_object_id,
         } = host_effects;
 
@@ -2291,6 +2416,9 @@ impl Definition {
         }
         if !host_spawns.is_empty() {
             batch.spawns.extend(host_spawns);
+        }
+        if !host_particles.is_empty() {
+            batch.particles.extend(host_particles);
         }
         if !environment_delta.is_empty() {
             batch.environment = Some(environment_delta);
@@ -2672,6 +2800,9 @@ impl ScenarioScript {
         if !environment_delta.is_empty() {
             batch.environment = Some(environment_delta);
         }
+        if !host_effects.particles.is_empty() {
+            batch.particles.extend(host_effects.particles);
+        }
         Ok((batch, rng))
     }
 }
@@ -2685,6 +2816,7 @@ struct CommandBatch {
     effects: Vec<EffectCommand>,
     global_effects: Vec<EffectCommand>,
     environment: Option<EnvironmentDelta>,
+    particles: Vec<ParticleCommand>,
 }
 
 #[derive(Debug, Default)]
@@ -2692,6 +2824,7 @@ struct ScenarioBatch {
     spawns: Vec<SpawnConfig>,
     global_effects: Vec<EffectCommand>,
     environment: Option<EnvironmentDelta>,
+    particles: Vec<ParticleCommand>,
 }
 
 pub struct Engine {
@@ -2704,6 +2837,7 @@ pub struct Engine {
     physics: PhysicsSettings,
     environment: EnvironmentSettings,
     global_effects: Vec<EffectState>,
+    particles: Vec<ActiveParticle>,
     scenario_script: Option<ScenarioScript>,
     crew_selection: HashMap<i32, CrewSelection>,
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
@@ -2994,6 +3128,7 @@ impl Engine {
             physics: PhysicsSettings::default(),
             environment: EnvironmentSettings::default(),
             global_effects: Vec::new(),
+            particles: Vec::new(),
             scenario_script: None,
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
@@ -3105,6 +3240,7 @@ impl Engine {
             spawns,
             global_effects,
             environment,
+            particles,
         } = batch;
 
         if let Some(delta) = environment {
@@ -3113,6 +3249,7 @@ impl Engine {
         if !global_effects.is_empty() {
             self.apply_global_effect_commands(&global_effects);
         }
+        self.apply_particle_commands(particles);
         let mut created = Vec::with_capacity(spawns.len());
         for spawn in spawns {
             let id = self.spawn_object(spawn)?;
@@ -3377,6 +3514,7 @@ impl Engine {
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
         self.frame += 1;
         let frame = self.frame;
+        self.tick_particles();
         self.environment.advance_frame();
         if self.scenario_script.is_some() {
             let snapshot = self.snapshot();
@@ -3451,7 +3589,7 @@ impl Engine {
                 let global_view = self.global_effects.clone();
                 let rng_state = self.rng.clone();
                 let world = self.host_world_context();
-                let (global_cmds, new_rng) = {
+                let (global_cmds, emitted_particles, new_rng) = {
                     let definition = self
                         .definitions
                         .get(&definition_id)
@@ -3473,6 +3611,7 @@ impl Engine {
                 if !global_cmds.is_empty() {
                     self.apply_global_effect_commands(&global_cmds);
                 }
+                self.apply_particle_commands(emitted_particles);
             }
 
             if !queued_spawns.is_empty() {
@@ -3497,7 +3636,7 @@ impl Engine {
                 let global_view = self.global_effects.clone();
                 let rng_state = self.rng.clone();
                 let world = self.host_world_context();
-                let (global_cmds, new_rng) = {
+                let (global_cmds, emitted_particles, new_rng) = {
                     let definition = self
                         .definitions
                         .get(&definition_id)
@@ -3519,6 +3658,7 @@ impl Engine {
                 if !global_cmds.is_empty() {
                     self.apply_global_effect_commands(&global_cmds);
                 }
+                self.apply_particle_commands(emitted_particles);
             }
 
             let mut pre_phase_state = None;
@@ -3599,6 +3739,7 @@ impl Engine {
                 effects,
                 global_effects,
                 environment,
+                particles,
             } = command;
 
             if let Some(update) = environment {
@@ -3639,6 +3780,8 @@ impl Engine {
                 self.apply_container_change(object_id, previous_container, new_container)?;
             }
 
+            self.apply_particle_commands(particles);
+
             if !global_effects.is_empty() {
                 self.apply_global_effect_commands(&global_effects);
             }
@@ -3646,7 +3789,7 @@ impl Engine {
             if !effect_events.is_empty() {
                 let previous_container = self.objects[idx].state.container;
                 let world = self.host_world_context();
-                let global_cmds = {
+                let (global_cmds, emitted_particles) = {
                     let definition = self
                         .definitions
                         .get(&definition_id)
@@ -3654,24 +3797,26 @@ impl Engine {
                     let global_view = self.global_effects.clone();
                     let rng_state = self.rng.clone();
                     let object = &mut self.objects[idx];
-                    let (global_cmds, new_rng) = Self::run_effect_events_for_object(
-                        definition,
-                        rng_state,
-                        object_id,
-                        object,
-                        effect_events,
-                        global_view,
-                        &mut self.environment,
-                        self.frame,
-                        world.clone(),
-                    )?;
+                    let (global_cmds, emitted_particles, new_rng) =
+                        Self::run_effect_events_for_object(
+                            definition,
+                            rng_state,
+                            object_id,
+                            object,
+                            effect_events,
+                            global_view,
+                            &mut self.environment,
+                            self.frame,
+                            world.clone(),
+                        )?;
                     self.rng = new_rng;
-                    global_cmds
+                    (global_cmds, emitted_particles)
                 };
                 let new_container = self.objects[idx].state.container;
                 if !global_cmds.is_empty() {
                     self.apply_global_effect_commands(&global_cmds);
                 }
+                self.apply_particle_commands(emitted_particles);
                 if previous_container != new_container {
                     self.apply_container_change(object_id, previous_container, new_container)?;
                 }
@@ -3971,6 +4116,7 @@ impl Engine {
             destroy_object,
             environment,
             spawns,
+            particles,
             next_object_id,
         } = outcome;
 
@@ -3982,6 +4128,7 @@ impl Engine {
         if !spawns.is_empty() {
             self.process_spawn_queue(spawns)?;
         }
+        self.apply_particle_commands(particles);
 
         let mut effect_events = Vec::new();
         let mut container_changes = Vec::new();
@@ -4051,7 +4198,7 @@ impl Engine {
             let rng_state = self.rng.clone();
             let world = self.host_world_context();
             let object = &mut self.objects[index];
-            let (global_cmds, new_rng) = Self::run_effect_events_for_object(
+            let (global_cmds, emitted_particles, new_rng) = Self::run_effect_events_for_object(
                 definition,
                 rng_state,
                 object_id,
@@ -4066,6 +4213,7 @@ impl Engine {
             if !global_cmds.is_empty() {
                 self.apply_global_effect_commands(&global_cmds);
             }
+            self.apply_particle_commands(emitted_particles);
             let new_container = self.objects[index].state.container;
             if previous_container != new_container {
                 container_changes.push((previous_container, new_container));
@@ -4110,6 +4258,11 @@ impl Engine {
             objects.push(object.snapshot(library));
         }
         objects.sort_by_key(|object| object.id);
+        let particles: Vec<_> = self
+            .particles
+            .iter()
+            .map(ActiveParticle::snapshot)
+            .collect();
         let crew_selection = self
             .crew_selection
             .iter()
@@ -4163,7 +4316,7 @@ impl Engine {
             objects,
             environment,
             global_effects: self.global_effects.clone(),
-            particles: Vec::new(),
+            particles,
             crew_selection,
             crew_roles,
             known_crew_owners,
@@ -4212,6 +4365,11 @@ impl Engine {
         let mut eliminated_crew_owners: Vec<_> =
             self.eliminated_crew_owners.iter().cloned().collect();
         eliminated_crew_owners.sort_unstable();
+        let particles: Vec<_> = self
+            .particles
+            .iter()
+            .map(ActiveParticle::snapshot)
+            .collect();
 
         EngineState {
             frame: self.frame,
@@ -4220,7 +4378,7 @@ impl Engine {
             next_object_id: self.next_object_id,
             landscape: self.landscape.clone(),
             objects,
-            particles: Vec::new(),
+            particles,
             crew_selection,
             crew_roles,
             global_effects: self.global_effects.clone(),
@@ -4249,6 +4407,12 @@ impl Engine {
         self.rng = state.rng.clone();
         self.objects.clear();
         self.global_effects = state.global_effects.clone();
+        self.particles = state
+            .particles
+            .iter()
+            .cloned()
+            .map(ActiveParticle::from_snapshot)
+            .collect();
         self.crew_selection = state
             .crew_selection
             .iter()
@@ -4340,15 +4504,16 @@ impl Engine {
         environment: &mut EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
-    ) -> Result<(Vec<EffectCommand>, ChaCha8Rng), EngineError> {
+    ) -> Result<(Vec<EffectCommand>, Vec<ParticleCommand>, ChaCha8Rng), EngineError> {
         if events.is_empty() {
-            return Ok((Vec::new(), rng));
+            return Ok((Vec::new(), Vec::new(), rng));
         }
 
         let mut queue: VecDeque<EffectEvent> = VecDeque::from(events);
         let mut state_snapshot = object.state.clone();
         let mut global_commands = Vec::new();
         let mut current_environment = *environment;
+        let mut pending_particles = Vec::new();
 
         while let Some(event) = queue.pop_front() {
             let snapshot_for_call = state_snapshot.clone();
@@ -4394,6 +4559,7 @@ impl Engine {
                 object_commands,
                 destroy_object,
                 environment: environment_update,
+                particles: mut emitted_particles,
                 ..
             } = outcome;
 
@@ -4436,11 +4602,15 @@ impl Engine {
                 apply_effect_commands_to_stack(&mut global_view, &global_effect_commands);
                 global_commands.append(&mut global_effect_commands);
             }
+
+            if !emitted_particles.is_empty() {
+                pending_particles.append(&mut emitted_particles);
+            }
         }
 
         *environment = current_environment;
 
-        Ok((global_commands, rng))
+        Ok((global_commands, pending_particles, rng))
     }
 
     fn apply_landscape(&self, state: &mut ObjectState) {
@@ -5321,6 +5491,64 @@ impl Engine {
         apply_effect_commands_to_stack(&mut self.global_effects, commands);
     }
 
+    fn apply_particle_commands(&mut self, commands: Vec<ParticleCommand>) {
+        if commands.is_empty() {
+            return;
+        }
+        for command in commands {
+            match command {
+                ParticleCommand::Create(config) => {
+                    self.particles.push(ActiveParticle::from_config(config));
+                }
+                ParticleCommand::Clear {
+                    definition_id,
+                    scope,
+                } => {
+                    let definition = definition_id.as_deref();
+                    match scope {
+                        ParticleScope::Global => {
+                            self.particles.retain(|particle| {
+                                if !matches!(particle.snapshot.layer, ParticleLayer::Global) {
+                                    return true;
+                                }
+                                match definition {
+                                    Some(def) => particle.snapshot.definition_id != def,
+                                    None => false,
+                                }
+                            });
+                        }
+                        ParticleScope::Object(target) => {
+                            self.particles.retain(|particle| {
+                                let matches_layer = match particle.snapshot.layer {
+                                    ParticleLayer::ObjectFront(id)
+                                    | ParticleLayer::ObjectBack(id) => id == target,
+                                    ParticleLayer::Global => false,
+                                };
+                                if !matches_layer {
+                                    return true;
+                                }
+                                match definition {
+                                    Some(def) => particle.snapshot.definition_id != def,
+                                    None => false,
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn tick_particles(&mut self) {
+        if self.particles.is_empty() {
+            return;
+        }
+        for particle in &mut self.particles {
+            particle.tick();
+        }
+        self.particles.retain(|particle| !particle.is_expired());
+    }
+
     fn tick_global_effects(&mut self) {
         for effect in &mut self.global_effects {
             effect.advance_tick();
@@ -5427,6 +5655,7 @@ impl Engine {
                     effects,
                     global_effects,
                     environment,
+                    particles,
                 },
                 new_rng,
                 next_object_id,
@@ -5467,6 +5696,7 @@ impl Engine {
             }
             let mut applied = object.apply_effect_commands(&effects);
             effect_events.append(&mut applied);
+            self.apply_particle_commands(particles);
             if !global_effects.is_empty() {
                 self.apply_global_effect_commands(&global_effects);
             }
@@ -5486,7 +5716,7 @@ impl Engine {
             let previous_container = object.state.container;
             let rng_state = self.rng.clone();
             let world = self.host_world_context();
-            let (global_cmds, new_rng) = Self::run_effect_events_for_object(
+            let (global_cmds, emitted_particles, new_rng) = Self::run_effect_events_for_object(
                 definition,
                 rng_state,
                 id,
@@ -5501,6 +5731,7 @@ impl Engine {
             if !global_cmds.is_empty() {
                 self.apply_global_effect_commands(&global_cmds);
             }
+            self.apply_particle_commands(emitted_particles);
             if previous_container != object.state.container {
                 container_changes.push((previous_container, object.state.container));
             }

@@ -6,9 +6,10 @@ use std::rc::Rc;
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::{
     ActionLibrary, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, Direction,
-    EnvironmentSettings, Landscape, ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex,
-    QueuedCommand, SpawnConfig, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION,
-    CNAT_RIGHT, CNAT_TOP, OWNER_NONE,
+    EnvironmentSettings, FloatVector2, Landscape, ObjectId, ObjectStatus, ObjectUpdate,
+    ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, QueuedCommand,
+    SpawnConfig, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT,
+    CNAT_TOP, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -277,6 +278,20 @@ fn value_to_i32(value: &Value, function: &str, parameter: &str) -> Result<i32, R
         Value::Int(int) => Ok(*int),
         other => Err(RuntimeError::new(format!(
             "{}: expected integer for {}, got {}",
+            function,
+            parameter,
+            other.type_name()
+        ))),
+    }
+}
+
+fn value_to_bool(value: &Value, function: &str, parameter: &str) -> Result<bool, RuntimeError> {
+    match value {
+        Value::Bool(flag) => Ok(*flag),
+        Value::Int(int) => Ok(*int != 0),
+        Value::Nil => Ok(false),
+        other => Err(RuntimeError::new(format!(
+            "{}: expected bool or int for {}, got {}",
             function,
             parameter,
             other.type_name()
@@ -722,6 +737,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetY", get_y);
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
+    script.register_host_function("CreateParticle", create_particle);
+    script.register_host_function("ClearParticles", clear_particles);
     script.register_host_function("Contained", contained);
     script.register_host_function("SetOwner", set_owner);
     script.register_host_function("GetOwner", get_owner);
@@ -985,6 +1002,7 @@ pub(crate) struct EffectContextOutcome {
     pub destroy_object: bool,
     pub environment: Option<EnvironmentDelta>,
     pub spawns: Vec<SpawnConfig>,
+    pub particles: Vec<ParticleCommand>,
     pub next_object_id: u64,
 }
 
@@ -1007,6 +1025,7 @@ impl EffectContextOutcome {
             destroy_object,
             environment,
             spawns,
+            particles: Vec::new(),
             next_object_id,
         }
     }
@@ -1020,6 +1039,7 @@ impl EffectContextOutcome {
             destroy_object: false,
             environment: None,
             spawns: Vec::new(),
+            particles: Vec::new(),
             next_object_id,
         }
     }
@@ -3553,6 +3573,192 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn create_particle(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "CreateParticle expects at least 1 argument: name",
+        ));
+    }
+
+    let definition = match &args[0] {
+        Value::String(name) if !name.is_empty() => name.clone(),
+        Value::String(_) | Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "CreateParticle: expected string for name, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let mut index = 1;
+
+    let x = if let Some(arg) = args.get(index) {
+        let value = value_to_i32(arg, "CreateParticle", "x")?;
+        index += 1;
+        value
+    } else {
+        0
+    };
+
+    let y = if let Some(arg) = args.get(index) {
+        let value = value_to_i32(arg, "CreateParticle", "y")?;
+        index += 1;
+        value
+    } else {
+        0
+    };
+
+    let x_dir = if let Some(arg) = args.get(index) {
+        let value = value_to_i32(arg, "CreateParticle", "xdir")?;
+        index += 1;
+        value
+    } else {
+        0
+    };
+
+    let y_dir = if let Some(arg) = args.get(index) {
+        let value = value_to_i32(arg, "CreateParticle", "ydir")?;
+        index += 1;
+        value
+    } else {
+        0
+    };
+
+    let parameter_a = if let Some(arg) = args.get(index) {
+        let value = value_to_i32(arg, "CreateParticle", "a")?;
+        index += 1;
+        value
+    } else {
+        0
+    };
+
+    let life_raw = if let Some(arg) = args.get(index) {
+        let value = value_to_i32(arg, "CreateParticle", "b")?;
+        index += 1;
+        value
+    } else {
+        0
+    };
+
+    let mut target_object: Option<ObjectId> = None;
+    if let Some(arg) = args.get(index) {
+        target_object = parse_object_reference_argument(arg, "CreateParticle", "object")?;
+        index += 1;
+    }
+
+    let mut back = false;
+    if let Some(arg) = args.get(index) {
+        back = value_to_bool(arg, "CreateParticle", "back")?;
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "CreateParticle: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("CreateParticle requires an active engine context"))?;
+
+        let base_position = context
+            .object_context()
+            .map(|object| object.effective_position())
+            .unwrap_or(Vector2::ZERO);
+
+        let world_x = base_position.x.saturating_add(x);
+        let world_y = base_position.y.saturating_add(y);
+
+        let layer = if let Some(target) = target_object {
+            let world_object = match context.get_world_object(target) {
+                Some(object) => object,
+                None => return Ok(Value::Bool(false)),
+            };
+            if !world_object.status().is_active() {
+                return Ok(Value::Bool(false));
+            }
+            if back {
+                ParticleLayer::ObjectBack(target)
+            } else {
+                ParticleLayer::ObjectFront(target)
+            }
+        } else {
+            ParticleLayer::Global
+        };
+
+        let config = ParticleConfig {
+            definition_id: definition,
+            position: FloatVector2::new(world_x as f32, world_y as f32),
+            velocity: FloatVector2::new(x_dir as f32 / 10.0, y_dir as f32 / 10.0),
+            life: life_raw.max(0),
+            parameter_a: parameter_a as f32 / 10.0,
+            parameter_b: life_raw,
+            layer,
+        };
+
+        context.register_particle(ParticleCommand::Create(config));
+        Ok(Value::Bool(true))
+    })
+}
+
+fn clear_particles(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let mut definition: Option<String> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::String(name) if !name.is_empty() => definition = Some(name.clone()),
+            Value::String(_) | Value::Nil => definition = None,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "ClearParticles: expected string or nil for name, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+        index += 1;
+    }
+
+    let mut target_object: Option<ObjectId> = None;
+    if let Some(arg) = args.get(index) {
+        target_object = parse_object_reference_argument(arg, "ClearParticles", "object")?;
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "ClearParticles: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = match borrow.as_mut() {
+            Some(context) => context,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        let scope = if let Some(target) = target_object {
+            if context.get_world_object(target).is_none() {
+                return Ok(Value::Bool(false));
+            }
+            ParticleScope::Object(target)
+        } else {
+            ParticleScope::Global
+        };
+
+        context.register_particle(ParticleCommand::Clear {
+            definition_id: definition.clone(),
+            scope,
+        });
+        Ok(Value::Bool(true))
+    })
+}
+
 fn contained(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
@@ -4085,6 +4291,7 @@ struct EffectHostContext {
     pending_spawns: Vec<SpawnConfig>,
     pending_objects: HashMap<ObjectId, HostWorldObject>,
     pending_order: Vec<ObjectId>,
+    pending_particles: Vec<ParticleCommand>,
     next_object_id: u64,
 }
 
@@ -4143,6 +4350,7 @@ impl EffectHostContext {
             pending_spawns: Vec::new(),
             pending_objects: HashMap::new(),
             pending_order: Vec::new(),
+            pending_particles: Vec::new(),
             next_object_id,
         }
     }
@@ -4178,6 +4386,10 @@ impl EffectHostContext {
         }
         self.pending_objects.insert(id, preview);
         self.pending_spawns.push(spawn);
+    }
+
+    fn register_particle(&mut self, command: ParticleCommand) {
+        self.pending_particles.push(command);
     }
 
     fn get_world_object(&self, id: ObjectId) -> Option<HostWorldObject> {
@@ -4236,7 +4448,7 @@ impl EffectHostContext {
             .map(EffectScopeContext::into_commands)
             .unwrap_or_default();
 
-        EffectContextOutcome::new(
+        let mut outcome = EffectContextOutcome::new(
             object_effects,
             global,
             object_update,
@@ -4245,7 +4457,9 @@ impl EffectHostContext {
             None,
             self.pending_spawns,
             self.next_object_id,
-        )
+        );
+        outcome.particles = self.pending_particles;
+        outcome
     }
 }
 
@@ -6896,6 +7110,159 @@ mod tests {
         assert_eq!(spawn.owner, OWNER_NONE);
         assert_eq!(spawn.id, Some(ObjectId::new(1)));
         assert_eq!(outcome.next_object_id, 2);
+    }
+
+    #[test]
+    fn create_particle_registers_command() {
+        let args = [
+            Value::String("Smoke".into()),
+            Value::Int(8),
+            Value::Int(-4),
+            Value::Int(20),
+            Value::Int(-10),
+            Value::Int(15),
+            Value::Int(60),
+        ];
+        let (result, outcome) = with_object_host_context(|| create_particle(&args));
+        let value = result.expect("CreateParticle succeeds");
+        assert_eq!(value, Value::Bool(true));
+        assert_eq!(outcome.particles.len(), 1);
+        match &outcome.particles[0] {
+            ParticleCommand::Create(config) => {
+                assert_eq!(config.definition_id, "Smoke");
+                assert_eq!(config.position, FloatVector2::new(8.0, -4.0));
+                assert_eq!(config.velocity, FloatVector2::new(2.0, -1.0));
+                assert_eq!(config.parameter_a, 1.5);
+                assert_eq!(config.parameter_b, 60);
+                assert_eq!(config.life, 60);
+                assert!(matches!(config.layer, ParticleLayer::Global));
+            }
+            other => panic!("unexpected particle command {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_particle_with_object_sets_layer() {
+        let target_id = ObjectId::new(5);
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            target_id,
+            "Torch",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )]);
+        let args = [
+            Value::String("Spark".into()),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(30),
+            object_reference_value(target_id),
+            Value::Bool(true),
+        ];
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || create_particle(&args));
+        let value = result.expect("CreateParticle succeeds");
+        assert_eq!(value, Value::Bool(true));
+        assert_eq!(outcome.particles.len(), 1);
+        match &outcome.particles[0] {
+            ParticleCommand::Create(config) => {
+                assert!(matches!(
+                    config.layer,
+                    ParticleLayer::ObjectBack(id) if id == target_id
+                ));
+            }
+            other => panic!("unexpected particle command {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_particle_rejects_unknown_object() {
+        let args = [
+            Value::String("Spark".into()),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(10),
+            object_reference_value(ObjectId::new(99)),
+        ];
+        let (result, outcome) = with_object_host_context(|| create_particle(&args));
+        let value = result.expect("CreateParticle handles missing object");
+        assert_eq!(value, Value::Bool(false));
+        assert!(outcome.particles.is_empty());
+    }
+
+    #[test]
+    fn clear_particles_registers_command() {
+        let (result, outcome) = with_object_host_context(|| clear_particles(&[]));
+        let value = result.expect("ClearParticles succeeds");
+        assert_eq!(value, Value::Bool(true));
+        assert_eq!(outcome.particles.len(), 1);
+        match &outcome.particles[0] {
+            ParticleCommand::Clear {
+                definition_id,
+                scope,
+            } => {
+                assert!(definition_id.is_none());
+                assert!(matches!(scope, ParticleScope::Global));
+            }
+            other => panic!("unexpected particle command {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clear_particles_with_object_sets_scope() {
+        let target_id = ObjectId::new(12);
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            target_id,
+            "Emitter",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )]);
+        let args = [
+            Value::String("Smoke".into()),
+            object_reference_value(target_id),
+        ];
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || clear_particles(&args));
+        let value = result.expect("ClearParticles succeeds");
+        assert_eq!(value, Value::Bool(true));
+        assert_eq!(outcome.particles.len(), 1);
+        match &outcome.particles[0] {
+            ParticleCommand::Clear {
+                definition_id,
+                scope,
+            } => {
+                assert_eq!(definition_id.as_deref(), Some("Smoke"));
+                assert!(matches!(scope, ParticleScope::Object(id) if *id == target_id));
+            }
+            other => panic!("unexpected particle command {other:?}"),
+        }
     }
 
     #[test]
