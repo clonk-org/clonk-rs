@@ -7,7 +7,7 @@ use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::{
     ActionLibrary, ActionUpdate, CommandDirection, Direction, EnvironmentSettings, Landscape,
     ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex, QueuedCommand, Vector2, CNAT_BOTTOM,
-    CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP,
+    CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -28,6 +28,7 @@ pub(crate) struct HostWorldObject {
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
     pub action_procedure: Option<String>,
+    pub owner: i32,
     pub position: Vector2,
     pub vertices: Vec<ObjectVertex>,
     pub action_ticks: u32,
@@ -40,6 +41,7 @@ impl HostWorldObject {
         action_target: Option<ObjectId>,
         action_target2: Option<ObjectId>,
         action_procedure: Option<String>,
+        owner: i32,
         position: Vector2,
         vertices: Vec<ObjectVertex>,
         action_ticks: u32,
@@ -50,6 +52,7 @@ impl HostWorldObject {
             action_target,
             action_target2,
             action_procedure,
+            owner,
             position,
             vertices,
             action_ticks,
@@ -66,6 +69,10 @@ impl HostWorldObject {
 
     pub fn procedure_name(&self) -> Option<&str> {
         self.action_procedure.as_deref()
+    }
+
+    pub fn owner(&self) -> i32 {
+        self.owner
     }
 
     pub fn position(&self) -> Vector2 {
@@ -263,6 +270,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetDir", get_dir);
     script.register_host_function("SetComDir", set_com_dir);
     script.register_host_function("GetComDir", get_com_dir);
+    script.register_host_function("SetOwner", set_owner);
+    script.register_host_function("GetOwner", get_owner);
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("DoEnergy", do_energy);
@@ -296,6 +305,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub id: ObjectId,
     pub status: ObjectStatus,
     pub energy: i32,
+    pub owner: i32,
     pub position: Vector2,
     pub effects: &'a [EffectState],
     pub action_name: String,
@@ -313,6 +323,7 @@ impl<'a> HostObjectContext<'a> {
         id: ObjectId,
         status: ObjectStatus,
         energy: i32,
+        owner: i32,
         position: Vector2,
         effects: &'a [EffectState],
         action_name: impl Into<String>,
@@ -328,6 +339,7 @@ impl<'a> HostObjectContext<'a> {
             id,
             status,
             energy,
+            owner,
             position,
             effects,
             action_name: action_name.into(),
@@ -2312,6 +2324,98 @@ fn get_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetOwner expects at least 1 argument: owner",
+        ));
+    }
+
+    let owner = match &args[0] {
+        Value::Int(value) => *value,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetOwner: expected int for owner, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        target_id = parse_object_reference_argument(arg, "SetOwner", "target")?;
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetOwner: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetOwner requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        object.set_owner(owner);
+        Ok(Value::Bool(true))
+    })
+}
+
+fn get_owner(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetOwner expects at most 1 argument: target",
+        ));
+    }
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(0) {
+        target_id = parse_object_reference_argument(arg, "GetOwner", "target")?;
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Int(OWNER_NONE)),
+        };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    return Ok(Value::Int(object.owner()));
+                }
+            }
+            if let Some(other) = context.world.get(target) {
+                return Ok(Value::Int(other.owner()));
+            }
+            return Ok(Value::Int(OWNER_NONE));
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Int(OWNER_NONE)),
+        };
+
+        Ok(Value::Int(object.owner()))
+    })
+}
+
 fn with_context_mut<R>(
     scope: EffectScope,
     func: impl FnOnce(&mut EffectScopeContext) -> R,
@@ -2683,6 +2787,7 @@ impl EffectHostContext {
                 id,
                 status,
                 energy,
+                owner,
                 position,
                 effects,
                 action_name,
@@ -2698,6 +2803,7 @@ impl EffectHostContext {
                 id,
                 status,
                 energy,
+                owner,
                 position,
                 effects.to_vec(),
                 action_library,
@@ -2924,6 +3030,7 @@ struct ObjectScopeContext {
     current_action_ticks: u32,
     current_energy: i32,
     max_energy: i32,
+    current_owner: i32,
     current_direction: Direction,
     current_command_direction: CommandDirection,
     current_position: Vector2,
@@ -2935,6 +3042,7 @@ impl ObjectScopeContext {
         id: ObjectId,
         status: ObjectStatus,
         energy: i32,
+        owner: i32,
         position: Vector2,
         effects: Vec<EffectState>,
         action_library: ActionLibrary,
@@ -2963,6 +3071,7 @@ impl ObjectScopeContext {
             current_action_ticks: action_ticks,
             current_energy: energy,
             max_energy,
+            current_owner: owner,
             current_direction: direction,
             current_command_direction: command_direction,
             current_position: position,
@@ -2981,6 +3090,15 @@ impl ObjectScopeContext {
     fn set_status(&mut self, status: ObjectStatus) {
         self.status = status;
         self.pending_update.status = Some(status);
+    }
+
+    fn owner(&self) -> i32 {
+        self.pending_update.owner.unwrap_or(self.current_owner)
+    }
+
+    fn set_owner(&mut self, owner: i32) {
+        self.current_owner = owner;
+        self.pending_update.owner = Some(owner);
     }
 
     fn update_effective_action(&mut self, action: &str) {
@@ -3180,6 +3298,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3507,6 +3626,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3532,6 +3652,7 @@ mod tests {
                 ObjectId::new(2),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3576,6 +3697,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3613,6 +3735,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3647,6 +3770,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3685,6 +3809,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3716,6 +3841,7 @@ mod tests {
             None,
             None,
             Some("swim".to_string()),
+            OWNER_NONE,
             Vector2::ZERO,
             Vec::new(),
             0,
@@ -3751,6 +3877,7 @@ mod tests {
             None,
             None,
             None,
+            OWNER_NONE,
             Vector2::ZERO,
             Vec::new(),
             0,
@@ -3774,6 +3901,7 @@ mod tests {
             None,
             None,
             None,
+            OWNER_NONE,
             Vector2::ZERO,
             Vec::new(),
             0,
@@ -3809,6 +3937,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3852,6 +3981,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3886,6 +4016,7 @@ mod tests {
             None,
             None,
             None,
+            OWNER_NONE,
             Vector2::ZERO,
             Vec::new(),
             12,
@@ -3915,6 +4046,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3946,6 +4078,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3967,6 +4100,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -3988,6 +4122,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -4012,6 +4147,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -4040,6 +4176,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -4073,6 +4210,7 @@ mod tests {
                 ObjectId::new(1),
                 ObjectStatus::Normal,
                 100,
+                OWNER_NONE,
                 Vector2::ZERO,
                 &[],
                 "Idle",
@@ -4166,6 +4304,7 @@ mod tests {
             Some(ObjectId::new(77)),
             None,
             None,
+            OWNER_NONE,
             Vector2::ZERO,
             Vec::new(),
             0,
@@ -4503,6 +4642,118 @@ mod tests {
         assert_eq!(value, Value::Int(ObjectStatus::Inactive.to_script_value()));
         let update = outcome.object_update.expect("status update present");
         assert_eq!(update.status, Some(ObjectStatus::Inactive));
+    }
+
+    #[test]
+    fn get_owner_returns_current_owner() {
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                5,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+            )),
+            &[],
+            HostWorldContext::default(),
+            || get_owner(&[]),
+        );
+
+        let value = result.expect("GetOwner succeeds");
+        assert_eq!(value, Value::Int(5));
+    }
+
+    #[test]
+    fn get_owner_reads_world_when_target_provided() {
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            ObjectId::new(7),
+            "Idle",
+            None,
+            None,
+            None,
+            42,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+        )]);
+        let args = [object_reference_value(ObjectId::new(7))];
+        let (result, _) = with_effect_context(None, &[], world, || get_owner(&args));
+
+        let value = result.expect("GetOwner for target succeeds");
+        assert_eq!(value, Value::Int(42));
+    }
+
+    #[test]
+    fn set_owner_records_owner_update() {
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                1,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+            )),
+            &[],
+            HostWorldContext::default(),
+            || set_owner(&[Value::Int(3)]),
+        );
+
+        let value = result.expect("SetOwner returns bool");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("owner update recorded");
+        assert_eq!(update.owner, Some(3));
+    }
+
+    #[test]
+    fn set_owner_respects_target_filter() {
+        let world = HostWorldContext::default();
+        let mut target = HashMap::new();
+        target.insert("id".into(), Value::Int(99));
+        let args = [Value::Int(2), Value::Proplist(target)];
+
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+            )),
+            &[],
+            world,
+            || set_owner(&args),
+        );
+
+        let value = result.expect("SetOwner returns bool");
+        assert_eq!(value, Value::Bool(false));
+        assert!(outcome.object_update.is_none());
     }
 
     #[test]
