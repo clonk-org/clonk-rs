@@ -1,5 +1,6 @@
 mod action;
 mod compat;
+mod control;
 mod effect;
 pub mod ffi;
 pub mod fixtures;

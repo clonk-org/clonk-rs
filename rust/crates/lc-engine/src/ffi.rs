@@ -1,4 +1,5 @@
 use crate::{
+    control::{parse_control_ini, ControlPacket},
     ActionState, CommandDirection, CrewRole, CrewSelectionState, Direction, EffectState, Engine,
     EngineState, EnvironmentFrame, FloatVector2, HudPlayerSnapshot, HudSnapshot, ObjectId,
     ObjectSnapshot, ObjectStatus, ObjectVertex, ParticleLayer, ParticleSnapshot, Playback,
@@ -123,7 +124,8 @@ pub struct RuntimeHandle {
     scenario_path: Option<PathBuf>,
     seed: u64,
     last_frame: u64,
-    control_log: BTreeMap<u64, Vec<String>>,
+    control_log_strings: BTreeMap<u64, Vec<String>>,
+    control_packets: BTreeMap<u64, Vec<ControlPacket>>,
 }
 
 impl RecorderHandle {
@@ -147,7 +149,8 @@ impl RuntimeHandle {
             scenario_path: None,
             seed: 0,
             last_frame: 0,
-            control_log: BTreeMap::new(),
+            control_log_strings: BTreeMap::new(),
+            control_packets: BTreeMap::new(),
         }
     }
 }
@@ -722,7 +725,8 @@ fn load_scenario_into_runtime(
     runtime.seed = seed;
     runtime.last_frame = runtime.engine.frame();
     runtime.scenario_path = Some(path.clone());
-    runtime.control_log.clear();
+    runtime.control_log_strings.clear();
+    runtime.control_packets.clear();
     Ok(())
 }
 
@@ -788,7 +792,7 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
         Err(_) => ini_cstr.to_string_lossy().into_owned(),
     };
 
-    if let Some((&last_frame, _)) = runtime.control_log.iter().next_back() {
+    if let Some((&last_frame, _)) = runtime.control_log_strings.iter().next_back() {
         if frame < last_frame {
             set_error(
                 error_out,
@@ -801,8 +805,25 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
         }
     }
 
+    match parse_control_ini(&ini_string) {
+        Ok(packets) => {
+            runtime
+                .control_packets
+                .entry(frame)
+                .or_insert_with(Vec::new)
+                .extend(packets);
+        }
+        Err(error) => {
+            set_error(
+                error_out,
+                format!("failed to parse control payload for frame {frame}: {error}"),
+            );
+            return false;
+        }
+    }
+
     runtime
-        .control_log
+        .control_log_strings
         .entry(frame)
         .or_insert_with(Vec::new)
         .push(ini_string);
@@ -823,7 +844,8 @@ pub extern "C" fn lc_engine_runtime_reset(
     let Some(path) = runtime.scenario_path.clone() else {
         runtime.engine = Engine::with_seed(runtime.seed);
         runtime.last_frame = runtime.engine.frame();
-        runtime.control_log.clear();
+        runtime.control_log_strings.clear();
+        runtime.control_packets.clear();
         return true;
     };
 
@@ -901,7 +923,7 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
 
     if frame == 0 && runtime.engine.frame() == 0 {
         let mut expected = runtime.engine.snapshot();
-        if let Some(entries) = runtime.control_log.get(&frame) {
+        if let Some(entries) = runtime.control_log_strings.get(&frame) {
             expected.controls = entries.clone();
         } else {
             expected.controls.clear();
@@ -945,19 +967,20 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     }
 
     let mut expected = runtime.engine.snapshot();
-    if let Some(entries) = runtime.control_log.get(&frame) {
+    if let Some(entries) = runtime.control_log_strings.get(&frame) {
         expected.controls = entries.clone();
     } else {
         expected.controls.clear();
     }
 
     let stale_frames: Vec<u64> = runtime
-        .control_log
+        .control_log_strings
         .range(..frame)
         .map(|(&key, _)| key)
         .collect();
     for stale in stale_frames {
-        runtime.control_log.remove(&stale);
+        runtime.control_log_strings.remove(&stale);
+        runtime.control_packets.remove(&stale);
     }
 
     if let Some(detail) = runtime_snapshot_mismatch(&expected, &snapshot) {
@@ -987,7 +1010,7 @@ pub extern "C" fn lc_engine_runtime_export_snapshot_json(
 
     let mut snapshot = runtime.engine.snapshot();
     let frame = snapshot.frame;
-    let control = runtime.control_log.remove(&frame);
+    let control = runtime.control_log_strings.remove(&frame);
     match &control {
         Some(entries) => {
             snapshot.controls = entries.clone();
@@ -996,6 +1019,7 @@ pub extern "C" fn lc_engine_runtime_export_snapshot_json(
             snapshot.controls.clear();
         }
     }
+    runtime.control_packets.remove(&frame);
 
     #[derive(Serialize)]
     struct RuntimeSnapshotExport {
@@ -1114,7 +1138,8 @@ pub extern "C" fn lc_engine_runtime_import_state_json(
     }
 
     runtime.last_frame = runtime.engine.frame();
-    runtime.control_log.clear();
+    runtime.control_log_strings.clear();
+    runtime.control_packets.clear();
 
     true
 }

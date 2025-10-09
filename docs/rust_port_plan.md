@@ -12,7 +12,7 @@
 - Build, packaging, and installer flows are CMake/C++ centric; Cargo artifacts are not integrated into CI releases or launcher updates.
 
 ## Blocking Gaps For Full Game Runtime
-- Authoritative game loop: C++ still owns object creation/destruction, crew control, scheduler ticks, particles, pathfinding, viewport syncing, and landscape updates; the Rust engine lacks coverage for many procedures beyond the demo set.
+- Authoritative game loop: C++ still owns object creation/destruction, crew control, scheduler ticks, particles, pathfinding, viewport syncing, and landscape updates; the Rust engine lacks coverage for many procedures beyond the demo set. (Rust runtime now parses C++ control frames into structured packets, giving us the inputs needed to drive crew commands without relying on raw INI blobs.)
 - Script and engine API coverage: Hundreds of AUL functions, proplist operations, callback hooks, effect priorities, overlay rendering, and global state mutations need Rust equivalents with identical call ordering and edge cases.
 - Frontend and IO parity: Window management, software/OpenGL render paths, HUD/GUI widgets, font and text layout, input devices (mouse, keyboard, gamepad), and platform-specific integrations live only in the C++ frontend.
 - Networking and concurrency: Lobby discovery, control packet resync, league/master-server protocols, voice/chat relays, and host migration logic are handled by C++ systems beyond the current `lc-network` framing.
