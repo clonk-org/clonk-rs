@@ -4813,6 +4813,12 @@ impl Engine {
             }
         }
 
+        if matches!(procedure, ActionProcedure::Attach) {
+            if !self.apply_attach_procedure(idx, &definition_id) {
+                return;
+            }
+        }
+
         let mut push_handled = false;
         if matches!(procedure, ActionProcedure::Push) {
             if !self.apply_push_procedure(idx, command_direction, movement_profile, &definition_id)
@@ -4905,6 +4911,7 @@ impl Engine {
             match procedure {
                 ActionProcedure::Bridge
                 | ActionProcedure::Build
+                | ActionProcedure::Attach
                 | ActionProcedure::Throw
                 | ActionProcedure::Connect
                 | ActionProcedure::Chop => {
@@ -5058,6 +5065,88 @@ impl Engine {
 
     fn reset_lift_action(&mut self, idx: usize, definition_id: &DefinitionId) {
         self.reset_action_to_default(idx, definition_id, true);
+    }
+
+    fn apply_attach_procedure(&mut self, idx: usize, definition_id: &DefinitionId) -> bool {
+        let Some(target_id) = self.objects[idx].state.action.target else {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        };
+
+        let Some(target_idx) = self.find_object_index(target_id) else {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        };
+
+        if target_idx == idx {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        let (target_position, target_vertices, target_container, target_destroyed, target_status) = {
+            let target = &self.objects[target_idx];
+            (
+                target.state.position,
+                target.state.vertices.clone(),
+                target.state.container,
+                target.destroyed,
+                target.state.status,
+            )
+        };
+
+        if target_destroyed || !target_status.is_active() {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        let (object_id, previous_container, object_vertices, action_data) = {
+            let object = &self.objects[idx];
+            (
+                object.id,
+                object.state.container,
+                object.state.vertices.clone(),
+                object.state.action.data as u32,
+            )
+        };
+
+        if previous_container != target_container {
+            if self
+                .apply_container_change(object_id, previous_container, target_container)
+                .is_err()
+            {
+                self.reset_action_to_default(idx, definition_id, true);
+                return false;
+            }
+        }
+
+        let self_vertex_index = ((action_data >> 8) & 0xFF) as usize;
+        let target_vertex_index = (action_data & 0xFF) as usize;
+
+        let self_offset = object_vertices
+            .get(self_vertex_index)
+            .map(|vertex| Vector2::new(vertex.x, vertex.y))
+            .unwrap_or(Vector2::ZERO);
+        let target_offset = target_vertices
+            .get(target_vertex_index)
+            .map(|vertex| Vector2::new(vertex.x, vertex.y))
+            .unwrap_or(Vector2::ZERO);
+
+        let new_position = Vector2::new(
+            target_position
+                .x
+                .saturating_add(target_offset.x)
+                .saturating_sub(self_offset.x),
+            target_position
+                .y
+                .saturating_add(target_offset.y)
+                .saturating_sub(self_offset.y),
+        );
+
+        let object = &mut self.objects[idx];
+        object.state.position = new_position;
+        object.state.velocity = Vector2::ZERO;
+
+        true
     }
 
     fn apply_pull_procedure(
@@ -5487,6 +5576,27 @@ impl Engine {
     }
 
     fn apply_landscape_at_index(&mut self, idx: usize) {
+        if idx >= self.objects.len() {
+            return;
+        }
+
+        let procedure = {
+            let object = &self.objects[idx];
+            let definition_id = object.definition_id.clone();
+            self.definitions
+                .get(&definition_id)
+                .map(|definition| {
+                    definition
+                        .action_library()
+                        .procedure_for_action(&object.state.action.name)
+                })
+                .unwrap_or_default()
+        };
+
+        if matches!(procedure, ActionProcedure::Attach) {
+            return;
+        }
+
         let resolution = match self.landscape.as_ref() {
             Some(landscape) => {
                 let (position, velocity) = {
@@ -8149,8 +8259,7 @@ mod tests {
 
         let id = engine
             .spawn_object(
-                SpawnConfig::new("Glider")
-                    .with_command_direction(CommandDirection::DownRight),
+                SpawnConfig::new("Glider").with_command_direction(CommandDirection::DownRight),
             )
             .expect("spawn succeeds");
 
