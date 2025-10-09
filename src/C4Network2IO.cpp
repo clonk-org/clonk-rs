@@ -25,6 +25,7 @@
 #include <C4UserMessages.h>
 #include <C4Log.h>
 #include <C4Game.h>
+#include "rust/RustEngineBridge.h"
 
 #ifndef _WIN32
 #include <sys/socket.h>
@@ -840,6 +841,16 @@ bool C4Network2IO::HandlePacket(const C4NetIOPacket &rPacket, C4Network2IOConnec
 	}
 #endif
 
+#ifdef USE_RUST_ENGINE_VALIDATION
+    RustEngineBridge::OnNetworkPacket(
+        static_cast<uint8_t>(rPacket.getStatus()),
+        static_cast<const uint8_t *>(rPacket.getData()),
+        rPacket.getSize(),
+        pConn->getClientID(),
+        pConn->getID(),
+        true);
+#endif
+
 	// search packet handling data
 	bool fSendToMainThread = false, fHandled = false;
 	for (const C4PktHandlingData *pHData = PktHandlingData; pHData->ID != PID_None; pHData++)
@@ -1425,6 +1436,15 @@ void C4Network2IOConnection::Close()
 
 bool C4Network2IOConnection::Send(const C4NetIOPacket &rPkt)
 {
+#ifdef USE_RUST_ENGINE_VALIDATION
+    RustEngineBridge::OnNetworkPacket(
+        static_cast<uint8_t>(rPkt.getStatus()),
+        static_cast<const uint8_t *>(rPkt.getData()),
+        rPkt.getSize(),
+        getClientID(),
+        getID(),
+        false);
+#endif
 	// some packets shouldn't go into the log
 	if (rPkt.getStatus() < PID_PacketLogStart)
 	{

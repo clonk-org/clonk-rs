@@ -290,6 +290,13 @@ fn describe_snapshot_mismatch(
         ));
     }
 
+    if expected.network_packets != actual.network_packets {
+        problems.push(format!(
+            "network packets mismatch (expected {:?}, got {:?})",
+            expected.network_packets, actual.network_packets
+        ));
+    }
+
     if expected.landscape != actual.landscape {
         problems.push("landscape mismatch".into());
     }
@@ -355,6 +362,7 @@ mod tests {
             hud: HudSnapshot::default(),
             surfaces: Vec::new(),
             controls: Vec::new(),
+            network_packets: Vec::new(),
         }
     }
 

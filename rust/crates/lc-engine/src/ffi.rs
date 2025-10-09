@@ -5,9 +5,9 @@ use crate::{
     },
     ActionState, CommandDirection, CrewCommandTarget, CrewRole, CrewSelectionState, Direction,
     EffectState, Engine, EngineError, EngineState, EnvironmentFrame, FloatVector2,
-    HudPlayerSnapshot, HudSnapshot, ObjectId, ObjectSnapshot, ObjectStatus, ObjectUpdate,
-    ObjectVertex, ParticleLayer, ParticleSnapshot, Playback, Recorder, Recording, Scenario,
-    SimulationSnapshot, SurfaceSnapshot, Vector2,
+    HudPlayerSnapshot, HudSnapshot, NetworkPacketDirection, NetworkPacketSnapshot, ObjectId,
+    ObjectSnapshot, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleLayer, ParticleSnapshot,
+    Playback, Recorder, Recording, Scenario, SimulationSnapshot, SurfaceSnapshot, Vector2,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -114,6 +114,17 @@ pub struct LcEngineSurfaceSnapshot {
     pub width: i32,
     pub height: i32,
     pub hash: u64,
+}
+
+#[repr(C)]
+pub struct LcEngineNetworkPacketSnapshot {
+    pub direction: u8,
+    pub status: u8,
+    pub reserved: u16,
+    pub size: u32,
+    pub hash: u64,
+    pub client_id: i32,
+    pub connection_id: u32,
 }
 
 pub struct RecorderHandle {
@@ -335,6 +346,8 @@ unsafe fn make_snapshot(
     hud_player_len: usize,
     surfaces: *const LcEngineSurfaceSnapshot,
     surface_len: usize,
+    network_packets: *const LcEngineNetworkPacketSnapshot,
+    network_packet_len: usize,
     controls: *const *const c_char,
     control_len: usize,
 ) -> Option<SimulationSnapshot> {
@@ -644,6 +657,30 @@ unsafe fn make_snapshot(
         });
     }
 
+    let network_slice: &[LcEngineNetworkPacketSnapshot] = if network_packet_len == 0 {
+        &[]
+    } else if network_packets.is_null() {
+        return None;
+    } else {
+        slice::from_raw_parts(network_packets, network_packet_len)
+    };
+    let mut network_snapshots = Vec::with_capacity(network_slice.len());
+    for entry in network_slice {
+        let direction = match entry.direction {
+            0 => NetworkPacketDirection::Inbound,
+            1 => NetworkPacketDirection::Outbound,
+            _ => return None,
+        };
+        network_snapshots.push(NetworkPacketSnapshot {
+            direction,
+            status: entry.status,
+            size: entry.size,
+            hash: entry.hash,
+            client_id: entry.client_id,
+            connection_id: entry.connection_id,
+        });
+    }
+
     let control_slice: &[*const c_char] = if control_len == 0 {
         &[]
     } else if controls.is_null() {
@@ -681,6 +718,7 @@ unsafe fn make_snapshot(
         },
         surfaces: surface_snapshots,
         controls: control_entries,
+        network_packets: network_snapshots,
     })
 }
 
@@ -856,6 +894,13 @@ fn runtime_snapshot_mismatch(
         problems.push(format!(
             "surface hash mismatch (expected {:?}, got {:?})",
             expected.surfaces, actual.surfaces
+        ));
+    }
+
+    if expected.network_packets != actual.network_packets {
+        problems.push(format!(
+            "network packets mismatch (expected {:?}, got {:?})",
+            expected.network_packets, actual.network_packets
         ));
     }
 
@@ -1052,6 +1097,8 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     hud_player_count: usize,
     surfaces: *const LcEngineSurfaceSnapshot,
     surface_len: usize,
+    network_packets: *const LcEngineNetworkPacketSnapshot,
+    network_packet_count: usize,
     controls: *const *const c_char,
     control_count: usize,
     error_out: *mut *mut c_char,
@@ -1082,6 +1129,8 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
             hud_player_count,
             surfaces,
             surface_len,
+            network_packets,
+            network_packet_count,
             controls,
             control_count,
         )
@@ -1376,6 +1425,8 @@ pub extern "C" fn lc_engine_recorder_record(
     hud_player_len: usize,
     surfaces: *const LcEngineSurfaceSnapshot,
     surface_len: usize,
+    network_packets: *const LcEngineNetworkPacketSnapshot,
+    network_packet_len: usize,
     controls: *const *const c_char,
     control_len: usize,
 ) {
@@ -1403,6 +1454,8 @@ pub extern "C" fn lc_engine_recorder_record(
             hud_player_len,
             surfaces,
             surface_len,
+            network_packets,
+            network_packet_len,
             controls,
             control_len,
         )
@@ -1497,6 +1550,8 @@ pub extern "C" fn lc_engine_playback_compare(
     hud_player_len: usize,
     surfaces: *const LcEngineSurfaceSnapshot,
     surface_len: usize,
+    network_packets: *const LcEngineNetworkPacketSnapshot,
+    network_packet_len: usize,
     controls: *const *const c_char,
     control_len: usize,
     error_out: *mut *mut c_char,
@@ -1526,6 +1581,8 @@ pub extern "C" fn lc_engine_playback_compare(
             hud_player_len,
             surfaces,
             surface_len,
+            network_packets,
+            network_packet_len,
             controls,
             control_len,
         )
@@ -1638,6 +1695,8 @@ mod tests {
             eliminated_crew_owner_len,
             hud_players,
             hud_player_len,
+            ptr::null(),
+            0,
             ptr::null(),
             0,
             controls,

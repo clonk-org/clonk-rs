@@ -100,6 +100,16 @@ typedef struct LcEngineSurfaceSnapshot {
     uint64_t hash;
 } LcEngineSurfaceSnapshot;
 
+typedef struct LcEngineNetworkPacketSnapshot {
+    uint8_t direction; // 0 = inbound, 1 = outbound
+    uint8_t status;
+    uint16_t reserved;
+    uint32_t size;
+    uint64_t hash;
+    int32_t client_id;
+    uint32_t connection_id;
+} LcEngineNetworkPacketSnapshot;
+
 LcEngineRecorderHandle *lc_engine_recorder_new(void);
 void lc_engine_recorder_clear(LcEngineRecorderHandle *handle);
 void lc_engine_recorder_record(
@@ -119,6 +129,8 @@ void lc_engine_recorder_record(
     size_t hud_player_count,
     const LcEngineSurfaceSnapshot *surfaces,
     size_t surface_count,
+    const LcEngineNetworkPacketSnapshot *network_packets,
+    size_t network_packet_count,
     const char *const *controls,
     size_t control_count,
     const int32_t *known_crew_owners,
@@ -146,6 +158,8 @@ bool lc_engine_playback_compare(
     size_t hud_player_count,
     const LcEngineSurfaceSnapshot *surfaces,
     size_t surface_count,
+    const LcEngineNetworkPacketSnapshot *network_packets,
+    size_t network_packet_count,
     const char *const *controls,
     size_t control_count,
     const int32_t *known_crew_owners,
@@ -188,6 +202,8 @@ bool lc_engine_runtime_compare_snapshot(
     size_t hud_player_count,
     const LcEngineSurfaceSnapshot *surfaces,
     size_t surface_count,
+    const LcEngineNetworkPacketSnapshot *network_packets,
+    size_t network_packet_count,
     const char *const *controls,
     size_t control_count,
     const int32_t *known_crew_owners,

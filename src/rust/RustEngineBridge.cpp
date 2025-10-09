@@ -22,6 +22,7 @@
 #include <Fixed.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -34,8 +35,12 @@
 #include <utility>
 #include <string>
 #include <vector>
+#include <limits>
 
 namespace {
+
+constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
+constexpr uint64_t kFnvPrime = 1099511628211ull;
 
 struct RecorderDeleter {
     void operator()(LcEngineRecorderHandle *handle) const {
@@ -98,9 +103,6 @@ uint64_t HashSurfaceRegion(
     int32_t width,
     int32_t height,
     float scale) {
-    constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
-    constexpr uint64_t kFnvPrime = 1099511628211ull;
-
     uint64_t hash = kFnvOffsetBasis;
     for (int32_t y = 0; y < height; ++y) {
         for (int32_t x = 0; x < width; ++x) {
@@ -109,6 +111,24 @@ uint64_t HashSurfaceRegion(
             hash ^= static_cast<uint64_t>(pixel);
             hash *= kFnvPrime;
         }
+    }
+    return hash;
+}
+
+uint64_t HashNetworkPacket(uint8_t status, const uint8_t *data, size_t size) {
+    uint64_t hash = kFnvOffsetBasis;
+    hash ^= static_cast<uint64_t>(status);
+    hash *= kFnvPrime;
+    hash ^= static_cast<uint64_t>(size);
+    hash *= kFnvPrime;
+    if (data && size > 0) {
+        for (size_t index = 0; index < size; ++index) {
+            hash ^= static_cast<uint64_t>(data[index]);
+            hash *= kFnvPrime;
+        }
+    } else {
+        hash ^= 0;
+        hash *= kFnvPrime;
     }
     return hash;
 }
@@ -172,6 +192,7 @@ struct SnapshotBuffer {
     std::vector<LcEngineHudPlayerSnapshot> hud_player_raw;
     std::vector<SurfaceEntry> surfaces;
     std::vector<LcEngineSurfaceSnapshot> surface_raw;
+    std::vector<LcEngineNetworkPacketSnapshot> network_packet_raw;
 };
 
 std::mutex g_mutex;
@@ -188,6 +209,9 @@ std::ofstream g_runtime_snapshot_stream;
 bool g_runtime_snapshot_enabled = false;
 bool g_runtime_snapshot_checked = false;
 std::map<uint64_t, std::vector<std::string>> g_frame_controls;
+std::mutex g_network_mutex;
+std::map<uint64_t, std::vector<LcEngineNetworkPacketSnapshot>> g_frame_network_packets;
+std::atomic<bool> g_capture_network_packets{false};
 
 RustStringPtr MakeString(char *raw) {
     return RustStringPtr(raw, lc_engine_string_free);
@@ -216,6 +240,11 @@ void LogWarning(const std::string &message) {
 
 void LogError(const std::string &message) {
     LogNTr(spdlog::level::err, message);
+}
+
+void ClearNetworkPacketLog() {
+    std::lock_guard<std::mutex> lock(g_network_mutex);
+    g_frame_network_packets.clear();
 }
 
 std::string LoadFile(const std::string &path) {
@@ -306,6 +335,7 @@ void CollectParticlesFromList(
 
 SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
     SnapshotBuffer buffer;
+    const uint64_t frame = static_cast<uint64_t>(game.FrameCounter);
     CollectParticlesFromList(
         game.Particles.GlobalParticles,
         ParticleLayer::Global,
@@ -727,6 +757,15 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
         buffer.surface_raw.push_back(entry.snapshot);
     }
 
+    {
+        std::lock_guard<std::mutex> network_lock(g_network_mutex);
+        auto it = g_frame_network_packets.find(frame);
+        if (it != g_frame_network_packets.end()) {
+            buffer.network_packet_raw = std::move(it->second);
+            g_frame_network_packets.erase(it);
+        }
+    }
+
     return buffer;
 }
 
@@ -917,7 +956,12 @@ void OnGameStart(C4Game &game) {
     std::lock_guard<std::mutex> lock(g_mutex);
     EnsureInitialised();
     g_frame_controls.clear();
+    ClearNetworkPacketLog();
+    g_capture_network_packets.store(false, std::memory_order_release);
     if (!g_runtime_requested) {
+        if (!g_disabled && (g_recorder || g_playback)) {
+            g_capture_network_packets.store(true, std::memory_order_release);
+        }
         return;
     }
 
@@ -925,6 +969,10 @@ void OnGameStart(C4Game &game) {
     g_runtime_disabled = false;
     if (!InitialiseRuntime(game)) {
         g_runtime.reset();
+    }
+
+    if (!g_disabled && (g_recorder || g_playback || (g_runtime && !g_runtime_disabled))) {
+        g_capture_network_packets.store(true, std::memory_order_release);
     }
 }
 
@@ -959,13 +1007,51 @@ void OnControlFrame(const C4Control &control, uint64_t frame) {
     }
 }
 
+void OnNetworkPacket(
+    uint8_t status,
+    const uint8_t *payload,
+    size_t payload_size,
+    int32_t client_id,
+    uint32_t connection_id,
+    bool inbound) {
+    if (!g_capture_network_packets.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    const size_t bounded_size = std::min(payload_size, static_cast<size_t>(std::numeric_limits<uint32_t>::max()));
+    const uint8_t *data = payload;
+    uint64_t hash = HashNetworkPacket(status, data, bounded_size);
+
+    LcEngineNetworkPacketSnapshot snapshot{};
+    snapshot.direction = inbound ? 0u : 1u;
+    snapshot.status = status;
+    snapshot.size = static_cast<uint32_t>(bounded_size);
+    snapshot.hash = hash;
+    snapshot.client_id = client_id;
+    snapshot.connection_id = connection_id;
+
+    uint64_t frame = 0;
+    if (Game.FrameCounter >= 0) {
+        frame = static_cast<uint64_t>(Game.FrameCounter);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_network_mutex);
+        g_frame_network_packets[frame].push_back(snapshot);
+    }
+}
+
 void OnFrame(C4Game &game) {
     std::lock_guard<std::mutex> lock(g_mutex);
     EnsureInitialised();
     if (g_disabled) {
         g_frame_controls.clear();
+        ClearNetworkPacketLog();
+        g_capture_network_packets.store(false, std::memory_order_release);
         return;
     }
+
+    g_capture_network_packets.store(true, std::memory_order_release);
 
     const bool capture_surface_hash =
         (g_recorder != nullptr) ||
@@ -994,6 +1080,10 @@ void OnFrame(C4Game &game) {
     const LcEngineSurfaceSnapshot *surface_data =
         surfaces.empty() ? nullptr : surfaces.data();
     const size_t surface_count = surfaces.size();
+    const auto &network_packets = buffer.network_packet_raw;
+    const LcEngineNetworkPacketSnapshot *network_data =
+        network_packets.empty() ? nullptr : network_packets.data();
+    const size_t network_count = network_packets.size();
     const int32_t *known_owners =
         buffer.known_crew_owners.empty() ? nullptr : buffer.known_crew_owners.data();
     const int32_t *eliminated_owners = buffer.eliminated_crew_owners.empty()
@@ -1035,6 +1125,8 @@ void OnFrame(C4Game &game) {
                 hud_players.size(),
                 surface_data,
                 surface_count,
+                network_data,
+                network_count,
                 control_data,
                 control_count,
                 known_owners,
@@ -1071,6 +1163,8 @@ void OnFrame(C4Game &game) {
             hud_players.size(),
             surface_data,
             surface_count,
+            network_data,
+            network_count,
             control_data,
             control_count,
             known_owners,
@@ -1098,6 +1192,8 @@ void OnFrame(C4Game &game) {
                 hud_players.size(),
                 surface_data,
                 surface_count,
+                network_data,
+                network_count,
                 control_data,
                 control_count,
                 known_owners,
@@ -1161,6 +1257,8 @@ void Shutdown() {
     }
     g_runtime_snapshot_enabled = false;
     g_runtime_snapshot_checked = false;
+    ClearNetworkPacketLog();
+    g_capture_network_packets.store(false, std::memory_order_release);
 }
 
 } // namespace RustEngineBridge

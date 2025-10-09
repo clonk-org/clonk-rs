@@ -436,6 +436,31 @@ pub struct SurfaceSnapshot {
     pub hash: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkPacketDirection {
+    Inbound,
+    Outbound,
+}
+
+impl Default for NetworkPacketDirection {
+    fn default() -> Self {
+        Self::Inbound
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct NetworkPacketSnapshot {
+    #[serde(default)]
+    pub direction: NetworkPacketDirection,
+    pub status: u8,
+    pub size: u32,
+    pub hash: u64,
+    pub client_id: i32,
+    #[serde(default)]
+    pub connection_id: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ObjectVertex {
     pub x: i32,
@@ -1827,6 +1852,8 @@ pub struct SimulationSnapshot {
     pub hud: HudSnapshot,
     #[serde(default)]
     pub controls: Vec<String>,
+    #[serde(default)]
+    pub network_packets: Vec<NetworkPacketSnapshot>,
 }
 
 impl SimulationSnapshot {
@@ -4071,6 +4098,7 @@ impl Engine {
                 players: hud_players,
             },
             controls: Vec::new(),
+            network_packets: Vec::new(),
         }
     }
 
