@@ -110,6 +110,7 @@ pub struct LcEngineHudPlayerSnapshot {
 
 #[repr(C)]
 pub struct LcEngineSurfaceSnapshot {
+    pub label: *const c_char,
     pub width: i32,
     pub height: i32,
     pub hash: u64,
@@ -626,7 +627,17 @@ unsafe fn make_snapshot(
     };
     let mut surface_snapshots = Vec::with_capacity(surface_slice.len());
     for entry in surface_slice {
+        let label = if entry.label.is_null() {
+            String::new()
+        } else {
+            let cstr = unsafe { CStr::from_ptr(entry.label) };
+            match cstr.to_str() {
+                Ok(value) => value.to_owned(),
+                Err(_) => cstr.to_string_lossy().into_owned(),
+            }
+        };
         surface_snapshots.push(SurfaceSnapshot {
+            label,
             width: entry.width,
             height: entry.height,
             hash: entry.hash,

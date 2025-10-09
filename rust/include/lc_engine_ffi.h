@@ -94,6 +94,7 @@ typedef struct LcEngineHudPlayerSnapshot {
 } LcEngineHudPlayerSnapshot;
 
 typedef struct LcEngineSurfaceSnapshot {
+    const char *label;
     int32_t width;
     int32_t height;
     uint64_t hash;

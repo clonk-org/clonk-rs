@@ -429,6 +429,8 @@ pub struct HudPlayerSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SurfaceSnapshot {
+    #[serde(default)]
+    pub label: String,
     pub width: i32,
     pub height: i32,
     pub hash: u64,

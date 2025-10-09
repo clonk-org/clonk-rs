@@ -8,12 +8,14 @@
 #include <C4Application.h>
 #include <C4Control.h>
 #include <C4Game.h>
+#include <C4GraphicsSystem.h>
 #include <C4Log.h>
 #include <C4Object.h>
 #include <C4ObjectList.h>
 #include <C4Effects.h>
 #include <C4Particles.h>
 #include <C4Player.h>
+#include <C4Viewport.h>
 #include <C4Wrappers.h>
 #include <StdCompiler.h>
 
@@ -89,14 +91,21 @@ private:
     bool locked;
 };
 
-uint64_t HashSurface(C4Surface &surface, int32_t width, int32_t height, float scale) {
+uint64_t HashSurfaceRegion(
+    C4Surface &surface,
+    int32_t origin_x,
+    int32_t origin_y,
+    int32_t width,
+    int32_t height,
+    float scale) {
     constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
     constexpr uint64_t kFnvPrime = 1099511628211ull;
 
     uint64_t hash = kFnvOffsetBasis;
     for (int32_t y = 0; y < height; ++y) {
         for (int32_t x = 0; x < width; ++x) {
-            const uint32_t pixel = surface.GetPixDw(x, y, false, scale);
+            const uint32_t pixel =
+                surface.GetPixDw(origin_x + x, origin_y + y, false, scale);
             hash ^= static_cast<uint64_t>(pixel);
             hash *= kFnvPrime;
         }
@@ -141,6 +150,11 @@ struct ParticleEntry {
     std::string definition;
 };
 
+struct SurfaceEntry {
+    LcEngineSurfaceSnapshot snapshot{};
+    std::string label;
+};
+
 struct SnapshotBuffer {
     std::vector<SnapshotEntry> entries;
     std::vector<LcEngineObjectSnapshot> raw;
@@ -156,6 +170,7 @@ struct SnapshotBuffer {
     std::vector<int32_t> eliminated_crew_owners;
     std::vector<HudPlayerEntry> hud_players;
     std::vector<LcEngineHudPlayerSnapshot> hud_player_raw;
+    std::vector<SurfaceEntry> surfaces;
     std::vector<LcEngineSurfaceSnapshot> surface_raw;
 };
 
@@ -578,17 +593,138 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
             SurfaceLock lock(surface);
             if (lock.IsLocked()) {
                 const float scale = Application.GetScale();
-                const int32_t width = static_cast<int32_t>(std::ceil(surface->Wdt * scale));
-                const int32_t height = static_cast<int32_t>(std::ceil(surface->Hgt * scale));
-                if (width > 0 && height > 0) {
-                    LcEngineSurfaceSnapshot snapshot{};
-                    snapshot.width = width;
-                    snapshot.height = height;
-                    snapshot.hash = HashSurface(*surface, width, height, scale);
-                    buffer.surface_raw.push_back(snapshot);
+                const int32_t surface_width =
+                    static_cast<int32_t>(std::ceil(surface->Wdt * scale));
+                const int32_t surface_height =
+                    static_cast<int32_t>(std::ceil(surface->Hgt * scale));
+                if (surface_width > 0 && surface_height > 0) {
+                    const auto clamp_coordinate = [](int32_t value, int32_t maximum) -> int32_t {
+                        if (value < 0) {
+                            return 0;
+                        }
+                        if (value > maximum) {
+                            return maximum;
+                        }
+                        return value;
+                    };
+                    auto add_surface_hash = [&](std::string label,
+                                                int32_t origin_x,
+                                                int32_t origin_y,
+                                                int32_t width,
+                                                int32_t height) {
+                        if (width <= 0 || height <= 0) {
+                            return;
+                        }
+                        origin_x = clamp_coordinate(origin_x, surface_width);
+                        origin_y = clamp_coordinate(origin_y, surface_height);
+                        width = std::min(width, surface_width - origin_x);
+                        height = std::min(height, surface_height - origin_y);
+                        if (width <= 0 || height <= 0) {
+                            return;
+                        }
+                        SurfaceEntry entry;
+                        entry.label = std::move(label);
+                        entry.snapshot.width = width;
+                        entry.snapshot.height = height;
+                        entry.snapshot.hash = HashSurfaceRegion(
+                            *surface,
+                            origin_x,
+                            origin_y,
+                            width,
+                            height,
+                            scale);
+                        buffer.surfaces.push_back(std::move(entry));
+                    };
+                    auto add_surface_from_rect =
+                        [&](std::string label, int32_t x, int32_t y, int32_t width, int32_t height) {
+                            if (width <= 0 || height <= 0) {
+                                return;
+                            }
+                            const double left_value =
+                                static_cast<double>(x) * static_cast<double>(scale);
+                            const double top_value =
+                                static_cast<double>(y) * static_cast<double>(scale);
+                            const double right_value =
+                                static_cast<double>(x + width) * static_cast<double>(scale);
+                            const double bottom_value =
+                                static_cast<double>(y + height) * static_cast<double>(scale);
+                            int32_t left = static_cast<int32_t>(std::floor(left_value));
+                            int32_t top = static_cast<int32_t>(std::floor(top_value));
+                            int32_t right = static_cast<int32_t>(std::ceil(right_value));
+                            int32_t bottom = static_cast<int32_t>(std::ceil(bottom_value));
+                            left = clamp_coordinate(left, surface_width);
+                            top = clamp_coordinate(top, surface_height);
+                            right = clamp_coordinate(right, surface_width);
+                            bottom = clamp_coordinate(bottom, surface_height);
+                            const int32_t scaled_width = right - left;
+                            const int32_t scaled_height = bottom - top;
+                            add_surface_hash(
+                                std::move(label),
+                                left,
+                                top,
+                                scaled_width,
+                                scaled_height);
+                        };
+
+                    add_surface_hash(
+                        "back_buffer",
+                        0,
+                        0,
+                        surface_width,
+                        surface_height);
+
+                    const auto &viewports = Game.GraphicsSystem.GetViewports();
+                    size_t viewport_index = 0;
+                    for (const auto &viewport_ptr : viewports) {
+                        if (!viewport_ptr) {
+                            continue;
+                        }
+                        const C4Viewport *viewport = viewport_ptr.get();
+                        const C4Rect rect = viewport->GetOutputRect();
+                        std::string label = "viewport#" + std::to_string(viewport_index);
+                        label += ":player=";
+                        const int32_t player = viewport->GetPlayer();
+                        if (player == NO_OWNER) {
+                            label += "none";
+                        } else {
+                            label += std::to_string(player);
+                        }
+                        add_surface_from_rect(label, rect.x, rect.y, rect.Wdt, rect.Hgt);
+                        ++viewport_index;
+                    }
+
+                    const C4Facet &upper_output = Game.GraphicsSystem.UpperBoard.Output;
+                    if (upper_output.Surface == surface &&
+                        upper_output.Wdt > 0 &&
+                        upper_output.Hgt > 0) {
+                        add_surface_from_rect(
+                            "upper_board",
+                            upper_output.X,
+                            upper_output.Y,
+                            upper_output.Wdt,
+                            upper_output.Hgt);
+                    }
+
+                    const C4Facet &message_output = Game.GraphicsSystem.MessageBoard.Output;
+                    if (message_output.Surface == surface &&
+                        message_output.Wdt > 0 &&
+                        message_output.Hgt > 0) {
+                        add_surface_from_rect(
+                            "message_board",
+                            message_output.X,
+                            message_output.Y,
+                            message_output.Wdt,
+                            message_output.Hgt);
+                    }
                 }
             }
         }
+    }
+
+    buffer.surface_raw.reserve(buffer.surfaces.size());
+    for (auto &entry : buffer.surfaces) {
+        entry.snapshot.label = entry.label.c_str();
+        buffer.surface_raw.push_back(entry.snapshot);
     }
 
     return buffer;
