@@ -1668,7 +1668,7 @@ pub enum EngineError {
     #[error("crew selection error for owner {owner}: {detail}")]
     CrewSelection { owner: i32, detail: String },
     #[error("crew role error for owner {owner}: {detail}")]
-   CrewRole { owner: i32, detail: String },
+    CrewRole { owner: i32, detail: String },
     #[error("script error in {function} of `{definition}`")]
     Script {
         definition: String,
@@ -2138,6 +2138,7 @@ impl Definition {
         let (result, host_effects) = compat::with_effect_context(
             Some(compat::HostObjectContext::new(
                 object_id,
+                state.container,
                 state.status,
                 state.energy,
                 state.owner,
@@ -2232,6 +2233,7 @@ impl Definition {
         let (result, host_effects) = compat::with_effect_context(
             Some(compat::HostObjectContext::new(
                 object_id,
+                state.container,
                 state.status,
                 state.energy,
                 state.owner,
@@ -2327,6 +2329,7 @@ impl Definition {
         let (result, host_effects) = compat::with_effect_context(
             Some(compat::HostObjectContext::new(
                 object_id,
+                state.container,
                 state.status,
                 state.energy,
                 state.owner,
@@ -2489,6 +2492,7 @@ impl Definition {
         let (result, mut commands) = compat::with_effect_context(
             Some(compat::HostObjectContext::new(
                 object_id,
+                state.container,
                 state.status,
                 state.energy,
                 state.owner,

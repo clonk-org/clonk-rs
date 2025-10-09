@@ -722,10 +722,12 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetY", get_y);
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
+    script.register_host_function("Contained", contained);
     script.register_host_function("SetOwner", set_owner);
     script.register_host_function("GetOwner", get_owner);
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
+    script.register_host_function("RemoveObject", remove_object);
     script.register_host_function("GetEnergy", get_energy);
     script.register_host_function("DoEnergy", do_energy);
     script.register_host_function("Random", random);
@@ -756,6 +758,7 @@ pub(crate) fn enter_random_context(rng: ChaCha8Rng) -> RandomContextGuard {
 #[derive(Clone, Debug)]
 pub(crate) struct HostObjectContext<'a> {
     pub id: ObjectId,
+    pub container: Option<ObjectId>,
     pub status: ObjectStatus,
     pub energy: i32,
     pub owner: i32,
@@ -776,6 +779,7 @@ pub(crate) struct HostObjectContext<'a> {
 impl<'a> HostObjectContext<'a> {
     pub fn new(
         id: ObjectId,
+        container: Option<ObjectId>,
         status: ObjectStatus,
         energy: i32,
         owner: i32,
@@ -794,6 +798,7 @@ impl<'a> HostObjectContext<'a> {
     ) -> Self {
         Self {
             id,
+            container,
             status,
             energy,
             owner,
@@ -3548,6 +3553,50 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn contained(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "Contained expects at most 1 argument: target",
+        ));
+    }
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(0) {
+        target_id = parse_object_reference_argument(arg, "Contained", "target")?;
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let to_value = |container: Option<ObjectId>| {
+            container.map(object_reference_value).unwrap_or(Value::Nil)
+        };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    return Ok(to_value(object.container()));
+                }
+            }
+            if let Some(other) = context.get_world_object(target) {
+                return Ok(to_value(other.container()));
+            }
+            return Ok(Value::Nil);
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        Ok(to_value(object.container()))
+    })
+}
+
 fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() {
         return Err(RuntimeError::new(
@@ -3637,6 +3686,41 @@ fn get_owner(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         Ok(Value::Int(object.owner()))
+    })
+}
+
+fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "RemoveObject expects at most 1 argument: target",
+        ));
+    }
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(0) {
+        target_id = parse_object_reference_argument(arg, "RemoveObject", "target")?;
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = match borrow.as_mut() {
+            Some(context) => context,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        object.mark_destroy();
+        Ok(Value::Bool(true))
     })
 }
 
@@ -4014,6 +4098,7 @@ impl EffectHostContext {
         let object = object.map(|ctx| {
             let HostObjectContext {
                 id,
+                container,
                 status,
                 energy,
                 owner,
@@ -4032,6 +4117,7 @@ impl EffectHostContext {
             } = ctx;
             ObjectScopeContext::new(
                 id,
+                container,
                 status,
                 energy,
                 owner,
@@ -4289,6 +4375,7 @@ impl EffectScopeContext {
 
 struct ObjectScopeContext {
     id: ObjectId,
+    current_container: Option<ObjectId>,
     status: ObjectStatus,
     effects: EffectScopeContext,
     pending_update: ObjectUpdate,
@@ -4314,6 +4401,7 @@ struct ObjectScopeContext {
 impl ObjectScopeContext {
     fn new(
         id: ObjectId,
+        container: Option<ObjectId>,
         status: ObjectStatus,
         energy: i32,
         owner: i32,
@@ -4334,6 +4422,7 @@ impl ObjectScopeContext {
         let max_energy = energy.max(DEFAULT_MAX_ENERGY);
         Self {
             id,
+            current_container: container,
             status,
             effects: EffectScopeContext::new(effects),
             pending_update: ObjectUpdate::default(),
@@ -4377,6 +4466,26 @@ impl ObjectScopeContext {
     fn set_owner(&mut self, owner: i32) {
         self.current_owner = owner;
         self.pending_update.owner = Some(owner);
+    }
+
+    fn container(&self) -> Option<ObjectId> {
+        match self.pending_update.container {
+            Some(container) => container,
+            None => self.current_container,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn set_container(&mut self, container: Option<ObjectId>) {
+        if self.container() == container {
+            return;
+        }
+        self.current_container = container;
+        self.pending_update.container = Some(container);
+    }
+
+    fn mark_destroy(&mut self) {
+        self.destroy = true;
     }
 
     fn update_effective_action(&mut self, action: &str) -> bool {
@@ -4642,6 +4751,7 @@ mod tests {
         with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -4973,6 +5083,7 @@ mod tests {
         let (result, outcome) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -4990,7 +5101,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || set_action(&[Value::String("Walk".into())]),
         );
 
@@ -5001,6 +5113,7 @@ mod tests {
         let (result, outcome) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(2),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5018,7 +5131,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || set_action(&[Value::String("Idle".into())]),
         );
 
@@ -5042,6 +5156,7 @@ mod tests {
         let (result, outcome) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5059,7 +5174,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || set_action_data(&[Value::Int(512)]),
         );
 
@@ -5082,6 +5198,7 @@ mod tests {
         let (result, outcome) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5099,7 +5216,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || set_action_data(&[Value::Int(31 << 8)]),
         );
 
@@ -5117,6 +5235,7 @@ mod tests {
         let (result, outcome) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Inactive,
                 100,
                 OWNER_NONE,
@@ -5134,7 +5253,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || set_action_data(&[Value::Int(5)]),
         );
 
@@ -5161,6 +5281,7 @@ mod tests {
         let (result, outcome) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5178,7 +5299,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || {
                 set_action(&[Value::String("Walk".into())])?;
                 get_action(&[])
@@ -5201,6 +5323,7 @@ mod tests {
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5218,7 +5341,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || get_procedure(&[]),
         );
 
@@ -5238,6 +5362,7 @@ mod tests {
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5255,7 +5380,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || get_procedure(&[]),
         );
 
@@ -5279,6 +5405,7 @@ mod tests {
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5296,7 +5423,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || {
                 set_action(&[Value::String("Float".into())])?;
                 get_procedure(&[])
@@ -5427,6 +5555,7 @@ mod tests {
         let (result, outcome) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5444,7 +5573,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || {
                 set_action(&[
                     Value::String("Idle".into()),
@@ -5473,6 +5603,7 @@ mod tests {
         let (result, outcome) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5490,7 +5621,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || {
                 set_action(&[Value::String("Walk".into())])?;
                 get_act_time(&[])
@@ -5546,6 +5678,7 @@ mod tests {
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5563,7 +5696,8 @@ mod tests {
                 &vertices,
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || get_vertex_num(&[]),
         );
 
@@ -5580,6 +5714,7 @@ mod tests {
         let (x, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5597,13 +5732,15 @@ mod tests {
                 &vertices,
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || get_vertex(&[Value::Int(0), Value::Int(0)]),
         );
         assert_eq!(x.expect("x succeeds"), Value::Int(2));
         let (y, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5621,13 +5758,15 @@ mod tests {
                 &vertices,
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || get_vertex(&[Value::Int(0), Value::Int(1)]),
         );
         assert_eq!(y.expect("y succeeds"), Value::Int(-3));
         let (cnat, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5645,7 +5784,8 @@ mod tests {
                 &vertices,
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || get_vertex(&[Value::Int(0), Value::Int(2)]),
         );
         assert_eq!(
@@ -5655,6 +5795,7 @@ mod tests {
         let (friction, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5672,7 +5813,8 @@ mod tests {
                 &vertices,
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || get_vertex(&[Value::Int(0), Value::Int(3)]),
         );
         assert_eq!(friction.expect("friction succeeds"), Value::Int(7));
@@ -5686,6 +5828,7 @@ mod tests {
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5703,7 +5846,8 @@ mod tests {
                 &vertices,
             )),
             &[],
-            world, 1,
+            world,
+            1,
             || get_vertex_contact(&[Value::Int(0)]),
         );
 
@@ -5722,6 +5866,7 @@ mod tests {
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5739,7 +5884,8 @@ mod tests {
                 &vertices,
             )),
             &[],
-            world, 1,
+            world,
+            1,
             || get_contact(&[Value::Int(-1)]),
         );
 
@@ -5909,6 +6055,7 @@ mod tests {
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5926,7 +6073,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || get_x(&[]),
         );
 
@@ -5939,6 +6087,7 @@ mod tests {
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(2),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -5956,7 +6105,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || get_y(&[]),
         );
 
@@ -6004,6 +6154,7 @@ mod tests {
     fn get_x_dir_returns_object_velocity() {
         let context = HostObjectContext::new(
             ObjectId::new(7),
+            None,
             ObjectStatus::Normal,
             100,
             OWNER_NONE,
@@ -6032,6 +6183,7 @@ mod tests {
     fn get_y_dir_applies_precision_scaling() {
         let context = HostObjectContext::new(
             ObjectId::new(8),
+            None,
             ObjectStatus::Normal,
             100,
             OWNER_NONE,
@@ -6086,8 +6238,9 @@ mod tests {
     #[test]
     fn get_x_dir_returns_nil_for_missing_target() {
         let args = [object_reference_value(ObjectId::new(77))];
-        let (result, _) =
-            with_effect_context(None, &[], HostWorldContext::default(), 1, || get_x_dir(&args));
+        let (result, _) = with_effect_context(None, &[], HostWorldContext::default(), 1, || {
+            get_x_dir(&args)
+        });
         let value = result.expect("GetXDir handles missing target");
         assert_eq!(value, Value::Nil);
     }
@@ -6159,6 +6312,7 @@ mod tests {
         let (result, outcome) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -6176,7 +6330,8 @@ mod tests {
                 &[ObjectVertex::new(0, 0)],
             )),
             &[],
-            world, 1,
+            world,
+            1,
             || set_position(&args),
         );
 
@@ -6460,6 +6615,7 @@ mod tests {
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 5,
@@ -6477,7 +6633,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || get_owner(&[]),
         );
 
@@ -6516,6 +6673,7 @@ mod tests {
         let (result, outcome) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 1,
@@ -6533,7 +6691,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || set_owner(&[Value::Int(3)]),
         );
 
@@ -6553,6 +6712,7 @@ mod tests {
         let (result, outcome) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 100,
                 OWNER_NONE,
@@ -6570,7 +6730,8 @@ mod tests {
                 &[],
             )),
             &[],
-            world, 1,
+            world,
+            1,
             || set_owner(&args),
         );
 
@@ -6623,6 +6784,7 @@ mod tests {
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
+                None,
                 ObjectStatus::Normal,
                 75,
                 OWNER_NONE,
@@ -6640,7 +6802,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || get_energy(&[]),
         );
 
@@ -6677,7 +6840,13 @@ mod tests {
     #[test]
     fn get_energy_returns_nil_without_context() {
         let (result, _) =
-            with_effect_context(None, &[], HostWorldContext::default(), 1, || get_energy(&[]));
+            with_effect_context(
+                None,
+                &[],
+                HostWorldContext::default(),
+                1,
+                || get_energy(&[]),
+            );
         let value = result.expect("GetEnergy handles missing context");
         assert_eq!(value, Value::Nil);
     }
@@ -6687,6 +6856,7 @@ mod tests {
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(3),
+                None,
                 ObjectStatus::Normal,
                 LEGACY_MAX_PHYSICAL / 2,
                 OWNER_NONE,
@@ -6704,7 +6874,8 @@ mod tests {
                 &[],
             )),
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || get_energy(&[]),
         );
 
@@ -6725,6 +6896,92 @@ mod tests {
         assert_eq!(spawn.owner, OWNER_NONE);
         assert_eq!(spawn.id, Some(ObjectId::new(1)));
         assert_eq!(outcome.next_object_id, 2);
+    }
+
+    #[test]
+    fn contained_returns_nil_when_object_has_no_container() {
+        let (result, _) = with_object_host_context(|| contained(&[]));
+        let value = result.expect("Contained without container succeeds");
+        assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn contained_returns_container_reference() {
+        let container_id = ObjectId::new(42);
+        let object_id = ObjectId::new(7);
+        let world = HostWorldContext::from_objects(vec![
+            HostWorldObject::new(
+                container_id,
+                "Chest",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                0,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+            HostWorldObject::new(
+                object_id,
+                "Gem",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                0,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                Some(container_id),
+            ),
+        ]);
+        let context = HostObjectContext::new(
+            object_id,
+            Some(container_id),
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+        );
+        let (result, _) = with_effect_context(Some(context), &[], world, 100, || contained(&[]));
+        let value = result.expect("Contained with container succeeds");
+        match value {
+            Value::Proplist(map) => {
+                assert_eq!(
+                    map.get("id"),
+                    Some(&Value::Int(container_id.as_u64() as i32))
+                );
+            }
+            other => panic!("expected proplist for container reference, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_object_marks_destroy_flag() {
+        let (result, outcome) = with_object_host_context(|| remove_object(&[]));
+        assert_eq!(result.expect("RemoveObject succeeds"), Value::Bool(true));
+        assert!(outcome.destroy_object);
     }
 
     #[test]
@@ -7032,9 +7289,10 @@ mod tests {
 
     #[test]
     fn add_global_effect_records_global_command() {
-        let (result, outcome) = with_effect_context(None, &[], HostWorldContext::default(), 1, || {
-            add_effect(&[Value::String("Glow".into()), Value::Nil, Value::Int(120)])
-        });
+        let (result, outcome) =
+            with_effect_context(None, &[], HostWorldContext::default(), 1, || {
+                add_effect(&[Value::String("Glow".into()), Value::Nil, Value::Int(120)])
+            });
 
         let value = result.expect("AddEffect succeeds");
         assert_eq!(value, Value::Int(1));
@@ -7054,7 +7312,8 @@ mod tests {
         let (result, _) = with_effect_context(
             None,
             &[],
-            HostWorldContext::default(), 1,
+            HostWorldContext::default(),
+            1,
             || -> Result<Value, RuntimeError> {
                 add_effect(&[Value::String("Glow".into()), Value::Nil, Value::Int(90)])?;
                 get_effect(&[
