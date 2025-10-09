@@ -4906,6 +4906,7 @@ impl Engine {
                 ActionProcedure::Bridge
                 | ActionProcedure::Build
                 | ActionProcedure::Throw
+                | ActionProcedure::Connect
                 | ActionProcedure::Chop => {
                     object.state.velocity = Vector2::ZERO;
                 }
@@ -8439,6 +8440,38 @@ mod tests {
                 SpawnConfig::new("Bridger")
                     .with_velocity(Vector2::new(8, -3))
                     .with_action(ActionState::new("Bridge")),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::ZERO);
+    }
+
+    #[test]
+    fn connect_procedure_freezes_velocity_and_ignores_wind() {
+        let mut definition =
+            Definition::from_script("Connector", "Connector", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Connect".to_string(),
+            ActionSpec::default().with_procedure("connect"),
+        );
+        definition.configure_actions(Some("Connect".to_string()), actions);
+
+        let mut engine = Engine::with_seed(29);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        engine.set_environment(EnvironmentSettings::new(10));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Connector")
+                    .with_velocity(Vector2::new(-7, 4))
+                    .with_action(ActionState::new("Connect")),
             )
             .expect("spawn succeeds");
 

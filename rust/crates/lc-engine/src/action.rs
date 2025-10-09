@@ -213,6 +213,7 @@ impl ActionProcedure {
                 | ActionProcedure::Bridge
                 | ActionProcedure::Build
                 | ActionProcedure::Throw
+                | ActionProcedure::Connect
                 | ActionProcedure::Scale
                 | ActionProcedure::Push
                 | ActionProcedure::Pull
@@ -230,6 +231,7 @@ impl ActionProcedure {
                 | ActionProcedure::Bridge
                 | ActionProcedure::Build
                 | ActionProcedure::Throw
+                | ActionProcedure::Connect
                 | ActionProcedure::Push
                 | ActionProcedure::Pull
                 | ActionProcedure::Chop
