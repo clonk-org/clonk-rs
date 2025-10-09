@@ -37,6 +37,7 @@
 #include <set>
 #include <utility>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <limits>
 #include <unordered_map>
@@ -144,9 +145,145 @@ int32_t ClampActionTicks(int32_t ticks) {
     return ticks;
 }
 
+C4Def *FindDefinitionForRuntimeIdentifier(const char *identifier) {
+    if (!identifier || !*identifier) {
+        return nullptr;
+    }
+
+    std::string_view view(identifier);
+    if (LooksLikeID(view)) {
+        if (C4Def *by_id = Game.Defs.ID2Def(C4Id(view))) {
+            return by_id;
+        }
+    }
+
+    for (const auto &def_entry : Game.Defs) {
+        C4Def *def = def_entry.get();
+        if (!def) {
+            continue;
+        }
+        const char *name = def->GetName();
+        if (name && SEqualNoCase(name, identifier)) {
+            return def;
+        }
+    }
+
+    return nullptr;
+}
+
+int32_t RuntimeObjectNumber(uint64_t id) {
+    if (id == 0 || id > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+        return -1;
+    }
+    return static_cast<int32_t>(id);
+}
+
+void EnsureObjectStatusMatchesRuntimeState(C4Object &object, int32_t desired_status) {
+    if (desired_status == C4OS_INACTIVE) {
+        if (object.Status == C4OS_NORMAL) {
+            object.StatusDeactivate(false);
+        }
+    } else {
+        if (object.Status == C4OS_INACTIVE) {
+            object.StatusActivate();
+        }
+    }
+}
+
+C4Object *CreateRuntimeObject(
+    C4Game &game,
+    const LcEngineRuntimeObjectState &state,
+    uint64_t frame) {
+    if (state.status == C4OS_DELETED) {
+        return nullptr;
+    }
+
+    C4Def *definition = FindDefinitionForRuntimeIdentifier(state.definition_id);
+    if (!definition) {
+        StdStrBuf message;
+        message.Format(
+            "Rust runtime could not resolve definition \"%s\" for object %llu on frame %llu",
+            state.definition_id ? state.definition_id : "<unknown>",
+            static_cast<unsigned long long>(state.id),
+            static_cast<unsigned long long>(frame));
+        LogWarning(message.getData());
+        return nullptr;
+    }
+
+    const int32_t number = RuntimeObjectNumber(state.id);
+    if (number <= 0) {
+        StdStrBuf message;
+        message.Format(
+            "Rust runtime reported unsupported object id %llu on frame %llu",
+            static_cast<unsigned long long>(state.id),
+            static_cast<unsigned long long>(frame));
+        LogWarning(message.getData());
+        return nullptr;
+    }
+
+    if (game.Objects.ObjectPointer(number) || game.Objects.InactiveObjects.ObjectPointer(number)) {
+        return nullptr;
+    }
+
+    auto object = std::make_unique<C4Object>();
+    if (!object->Init(
+            definition,
+            nullptr,
+            state.owner,
+            nullptr,
+            state.position_x,
+            state.position_y,
+            0,
+            Fix0,
+            Fix0,
+            Fix0,
+            state.owner)) {
+        StdStrBuf message;
+        message.Format(
+            "Rust runtime mirror failed to initialise object \"%s\" (%llu) on frame %llu",
+            state.definition_id ? state.definition_id : "<unknown>",
+            static_cast<unsigned long long>(state.id),
+            static_cast<unsigned long long>(frame));
+        LogWarning(message.getData());
+        return nullptr;
+    }
+
+    object->Con = FullCon;
+    object->UpdateMass();
+    object->UpdateFace(true);
+    object->SetOCF();
+    object->UpdatePos();
+
+    object->Number = number;
+    if (game.ObjectEnumerationIndex < number) {
+        game.ObjectEnumerationIndex = number;
+    }
+
+    C4Object *raw = object.get();
+    if (!game.Objects.Add(raw)) {
+        StdStrBuf message;
+        message.Format(
+            "Rust runtime mirror could not attach object \"%s\" (%llu) to game state on frame %llu",
+            state.definition_id ? state.definition_id : "<unknown>",
+            static_cast<unsigned long long>(state.id),
+            static_cast<unsigned long long>(frame));
+        LogWarning(message.getData());
+        return nullptr;
+    }
+
+    object.release();
+    return raw;
+}
+
 void ApplyRuntimeObjectStateToC4Object(
     C4Object &object,
     const LcEngineRuntimeObjectState &state) {
+    if (state.status == C4OS_DELETED) {
+        return;
+    }
+
+    EnsureObjectStatusMatchesRuntimeState(object, state.status);
+
     const int32_t pos_x = state.position_x;
     const int32_t pos_y = state.position_y;
     const int32_t vel_x = state.velocity_x;
@@ -200,30 +337,79 @@ void ApplyRuntimeObjectStatesToGame(
     lookup.reserve(slice.object_count);
     for (size_t index = 0; index < slice.object_count; ++index) {
         const LcEngineRuntimeObjectState &state = slice.objects[index];
-        lookup[state.id] = &state;
+        lookup.emplace(state.id, &state);
     }
 
-    for (auto it = game.Objects.begin(); it != game.Objects.end(); ++it) {
-        C4Object *object = *it;
-        if (!object || !object->Status) {
+    std::vector<C4Object *> to_remove;
+    to_remove.reserve(lookup.size());
+
+    auto reconcile_list = [&](C4ObjectList &list) {
+        for (auto it = list.begin(); it != list.end(); ++it) {
+            C4Object *object = *it;
+            if (!object || !object->Status) {
+                continue;
+            }
+            const uint64_t object_id = static_cast<uint64_t>(object->Number);
+            auto found = lookup.find(object_id);
+            if (found == lookup.end()) {
+                to_remove.push_back(object);
+                continue;
+            }
+            const LcEngineRuntimeObjectState *state = found->second;
+            if (state->status == C4OS_DELETED) {
+                to_remove.push_back(object);
+                lookup.erase(found);
+                continue;
+            }
+            ApplyRuntimeObjectStateToC4Object(*object, *state);
+            lookup.erase(found);
+        }
+    };
+
+    reconcile_list(game.Objects);
+    reconcile_list(game.Objects.InactiveObjects);
+
+    for (C4Object *object : to_remove) {
+        if (!object) {
             continue;
         }
-        const uint64_t object_id = static_cast<uint64_t>(object->Number);
-        const auto found = lookup.find(object_id);
-        if (found == lookup.end()) {
-            continue;
-        }
-        ApplyRuntimeObjectStateToC4Object(*object, *found->second);
-        lookup.erase(found);
+        object->AssignRemoval();
+        game.Objects.Remove(object);
+        game.Objects.InactiveObjects.Remove(object);
     }
 
-    if (!lookup.empty() && slice.frame != g_last_missing_warning_frame) {
-        g_last_missing_warning_frame = slice.frame;
-        StdStrBuf warning;
-        warning.Format(
-            "Rust runtime reported %zu objects not present in C++ state",
-            lookup.size());
-        LogWarning(warning.getData());
+    if (lookup.empty()) {
+        g_last_missing_warning_frame = std::numeric_limits<uint64_t>::max();
+        return;
+    }
+
+    std::vector<uint64_t> failures;
+    failures.reserve(lookup.size());
+
+    for (const auto &[id, state] : lookup) {
+        if (state->status == C4OS_DELETED) {
+            continue;
+        }
+        C4Object *object = CreateRuntimeObject(game, *state, slice.frame);
+        if (!object) {
+            failures.push_back(id);
+            continue;
+        }
+        ApplyRuntimeObjectStateToC4Object(*object, *state);
+    }
+
+    if (!failures.empty()) {
+        if (slice.frame != g_last_missing_warning_frame) {
+            g_last_missing_warning_frame = slice.frame;
+            StdStrBuf warning;
+            warning.Format(
+                "Rust runtime could not mirror %zu objects on frame %llu",
+                failures.size(),
+                static_cast<unsigned long long>(slice.frame));
+            LogWarning(warning.getData());
+        }
+    } else {
+        g_last_missing_warning_frame = std::numeric_limits<uint64_t>::max();
     }
 }
 
