@@ -270,6 +270,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetDir", get_dir);
     script.register_host_function("SetComDir", set_com_dir);
     script.register_host_function("GetComDir", get_com_dir);
+    script.register_host_function("GetX", get_x);
+    script.register_host_function("GetY", get_y);
     script.register_host_function("SetOwner", set_owner);
     script.register_host_function("GetOwner", get_owner);
     script.register_host_function("SetObjectStatus", set_object_status);
@@ -2322,6 +2324,84 @@ fn get_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 
         Ok(Value::Int(object.command_direction().to_script_value()))
     })
+}
+
+enum PositionComponent {
+    X,
+    Y,
+}
+
+impl PositionComponent {
+    fn function_name(&self) -> &'static str {
+        match self {
+            PositionComponent::X => "GetX",
+            PositionComponent::Y => "GetY",
+        }
+    }
+
+    fn extract(&self, position: Vector2) -> i32 {
+        match self {
+            PositionComponent::X => position.x,
+            PositionComponent::Y => position.y,
+        }
+    }
+}
+
+fn get_position_component(
+    args: &[Value],
+    component: PositionComponent,
+) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(format!(
+            "{} expects at most 1 argument: target",
+            component.function_name()
+        )));
+    }
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(0) {
+        target_id = parse_object_reference_argument(arg, component.function_name(), "target")?;
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    let position = object.effective_position();
+                    return Ok(Value::Int(component.extract(position)));
+                }
+            }
+
+            if let Some(other) = context.world.get(target) {
+                let position = other.position();
+                return Ok(Value::Int(component.extract(position)));
+            }
+
+            return Ok(Value::Nil);
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        let position = object.effective_position();
+        Ok(Value::Int(component.extract(position)))
+    })
+}
+
+fn get_x(args: &[Value]) -> Result<Value, RuntimeError> {
+    get_position_component(args, PositionComponent::X)
+}
+
+fn get_y(args: &[Value]) -> Result<Value, RuntimeError> {
+    get_position_component(args, PositionComponent::Y)
 }
 
 fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -4380,6 +4460,99 @@ mod tests {
             .object_update
             .expect("command direction update recorded");
         assert_eq!(update.command_direction, Some(CommandDirection::DownRight));
+    }
+
+    #[test]
+    fn get_x_returns_current_position() {
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::new(42, -7),
+                &[],
+                "Idle",
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+            )),
+            &[],
+            HostWorldContext::default(),
+            || get_x(&[]),
+        );
+
+        let value = result.expect("GetX succeeds");
+        assert_eq!(value, Value::Int(42));
+    }
+
+    #[test]
+    fn get_y_returns_current_position() {
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(2),
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::new(-5, 63),
+                &[],
+                "Idle",
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+            )),
+            &[],
+            HostWorldContext::default(),
+            || get_y(&[]),
+        );
+
+        let value = result.expect("GetY succeeds");
+        assert_eq!(value, Value::Int(63));
+    }
+
+    #[test]
+    fn get_x_reads_world_when_target_provided() {
+        let other = HostWorldObject::new(
+            ObjectId::new(99),
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            Vector2::new(-12, 34),
+            Vec::new(),
+            0,
+        );
+        let world = HostWorldContext::from_objects(vec![other]);
+        let args = [object_reference_value(ObjectId::new(99))];
+
+        let (result, _) = with_effect_context(None, &[], world, || get_x(&args));
+        let value = result.expect("GetX target succeeds");
+        assert_eq!(value, Value::Int(-12));
+    }
+
+    #[test]
+    fn get_y_returns_nil_for_missing_target() {
+        let args = [object_reference_value(ObjectId::new(1234))];
+        let (result, _) =
+            with_effect_context(None, &[], HostWorldContext::default(), || get_y(&args));
+        let value = result.expect("GetY handles missing target");
+        assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn get_x_rejects_additional_arguments() {
+        let (result, _) = with_object_host_context(|| get_x(&[Value::Nil, Value::Nil]));
+        let error = result.expect_err("GetX rejects extra arguments");
+        assert_eq!(error.to_string(), "GetX expects at most 1 argument: target");
     }
 
     #[test]
