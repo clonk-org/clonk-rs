@@ -4843,7 +4843,7 @@ impl Engine {
             }
             let mut pending_direction = None;
             match procedure {
-                ActionProcedure::Float => {
+                ActionProcedure::Float | ActionProcedure::Flight => {
                     apply_float_command_movement(
                         &mut object.state.velocity,
                         command_direction,
@@ -8122,6 +8122,40 @@ mod tests {
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity.y, 0);
         assert_eq!(object.velocity.x, 0);
+    }
+
+    #[test]
+    fn flight_command_direction_updates_velocity() {
+        let mut definition = Definition::from_script("Glider", "Glider", PROCEDURE_MOVEMENT_SCRIPT)
+            .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Fly".to_string(),
+            ActionSpec::default().with_procedure("flight"),
+        );
+        definition.configure_actions(Some("Fly".to_string()), actions);
+        definition.set_movement_profile(
+            MovementProfile::default()
+                .with_float_speed(6)
+                .with_float_acceleration(3),
+        );
+
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_environment(EnvironmentSettings::new(0));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Glider")
+                    .with_command_direction(CommandDirection::DownRight),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::new(3, 3));
     }
 
     #[test]
