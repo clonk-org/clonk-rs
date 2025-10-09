@@ -26,6 +26,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <cstdint>
 #include <iterator>
@@ -38,6 +39,7 @@
 #include <string>
 #include <vector>
 #include <limits>
+#include <unordered_map>
 
 namespace {
 
@@ -135,6 +137,121 @@ uint64_t HashNetworkPacket(uint8_t status, const uint8_t *data, size_t size) {
     return hash;
 }
 
+int32_t ClampActionTicks(int32_t ticks) {
+    if (ticks < 0) {
+        return 0;
+    }
+    return ticks;
+}
+
+void ApplyRuntimeObjectStateToC4Object(
+    C4Object &object,
+    const LcEngineRuntimeObjectState &state) {
+    const int32_t pos_x = state.position_x;
+    const int32_t pos_y = state.position_y;
+    const int32_t vel_x = state.velocity_x;
+    const int32_t vel_y = state.velocity_y;
+
+    object.old_x = object.x;
+    object.old_y = object.y;
+    object.x = pos_x;
+    object.y = pos_y;
+    object.fix_x = itofix(pos_x);
+    object.fix_y = itofix(pos_y);
+    object.motion_x = vel_x;
+    object.motion_y = vel_y;
+    object.xdir = itofix(vel_x);
+    object.ydir = itofix(vel_y);
+
+    object.Energy = state.energy;
+    if (object.Owner != state.owner) {
+        object.SetOwner(state.owner);
+    }
+
+    object.SetAlive(state.alive);
+
+    const char *desired_action = state.action_name ? state.action_name : "";
+    const char *current_action = object.Action.Name;
+    if (!current_action) {
+        current_action = "";
+    }
+    if (std::strcmp(current_action, desired_action) != 0) {
+        object.SetActionByName(desired_action, nullptr, nullptr, 0, true);
+    }
+
+    object.Action.Phase = state.action_phase;
+    object.Action.Time = ClampActionTicks(state.action_ticks);
+    object.Action.Data = state.action_data;
+    object.Action.Dir = state.direction;
+    object.Action.ComDir = state.command_direction;
+
+    object.UpdatePos();
+    object.SetOCF();
+}
+
+void ApplyRuntimeObjectStatesToGame(
+    C4Game &game,
+    const LcEngineRuntimeObjectStateSlice &slice) {
+    if (slice.object_count == 0 || slice.objects == nullptr) {
+        return;
+    }
+
+    std::unordered_map<uint64_t, const LcEngineRuntimeObjectState *> lookup;
+    lookup.reserve(slice.object_count);
+    for (size_t index = 0; index < slice.object_count; ++index) {
+        const LcEngineRuntimeObjectState &state = slice.objects[index];
+        lookup[state.id] = &state;
+    }
+
+    for (auto it = game.Objects.begin(); it != game.Objects.end(); ++it) {
+        C4Object *object = *it;
+        if (!object || !object->Status) {
+            continue;
+        }
+        const uint64_t object_id = static_cast<uint64_t>(object->Number);
+        const auto found = lookup.find(object_id);
+        if (found == lookup.end()) {
+            continue;
+        }
+        ApplyRuntimeObjectStateToC4Object(*object, *found->second);
+        lookup.erase(found);
+    }
+
+    if (!lookup.empty() && slice.frame != g_last_missing_warning_frame) {
+        g_last_missing_warning_frame = slice.frame;
+        StdStrBuf warning;
+        warning.Format(
+            "Rust runtime reported %zu objects not present in C++ state",
+            lookup.size());
+        LogWarning(warning.getData());
+    }
+}
+
+void ApplyAuthoritativeRuntimeState(C4Game &game) {
+    if (!g_runtime || g_runtime_disabled) {
+        return;
+    }
+
+    char *error_message = nullptr;
+    LcEngineRuntimeObjectStateArray *buffer =
+        lc_engine_runtime_export_object_states(g_runtime.get(), &error_message);
+    RustStringPtr error = MakeString(error_message);
+    if (!buffer) {
+        if (error) {
+            LogWarning(std::string("Rust runtime state export failed: ") + error.get());
+        } else {
+            LogWarning("Rust runtime state export failed (no detail)");
+        }
+        return;
+    }
+
+    const LcEngineRuntimeObjectStateSlice slice =
+        lc_engine_runtime_object_states_slice(buffer);
+    ApplyRuntimeObjectStatesToGame(game, slice);
+
+    lc_engine_runtime_object_states_free(buffer);
+}
+
 struct SnapshotEntry {
     LcEngineObjectSnapshot snapshot{};
     std::string definition;
@@ -198,6 +315,7 @@ struct SnapshotBuffer {
 };
 
 std::mutex g_mutex;
+uint64_t g_last_missing_warning_frame = std::numeric_limits<uint64_t>::max();
 bool g_initialised = false;
 bool g_disabled = false;
 RecorderPtr g_recorder;
@@ -1258,6 +1376,8 @@ void OnFrame(C4Game &game) {
                 }
                 g_runtime.reset();
                 g_runtime_disabled = true;
+            } else {
+                ApplyAuthoritativeRuntimeState(game);
             }
         } else {
             char *error_message = nullptr;

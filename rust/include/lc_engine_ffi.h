@@ -193,6 +193,47 @@ bool lc_engine_runtime_advance_to_frame(
     char **error_message);
 bool lc_engine_runtime_step(LcEngineRuntimeHandle *handle, char **error_message);
 uint64_t lc_engine_runtime_current_frame(const LcEngineRuntimeHandle *handle);
+
+typedef struct LcEngineRuntimeObjectState {
+    uint64_t id;
+    const char *definition_id;
+    int32_t position_x;
+    int32_t position_y;
+    int32_t velocity_x;
+    int32_t velocity_y;
+    int32_t energy;
+    int32_t owner;
+    bool crew_member;
+    bool alive;
+    int32_t status;
+    const char *action_name;
+    int32_t action_phase;
+    int32_t action_ticks;
+    int32_t action_data;
+    int32_t direction;
+    int32_t command_direction;
+    bool has_container;
+    uint64_t container_id;
+    const uint64_t *contents;
+    size_t contents_len;
+} LcEngineRuntimeObjectState;
+
+typedef struct LcEngineRuntimeObjectStateSlice {
+    uint64_t frame;
+    const LcEngineRuntimeObjectState *objects;
+    size_t object_count;
+} LcEngineRuntimeObjectStateSlice;
+
+typedef struct LcEngineRuntimeObjectStateArray LcEngineRuntimeObjectStateArray;
+
+LcEngineRuntimeObjectStateArray *lc_engine_runtime_export_object_states(
+    LcEngineRuntimeHandle *handle,
+    char **error_message);
+LcEngineRuntimeObjectStateSlice lc_engine_runtime_object_states_slice(
+    const LcEngineRuntimeObjectStateArray *buffer);
+void lc_engine_runtime_object_states_free(
+    LcEngineRuntimeObjectStateArray *buffer);
+
 bool lc_engine_runtime_compare_snapshot(
     LcEngineRuntimeHandle *handle,
     uint64_t frame,

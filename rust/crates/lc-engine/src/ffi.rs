@@ -13,6 +13,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
+use std::convert::TryFrom;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::PathBuf;
@@ -127,6 +128,39 @@ pub struct LcEngineNetworkPacketSnapshot {
     pub hash: u64,
     pub client_id: i32,
     pub connection_id: u32,
+}
+
+#[repr(C)]
+pub struct LcEngineRuntimeObjectState {
+    pub id: u64,
+    pub definition_id: *const c_char,
+    pub position_x: i32,
+    pub position_y: i32,
+    pub velocity_x: i32,
+    pub velocity_y: i32,
+    pub energy: i32,
+    pub owner: i32,
+    pub crew_member: bool,
+    pub alive: bool,
+    pub status: i32,
+    pub action_name: *const c_char,
+    pub action_phase: i32,
+    pub action_ticks: i32,
+    pub action_data: i32,
+    pub direction: i32,
+    pub command_direction: i32,
+    pub has_container: bool,
+    pub container_id: u64,
+    pub contents: *const u64,
+    pub contents_len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LcEngineRuntimeObjectStateSlice {
+    pub frame: u64,
+    pub objects: *const LcEngineRuntimeObjectState,
+    pub object_count: usize,
 }
 
 pub struct RecorderHandle {
@@ -368,6 +402,93 @@ impl RuntimeHandle {
         }
 
         Ok(())
+    }
+}
+
+pub struct LcEngineRuntimeObjectStateArray {
+    slice: LcEngineRuntimeObjectStateSlice,
+    objects: Vec<LcEngineRuntimeObjectState>,
+    definition_ids: Vec<CString>,
+    action_names: Vec<CString>,
+    contents: Vec<Box<[u64]>>,
+}
+
+impl LcEngineRuntimeObjectStateArray {
+    fn from_snapshot(snapshot: &SimulationSnapshot) -> Result<Self, String> {
+        let mut buffer = Self {
+            slice: LcEngineRuntimeObjectStateSlice {
+                frame: snapshot.frame,
+                objects: ptr::null(),
+                object_count: 0,
+            },
+            objects: Vec::with_capacity(snapshot.objects.len()),
+            definition_ids: Vec::with_capacity(snapshot.objects.len()),
+            action_names: Vec::with_capacity(snapshot.objects.len()),
+            contents: Vec::with_capacity(snapshot.objects.len()),
+        };
+
+        for object in &snapshot.objects {
+            let definition_id = CString::new(object.definition_id.clone()).map_err(|_| {
+                format!("definition id for object {} contains null byte", object.id)
+            })?;
+            let action_name = CString::new(object.action.name.clone())
+                .map_err(|_| format!("action name for object {} contains null byte", object.id))?;
+
+            let mut contents_ptr = ptr::null();
+            let mut contents_len = 0;
+            if !object.contents.is_empty() {
+                let boxed = object
+                    .contents
+                    .iter()
+                    .map(|id| id.as_u64())
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                contents_ptr = boxed.as_ptr();
+                contents_len = boxed.len();
+                buffer.contents.push(boxed);
+            }
+
+            buffer.definition_ids.push(definition_id);
+            buffer.action_names.push(action_name);
+
+            let action_ticks = i32::try_from(object.action.ticks).unwrap_or_else(|_| i32::MAX);
+
+            let has_container = object.container.is_some();
+            let container_id = object.container.map(|id| id.as_u64()).unwrap_or_default();
+
+            buffer.objects.push(LcEngineRuntimeObjectState {
+                id: object.id.as_u64(),
+                definition_id: buffer.definition_ids.last().unwrap().as_ptr(),
+                position_x: object.position.x,
+                position_y: object.position.y,
+                velocity_x: object.velocity.x,
+                velocity_y: object.velocity.y,
+                energy: object.energy,
+                owner: object.owner,
+                crew_member: object.crew_member,
+                alive: object.alive,
+                status: object.status.to_script_value(),
+                action_name: buffer.action_names.last().unwrap().as_ptr(),
+                action_phase: object.action.phase,
+                action_ticks,
+                action_data: object.action.data,
+                direction: object.direction.to_script_value(),
+                command_direction: object.command_direction.to_script_value(),
+                has_container,
+                container_id,
+                contents: contents_ptr,
+                contents_len,
+            });
+        }
+
+        buffer.slice.object_count = buffer.objects.len();
+        buffer.slice.objects = if buffer.objects.is_empty() {
+            ptr::null()
+        } else {
+            buffer.objects.as_ptr()
+        };
+
+        Ok(buffer)
     }
 }
 
@@ -1201,6 +1322,59 @@ pub extern "C" fn lc_engine_runtime_current_frame(handle: *const RuntimeHandle) 
         return 0;
     };
     runtime.engine.frame()
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_export_object_states(
+    handle: *mut RuntimeHandle,
+    error_out: *mut *mut c_char,
+) -> *mut LcEngineRuntimeObjectStateArray {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    let Some(runtime) = (unsafe { handle.as_mut() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return ptr::null_mut();
+    };
+
+    let snapshot = runtime.engine.snapshot();
+    match LcEngineRuntimeObjectStateArray::from_snapshot(&snapshot) {
+        Ok(buffer) => Box::into_raw(Box::new(buffer)),
+        Err(message) => {
+            set_error(error_out, message);
+            ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_object_states_slice(
+    buffer: *const LcEngineRuntimeObjectStateArray,
+) -> LcEngineRuntimeObjectStateSlice {
+    if buffer.is_null() {
+        return LcEngineRuntimeObjectStateSlice {
+            frame: 0,
+            objects: ptr::null(),
+            object_count: 0,
+        };
+    }
+
+    unsafe { (*buffer).slice }
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_object_states_free(
+    buffer: *mut LcEngineRuntimeObjectStateArray,
+) {
+    if buffer.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(buffer));
+    }
 }
 
 #[no_mangle]
