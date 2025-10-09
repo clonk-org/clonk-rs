@@ -438,6 +438,8 @@ pub struct ActionState {
     #[serde(default)]
     pub ticks: u32,
     #[serde(default)]
+    pub data: i32,
+    #[serde(default)]
     pub target: Option<ObjectId>,
     #[serde(default)]
     pub target2: Option<ObjectId>,
@@ -449,6 +451,7 @@ impl ActionState {
             name: name.into(),
             phase: 0,
             ticks: 0,
+            data: 0,
             target: None,
             target2: None,
         }
@@ -487,6 +490,9 @@ impl ActionState {
         if let Some(ticks) = update.ticks {
             self.ticks = ticks;
         }
+        if let Some(data) = update.data {
+            self.data = data;
+        }
         if let Some(target) = update.target {
             self.target = target;
         }
@@ -514,7 +520,19 @@ impl ActionState {
             }
         }
 
+        let previous_name = self.name.clone();
+        let previous_procedure = library.procedure_for_action(&previous_name);
+
         self.apply_update(&resolved);
+
+        let next_name = self.name.clone();
+        let next_procedure = library.procedure_for_action(&next_name);
+        if previous_name != next_name
+            && previous_procedure != next_procedure
+            && resolved.data.is_none()
+        {
+            self.data = 0;
+        }
         self.reconcile_with_library(library);
         ActionUpdateResult::Applied
     }
@@ -543,6 +561,8 @@ pub struct ActionUpdate {
     pub ticks: Option<u32>,
     #[serde(default = "ActionUpdate::default_force")]
     pub force: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<Option<ObjectId>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -575,6 +595,15 @@ impl ActionUpdate {
 
     pub fn set_ticks(&mut self, ticks: u32) {
         self.ticks = Some(ticks);
+    }
+
+    pub fn with_data(mut self, data: i32) -> Self {
+        self.data = Some(data);
+        self
+    }
+
+    pub fn set_data(&mut self, data: i32) {
+        self.data = Some(data);
     }
 
     pub fn with_force(mut self, force: bool) -> Self {
@@ -617,6 +646,9 @@ impl ActionUpdate {
         if !other.force {
             self.force = false;
         }
+        if other.data.is_some() {
+            self.data = other.data;
+        }
         if other.target.is_some() {
             self.target = other.target;
         }
@@ -637,6 +669,7 @@ impl Default for ActionUpdate {
             phase: None,
             ticks: None,
             force: true,
+            data: None,
             target: None,
             target2: None,
         }

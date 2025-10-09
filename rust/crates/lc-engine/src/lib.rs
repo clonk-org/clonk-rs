@@ -1160,6 +1160,13 @@ impl ObjectUpdate {
         self
     }
 
+    pub fn with_action_data(mut self, data: i32) -> Self {
+        let mut update = self.action.unwrap_or_default();
+        update.set_data(data);
+        self.action = Some(update);
+        self
+    }
+
     pub fn with_action_update(mut self, update: ActionUpdate) -> Self {
         self.action = Some(update);
         self
@@ -1201,6 +1208,7 @@ impl ObjectUpdate {
             && self.owner.is_none()
             && self.crew_member.is_none()
             && self.container.is_none()
+            && self.vertices.is_none()
     }
 }
 
@@ -2127,6 +2135,7 @@ impl Definition {
                 &state.effects,
                 state.action.name.clone(),
                 state.action.ticks,
+                state.action.data,
                 self.action_library.clone(),
                 state.direction,
                 state.command_direction,
@@ -2213,6 +2222,7 @@ impl Definition {
                 &state.effects,
                 state.action.name.clone(),
                 state.action.ticks,
+                state.action.data,
                 self.action_library.clone(),
                 state.direction,
                 state.command_direction,
@@ -2300,6 +2310,7 @@ impl Definition {
                 &state.effects,
                 state.action.name.clone(),
                 state.action.ticks,
+                state.action.data,
                 self.action_library.clone(),
                 state.direction,
                 state.command_direction,
@@ -2459,6 +2470,7 @@ impl Definition {
                 &state.effects,
                 state.action.name.clone(),
                 state.action.ticks,
+                state.action.data,
                 self.action_library.clone(),
                 state.direction,
                 state.command_direction,
@@ -3018,6 +3030,7 @@ impl Engine {
                     object.state.position,
                     object.state.velocity,
                     object.state.vertices.clone(),
+                    object.state.action.data,
                     object.state.action.ticks,
                     object.state.container,
                 )
@@ -4770,6 +4783,7 @@ impl Engine {
             phase: Some(0),
             ticks: Some(0),
             force: true,
+            data: None,
             target: if clear_targets { Some(None) } else { None },
             target2: if clear_targets { Some(None) } else { None },
         };
@@ -5510,11 +5524,12 @@ fn build_state_value(
         .map(|id| Value::Int(truncate_to_i32(id.as_u64())))
         .collect();
     map.insert("contents".into(), Value::Array(contents));
-    let mut action = HashMap::with_capacity(6);
+    let mut action = HashMap::with_capacity(7);
     action.insert("name".into(), Value::String(state.action.name.clone()));
     action.insert("phase".into(), Value::Int(state.action.phase));
     let ticks = (state.action.ticks).min(i32::MAX as u32) as i32;
     action.insert("ticks".into(), Value::Int(ticks));
+    action.insert("data".into(), Value::Int(state.action.data));
     match state.action.target {
         Some(target) => {
             action.insert(
@@ -5607,11 +5622,12 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
         .map(|id| Value::Int(truncate_to_i32(id.as_u64())))
         .collect();
     map.insert("contents".into(), Value::Array(contents));
-    let mut action = HashMap::with_capacity(6);
+    let mut action = HashMap::with_capacity(7);
     action.insert("name".into(), Value::String(snapshot.action.name.clone()));
     action.insert("phase".into(), Value::Int(snapshot.action.phase));
     let ticks = snapshot.action.ticks.min(i32::MAX as u32) as i32;
     action.insert("ticks".into(), Value::Int(ticks));
+    action.insert("data".into(), Value::Int(snapshot.action.data));
     match snapshot.action.target {
         Some(target) => {
             action.insert(
@@ -5659,6 +5675,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.position,
                 object.velocity,
                 object.vertices.clone(),
+                object.action.data,
                 object.action.ticks,
                 object.container,
             )
@@ -6039,6 +6056,10 @@ fn parse_action_update(
                     });
                 }
                 update.set_ticks(ticks as u32);
+            }
+            "data" => {
+                let data = value_to_int(definition, function, value)?;
+                update.set_data(data);
             }
             "target" => {
                 let target = value_to_object_reference(definition, function, "target", value)?;

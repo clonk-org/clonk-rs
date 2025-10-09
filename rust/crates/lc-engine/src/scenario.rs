@@ -769,6 +769,8 @@ struct ActionManifest {
     phase: Option<i32>,
     #[serde(default)]
     ticks: Option<u32>,
+    #[serde(default)]
+    data: Option<i32>,
 }
 
 impl ActionManifest {
@@ -779,6 +781,9 @@ impl ActionManifest {
         }
         if let Some(ticks) = self.ticks {
             state.ticks = ticks;
+        }
+        if let Some(data) = self.data {
+            state.data = data;
         }
         state
     }

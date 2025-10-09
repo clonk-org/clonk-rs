@@ -416,6 +416,7 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
         entry.snapshot.action_name = entry.action.c_str();
         entry.snapshot.action_phase = object->Action.Phase;
         entry.snapshot.action_ticks = object->Action.Time;
+        entry.snapshot.action_data = object->Action.Data;
         entry.snapshot.direction = object->Action.Dir;
         entry.snapshot.command_direction = object->Action.ComDir;
 

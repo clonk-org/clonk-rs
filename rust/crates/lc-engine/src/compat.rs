@@ -5,9 +5,10 @@ use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::{
-    ActionLibrary, ActionUpdate, CommandDirection, DefinitionId, Direction, EnvironmentSettings,
-    Landscape, ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex, QueuedCommand, Vector2,
-    CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, OWNER_NONE,
+    ActionLibrary, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, Direction,
+    EnvironmentSettings, Landscape, ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex,
+    QueuedCommand, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT,
+    CNAT_TOP, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -24,6 +25,7 @@ thread_local! {
 const OWNER_ANY: i32 = -2;
 const ANY_CONTAINER_SENTINEL: i32 = 123;
 const NO_CONTAINER_SENTINEL: i32 = 124;
+const MAX_VERTEX_COUNT: i32 = 30;
 
 #[derive(Debug, Clone)]
 pub(crate) struct HostWorldObject {
@@ -40,6 +42,8 @@ pub(crate) struct HostWorldObject {
     #[allow(dead_code)]
     pub velocity: Vector2,
     pub vertices: Vec<ObjectVertex>,
+    #[allow(dead_code)]
+    pub action_data: i32,
     pub action_ticks: u32,
     container: Option<ObjectId>,
 }
@@ -58,6 +62,7 @@ impl HostWorldObject {
         position: Vector2,
         velocity: Vector2,
         vertices: Vec<ObjectVertex>,
+        action_data: i32,
         action_ticks: u32,
         container: Option<ObjectId>,
     ) -> Self {
@@ -74,6 +79,7 @@ impl HostWorldObject {
             position,
             velocity,
             vertices,
+            action_data,
             action_ticks,
             container,
         }
@@ -129,6 +135,11 @@ impl HostWorldObject {
 
     pub fn action_ticks(&self) -> u32 {
         self.action_ticks
+    }
+
+    #[allow(dead_code)]
+    pub fn action_data(&self) -> i32 {
+        self.action_data
     }
 }
 
@@ -651,6 +662,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetEffectCount", get_effect_count);
     script.register_host_function("EffectVar", effect_var);
     script.register_host_function("SetAction", set_action);
+    script.register_host_function("SetActionData", set_action_data);
     script.register_host_function("GetAction", get_action);
     script.register_host_function("GetActTime", get_act_time);
     script.register_host_function("GetProcedure", get_procedure);
@@ -715,6 +727,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub effects: &'a [EffectState],
     pub action_name: String,
     pub action_ticks: u32,
+    pub action_data: i32,
     pub action_library: ActionLibrary,
     pub direction: Direction,
     pub command_direction: CommandDirection,
@@ -734,6 +747,7 @@ impl<'a> HostObjectContext<'a> {
         effects: &'a [EffectState],
         action_name: impl Into<String>,
         action_ticks: u32,
+        action_data: i32,
         action_library: ActionLibrary,
         direction: Direction,
         command_direction: CommandDirection,
@@ -751,6 +765,7 @@ impl<'a> HostObjectContext<'a> {
             effects,
             action_name: action_name.into(),
             action_ticks,
+            action_data,
             action_library,
             direction,
             command_direction,
@@ -1961,8 +1976,74 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             object.reset_action_ticks();
         }
 
-        object.update_effective_action(&name);
+        let procedure_changed = object.update_effective_action(&name);
+        if procedure_changed {
+            object.reset_action_data();
+        }
 
+        Ok(Value::Bool(true))
+    })
+}
+
+fn set_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetActionData expects at least 1 argument: data",
+        ));
+    }
+
+    let data = value_to_i32(&args[0], "SetActionData", "data")?;
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        target_id = parse_object_reference_argument(arg, "SetActionData", "target")?;
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetActionData: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetActionData requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        if !object.status().is_active() {
+            return Ok(Value::Bool(false));
+        }
+
+        let procedure = object.effective_action_procedure();
+        let mut next_data = data;
+        match procedure {
+            ActionProcedure::Bridge => {
+                next_data = if data < 0 { 0xFF } else { data.min(0xFF) };
+            }
+            ActionProcedure::Attach => {
+                let primary_vertex = (data & 0xFF) as i32;
+                let secondary_vertex = data >> 8;
+                if primary_vertex >= MAX_VERTEX_COUNT || secondary_vertex >= MAX_VERTEX_COUNT {
+                    return Ok(Value::Bool(false));
+                }
+            }
+            _ => {}
+        }
+
+        object.set_action_data(next_data);
         Ok(Value::Bool(true))
     })
 }
@@ -3778,6 +3859,7 @@ impl EffectHostContext {
                 effects,
                 action_name,
                 action_ticks,
+                action_data,
                 action_library,
                 direction,
                 command_direction,
@@ -3796,6 +3878,7 @@ impl EffectHostContext {
                 action_library,
                 action_name,
                 action_ticks,
+                action_data,
                 direction,
                 command_direction,
                 action_target,
@@ -4014,6 +4097,7 @@ struct ObjectScopeContext {
     current_action_blocks_other_actions: bool,
     current_action_target: Option<ObjectId>,
     current_action_target2: Option<ObjectId>,
+    current_action_data: i32,
     current_action_ticks: u32,
     current_energy: i32,
     max_energy: i32,
@@ -4037,6 +4121,7 @@ impl ObjectScopeContext {
         action_library: ActionLibrary,
         action_name: String,
         action_ticks: u32,
+        action_data: i32,
         direction: Direction,
         command_direction: CommandDirection,
         action_target: Option<ObjectId>,
@@ -4057,6 +4142,7 @@ impl ObjectScopeContext {
             current_action_blocks_other_actions: blocks_other_actions,
             current_action_target: action_target,
             current_action_target2: action_target2,
+            current_action_data: action_data,
             current_action_ticks: action_ticks,
             current_energy: energy,
             max_energy,
@@ -4091,9 +4177,13 @@ impl ObjectScopeContext {
         self.pending_update.owner = Some(owner);
     }
 
-    fn update_effective_action(&mut self, action: &str) {
+    fn update_effective_action(&mut self, action: &str) -> bool {
+        let previous_name = self.current_action_name.clone();
+        let previous_procedure = self.action_library.procedure_for_action(&previous_name);
         self.current_action_name = action.to_string();
         self.current_action_blocks_other_actions = self.action_library.blocks_other_actions(action);
+        let next_procedure = self.action_library.procedure_for_action(action);
+        previous_name != action && previous_procedure != next_procedure
     }
 
     fn effective_action_name(&self) -> &str {
@@ -4150,6 +4240,48 @@ impl ObjectScopeContext {
             }
         }
         self.current_action_ticks
+    }
+
+    fn effective_action_procedure(&self) -> ActionProcedure {
+        let action = self.effective_action_name();
+        self.action_library.procedure_for_action(action)
+    }
+
+    #[allow(dead_code)]
+    fn effective_action_data(&self) -> i32 {
+        if let Some(update) = self.pending_update.action.as_ref() {
+            if let Some(data) = update.data {
+                return data;
+            }
+        }
+        self.current_action_data
+    }
+
+    fn set_action_data(&mut self, data: i32) {
+        if self.current_action_data == data {
+            if let Some(existing) = self
+                .pending_update
+                .action
+                .as_ref()
+                .and_then(|update| update.data)
+            {
+                if existing == data {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+        self.current_action_data = data;
+        let update = self
+            .pending_update
+            .action
+            .get_or_insert_with(ActionUpdate::default);
+        update.set_data(data);
+    }
+
+    fn reset_action_data(&mut self) {
+        self.set_action_data(0);
     }
 
     fn set_action_ticks(&mut self, ticks: u32) {
@@ -4315,6 +4447,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
+                0,
                 0,
                 ActionLibrary::default(),
                 Direction::Left,
@@ -4645,6 +4778,7 @@ mod tests {
                 &[],
                 "Idle",
                 0,
+                0,
                 library.clone(),
                 Direction::Left,
                 CommandDirection::Stop,
@@ -4672,6 +4806,7 @@ mod tests {
                 &[],
                 "Idle",
                 0,
+                0,
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
@@ -4690,6 +4825,119 @@ mod tests {
         let action = update.action.expect("action update recorded");
         assert_eq!(action.name.as_deref(), Some("Idle"));
         assert!(!action.force);
+    }
+
+    #[test]
+    fn set_action_data_records_object_update() {
+        let mut specs = HashMap::new();
+        specs.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("bridge"),
+        );
+        let library = ActionLibrary::new(Some("Idle".to_string()), specs);
+
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                0,
+                library,
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+            )),
+            &[],
+            HostWorldContext::default(),
+            || set_action_data(&[Value::Int(512)]),
+        );
+
+        let value = result.expect("SetActionData returns bool");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("object update recorded");
+        let action = update.action.expect("action update present");
+        assert_eq!(action.data, Some(255));
+    }
+
+    #[test]
+    fn set_action_data_rejects_invalid_attach_vertices() {
+        let mut specs = HashMap::new();
+        specs.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("attach"),
+        );
+        let library = ActionLibrary::new(Some("Idle".to_string()), specs);
+
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                0,
+                library,
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+            )),
+            &[],
+            HostWorldContext::default(),
+            || set_action_data(&[Value::Int(31 << 8)]),
+        );
+
+        let value = result.expect("SetActionData returns bool");
+        assert_eq!(value, Value::Bool(false));
+        assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
+    fn set_action_data_requires_active_object() {
+        let mut specs = HashMap::new();
+        specs.insert("Idle".to_string(), ActionSpec::default());
+        let library = ActionLibrary::new(Some("Idle".to_string()), specs);
+
+        let (result, outcome) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Inactive,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                0,
+                library,
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+            )),
+            &[],
+            HostWorldContext::default(),
+            || set_action_data(&[Value::Int(5)]),
+        );
+
+        let value = result.expect("SetActionData returns bool");
+        assert_eq!(value, Value::Bool(false));
+        assert!(outcome.object_update.is_none());
     }
 
     #[test]
@@ -4717,6 +4965,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
+                0,
                 0,
                 library,
                 Direction::Left,
@@ -4757,6 +5006,7 @@ mod tests {
                 &[],
                 "Idle",
                 0,
+                0,
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
@@ -4792,6 +5042,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
+                0,
                 0,
                 library,
                 Direction::Left,
@@ -4833,6 +5084,7 @@ mod tests {
                 &[],
                 "Idle",
                 0,
+                0,
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
@@ -4867,6 +5119,7 @@ mod tests {
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
+            0,
             0,
             None,
         )]);
@@ -4909,6 +5162,7 @@ mod tests {
             Vector2::ZERO,
             Vec::new(),
             0,
+            0,
             None,
         );
         let world = HostWorldContext::from_objects(vec![other]);
@@ -4937,6 +5191,7 @@ mod tests {
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
+            0,
             0,
             None,
         )]);
@@ -4976,6 +5231,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
+                0,
                 0,
                 ActionLibrary::default(),
                 Direction::Left,
@@ -5022,6 +5278,7 @@ mod tests {
                 &[],
                 "Idle",
                 5,
+                0,
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
@@ -5059,6 +5316,7 @@ mod tests {
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
+            0,
             12,
             None,
         );
@@ -5093,6 +5351,7 @@ mod tests {
                 &[],
                 "Idle",
                 0,
+                0,
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
@@ -5126,6 +5385,7 @@ mod tests {
                 &[],
                 "Idle",
                 0,
+                0,
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
@@ -5149,6 +5409,7 @@ mod tests {
                 &[],
                 "Idle",
                 0,
+                0,
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
@@ -5171,6 +5432,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
+                0,
                 0,
                 ActionLibrary::default(),
                 Direction::Left,
@@ -5197,6 +5459,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
+                0,
                 0,
                 ActionLibrary::default(),
                 Direction::Left,
@@ -5227,6 +5490,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
+                0,
                 0,
                 ActionLibrary::default(),
                 Direction::Left,
@@ -5262,6 +5526,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
+                0,
                 0,
                 ActionLibrary::default(),
                 Direction::Left,
@@ -5360,6 +5625,7 @@ mod tests {
             Vector2::ZERO,
             Vec::new(),
             0,
+            0,
             None,
         );
         let world = HostWorldContext::from_objects(vec![other]);
@@ -5448,6 +5714,7 @@ mod tests {
                 &[],
                 "Idle",
                 0,
+                0,
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
@@ -5476,6 +5743,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
+                0,
                 0,
                 ActionLibrary::default(),
                 Direction::Left,
@@ -5509,6 +5777,7 @@ mod tests {
             Vector2::ZERO,
             Vec::new(),
             0,
+            0,
             None,
         );
         let world = HostWorldContext::from_objects(vec![other]);
@@ -5540,6 +5809,7 @@ mod tests {
             &[],
             "Idle",
             0,
+            0,
             ActionLibrary::default(),
             Direction::Left,
             CommandDirection::Stop,
@@ -5566,6 +5836,7 @@ mod tests {
             Vector2::new(0, 25),
             &[],
             "Idle",
+            0,
             0,
             ActionLibrary::default(),
             Direction::Left,
@@ -5598,6 +5869,7 @@ mod tests {
             Vector2::ZERO,
             Vector2::new(-8, 3),
             Vec::new(),
+            0,
             0,
             None,
         );
@@ -5691,6 +5963,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
+                0,
                 0,
                 ActionLibrary::default(),
                 Direction::Left,
@@ -5992,6 +6265,7 @@ mod tests {
                 &[],
                 "Idle",
                 0,
+                0,
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
@@ -6024,6 +6298,7 @@ mod tests {
             Vector2::ZERO,
             Vec::new(),
             0,
+            0,
             None,
         )]);
         let args = [object_reference_value(ObjectId::new(7))];
@@ -6045,6 +6320,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
+                0,
                 0,
                 ActionLibrary::default(),
                 Direction::Left,
@@ -6081,6 +6357,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
+                0,
                 0,
                 ActionLibrary::default(),
                 Direction::Left,
@@ -6151,6 +6428,7 @@ mod tests {
                 &[],
                 "Idle",
                 0,
+                0,
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
@@ -6183,6 +6461,7 @@ mod tests {
             Vector2::ZERO,
             Vec::new(),
             0,
+            0,
             None,
         )]);
         let args = [object_reference_value(ObjectId::new(55))];
@@ -6212,6 +6491,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
+                0,
                 0,
                 ActionLibrary::default(),
                 Direction::Left,
@@ -6246,6 +6526,7 @@ mod tests {
                 Vector2::ZERO,
                 Vec::new(),
                 0,
+                0,
                 None,
             ),
             HostWorldObject::new(
@@ -6261,6 +6542,7 @@ mod tests {
                 Vector2::new(50, 5),
                 Vector2::ZERO,
                 Vec::new(),
+                0,
                 0,
                 None,
             ),
@@ -6289,6 +6571,7 @@ mod tests {
                 Vector2::ZERO,
                 Vec::new(),
                 0,
+                0,
                 None,
             ),
             HostWorldObject::new(
@@ -6304,6 +6587,7 @@ mod tests {
                 Vector2::new(5, 0),
                 Vector2::ZERO,
                 Vec::new(),
+                0,
                 0,
                 None,
             ),
@@ -6343,6 +6627,7 @@ mod tests {
                 Vector2::ZERO,
                 Vec::new(),
                 0,
+                0,
                 None,
             ),
             HostWorldObject::new(
@@ -6358,6 +6643,7 @@ mod tests {
                 Vector2::new(6, 0),
                 Vector2::ZERO,
                 Vec::new(),
+                0,
                 0,
                 None,
             ),
@@ -6414,6 +6700,7 @@ mod tests {
                 Vector2::ZERO,
                 Vec::new(),
                 0,
+                0,
                 None,
             ),
             HostWorldObject::new(
@@ -6430,6 +6717,7 @@ mod tests {
                 Vector2::ZERO,
                 Vec::new(),
                 0,
+                0,
                 Some(container),
             ),
             HostWorldObject::new(
@@ -6445,6 +6733,7 @@ mod tests {
                 Vector2::new(5, 0),
                 Vector2::ZERO,
                 Vec::new(),
+                0,
                 0,
                 Some(container),
             ),

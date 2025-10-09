@@ -54,6 +54,7 @@ typedef struct LcEngineObjectSnapshot {
     const char *action_name;
     int32_t action_phase;
     int32_t action_ticks;
+    int32_t action_data;
     int32_t direction;
     int32_t command_direction;
     const LcEngineEffectSnapshot *effects;

@@ -65,6 +65,7 @@ pub struct LcEngineObjectSnapshot {
     pub action_name: *const c_char,
     pub action_phase: i32,
     pub action_ticks: i32,
+    pub action_data: i32,
     pub direction: i32,
     pub command_direction: i32,
     pub effects: *const LcEngineEffectSnapshot,
@@ -388,6 +389,7 @@ unsafe fn make_snapshot(
         } else {
             action.ticks = 0;
         }
+        action.data = entry.action_data;
 
         let direction = Direction::from_script_value(entry.direction).unwrap_or_default();
         let command_direction =
@@ -1740,6 +1742,7 @@ mod tests {
             action_name: action.as_ptr(),
             action_phase: 3,
             action_ticks: 2,
+            action_data: 0,
             direction: 1,
             command_direction: 3,
             effects: &effect_snapshot,
@@ -1823,6 +1826,7 @@ mod tests {
             action_name: action.as_ptr(),
             action_phase: 0,
             action_ticks: 0,
+            action_data: 0,
             direction: 0,
             command_direction: 0,
             effects: ptr::null(),
@@ -2000,6 +2004,7 @@ mod tests {
             action_name: ptr::null(),
             action_phase: 0,
             action_ticks: 0,
+            action_data: 0,
             direction: 0,
             command_direction: 0,
             effects: ptr::null(),
@@ -2026,6 +2031,7 @@ mod tests {
             action_name: ptr::null(),
             action_phase: 0,
             action_ticks: 0,
+            action_data: 0,
             direction: 0,
             command_direction: 0,
             effects: ptr::null(),
