@@ -3151,8 +3151,8 @@ impl ObjectScopeContext {
 mod tests {
     use super::*;
     use crate::ActionSpec;
-    use std::collections::HashMap;
     use proptest::prelude::*;
+    use std::collections::HashMap;
 
     fn empty_state() -> Value {
         let mut map = HashMap::new();

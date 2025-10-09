@@ -176,6 +176,13 @@ bool lc_engine_runtime_compare_snapshot(
 char *lc_engine_runtime_export_snapshot_json(
     LcEngineRuntimeHandle *handle,
     char **error_message);
+char *lc_engine_runtime_export_state_json(
+    LcEngineRuntimeHandle *handle,
+    char **error_message);
+bool lc_engine_runtime_import_state_json(
+    LcEngineRuntimeHandle *handle,
+    const char *json,
+    char **error_message);
 
 #ifdef __cplusplus
 }

@@ -1,8 +1,8 @@
 use crate::{
     ActionState, CommandDirection, CrewRole, CrewSelectionState, Direction, EffectState, Engine,
-    EnvironmentFrame, FloatVector2, HudPlayerSnapshot, HudSnapshot, ObjectId, ObjectSnapshot,
-    ObjectStatus, ParticleLayer, ParticleSnapshot, Playback, Recorder, Recording, Scenario,
-    SimulationSnapshot, Vector2,
+    EngineState, EnvironmentFrame, FloatVector2, HudPlayerSnapshot, HudSnapshot, ObjectId,
+    ObjectSnapshot, ObjectStatus, ParticleLayer, ParticleSnapshot, Playback, Recorder, Recording,
+    Scenario, SimulationSnapshot, Vector2,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -961,6 +961,96 @@ pub extern "C" fn lc_engine_runtime_export_snapshot_json(
 }
 
 #[no_mangle]
+pub extern "C" fn lc_engine_runtime_export_state_json(
+    handle: *mut RuntimeHandle,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    let Some(runtime) = (unsafe { handle.as_mut() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return ptr::null_mut();
+    };
+
+    let state = runtime.engine.capture_state();
+    let json = match serde_json::to_string_pretty(&state) {
+        Ok(json) => json,
+        Err(error) => {
+            set_error(
+                error_out,
+                format!("failed to serialize runtime state: {error}"),
+            );
+            return ptr::null_mut();
+        }
+    };
+
+    match CString::new(json) {
+        Ok(string) => string.into_raw(),
+        Err(_) => {
+            set_error(
+                error_out,
+                "runtime state JSON contained interior null byte".into(),
+            );
+            ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_import_state_json(
+    handle: *mut RuntimeHandle,
+    json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> bool {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    let Some(runtime) = (unsafe { handle.as_mut() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return false;
+    };
+
+    if json.is_null() {
+        set_error(error_out, "runtime state JSON is null".into());
+        return false;
+    }
+
+    let json_cstr = unsafe { CStr::from_ptr(json) };
+    let json_string = match json_cstr.to_str() {
+        Ok(value) => value.to_owned(),
+        Err(_) => json_cstr.to_string_lossy().into_owned(),
+    };
+
+    let state: EngineState = match serde_json::from_str(&json_string) {
+        Ok(state) => state,
+        Err(error) => {
+            set_error(error_out, format!("failed to parse runtime state: {error}"));
+            return false;
+        }
+    };
+
+    if let Err(error) = runtime.engine.restore_state(&state) {
+        set_error(
+            error_out,
+            format!("failed to restore runtime state: {error}"),
+        );
+        return false;
+    }
+
+    runtime.last_frame = runtime.engine.frame();
+    runtime.control_log.clear();
+
+    true
+}
+
+#[no_mangle]
 pub extern "C" fn lc_engine_recorder_new() -> *mut RecorderHandle {
     Box::into_raw(Box::new(RecorderHandle::new()))
 }
@@ -1206,6 +1296,8 @@ pub extern "C" fn lc_engine_string_free(value: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Definition, SpawnConfig, Vector2};
+    use serde_json::Value;
     use std::{ffi::CString, ptr};
 
     unsafe fn call_make_snapshot(
@@ -1602,5 +1694,100 @@ mod tests {
             detail.contains("controls mismatch"),
             "detail did not mention controls: {detail}"
         );
+    }
+
+    #[test]
+    fn runtime_state_export_and_import_roundtrip() {
+        const TEST_SCRIPT: &str = r#"
+global func Initialize(state, random)
+{
+    return {};
+}
+
+global func Step(state, frame, random)
+{
+    return {
+        velocity = [state.velocity[0] + 1, state.velocity[1] + 2],
+        energy = state.energy - 1,
+    };
+}
+"#;
+
+        let mut runtime = RuntimeHandle::new();
+        let definition =
+            Definition::from_script("Mover", "Mover", TEST_SCRIPT).expect("definition compiles");
+        runtime
+            .engine
+            .register_definition(definition)
+            .expect("register definition");
+        runtime
+            .engine
+            .spawn_object(
+                SpawnConfig::new("Mover")
+                    .with_position(Vector2::new(5, 10))
+                    .with_velocity(Vector2::new(3, -4))
+                    .with_energy(80),
+            )
+            .expect("spawn succeeds");
+
+        runtime.engine.tick().expect("tick succeeds");
+        let expected_snapshot = runtime.engine.snapshot();
+
+        let mut export_error: *mut c_char = ptr::null_mut();
+        let json_ptr = lc_engine_runtime_export_state_json(&mut runtime, &mut export_error);
+        assert!(export_error.is_null());
+        assert!(!json_ptr.is_null());
+
+        let original_json = unsafe {
+            let json = CStr::from_ptr(json_ptr)
+                .to_str()
+                .expect("exported JSON is UTF-8")
+                .to_owned();
+            lc_engine_string_free(json_ptr);
+            json
+        };
+
+        let mut imported = RuntimeHandle::new();
+        let import_definition = Definition::from_script("Mover", "Mover", TEST_SCRIPT)
+            .expect("definition compiles for import");
+        imported
+            .engine
+            .register_definition(import_definition)
+            .expect("register definition for import");
+
+        let json_cstring = CString::new(original_json.clone()).expect("json CString");
+        let mut import_error: *mut c_char = ptr::null_mut();
+        let import_ok = lc_engine_runtime_import_state_json(
+            &mut imported,
+            json_cstring.as_ptr(),
+            &mut import_error,
+        );
+        if !import_error.is_null() {
+            lc_engine_string_free(import_error);
+        }
+        assert!(import_ok, "import should succeed");
+        let restored_snapshot = imported.engine.snapshot();
+        assert_eq!(restored_snapshot, expected_snapshot);
+
+        let mut roundtrip_error: *mut c_char = ptr::null_mut();
+        let roundtrip_ptr =
+            lc_engine_runtime_export_state_json(&mut imported, &mut roundtrip_error);
+        assert!(roundtrip_error.is_null());
+        assert!(!roundtrip_ptr.is_null());
+
+        let roundtrip_json = unsafe {
+            let json = CStr::from_ptr(roundtrip_ptr)
+                .to_str()
+                .expect("roundtrip JSON is UTF-8")
+                .to_owned();
+            lc_engine_string_free(roundtrip_ptr);
+            json
+        };
+
+        let original_value: Value =
+            serde_json::from_str(&original_json).expect("original JSON parses");
+        let roundtrip_value: Value =
+            serde_json::from_str(&roundtrip_json).expect("roundtrip JSON parses");
+        assert_eq!(roundtrip_value, original_value);
     }
 }

@@ -123,6 +123,7 @@ std::string g_record_path;
 RuntimePtr g_runtime;
 bool g_runtime_requested = false;
 bool g_runtime_disabled = false;
+std::string g_runtime_state_path;
 std::ofstream g_runtime_snapshot_stream;
 bool g_runtime_snapshot_enabled = false;
 bool g_runtime_snapshot_checked = false;
@@ -561,6 +562,7 @@ void EnsureInitialised() {
 
     g_runtime_requested = false;
     g_runtime_disabled = false;
+    g_runtime_state_path.clear();
 
     const char *record_path = std::getenv("LC_RUST_ENGINE_RECORD");
     if (record_path && *record_path) {
@@ -570,6 +572,12 @@ void EnsureInitialised() {
     if (const char *runtime_toggle = std::getenv("LC_RUST_ENGINE_RUNTIME")) {
         if (*runtime_toggle) {
             g_runtime_requested = true;
+        }
+    }
+
+    if (const char *state_path = std::getenv("LC_RUST_ENGINE_RUNTIME_STATE")) {
+        if (state_path[0]) {
+            g_runtime_state_path = state_path;
         }
     }
 
@@ -647,6 +655,36 @@ void FlushRecording() {
     }
 
     ResetRecorder();
+}
+
+void ExportRuntimeState() {
+    if (!g_runtime || g_runtime_state_path.empty()) {
+        return;
+    }
+
+    char *error_message = nullptr;
+    char *json_ptr = lc_engine_runtime_export_state_json(g_runtime.get(), &error_message);
+    RustStringPtr error = MakeString(error_message);
+    RustStringPtr json = MakeString(json_ptr);
+    if (!json) {
+        if (error) {
+            LogWarning(std::string("Failed to capture Rust runtime state: ") + error.get());
+        } else {
+            LogWarning("Failed to capture Rust runtime state (no detail)");
+        }
+        return;
+    }
+
+    std::ofstream out(g_runtime_state_path, std::ios::out | std::ios::trunc);
+    if (!out) {
+        LogWarning(std::string("Failed to open Rust runtime state path: ") + g_runtime_state_path);
+        return;
+    }
+
+    out << json.get();
+    if (!out.good()) {
+        LogWarning(std::string("Failed to write Rust runtime state to path: ") + g_runtime_state_path);
+    }
 }
 
 } // namespace
@@ -880,6 +918,7 @@ void Shutdown() {
     }
     FinishPlayback();
     FlushRecording();
+    ExportRuntimeState();
     g_playback.reset();
     ResetRecorder();
     g_initialised = false;
