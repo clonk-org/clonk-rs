@@ -23,10 +23,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <exception>
@@ -204,7 +206,8 @@ std::string g_record_path;
 RuntimePtr g_runtime;
 bool g_runtime_requested = false;
 bool g_runtime_disabled = false;
-std::string g_runtime_state_path;
+std::string g_runtime_state_export_path;
+std::string g_runtime_state_import_path;
 std::ofstream g_runtime_snapshot_stream;
 bool g_runtime_snapshot_enabled = false;
 bool g_runtime_snapshot_checked = false;
@@ -255,6 +258,49 @@ std::string LoadFile(const std::string &path) {
     return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
 }
 
+bool LoadFileIntoString(const std::string &path, std::string &output) {
+    std::ifstream stream(path);
+    if (!stream) {
+        return false;
+    }
+    output.assign(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+    return true;
+}
+
+bool ImportRuntimeState(RuntimePtr &runtime, const std::string &path) {
+    if (!runtime || path.empty()) {
+        return true;
+    }
+
+    std::string json;
+    if (!LoadFileIntoString(path, json)) {
+        LogWarning(std::string("Rust runtime import state path could not be opened (runtime parity disabled): ") + path);
+        return false;
+    }
+
+    const bool has_content = std::any_of(
+        json.begin(),
+        json.end(),
+        [](unsigned char ch) { return !std::isspace(ch); });
+    if (!has_content) {
+        LogWarning(std::string("Rust runtime import state path contained no data (runtime parity disabled): ") + path);
+        return false;
+    }
+
+    char *error_message = nullptr;
+    if (!lc_engine_runtime_import_state_json(runtime.get(), json.c_str(), &error_message)) {
+        RustStringPtr error = MakeString(error_message);
+        if (error) {
+            LogWarning(std::string("Rust runtime failed to import state (runtime parity disabled): ") + error.get());
+        } else {
+            LogWarning("Rust runtime failed to import state (runtime parity disabled, no detail)");
+        }
+        return false;
+    }
+
+    return true;
+}
+
 std::string DetermineScenarioPath(const C4Game &game) {
     const StdStrBuf full_name = game.ScenarioFile.GetFullName();
     if (full_name.getLength()) {
@@ -295,6 +341,11 @@ bool InitialiseRuntime(C4Game &game) {
         } else {
             LogError("Rust runtime failed to load scenario (no detail)");
         }
+        g_runtime_disabled = true;
+        return false;
+    }
+
+    if (!ImportRuntimeState(runtime, g_runtime_state_import_path)) {
         g_runtime_disabled = true;
         return false;
     }
@@ -817,7 +868,8 @@ void EnsureInitialised() {
 
     g_runtime_requested = false;
     g_runtime_disabled = false;
-    g_runtime_state_path.clear();
+    g_runtime_state_export_path.clear();
+    g_runtime_state_import_path.clear();
 
     const char *record_path = std::getenv("LC_RUST_ENGINE_RECORD");
     if (record_path && *record_path) {
@@ -832,7 +884,13 @@ void EnsureInitialised() {
 
     if (const char *state_path = std::getenv("LC_RUST_ENGINE_RUNTIME_STATE")) {
         if (state_path[0]) {
-            g_runtime_state_path = state_path;
+            g_runtime_state_export_path = state_path;
+        }
+    }
+
+    if (const char *import_path = std::getenv("LC_RUST_ENGINE_RUNTIME_STATE_IMPORT")) {
+        if (import_path[0]) {
+            g_runtime_state_import_path = import_path;
         }
     }
 
@@ -913,7 +971,7 @@ void FlushRecording() {
 }
 
 void ExportRuntimeState() {
-    if (!g_runtime || g_runtime_state_path.empty()) {
+    if (!g_runtime || g_runtime_state_export_path.empty()) {
         return;
     }
 
@@ -930,15 +988,15 @@ void ExportRuntimeState() {
         return;
     }
 
-    std::ofstream out(g_runtime_state_path, std::ios::out | std::ios::trunc);
+    std::ofstream out(g_runtime_state_export_path, std::ios::out | std::ios::trunc);
     if (!out) {
-        LogWarning(std::string("Failed to open Rust runtime state path: ") + g_runtime_state_path);
+        LogWarning(std::string("Failed to open Rust runtime state path: ") + g_runtime_state_export_path);
         return;
     }
 
     out << json.get();
     if (!out.good()) {
-        LogWarning(std::string("Failed to write Rust runtime state to path: ") + g_runtime_state_path);
+        LogWarning(std::string("Failed to write Rust runtime state to path: ") + g_runtime_state_export_path);
     }
 }
 
