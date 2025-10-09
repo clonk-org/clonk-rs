@@ -29,6 +29,7 @@ pub(crate) struct HostWorldObject {
     pub action_target2: Option<ObjectId>,
     pub action_procedure: Option<String>,
     pub owner: i32,
+    pub energy: i32,
     pub position: Vector2,
     #[allow(dead_code)]
     pub velocity: Vector2,
@@ -44,6 +45,7 @@ impl HostWorldObject {
         action_target2: Option<ObjectId>,
         action_procedure: Option<String>,
         owner: i32,
+        energy: i32,
         position: Vector2,
         velocity: Vector2,
         vertices: Vec<ObjectVertex>,
@@ -56,6 +58,7 @@ impl HostWorldObject {
             action_target2,
             action_procedure,
             owner,
+            energy,
             position,
             velocity,
             vertices,
@@ -77,6 +80,10 @@ impl HostWorldObject {
 
     pub fn owner(&self) -> i32 {
         self.owner
+    }
+
+    pub fn energy(&self) -> i32 {
+        self.energy
     }
 
     pub fn position(&self) -> Vector2 {
@@ -190,6 +197,17 @@ fn value_to_i32(value: &Value, function: &str, parameter: &str) -> Result<i32, R
     }
 }
 
+fn energy_to_script_value(energy: i32) -> i32 {
+    if energy <= DEFAULT_MAX_ENERGY {
+        energy
+    } else {
+        let numerator = (energy as i64) * 100;
+        let denominator = LEGACY_MAX_PHYSICAL as i64;
+        (numerator / denominator) as i32
+    }
+}
+
+const LEGACY_MAX_PHYSICAL: i32 = 100_000;
 const CONTACT_DIRECTION_MASK: u32 = CNAT_LEFT | CNAT_RIGHT | CNAT_TOP | CNAT_BOTTOM | CNAT_CENTER;
 
 fn compute_vertex_contact(
@@ -321,6 +339,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetOwner", get_owner);
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
+    script.register_host_function("GetEnergy", get_energy);
     script.register_host_function("DoEnergy", do_energy);
     script.register_host_function("Random", random);
     script.register_host_function("SetWind", set_wind);
@@ -1307,6 +1326,46 @@ fn get_climate(args: &[Value]) -> Result<Value, RuntimeError> {
             .ok_or_else(|| RuntimeError::new("GetClimate requires an active engine context"))?
             .clone();
         Ok(Value::Int(context.climate()))
+    })
+}
+
+fn get_energy(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetEnergy expects at most 1 argument: target",
+        ));
+    }
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(0) {
+        target_id = parse_object_reference_argument(arg, "GetEnergy", "target")?;
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if object.id() == target {
+                    return Ok(Value::Int(energy_to_script_value(object.energy())));
+                }
+            }
+            if let Some(other) = context.world.get(target) {
+                return Ok(Value::Int(energy_to_script_value(other.energy())));
+            }
+            return Ok(Value::Nil);
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        Ok(Value::Int(energy_to_script_value(object.energy())))
     })
 }
 
@@ -4330,6 +4389,7 @@ mod tests {
             None,
             Some("swim".to_string()),
             OWNER_NONE,
+            100,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -4367,6 +4427,7 @@ mod tests {
             None,
             None,
             OWNER_NONE,
+            100,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -4392,6 +4453,7 @@ mod tests {
             None,
             None,
             OWNER_NONE,
+            100,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -4510,6 +4572,7 @@ mod tests {
             None,
             None,
             OWNER_NONE,
+            100,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -4806,6 +4869,7 @@ mod tests {
             None,
             None,
             OWNER_NONE,
+            100,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -4951,6 +5015,7 @@ mod tests {
             None,
             None,
             OWNER_NONE,
+            100,
             Vector2::new(-12, 34),
             Vector2::ZERO,
             Vec::new(),
@@ -5037,6 +5102,7 @@ mod tests {
             None,
             None,
             OWNER_NONE,
+            100,
             Vector2::ZERO,
             Vector2::new(-8, 3),
             Vec::new(),
@@ -5458,6 +5524,7 @@ mod tests {
             None,
             None,
             42,
+            100,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -5573,6 +5640,94 @@ mod tests {
             .as_ref()
             .and_then(|update| update.energy)
             .is_some());
+    }
+
+    #[test]
+    fn get_energy_returns_current_energy() {
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                ObjectStatus::Normal,
+                75,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+            )),
+            &[],
+            HostWorldContext::default(),
+            || get_energy(&[]),
+        );
+
+        let value = result.expect("GetEnergy succeeds");
+        assert_eq!(value, Value::Int(75));
+    }
+
+    #[test]
+    fn get_energy_reads_world_when_target_provided() {
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            ObjectId::new(55),
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            33,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+        )]);
+        let args = [object_reference_value(ObjectId::new(55))];
+        let (result, _) = with_effect_context(None, &[], world, || get_energy(&args));
+
+        let value = result.expect("GetEnergy target succeeds");
+        assert_eq!(value, Value::Int(33));
+    }
+
+    #[test]
+    fn get_energy_returns_nil_without_context() {
+        let (result, _) =
+            with_effect_context(None, &[], HostWorldContext::default(), || get_energy(&[]));
+        let value = result.expect("GetEnergy handles missing context");
+        assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn get_energy_converts_raw_units_to_percent() {
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(3),
+                ObjectStatus::Normal,
+                LEGACY_MAX_PHYSICAL / 2,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+            )),
+            &[],
+            HostWorldContext::default(),
+            || get_energy(&[]),
+        );
+
+        let value = result.expect("GetEnergy converts raw energy");
+        assert_eq!(value, Value::Int(50));
     }
 
     proptest! {
