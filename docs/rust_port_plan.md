@@ -6,6 +6,7 @@
 ## Current State Snapshot
 - Rust crates (`lc-core`, `lc-engine`, `lc-script`, `lc-graphics`, etc.) back the `lc-app` demo and parity tooling; the live game loop, rendering, and UI remain C++ (`C4Game`, `C4GraphicsSystem`, `C4Gui`).
 - `RustEngineBridge` can mirror frames alongside the C++ loop for validation, but authoritative physics, control queues, and object lifetimes are still driven by the C++ engine.
+- `LC_RUST_ENGINE_RUNTIME` snapshots now bundle per-frame player controls alongside particles and HUD state, giving the recorder/playback harness full I/O context for parity runs.
 - Graphics/audio/platform crates operate on CPU surfaces or null backends for comparisons and do not yet present a window, swap chain, input handling, or OS event loop.
 - The Rust AUL VM runs scripted procedures inside controlled host contexts, yet large parts of the C4 API surface (effect callbacks, proplist mutation, object enumerators, particles, menus, cutscenes) still rely on C++ glue.
 - Build, packaging, and installer flows are CMake/C++ centric; Cargo artifacts are not integrated into CI releases or launcher updates.

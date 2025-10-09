@@ -24,7 +24,9 @@
 #include <memory>
 #include <mutex>
 #include <exception>
+#include <map>
 #include <set>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -124,6 +126,7 @@ bool g_runtime_disabled = false;
 std::ofstream g_runtime_snapshot_stream;
 bool g_runtime_snapshot_enabled = false;
 bool g_runtime_snapshot_checked = false;
+std::map<uint64_t, std::vector<std::string>> g_frame_controls;
 
 RustStringPtr MakeString(char *raw) {
     return RustStringPtr(raw, lc_engine_string_free);
@@ -660,6 +663,7 @@ bool IsActive() {
 void OnGameStart(C4Game &game) {
     std::lock_guard<std::mutex> lock(g_mutex);
     EnsureInitialised();
+    g_frame_controls.clear();
     if (!g_runtime_requested) {
         return;
     }
@@ -674,16 +678,16 @@ void OnGameStart(C4Game &game) {
 void OnControlFrame(const C4Control &control, uint64_t frame) {
     std::lock_guard<std::mutex> lock(g_mutex);
     EnsureInitialised();
-    if (!g_runtime_requested || g_runtime_disabled) {
-        return;
-    }
-
-    if (!g_runtime) {
-        return;
-    }
-
-    const std::string serialised = SerialiseControl(control);
+    std::string serialised = SerialiseControl(control);
     if (serialised.empty()) {
+        return;
+    }
+
+    auto &control_log = g_frame_controls[frame];
+    control_log.push_back(std::move(serialised));
+    const std::string &stored_control = control_log.back();
+
+    if (!g_runtime_requested || g_runtime_disabled || !g_runtime) {
         return;
     }
 
@@ -691,7 +695,7 @@ void OnControlFrame(const C4Control &control, uint64_t frame) {
     if (!lc_engine_runtime_record_control_ini(
             g_runtime.get(),
             frame,
-            serialised.c_str(),
+            stored_control.c_str(),
             &error_message)) {
         RustStringPtr error = MakeString(error_message);
         if (error) {
@@ -706,6 +710,7 @@ void OnFrame(C4Game &game) {
     std::lock_guard<std::mutex> lock(g_mutex);
     EnsureInitialised();
     if (g_disabled) {
+        g_frame_controls.clear();
         return;
     }
 
@@ -734,6 +739,21 @@ void OnFrame(C4Game &game) {
         : buffer.eliminated_crew_owners.data();
     const uint64_t frame = static_cast<uint64_t>(game.FrameCounter);
 
+    std::vector<std::string> control_inis;
+    std::vector<const char *> control_ptrs;
+    const auto control_it = g_frame_controls.find(frame);
+    if (control_it != g_frame_controls.end()) {
+        control_inis = std::move(control_it->second);
+        g_frame_controls.erase(control_it);
+        control_ptrs.reserve(control_inis.size());
+        for (const std::string &entry : control_inis) {
+            control_ptrs.push_back(entry.c_str());
+        }
+    }
+    const char *const *control_data =
+        control_ptrs.empty() ? nullptr : control_ptrs.data();
+    const size_t control_count = control_ptrs.size();
+
     if (g_playback) {
         char *error_message = nullptr;
         if (!lc_engine_playback_compare(
@@ -751,6 +771,8 @@ void OnFrame(C4Game &game) {
                 crew_roles.size(),
                 hud_player_data,
                 hud_players.size(),
+                control_data,
+                control_count,
                 known_owners,
                 buffer.known_crew_owners.size(),
                 eliminated_owners,
@@ -783,6 +805,8 @@ void OnFrame(C4Game &game) {
             crew_roles.size(),
             hud_player_data,
             hud_players.size(),
+            control_data,
+            control_count,
             known_owners,
             buffer.known_crew_owners.size(),
             eliminated_owners,
@@ -806,6 +830,8 @@ void OnFrame(C4Game &game) {
                 crew_roles.size(),
                 hud_player_data,
                 hud_players.size(),
+                control_data,
+                control_count,
                 known_owners,
                 buffer.known_crew_owners.size(),
                 eliminated_owners,
@@ -858,6 +884,7 @@ void Shutdown() {
     ResetRecorder();
     g_initialised = false;
     g_disabled = false;
+    g_frame_controls.clear();
     g_runtime.reset();
     g_runtime_disabled = false;
     if (g_runtime_snapshot_stream.is_open()) {

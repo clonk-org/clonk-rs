@@ -153,6 +153,8 @@ unsafe fn make_snapshot(
     eliminated_crew_owner_len: usize,
     hud_players: *const LcEngineHudPlayerSnapshot,
     hud_player_len: usize,
+    controls: *const *const c_char,
+    control_len: usize,
 ) -> Option<SimulationSnapshot> {
     let objects_slice: &[LcEngineObjectSnapshot] = if object_len == 0 {
         &[]
@@ -418,6 +420,25 @@ unsafe fn make_snapshot(
         });
     }
 
+    let control_slice: &[*const c_char] = if control_len == 0 {
+        &[]
+    } else if controls.is_null() {
+        return None;
+    } else {
+        slice::from_raw_parts(controls, control_len)
+    };
+    let mut control_entries = Vec::with_capacity(control_slice.len());
+    for &entry in control_slice {
+        if entry.is_null() {
+            return None;
+        }
+        let ini = match CStr::from_ptr(entry).to_str() {
+            Ok(value) => value.to_string(),
+            Err(_) => CStr::from_ptr(entry).to_string_lossy().into_owned(),
+        };
+        control_entries.push(ini);
+    }
+
     Some(SimulationSnapshot {
         frame,
         physics: None,
@@ -434,6 +455,7 @@ unsafe fn make_snapshot(
         hud: HudSnapshot {
             players: hud_players_vec,
         },
+        controls: control_entries,
     })
 }
 
@@ -762,6 +784,8 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
     eliminated_crew_owner_count: usize,
     hud_players: *const LcEngineHudPlayerSnapshot,
     hud_player_count: usize,
+    controls: *const *const c_char,
+    control_count: usize,
     error_out: *mut *mut c_char,
 ) -> bool {
     let Some(runtime) = (unsafe { handle.as_mut() }) else {
@@ -788,6 +812,8 @@ pub extern "C" fn lc_engine_runtime_compare_snapshot(
             eliminated_crew_owner_count,
             hud_players,
             hud_player_count,
+            controls,
+            control_count,
         )
     } {
         Some(snapshot) => snapshot,
@@ -863,9 +889,17 @@ pub extern "C" fn lc_engine_runtime_export_snapshot_json(
         return ptr::null_mut();
     };
 
-    let snapshot = runtime.engine.snapshot();
+    let mut snapshot = runtime.engine.snapshot();
     let frame = snapshot.frame;
     let control = runtime.control_log.remove(&frame);
+    match &control {
+        Some(entries) => {
+            snapshot.controls = entries.clone();
+        }
+        None => {
+            snapshot.controls.clear();
+        }
+    }
 
     #[derive(Serialize)]
     struct RuntimeSnapshotExport {
@@ -935,6 +969,8 @@ pub extern "C" fn lc_engine_recorder_record(
     eliminated_crew_owner_len: usize,
     hud_players: *const LcEngineHudPlayerSnapshot,
     hud_player_len: usize,
+    controls: *const *const c_char,
+    control_len: usize,
 ) {
     if handle.is_null() {
         return;
@@ -958,6 +994,8 @@ pub extern "C" fn lc_engine_recorder_record(
             eliminated_crew_owner_len,
             hud_players,
             hud_player_len,
+            controls,
+            control_len,
         )
     };
     if let Some(snapshot) = snapshot {
@@ -1048,6 +1086,8 @@ pub extern "C" fn lc_engine_playback_compare(
     eliminated_crew_owner_len: usize,
     hud_players: *const LcEngineHudPlayerSnapshot,
     hud_player_len: usize,
+    controls: *const *const c_char,
+    control_len: usize,
     error_out: *mut *mut c_char,
 ) -> bool {
     if handle.is_null() {
@@ -1073,6 +1113,8 @@ pub extern "C" fn lc_engine_playback_compare(
             eliminated_crew_owner_len,
             hud_players,
             hud_player_len,
+            controls,
+            control_len,
         )
     };
     let Some(snapshot) = snapshot else {
@@ -1137,7 +1179,52 @@ pub extern "C" fn lc_engine_string_free(value: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::CString;
+    use std::{ffi::CString, ptr};
+
+    unsafe fn call_make_snapshot(
+        frame: u64,
+        objects: *const LcEngineObjectSnapshot,
+        object_len: usize,
+        global_effects: *const LcEngineEffectSnapshot,
+        global_effect_len: usize,
+        particles: *const LcEngineParticleSnapshot,
+        particle_len: usize,
+        crew_selection: *const LcEngineCrewSelectionSnapshot,
+        crew_selection_len: usize,
+        crew_roles: *const LcEngineCrewRoleSnapshot,
+        crew_roles_len: usize,
+        known_crew_owners: *const i32,
+        known_crew_owner_len: usize,
+        eliminated_crew_owners: *const i32,
+        eliminated_crew_owner_len: usize,
+        hud_players: *const LcEngineHudPlayerSnapshot,
+        hud_player_len: usize,
+        controls: *const *const c_char,
+        control_len: usize,
+    ) -> SimulationSnapshot {
+        make_snapshot(
+            frame,
+            objects,
+            object_len,
+            global_effects,
+            global_effect_len,
+            particles,
+            particle_len,
+            crew_selection,
+            crew_selection_len,
+            crew_roles,
+            crew_roles_len,
+            known_crew_owners,
+            known_crew_owner_len,
+            eliminated_crew_owners,
+            eliminated_crew_owner_len,
+            hud_players,
+            hud_player_len,
+            controls,
+            control_len,
+        )
+        .expect("snapshot should deserialize")
+    }
 
     #[test]
     fn make_snapshot_collects_effects() {
@@ -1176,7 +1263,7 @@ mod tests {
         };
 
         let snapshot = unsafe {
-            make_snapshot(
+            call_make_snapshot(
                 5,
                 &object,
                 1,
@@ -1194,9 +1281,10 @@ mod tests {
                 0,
                 ptr::null(),
                 0,
+                ptr::null(),
+                0,
             )
-        }
-        .expect("snapshot should deserialize");
+        };
 
         assert_eq!(snapshot.objects.len(), 1);
         let recorded = &snapshot.objects[0];
@@ -1224,7 +1312,7 @@ mod tests {
         };
 
         let snapshot = unsafe {
-            make_snapshot(
+            call_make_snapshot(
                 1,
                 ptr::null(),
                 0,
@@ -1242,9 +1330,10 @@ mod tests {
                 0,
                 ptr::null(),
                 0,
+                ptr::null(),
+                0,
             )
-        }
-        .expect("snapshot should deserialize");
+        };
 
         assert!(snapshot.objects.is_empty());
         assert_eq!(snapshot.global_effects.len(), 1);
@@ -1281,7 +1370,7 @@ mod tests {
         let eliminated = [2i32];
 
         let snapshot = unsafe {
-            make_snapshot(
+            call_make_snapshot(
                 1,
                 ptr::null(),
                 0,
@@ -1299,9 +1388,10 @@ mod tests {
                 eliminated.len(),
                 ptr::null(),
                 0,
+                ptr::null(),
+                0,
             )
-        }
-        .expect("snapshot should include crew data");
+        };
 
         assert_eq!(snapshot.crew_selection.len(), 1);
         let selection = snapshot.crew_selection.get(&1).expect("owner present");
@@ -1373,7 +1463,7 @@ mod tests {
         let objects = [container_snapshot, child_snapshot];
 
         let snapshot = unsafe {
-            make_snapshot(
+            call_make_snapshot(
                 1,
                 objects.as_ptr(),
                 objects.len(),
@@ -1391,9 +1481,10 @@ mod tests {
                 0,
                 ptr::null(),
                 0,
+                ptr::null(),
+                0,
             )
-        }
-        .expect("snapshot should include container data");
+        };
 
         let container = snapshot
             .objects
@@ -1412,5 +1503,40 @@ mod tests {
             .expect("child present");
         assert_eq!(child.container.map(|id| id.as_u64()), Some(1));
         assert!(child.contents.is_empty());
+    }
+
+    #[test]
+    fn make_snapshot_collects_controls() {
+        let control_ini = CString::new("[Control]\nType=Player\n").unwrap();
+        let controls = [control_ini.as_ptr()];
+
+        let snapshot = unsafe {
+            call_make_snapshot(
+                3,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                controls.as_ptr(),
+                controls.len(),
+            )
+        };
+
+        assert_eq!(
+            snapshot.controls,
+            vec!["[Control]\nType=Player\n".to_string()]
+        );
     }
 }

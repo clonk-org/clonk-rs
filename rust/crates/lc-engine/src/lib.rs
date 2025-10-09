@@ -1813,6 +1813,8 @@ pub struct SimulationSnapshot {
     pub rng: ChaCha8Rng,
     #[serde(default)]
     pub hud: HudSnapshot,
+    #[serde(default)]
+    pub controls: Vec<String>,
 }
 
 impl SimulationSnapshot {
@@ -4050,6 +4052,7 @@ impl Engine {
             hud: HudSnapshot {
                 players: hud_players,
             },
+            controls: Vec::new(),
         }
     }
 

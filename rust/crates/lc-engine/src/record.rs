@@ -339,6 +339,7 @@ mod tests {
             landscape: None,
             rng: ChaCha8Rng::seed_from_u64(frame),
             hud: HudSnapshot::default(),
+            controls: Vec::new(),
         }
     }
 
