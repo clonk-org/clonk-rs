@@ -10,7 +10,8 @@ pub use bundle::{create_support_bundle, regenerate_support_bundle};
 pub use log::LauncherLog;
 pub use shell::{
     copy_support_bundle, ensure_support_bundle, load_shell_state, reveal_in_file_manager,
-    support_artifacts, LauncherShellEnsureResult, LauncherShellState, SupportArtifact,
+    support_artifacts, LauncherShellEnsureResult, LauncherShellState, LauncherTelemetryFailure,
+    SupportArtifact,
 };
 pub use summary::{
     load_launcher_summary, write_launcher_summary, LauncherSummary, LauncherSummaryRecord,
@@ -163,9 +164,16 @@ mod tests {
             paths.logs_dir().join("launcher-summary.json")
         );
         assert_eq!(state.launcher_log_path, logger.path());
-        assert_eq!(state.runtime_log_paths, vec![runtime_log]);
-        assert_eq!(state.crash_report_paths, vec![crash_log]);
+        assert_eq!(state.runtime_log_paths, vec![runtime_log.clone()]);
+        assert_eq!(state.crash_report_paths, vec![crash_log.clone()]);
         assert_eq!(state.support_bundle_path, Some(bundle_path));
+        assert_eq!(state.telemetry_success_logs, vec![runtime_log.clone()]);
+        assert_eq!(state.telemetry_failures.len(), 1);
+        assert_eq!(state.telemetry_failures[0].log_path, runtime_log);
+        assert_eq!(
+            state.telemetry_failures[0].message,
+            "c4group returned status 1"
+        );
     }
 
     #[test]

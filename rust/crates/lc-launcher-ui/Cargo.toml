@@ -1,0 +1,11 @@
+[package]
+name = "lc-launcher-ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lc-launcher = { path = "../lc-launcher" }
+lc-gui = { path = "../lc-gui" }
+
+[dev-dependencies]
+tempfile = "3.10"

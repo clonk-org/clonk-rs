@@ -9,6 +9,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Debug)]
 pub struct LauncherShellState {
     pub summary_path: PathBuf,
     pub logs_dir: PathBuf,
@@ -17,6 +18,8 @@ pub struct LauncherShellState {
     pub runtime_log_paths: Vec<PathBuf>,
     pub crash_report_paths: Vec<PathBuf>,
     pub support_bundle_path: Option<PathBuf>,
+    pub telemetry_success_logs: Vec<PathBuf>,
+    pub telemetry_failures: Vec<LauncherTelemetryFailure>,
 }
 
 pub struct LauncherShellEnsureResult {
@@ -24,9 +27,16 @@ pub struct LauncherShellEnsureResult {
     pub telemetry: UpdateTelemetrySummary,
 }
 
+#[derive(Clone, Debug)]
 pub struct SupportArtifact {
     pub path: PathBuf,
     pub role: &'static str,
+}
+
+#[derive(Clone, Debug)]
+pub struct LauncherTelemetryFailure {
+    pub log_path: PathBuf,
+    pub message: String,
 }
 
 pub fn load_shell_state(paths: &AppPaths) -> Result<Option<LauncherShellState>> {
@@ -48,6 +58,23 @@ pub fn load_shell_state(paths: &AppPaths) -> Result<Option<LauncherShellState>> 
         .iter()
         .map(|entry| resolve_logs_entry(&record.logs_dir, entry))
         .collect();
+    let telemetry_success_logs = record
+        .summary
+        .update_telemetry
+        .successes
+        .iter()
+        .map(|entry| resolve_logs_entry(&record.logs_dir, entry))
+        .collect();
+    let telemetry_failures = record
+        .summary
+        .update_telemetry
+        .failures
+        .iter()
+        .map(|entry| LauncherTelemetryFailure {
+            log_path: resolve_logs_entry(&record.logs_dir, &entry.log),
+            message: entry.message.clone(),
+        })
+        .collect();
     let support_bundle_path = record
         .summary
         .support_bundle
@@ -62,6 +89,8 @@ pub fn load_shell_state(paths: &AppPaths) -> Result<Option<LauncherShellState>> 
         runtime_log_paths,
         crash_report_paths,
         support_bundle_path,
+        telemetry_success_logs,
+        telemetry_failures,
     }))
 }
 

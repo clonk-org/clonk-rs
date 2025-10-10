@@ -844,6 +844,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lc-launcher-ui"
+version = "0.1.0"
+dependencies = [
+ "lc-gui",
+ "lc-launcher",
+ "tempfile",
+]
+
+[[package]]
 name = "lc-network"
 version = "0.1.0"
 dependencies = [
