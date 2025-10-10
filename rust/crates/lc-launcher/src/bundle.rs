@@ -1,11 +1,12 @@
 use crate::log::LauncherLog;
 use crate::paths::{ensure_logs_dir, launcher_summary_path, resolve_logs_entry};
+use crate::report::render_support_bundle_report;
 use crate::summary::{load_launcher_summary, write_launcher_summary};
 use crate::telemetry::UpdateTelemetrySummary;
 use crate::time::timestamp_for_filename;
 use anyhow::{anyhow, Context, Result};
 use lc_platform::AppPaths;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use zip::write::FileOptions;
@@ -174,7 +175,46 @@ pub fn regenerate_support_bundle(
         record.summary.provider_bulk_retarget.clone(),
     )?;
 
+    append_support_bundle_report(paths, &bundle, &telemetry)?;
+
     Ok((bundle, telemetry))
+}
+
+pub fn append_support_bundle_report(
+    paths: &AppPaths,
+    bundle_path: &Path,
+    telemetry_summary: &UpdateTelemetrySummary,
+) -> Result<()> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(bundle_path)
+        .with_context(|| {
+            format!(
+                "failed to open support bundle {} for report append",
+                bundle_path.display()
+            )
+        })?;
+
+    let mut writer = zip::ZipWriter::new_append(file)
+        .context("failed to prepare support bundle for report append")?;
+    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    let mut report =
+        render_support_bundle_report(paths, Some(bundle_path), telemetry_summary).join("\n");
+    report.push('\n');
+
+    writer
+        .start_file("support-bundle-report.txt", options)
+        .context("failed to create report entry in support bundle")?;
+    writer
+        .write_all(report.as_bytes())
+        .context("failed to write support bundle report")?;
+    writer
+        .finish()
+        .context("failed to finalise support bundle report append")?;
+
+    Ok(())
 }
 
 fn add_file_to_bundle(

@@ -3,18 +3,20 @@ mod log;
 mod paths;
 mod preferences;
 mod provider;
+mod report;
 mod shell;
 mod summary;
 mod telemetry;
 mod time;
 
-pub use bundle::{create_support_bundle, regenerate_support_bundle};
+pub use bundle::{append_support_bundle_report, create_support_bundle, regenerate_support_bundle};
 pub use log::LauncherLog;
 pub use preferences::{load_launcher_preferences, save_launcher_preferences, LauncherPreferences};
 pub use provider::{
     ProviderAutomationState, ProviderDiagnostics, ProviderOverrideSource, ProviderPathProvenance,
     ProviderPathStatus, ProviderStatus,
 };
+pub use report::render_support_bundle_report;
 pub use shell::{
     copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_shell_state,
     reveal_in_file_manager, support_artifacts, LauncherShellEnsureResult, LauncherShellState,

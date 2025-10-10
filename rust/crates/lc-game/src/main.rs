@@ -12,12 +12,11 @@ use std::time::SystemTime;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use lc_launcher::{
-    create_support_bundle, digest_update_telemetry, load_launcher_summary,
-    regenerate_support_bundle, timestamp_for_filename, timestamp_for_log, write_launcher_summary,
-    LauncherLog, LauncherSummary, LauncherSummaryRecord, ProviderAutomationRecord,
+    append_support_bundle_report, create_support_bundle, digest_update_telemetry,
+    regenerate_support_bundle, render_support_bundle_report, timestamp_for_filename,
+    timestamp_for_log, write_launcher_summary, LauncherLog, ProviderAutomationRecord,
     ProviderAutomationSnapshot, ProviderAutomationState, ProviderBulkRetargetRecord,
-    ProviderBulkRetargetSummary, ProviderOverrideSourceRecord, ProviderPathStatus,
-    SerializableTelemetrySummary, UpdateTelemetrySummary,
+    ProviderBulkRetargetSummary, ProviderPathStatus, UpdateTelemetrySummary,
 };
 use lc_platform::AppPaths;
 
@@ -164,6 +163,14 @@ fn run() -> Result<()> {
             .ok();
     }
     summary_result?;
+
+    if let Some(bundle_path) = support_bundle.as_ref() {
+        if let Err(err) = append_support_bundle_report(&paths, bundle_path, &telemetry_summary) {
+            logger
+                .log_line(&format!("failed to embed support bundle report: {err}"))
+                .ok();
+        }
+    }
 
     print_launcher_report(&paths, support_bundle.as_deref(), &telemetry_summary);
 
@@ -805,252 +812,14 @@ fn collect_crash_reports(
     Ok(captured)
 }
 
-fn filename_or_display(path: &Path) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
 fn print_launcher_report(
     paths: &AppPaths,
     support_bundle: Option<&Path>,
     telemetry_summary: &UpdateTelemetrySummary,
 ) {
-    let summary_path = paths.logs_dir().join("launcher-summary.json");
     println!();
-    println!("Launcher summary written to {}", summary_path.display());
-    match support_bundle {
-        Some(path) => println!("Support bundle available at {}", path.display()),
-        None => println!("Support bundle was not created; check launcher logs for details."),
-    }
-
-    if !telemetry_summary.failures().is_empty() {
-        println!("Updater issues detected:");
-        for failure in telemetry_summary.failures() {
-            println!("  {} -> {}", failure.log_path.display(), failure.message);
-        }
-    } else if !telemetry_summary.successes().is_empty() {
-        let successes = telemetry_summary
-            .successes()
-            .iter()
-            .map(|path| filename_or_display(path))
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("Updater telemetry success recorded in: {successes}");
-    } else {
-        println!("Updater telemetry: no signals captured in the collected runtime logs.");
-    }
-
-    emit_provider_snapshot(paths);
-
-    match support_bundle {
-        Some(_) => println!(
-            "Share the support bundle when filing bugs to include launcher, runtime, and telemetry logs."
-        ),
-        None => println!(
-            "Share launcher-summary.json when filing bugs so support can collect the right logs."
-        ),
-    }
-}
-
-fn emit_provider_snapshot(paths: &AppPaths) {
-    match load_launcher_summary(paths) {
-        Ok(Some(record)) => {
-            println!();
-            print_provider_sections(&record);
-        }
-        Ok(None) => {
-            println!();
-            println!("First-party providers: launcher summary not available yet.");
-        }
-        Err(err) => {
-            println!();
-            println!("First-party providers: failed to load launcher summary ({err}).");
-        }
-    }
-}
-
-fn print_provider_sections(record: &LauncherSummaryRecord) {
-    for line in provider_report_lines(record) {
+    for line in render_support_bundle_report(paths, support_bundle, telemetry_summary) {
         println!("{line}");
-    }
-}
-
-fn provider_report_lines(record: &LauncherSummaryRecord) -> Vec<String> {
-    let snapshot = &record.summary.provider_automation;
-    let has_share = !snapshot.share.is_empty();
-    let has_upload = !snapshot.upload.is_empty();
-    let has_automation = has_share || has_upload;
-
-    let mut lines = Vec::new();
-    if has_automation {
-        lines.push(format!(
-            "First-party providers (logs dir: {}):",
-            record.logs_dir.display()
-        ));
-        if has_share {
-            lines.push("  Share targets:".into());
-            lines.extend(provider_category_lines(&snapshot.share, &record.logs_dir));
-        }
-        if has_upload {
-            lines.push("  Upload targets:".into());
-            lines.extend(provider_category_lines(&snapshot.upload, &record.logs_dir));
-        }
-    } else {
-        lines.push("First-party providers: no automation targets recorded.".into());
-    }
-
-    if let Some(summary) = record.summary.provider_bulk_retarget.as_ref() {
-        lines.extend(bulk_retarget_lines(summary, &record.logs_dir));
-    }
-
-    lines
-}
-
-fn provider_category_lines(providers: &[ProviderAutomationRecord], logs_dir: &Path) -> Vec<String> {
-    let mut lines = Vec::new();
-    for provider in providers {
-        lines.extend(provider_entry_lines("    ", provider, logs_dir));
-    }
-    lines
-}
-
-fn provider_entry_lines(
-    indent: &str,
-    provider: &ProviderAutomationRecord,
-    logs_dir: &Path,
-) -> Vec<String> {
-    let mut lines = Vec::new();
-    let current_path = resolve_summary_entry(logs_dir, &provider.path);
-    lines.push(format!(
-        "{indent}- {} ({})",
-        provider.name,
-        describe_provider_path_status(&provider.path_status)
-    ));
-    lines.push(format!(
-        "{indent}  Current path: {}",
-        current_path.display()
-    ));
-    lines.push(format!(
-        "{indent}  Automation: {}",
-        describe_provider_automation(&provider.automation)
-    ));
-
-    let default_entry = provider.default_path.as_deref().unwrap_or(&provider.path);
-    let default_path = resolve_summary_entry(logs_dir, default_entry);
-    lines.push(format!(
-        "{indent}  Default path: {}",
-        default_path.display()
-    ));
-
-    if provider.overrides.is_empty() {
-        lines.push(format!("{indent}  Overrides: none recorded."));
-    } else {
-        lines.push(format!("{indent}  Overrides:"));
-        for override_entry in &provider.overrides {
-            let path = resolve_summary_entry(logs_dir, &override_entry.path);
-            let source = describe_override_source(&override_entry.source);
-            lines.push(format!("{indent}    - {} -> {}", source, path.display()));
-        }
-    }
-    lines
-}
-
-fn bulk_retarget_lines(summary: &ProviderBulkRetargetSummary, logs_dir: &Path) -> Vec<String> {
-    let mut lines = Vec::new();
-    let has_records = !summary.share.is_empty() || !summary.upload.is_empty();
-    if !has_records && summary.history_cleared_at.is_none() {
-        return lines;
-    }
-
-    lines.push("  Bulk retarget history:".into());
-    if has_records {
-        if !summary.share.is_empty() {
-            lines.push("    Share targets:".into());
-            lines.extend(bulk_retarget_category_lines(
-                "      ",
-                &summary.share,
-                logs_dir,
-            ));
-        }
-        if !summary.upload.is_empty() {
-            lines.push("    Upload targets:".into());
-            lines.extend(bulk_retarget_category_lines(
-                "      ",
-                &summary.upload,
-                logs_dir,
-            ));
-        }
-    }
-
-    if let Some(cleared_at) = &summary.history_cleared_at {
-        let message = if has_records {
-            format!("    Bulk retarget history last cleared at {cleared_at}.")
-        } else {
-            format!(
-                "    Bulk retarget history was cleared at {cleared_at}. No retarget records remain while providers use default staging paths."
-            )
-        };
-        lines.push(message);
-    }
-
-    lines
-}
-
-fn bulk_retarget_category_lines(
-    indent: &str,
-    records: &[ProviderBulkRetargetRecord],
-    logs_dir: &Path,
-) -> Vec<String> {
-    let mut lines = Vec::new();
-    for record in records {
-        let base_path = resolve_summary_entry(logs_dir, &record.base_path);
-        lines.push(format!(
-            "{indent}- {} (last retargeted at {}, changed {} of {} targets)",
-            base_path.display(),
-            record.retargeted_at,
-            record.changed,
-            record.total
-        ));
-    }
-    lines
-}
-
-fn resolve_summary_entry(logs_dir: &Path, entry: &str) -> PathBuf {
-    let candidate = Path::new(entry);
-    if candidate.is_absolute() {
-        candidate.to_path_buf()
-    } else {
-        logs_dir.join(candidate)
-    }
-}
-
-fn describe_provider_path_status(status: &ProviderPathStatus) -> String {
-    match status {
-        ProviderPathStatus::Ready => "ready".into(),
-        ProviderPathStatus::Missing => "missing".into(),
-        ProviderPathStatus::NotDirectory => "not a directory".into(),
-        ProviderPathStatus::Inaccessible(err) => format!("inaccessible ({err})"),
-    }
-}
-
-fn describe_provider_automation(state: &ProviderAutomationState) -> String {
-    match state {
-        ProviderAutomationState::Idle => "Idle".into(),
-        ProviderAutomationState::Submitted { detail } => format!("Submitted ({detail})"),
-        ProviderAutomationState::Stale { reason } => format!("Stale ({reason})"),
-        ProviderAutomationState::Skipped { reason } => format!("Skipped ({reason})"),
-        ProviderAutomationState::Failed { error } => format!("Failed ({error})"),
-    }
-}
-
-fn describe_override_source(source: &ProviderOverrideSourceRecord) -> String {
-    match source {
-        ProviderOverrideSourceRecord::Preference => "Launcher preference".into(),
-        ProviderOverrideSourceRecord::Retargeted { applied_at } => {
-            format!("Retargeted at {applied_at}")
-        }
     }
 }
 
@@ -1390,6 +1159,8 @@ mod tests {
             bundle_path.display()
         );
 
+        append_support_bundle_report(&paths, &bundle_path, &telemetry).unwrap();
+
         let file = fs::File::open(&bundle_path).unwrap();
         let mut archive = ZipArchive::new(file).unwrap();
         let mut entries = Vec::new();
@@ -1417,6 +1188,10 @@ mod tests {
             entries.contains(&"telemetry-summary.json".to_string()),
             "bundle should include telemetry summary, entries: {entries:?}"
         );
+        assert!(
+            entries.contains(&"support-bundle-report.txt".to_string()),
+            "bundle should include textual report, entries: {entries:?}"
+        );
 
         let mut telemetry_json = String::new();
         archive
@@ -1429,6 +1204,17 @@ mod tests {
             value["successes"][0].as_str(),
             Some("Clonk-session.log"),
             "telemetry summary should list runtime log success"
+        );
+
+        let mut report_contents = String::new();
+        archive
+            .by_name("support-bundle-report.txt")
+            .unwrap()
+            .read_to_string(&mut report_contents)
+            .unwrap();
+        assert!(
+            report_contents.contains("Launcher summary written to"),
+            "report should describe summary path: {report_contents}"
         );
     }
 
@@ -1657,34 +1443,62 @@ mod tests {
             entries.iter().any(|name| name == "telemetry-summary.json"),
             "bundle should include telemetry summary entries: {entries:?}"
         );
+        assert!(
+            entries.contains(&"support-bundle-report.txt".to_string()),
+            "bundle should include textual report entries: {entries:?}"
+        );
+
+        let mut report = String::new();
+        archive
+            .by_name("support-bundle-report.txt")
+            .unwrap()
+            .read_to_string(&mut report)
+            .unwrap();
+        assert!(
+            report.contains("Support bundle available"),
+            "report should mention support bundle availability: {report}"
+        );
     }
 
     #[test]
     fn provider_report_surfaces_history_cleared_without_records() {
-        let temp = TempDir::new().unwrap();
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        let logger = LauncherLogger::new(&paths).unwrap();
+        logger
+            .log_line("provider report history cleared test")
+            .unwrap();
+
         let mut bulk_summary = ProviderBulkRetargetSummary::default();
         bulk_summary.history_cleared_at = Some("2024-06-05T18:30:00Z".into());
 
-        let summary = LauncherSummaryRecord {
-            summary: LauncherSummary {
-                schema_version: 1,
-                generated_at: "2024-06-05T18:45:00Z".into(),
-                launcher_log: "lc-launcher.log".into(),
-                runtime_logs: Vec::new(),
-                crash_reports: Vec::new(),
-                support_bundle: None,
-                update_telemetry: SerializableTelemetrySummary {
-                    successes: Vec::new(),
-                    failures: Vec::new(),
-                },
-                provider_automation: ProviderAutomationSnapshot::default(),
-                provider_bulk_retarget: Some(bulk_summary),
-            },
-            path: temp.path().join("launcher-summary.json"),
-            logs_dir: temp.path().to_path_buf(),
-        };
+        let telemetry = UpdateTelemetrySummary::default();
 
-        let lines = provider_report_lines(&summary);
+        write_launcher_summary(
+            &paths,
+            &logger,
+            logger.path(),
+            &[],
+            &[],
+            &telemetry,
+            None,
+            Some(ProviderAutomationSnapshot::default()),
+            Some(bulk_summary),
+        )
+        .unwrap();
+
+        let lines = render_support_bundle_report(&paths, None, &telemetry);
         assert!(
             lines.iter().any(|line| line == "  Bulk retarget history:"),
             "expected bulk retarget history headline to be rendered: {lines:?}"
@@ -1699,7 +1513,22 @@ mod tests {
 
     #[test]
     fn provider_report_surfaces_history_cleared_alongside_records() {
-        let temp = TempDir::new().unwrap();
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        let logger = LauncherLogger::new(&paths).unwrap();
+        logger.log_line("provider report records test").unwrap();
+
         let mut bulk_summary = ProviderBulkRetargetSummary::default();
         bulk_summary.share.push(ProviderBulkRetargetRecord {
             base_path: "support-share".into(),
@@ -1719,26 +1548,22 @@ mod tests {
             overrides: Vec::new(),
         });
 
-        let summary = LauncherSummaryRecord {
-            summary: LauncherSummary {
-                schema_version: 1,
-                generated_at: "2024-06-05T19:00:00Z".into(),
-                launcher_log: "lc-launcher.log".into(),
-                runtime_logs: Vec::new(),
-                crash_reports: Vec::new(),
-                support_bundle: None,
-                update_telemetry: SerializableTelemetrySummary {
-                    successes: Vec::new(),
-                    failures: Vec::new(),
-                },
-                provider_automation: automation,
-                provider_bulk_retarget: Some(bulk_summary),
-            },
-            path: temp.path().join("launcher-summary.json"),
-            logs_dir: temp.path().to_path_buf(),
-        };
+        let telemetry = UpdateTelemetrySummary::default();
 
-        let lines = provider_report_lines(&summary);
+        write_launcher_summary(
+            &paths,
+            &logger,
+            logger.path(),
+            &[],
+            &[],
+            &telemetry,
+            None,
+            Some(automation),
+            Some(bulk_summary),
+        )
+        .unwrap();
+
+        let lines = render_support_bundle_report(&paths, None, &telemetry);
         assert!(
             lines
                 .iter()
