@@ -1,46 +1,58 @@
 # LegacyClonk Rust Port Plan
 
-## Goal
-- Ship LegacyClonk with a Rust-based client/server runtime that is behavior-identical to the current C++ build across simulation, rendering, networking, UI, and modding, running the production game rather than demos.
+## North Star
+- `cargo run -p lc-game` boots the production Startup Menu, runs the full game loop, and exposes every feature the current C++ release ships today.
+- The Rust runtime must be behavior-identical across simulation, UI, networking, modding, and tooling; parity is measured against existing regression packs and live builds on all supported platforms.
+- Continue shipping C++ binaries until deterministic replays, multiplayer soak, and UI flows stay green with the Rust build.
 
-## Current State Snapshot
-- Rust crates (`lc-core`, `lc-engine`, `lc-script`, `lc-graphics`, etc.) back the `lc-app` demo and parity tooling; the live game loop, rendering, and UI remain C++ (`C4Game`, `C4GraphicsSystem`, `C4Gui`).
-- `RustEngineBridge` can mirror frames alongside the C++ loop for validation, but authoritative physics, control queues, and object lifetimes are still driven by the C++ engine.
-- `LC_RUST_ENGINE_RUNTIME` snapshots now bundle per-frame player controls alongside particles and HUD state, giving the recorder/playback harness full I/O context for parity runs.
-- Graphics/audio/platform crates operate on CPU surfaces or null backends for comparisons and do not yet present a window, swap chain, input handling, or OS event loop.
-- The Rust AUL VM runs scripted procedures inside controlled host contexts, yet large parts of the C4 API surface (effect callbacks, proplist mutation, object enumerators, particles, menus, cutscenes) still rely on C++ glue.
-- Build, packaging, and installer flows are CMake/C++ centric; Cargo artifacts are not integrated into CI releases or launcher updates.
+## Reality Check
+- Rust crates (`lc-engine`, `lc-script`, `lc-graphics`, `lc-network`, `lc-audio`, `lc-gui`, `lc-platform`) currently back parity tooling; `C4Game`, `C4GraphicsSystem`, and `C4Gui` still drive the live runtime.
+- `lc-app` remains a headless demo runner: no windowing, hardware rendering, input, or audio output.
+- `RustEngineBridge` mirrors frames when `USE_RUST_ENGINE_VALIDATION` is enabled, but the authoritative scheduler, effects, pathfinding, lobby, and UI stacks are still C++.
+- Build, packaging, and updater flows are CMake-first; Cargo outputs are never shipped to players or CI artifacts.
 
-## Blocking Gaps For Full Game Runtime
-- Authoritative game loop: C++ still owns object creation/destruction, crew control, scheduler ticks, particles, pathfinding, viewport syncing, and landscape updates; the Rust engine lacks coverage for many procedures beyond the demo set. (Rust runtime now parses C++ control frames into structured packets, giving us the inputs needed to drive crew commands without relying on raw INI blobs, the host layer mirrors `SetPosition` with landscape bounds clamping so script-driven teleports and warps run through `lc-engine`, velocity reads/writes (`SetXDir`/`SetYDir`/`GetXDir`/`GetYDir`) now update Rust state for parity, parity snapshots carry per-object `Alive` flags so crew death and elimination state survives hand-off to the Rust runtime, scripts can now toggle/query alive state via Rust-backed `SetAlive`/`GetAlive`, keeping elimination bookkeeping consistent when the Rust runtime drives object lifetimes, when `LC_RUST_ENGINE_RUNTIME_AUTHORITATIVE` is enabled the bridge now applies Rust object transforms (position, velocity, action metadata) back into the running C++ world each frame, the bridge now instantiates missing C++ objects and removes stragglers so Rust-driven creation/destruction is mirrored during authoritative runs, the host layer now routes `CreateParticle`/`ClearParticles` into `lc-engine` while the engine advances particle lifetimes so authoritative snapshots include live particle state, flight procedures now honor command directions through the Rust movement profile so airborne crew can be steered during authoritative runs, the Connect procedure now freezes crew velocity and blocks wind so line construction stays stationary during authoritative runs, scripts can now rely on Rust-backed `PathFree` queries for pathfinding against the authoritative landscape, container membership plus contents ordering now mirror Rust authoritative state so inventories and bases stay in sync, the bridge now pushes Rust wind/temperature/climate back into the C++ weather system each frame, authoritative terrain exports now stream landscape column heights into the C++ runtime so Rust-issued landscape commands update the map immediately, and the Bridge procedure now raises landscape columns step-by-step so walkway construction runs entirely in Rust.)
-- Script and engine API coverage: Hundreds of AUL functions, proplist operations, callback hooks, effect priorities, overlay rendering, and global state mutations need Rust equivalents with identical call ordering and edge cases. (Rust host layer now forwards `GetOwner`/`SetOwner`, `GetEnergy`, `GetX`/`GetY`, `SetXDir`/`SetYDir`/`GetXDir`/`GetYDir`, and `SetActionData`/`GetActionData`, wiring owner queries, energy reads, positional reads, velocity control, and action data updates through `lc-engine` for parity; `DoDamage` now mirrors C++ damage bookkeeping so structural damage deltas flow through Rust snapshots and authoritative exports; object enumerators `FindObject`/`FindObjects` now mirror legacy filtering, distance ordering, and container/owner semantics, and `CreateObject` queues spawn configs with deterministic IDs so scripts can instantiate objects directly from the Rust runtime; `SetGravity`/`GetGravity` now update shared physics state via Rust callbacks so script-driven gravity adjustments flow through the engine and back into the C++ bridge; category state now round-trips through `GetCategory`/`SetCategory`, snapshots, and runtime export so UI/view filters remain consistent; landscape queries `GBackSolid`/`GBackSemiSolid`/`GBackSky` resolve against the Rust height map and `GBackLiquid` now evaluates normalized liquid columns captured in engine snapshots so scripts can reason about terrain without falling back to C++.)
-- Frontend and IO parity: Window management, software/OpenGL render paths, HUD/GUI widgets, font and text layout, input devices (mouse, keyboard, gamepad), and platform-specific integrations live only in the C++ frontend. (Rust demo now opens a minifb window, presents the engine surface every tick with WASD/arrow controls, and falls back to terminal input when no windowing system is available.)
-- Networking and concurrency: Lobby discovery, league/master-server protocols, voice/chat relays, and host migration logic are handled by C++ systems beyond the current `lc-network` framing. (Control packet resync now runs in Rust via `lc-network::ControlBacklog` and `ResyncScheduler`, mirroring legacy backlog replay and request throttling.)
-- Toolchain compatibility: Scenario/editor workflows, savegames, replay files, localization, diagnostics, and mod packaging expect existing C++ utilities and file formats tied to legacy serialization.
+## Parity Gaps
+- **Boot & Platform:** configuration migration, patcher/updater, localization, logging/crash handling, launcher integration.
+- **Assets & Resources:** group parsing, definition loading, scenario discovery, dynamic downloads, string tables, shader/media pipelines.
+- **Runtime Authority:** crew lifecycle, scheduler, particles, pathfinding, weather, save/load, deterministic recordings owned by Rust. Bridge action parameters (`SetBridgeActionData`) now processed by `lc-engine`.
+- **Script Surface:** full AUL coverage, proplist semantics, callbacks/effects ordering, devmode hooks, debugger/console.
+- **Frontend & UI:** renderer, HUD, menus, cutscenes, text layout, input (mouse/keyboard/gamepad/touch), accessibility, editor dialogs.
+- **Audio:** device backends, mixing, environmental effects, voice chat plumbing, per-channel controls.
+- **Networking:** lobby stack, peer/server protocols, NAT traversal, desync detection/recovery, voting, recordings.
+- **Tools & Editor:** scenario editor, particle editor, developer console, replay viewer, script debugger tied to the Rust runtime.
+- **Distribution:** CI builds (Win/macOS/Linux), installers, auto-update, telemetry, mod folder layout.
 
-## Port Roadmap (Real Game Focus)
-- **Phase 0 · Parity Harness Expansion**
-  - Drive the shipping client through `LC_RUST_ENGINE_RUNTIME` for full matches, capturing snapshots, I/O, particles, and HUD state. (Rust bridge now builds into the shipping binary by default so toggling `LC_RUST_ENGINE_RUNTIME` runs full-match parity; snapshots carry per-frame controls, particles, HUD focus/elimination, back-buffer hashes, and support state import/export with network packet hashing guards.)
-  - Record canonical replays and savegames from C++ and ensure the Rust engine can import them losslessly. (`LC_RUST_ENGINE_RUNTIME_STATE` now captures runtime state JSON on shutdown and lc-engine provides export/import FFI with round-trip tests.)
-  - Extend automated diff tooling to compare network traffic, HUD buffers, and rendered surfaces frame-by-frame. (Recorder/playback snapshots now include per-frame back-buffer hashes from the C++ client with validation, parity captures labelled viewport/upper/message-board HUD surfaces alongside per-frame control logs, and directional network packet hashes keyed by connection for cross-runtime comparison.)
-- **Phase 1 · Simulation Authority Flip**
-  - Close feature gaps in `lc-engine` (all action procedures, crew AI, physics edge cases, object enumerators, global effects) until the C++ loop can defer object ticking to Rust. (Parity snapshots now include per-vertex collision metadata so physics edge cases surface identically in Rust and C++; the Fight action procedure now mirrors legacy engagements by steering combatants into range, keeping their facing consistent, and dropping back to idle if the opponent is not reciprocating; the Attach procedure now locks crew to target vertices, syncs container membership, and zeroes velocities to preserve hanging/rope behavior.)
-  - Expose every required engine/AUL entry point through FFI so C++ only marshals inputs/outputs while Rust advances world state deterministically. (Runtime FFI exports `lc_engine_runtime_advance_to_frame`, `lc_engine_runtime_step`, and `lc_engine_runtime_current_frame`, and the bridge can enable authoritative stepping via `LC_RUST_ENGINE_RUNTIME_AUTHORITATIVE`.)
-  - Promote the Rust VM to the primary script runtime, running scenario/system scripts in Rust while shadow-running the C++ VM for audit until clean. (Rust host now exposes container-aware `Contained` lookups and `RemoveObject`, keeping object inventories and deletions in sync so system scripts relying on inventory bookkeeping run inside lc-engine.)
-- **Phase 2 · Frontend and Platform Port**
-  - Replace `C4GraphicsSystem`, GUI, and input handling with Rust implementations (SDL/OpenGL or wgpu) that reproduce batching, overlay composition, and device quirks. (New `lc-frontend` crate encapsulates viewport rendering and GUI overlays in Rust; `lc-app` now drives frames through the Rust graphics system instead of bespoke surface code.)
-  - Port HUD/menus/console to Rust (`lc-gui` or successor) and ensure layout, focus, and animations match frame-perfect with legacy recordings.
-  - Wire audio mixing to `lc-audio` using a real backend (e.g., cpal/SDL) with streaming music, positional effects, and identical volume curves.
-- **Phase 3 · Networking and Services**
-  - Extend `lc-network` to handle league lobby, NAT traversal, replay upload, and peer reconnect semantics; let Rust host authoritative control arbitration.
-  - Port platform services (patcher, updater, telemetry, crash reporting) or provide Rust bindings to the existing implementations.
-  - Validate mixed C++/Rust multiplayer sessions before fully retiring the legacy netcode.
-- **Phase 4 · Release Integration**
-  - Integrate Cargo builds into CI, produce signed installers, and run automated parity suites on canonical replays before each release.
-  - Remove unused C++ modules once Rust reaches feature lock, keeping a fallback branch for hotfix builds until the Rust client proves stable in the wild.
+## Porting Strategy
+1. **Platform Bootstrap**
+   - Ship a Rust binary (`lc-game`) that mounts install/user paths, owns logging/config, and forwards to the existing Startup Menu through the bridge.
+   - Replace the demo-only `lc-app` path while the C++ gameplay loop remains authoritative.
+   - **Gate:** `cargo run -p lc-game` opens the shipping Startup Menu with live input routed through Rust scaffolding.
 
-## Validation & Tooling Requirements
-- Maintain deterministic replays across both runtimes, gating merges on replay hashes and rendered frame hashes.
-- Add exhaustive property-based and fixture-driven tests for AUL builtins, scenario loading, particle systems, and network state machines. (DoEnergy, SetWind/SetTemperature/SetClimate clamping, and Random stream parity now covered via proptest in `lc-engine/src/compat.rs`; expand to remaining APIs and subsystems.)
-- Provide developer toggles to dump cross-runtime diffs (state, HUD layers, audio mix) and integrate them into CI dashboards.
-- Establish performance baselines comparing CPU/GPU usage so regressions surface before release candidates.
+2. **Runtime Authority**
+   - Expand `lc-engine` to drive scheduler ticks, object creation/destruction, particles, landscape, weather, pathfinding, and save/load without C++ intervention.
+   - Mirror every AUL call/effect hook into Rust; maintain exhaustive replay fixtures for ordering and edge-case validation.
+   - **Gate:** headless Rust loop reproduces the deterministic regression pack byte-for-byte against C++ recordings.
+
+3. **Frontend & IO**
+   - Implement rendering (software or wgpu/winit) to match C4 graphics, HUD, GUI widgets, and text output; unify font pipelines.
+   - Port the full input stack and GUI/dialog system (startup, lobbies, editor, in-game menus); connect audio backends for music/effects parity.
+   - **Gate:** Rust frontend renders the Startup Menu and in-game HUD, handles live input/audio, and no longer depends on C++ surfaces.
+
+4. **Networking & Multiplayer**
+   - Rebuild the `C4Network2*` stack in Rust (`lc-network`) covering lobby, synchronization, voting, desync recovery, net logging, and NAT traversal.
+   - Stand up automated soak tests with mixed-platform clients to verify determinism and reconnection behavior.
+   - **Gate:** two Rust clients connect to a Rust host, complete regression scenarios, and pass desync testers.
+
+5. **Tools & Editor**
+   - Port scenario/editor tooling, developer console, script debugger, replay viewer, and dev HUD to operate on the Rust runtime.
+   - Ensure editor workflows (open/edit/save/play) round-trip with parity.
+   - **Gate:** Rust binary launches the editor, edits a scenario, and plays it back identically.
+
+6. **Release Integration**
+   - Transition CI/packaging to Cargo-first builds, bundle resources, produce installers, and migrate auto-updater and telemetry.
+   - Maintain dual shipping (C++ + Rust) until QA signs off; then retire CMake artifacts.
+   - **Gate:** nightly Rust builds ship through the launcher with parity signatures and crash telemetry enabled.
+
+## Validation
+- Maintain shared deterministic replay suites, UI screenshot comparisons, and networking soak tests in CI.
+- Track parity with a cross-functional feature checklist; no subsystem retires its C++ path until its acceptance gates stay green on every supported platform.

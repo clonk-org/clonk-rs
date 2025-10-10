@@ -864,6 +864,29 @@ impl BridgeParameters {
     }
 }
 
+pub(crate) fn encode_bridge_action_data(
+    duration: i32,
+    move_clonk: bool,
+    wall: bool,
+    material: i32,
+) -> i32 {
+    let clamped_duration = duration.clamp(0, 0xFFFF) as u32;
+    let mut raw = clamped_duration << 16;
+    if move_clonk {
+        raw |= 1 << 8;
+    }
+    if wall {
+        raw |= 1 << 9;
+    }
+    let material_byte = if material < 0 {
+        0xFF
+    } else {
+        (material as u32) & 0xFF
+    };
+    raw |= material_byte;
+    raw as i32
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentSettings {
     pub wind: i32,
@@ -7930,6 +7953,38 @@ mod tests {
     }
     "#;
 
+    const SET_BRIDGE_ACTION_DATA_SCRIPT: &str = r#"
+    global func Initialize(state, random)
+    {
+        if (SetBridgeActionData(200, true, false, 7))
+        {
+            return { energy = 1 };
+        }
+        return { energy = 0 };
+    }
+
+    global func Step(state, frame, random)
+    {
+        return nil;
+    }
+    "#;
+
+    const SET_BRIDGE_ACTION_DATA_FAILURE_SCRIPT: &str = r#"
+    global func Initialize(state, random)
+    {
+        if (SetBridgeActionData(120, false, false, -1))
+        {
+            return { energy = 1 };
+        }
+        return { energy = 0 };
+    }
+
+    global func Step(state, frame, random)
+    {
+        return nil;
+    }
+    "#;
+
     const RANDOM_HELPER_SCRIPT: &str = r#"
     global func Initialize(state, random)
     {
@@ -8006,24 +8061,6 @@ mod tests {
         }
         "#;
         Definition::from_script("Test", "Test", source).expect("script compiles")
-    }
-
-    fn encode_bridge_data(duration: u32, move_clonk: bool, wall: bool, material: i32) -> i32 {
-        let duration = duration & 0xFFFF;
-        let mut raw = duration << 16;
-        if move_clonk {
-            raw |= 1 << 8;
-        }
-        if wall {
-            raw |= 1 << 9;
-        }
-        let material_byte = if material < 0 {
-            0xFF
-        } else {
-            (material as u32) & 0xFF
-        };
-        raw |= material_byte;
-        raw as i32
     }
 
     #[test]
@@ -9076,6 +9113,66 @@ mod tests {
     }
 
     #[test]
+    fn set_bridge_action_data_updates_action_data() {
+        let mut definition =
+            Definition::from_script("Bridger", "Bridger", SET_BRIDGE_ACTION_DATA_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Bridge".to_string(),
+            ActionSpec::default().with_procedure("bridge"),
+        );
+        definition.configure_actions(Some("Bridge".to_string()), actions);
+
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Bridger").with_action(ActionState::new("Bridge")),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine
+            .object_snapshot(id)
+            .expect("object snapshot available");
+        assert_eq!(snapshot.energy, 1);
+        let expected = encode_bridge_action_data(200, true, false, 7);
+        assert_eq!(snapshot.action.data, expected);
+    }
+
+    #[test]
+    fn set_bridge_action_data_returns_false_when_not_in_bridge_procedure() {
+        let mut definition =
+            Definition::from_script(
+                "IdleActor",
+                "IdleActor",
+                SET_BRIDGE_ACTION_DATA_FAILURE_SCRIPT,
+            )
+            .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(41);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("IdleActor"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine
+            .object_snapshot(id)
+            .expect("object snapshot available");
+        assert_eq!(snapshot.energy, 0);
+        assert_eq!(snapshot.action.data, 0);
+    }
+
+    #[test]
     fn bridge_procedure_freezes_velocity_and_ignores_wind() {
         let mut definition =
             Definition::from_script("Bridger", "Bridger", PROCEDURE_MOVEMENT_SCRIPT)
@@ -9132,7 +9229,7 @@ mod tests {
         engine.set_landscape(Landscape::new(16, heights).expect("landscape constructs"));
 
         let mut action = ActionState::new("Bridge");
-        action.data = encode_bridge_data(10, false, false, -1);
+        action.data = encode_bridge_action_data(10, false, false, -1);
 
         let id = engine
             .spawn_object(

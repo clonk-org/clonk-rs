@@ -5,8 +5,9 @@ use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::{
-    ActionLibrary, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, Direction,
-    EnvironmentSettings, FloatVector2, Landscape, LiquidSegment, ObjectId, ObjectStatus,
+    encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, CommandDirection,
+    DefinitionId, Direction, EnvironmentSettings, FloatVector2, Landscape, LiquidSegment, ObjectId,
+    ObjectStatus,
     ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope,
     PhysicsSettings, QueuedCommand, SpawnConfig, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT,
     CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
@@ -788,6 +789,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetEffectCount", get_effect_count);
     script.register_host_function("EffectVar", effect_var);
     script.register_host_function("SetAction", set_action);
+    script.register_host_function("SetBridgeActionData", set_bridge_action_data);
     script.register_host_function("SetActionData", set_action_data);
     script.register_host_function("GetActionData", get_action_data);
     script.register_host_function("GetAction", get_action);
@@ -2438,6 +2440,89 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             object.reset_action_data();
         }
 
+        Ok(Value::Bool(true))
+    })
+}
+
+fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetBridgeActionData expects at least 1 argument: length",
+        ));
+    }
+
+    let mut param_count = args.len();
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(Value::Proplist(_)) = args.last() {
+        param_count -= 1;
+        target_id = parse_object_reference_argument(
+            &args[param_count],
+            "SetBridgeActionData",
+            "object",
+        )?;
+    }
+
+    if param_count == 0 {
+        return Err(RuntimeError::new(
+            "SetBridgeActionData expects at least 1 argument: length",
+        ));
+    }
+
+    if param_count > 4 {
+        return Err(RuntimeError::new(
+            "SetBridgeActionData accepts at most 4 arguments before the object parameter",
+        ));
+    }
+
+    let length = value_to_i32(&args[0], "SetBridgeActionData", "length")?;
+    let move_clonk = if param_count > 1 {
+        value_to_bool(&args[1], "SetBridgeActionData", "move_clonk")?
+    } else {
+        false
+    };
+    let wall = if param_count > 2 {
+        value_to_bool(&args[2], "SetBridgeActionData", "wall")?
+    } else {
+        false
+    };
+    let material = if param_count > 3 {
+        match &args[3] {
+            Value::Nil => -1,
+            other => value_to_i32(other, "SetBridgeActionData", "material")?,
+        }
+    } else {
+        -1
+    };
+
+    let encoded = encode_bridge_action_data(length, move_clonk, wall, material);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("SetBridgeActionData requires an active engine context")
+        })?;
+
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        if !object.status().is_active() {
+            return Ok(Value::Bool(false));
+        }
+
+        if object.effective_action_procedure() != ActionProcedure::Bridge {
+            return Ok(Value::Bool(false));
+        }
+
+        object.set_action_data(encoded);
         Ok(Value::Bool(true))
     })
 }
