@@ -1,6 +1,6 @@
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{LineWriter, Write};
+use std::io::{ErrorKind, LineWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -10,7 +10,8 @@ use lc_gui::{DrawCommand, GuiEvent, KeyCode, Point as GuiPoint, Rect as GuiRect,
 use lc_launcher::{
     copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_launcher_preferences,
     load_shell_state, reveal_in_file_manager, save_launcher_preferences, timestamp_for_filename,
-    timestamp_for_log, LauncherLog, LauncherPreferences, SupportArtifact,
+    timestamp_for_log, LauncherLog, LauncherPreferences, ProviderAutomationState,
+    ProviderDiagnostics, ProviderPathStatus, ProviderStatus, SupportArtifact,
 };
 use lc_launcher_ui::{
     ActionFeedback, LauncherShellMessage, LauncherShellResponse, LauncherShellUi,
@@ -18,6 +19,7 @@ use lc_launcher_ui::{
 use lc_platform::AppPaths;
 use pixels::{Pixels, SurfaceTexture};
 use rfd::FileDialog;
+use serde::Serialize;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, Event, MouseButton, TouchPhase, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -264,6 +266,31 @@ impl LauncherApp {
         self.update_feedback(Some(feedback))
     }
 
+    fn update_provider_diagnostics(&mut self) -> Result<()> {
+        let diagnostics = self.providers.diagnostics();
+        self.ui
+            .set_providers(diagnostics)
+            .map_err(|err| anyhow!(err))
+    }
+
+    fn feedback_from_reports(
+        &self,
+        message: String,
+        stage: &ProviderStageReport,
+        automation: &ProviderAutomationReport,
+    ) -> ActionFeedback {
+        let has_failure = !stage.failures().is_empty() || !automation.failures().is_empty();
+        let has_success = !stage.successes().is_empty() || !automation.successes().is_empty();
+        let has_skipped = !automation.skipped().is_empty();
+        if has_failure {
+            ActionFeedback::error(message)
+        } else if has_success && !has_skipped {
+            ActionFeedback::success(message)
+        } else {
+            ActionFeedback::info(message)
+        }
+    }
+
     fn persist_preferences(&self) {
         if let Err(err) = save_launcher_preferences(&self.paths, &self.preferences) {
             let _ = self
@@ -361,22 +388,33 @@ impl LauncherApp {
                                         staged_path.display()
                                     ))
                                     .context("failed to log copy success")?;
-                                let provider_report =
+                                let (stage_report, automation_report) =
                                     self.providers.stage_bundle(&self.logger, &bundle_path);
-                                let summary = self.providers.share_summary(&provider_report);
+                                self.update_provider_diagnostics().context(
+                                    "failed to refresh provider diagnostics after support bundle staging",
+                                )?;
+
                                 let mut feedback_message =
                                     format!("Support bundle copied to {}", staged_path.display());
-                                if let Some(summary) = summary {
-                                    feedback_message.push_str("; ");
-                                    feedback_message.push_str(&summary);
-                                }
-                                let feedback = if provider_report.failures().is_empty() {
-                                    ActionFeedback::success(feedback_message)
-                                } else if provider_report.successes().is_empty() {
-                                    ActionFeedback::error(feedback_message)
+                                if self.providers.has_share_targets() {
+                                    if let Some(summary) = stage_report.summary() {
+                                        feedback_message.push_str("; ");
+                                        feedback_message.push_str(&summary);
+                                    }
+                                    if let Some(summary) = automation_report.summary() {
+                                        feedback_message.push_str("; ");
+                                        feedback_message.push_str(&summary);
+                                    }
                                 } else {
-                                    ActionFeedback::info(feedback_message)
-                                };
+                                    feedback_message
+                                        .push_str("; no first-party share providers configured");
+                                }
+
+                                let feedback = self.feedback_from_reports(
+                                    feedback_message,
+                                    &stage_report,
+                                    &automation_report,
+                                );
                                 self.set_feedback(feedback)?;
                             }
                             Err(err) => {
@@ -445,21 +483,31 @@ impl LauncherApp {
                                     .log_line(&format!("{} ({})", summary, staged_list))
                                     .context("failed to log artifact staging success")?;
 
-                                let provider_report =
+                                let (stage_report, automation_report) =
                                     self.providers.stage_artifacts(&self.logger, &artifacts);
-                                if let Some(extra) = self.providers.upload_summary(&provider_report)
-                                {
-                                    summary.push_str("; ");
-                                    summary.push_str(&extra);
+                                self.update_provider_diagnostics().context(
+                                    "failed to refresh provider diagnostics after artifact staging",
+                                )?;
+
+                                if self.providers.has_upload_targets() {
+                                    if let Some(extra) = stage_report.summary() {
+                                        summary.push_str("; ");
+                                        summary.push_str(&extra);
+                                    }
+                                    if let Some(extra) = automation_report.summary() {
+                                        summary.push_str("; ");
+                                        summary.push_str(&extra);
+                                    }
+                                } else {
+                                    summary
+                                        .push_str("; no first-party upload providers configured");
                                 }
 
-                                let feedback = if provider_report.failures().is_empty() {
-                                    ActionFeedback::success(summary)
-                                } else if provider_report.successes().is_empty() {
-                                    ActionFeedback::error(summary)
-                                } else {
-                                    ActionFeedback::info(summary)
-                                };
+                                let feedback = self.feedback_from_reports(
+                                    summary,
+                                    &stage_report,
+                                    &automation_report,
+                                );
                                 self.set_feedback(feedback)?;
                             }
                             Err(err) => {
@@ -505,7 +553,8 @@ impl LauncherApp {
                     .context("failed to reset launcher UI state")?;
             }
         }
-        Ok(())
+        self.update_provider_diagnostics()
+            .context("failed to refresh provider diagnostics")
     }
 
     fn render(&mut self, frame: &mut [u8]) -> Result<()> {
@@ -591,15 +640,149 @@ impl ProviderStageFailure {
     }
 }
 
+#[derive(Default)]
+struct ProviderAutomationReport {
+    successes: Vec<ProviderAutomationSuccess>,
+    failures: Vec<ProviderAutomationFailure>,
+    skipped: Vec<ProviderAutomationSkip>,
+}
+
+impl ProviderAutomationReport {
+    fn summary(&self) -> Option<String> {
+        if self.successes.is_empty() && self.failures.is_empty() && self.skipped.is_empty() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if !self.successes.is_empty() {
+            let labels = self
+                .successes
+                .iter()
+                .map(|success| success.display_label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("submission requests prepared for {}", labels));
+        }
+        if !self.failures.is_empty() {
+            let labels = self
+                .failures
+                .iter()
+                .map(|failure| failure.display_label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("submission requests failed for {}", labels));
+        }
+        if !self.skipped.is_empty() {
+            let labels = self
+                .skipped
+                .iter()
+                .map(|skip| skip.display_label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("submission requests skipped for {}", labels));
+        }
+        Some(parts.join("; "))
+    }
+
+    fn successes(&self) -> &[ProviderAutomationSuccess] {
+        &self.successes
+    }
+
+    fn failures(&self) -> &[ProviderAutomationFailure] {
+        &self.failures
+    }
+
+    fn skipped(&self) -> &[ProviderAutomationSkip] {
+        &self.skipped
+    }
+}
+
+struct ProviderAutomationSuccess {
+    provider: String,
+    detail: String,
+}
+
+impl ProviderAutomationSuccess {
+    fn display_label(&self) -> String {
+        format!("{} ({})", self.provider, self.detail)
+    }
+}
+
+struct ProviderAutomationFailure {
+    provider: String,
+    error: String,
+}
+
+impl ProviderAutomationFailure {
+    fn display_label(&self) -> String {
+        format!("{} ({})", self.provider, self.error)
+    }
+}
+
+struct ProviderAutomationSkip {
+    provider: String,
+    reason: String,
+}
+
+impl ProviderAutomationSkip {
+    fn display_label(&self) -> String {
+        format!("{} ({})", self.provider, self.reason)
+    }
+}
+
 #[derive(Clone)]
 struct ProviderTarget {
     name: String,
     path: PathBuf,
 }
 
+#[derive(Clone)]
+struct ProviderTargetState {
+    target: ProviderTarget,
+    automation: ProviderAutomationState,
+}
+
+impl ProviderTargetState {
+    fn new(target: ProviderTarget) -> Self {
+        Self {
+            target,
+            automation: ProviderAutomationState::Idle,
+        }
+    }
+
+    fn to_status(&self) -> ProviderStatus {
+        ProviderStatus {
+            name: self.target.name.clone(),
+            path: self.target.path.clone(),
+            path_status: compute_path_status(&self.target.path),
+            automation: self.automation.clone(),
+        }
+    }
+}
+
+enum ProviderRole {
+    Share,
+    Upload,
+}
+
+impl ProviderRole {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ProviderRole::Share => "share",
+            ProviderRole::Upload => "upload",
+        }
+    }
+
+    fn file_prefix(&self) -> &'static str {
+        match self {
+            ProviderRole::Share => "share",
+            ProviderRole::Upload => "upload",
+        }
+    }
+}
+
 struct FirstPartyProviders {
-    share: Vec<ProviderTarget>,
-    upload: Vec<ProviderTarget>,
+    share: Vec<ProviderTargetState>,
+    upload: Vec<ProviderTargetState>,
 }
 
 impl FirstPartyProviders {
@@ -608,12 +791,18 @@ impl FirstPartyProviders {
             SHARE_PROVIDERS_ENV,
             "Support Share Drop",
             paths.logs_dir().join("support-share"),
-        );
+        )
+        .into_iter()
+        .map(ProviderTargetState::new)
+        .collect();
         let upload = Self::parse_targets(
             UPLOAD_PROVIDERS_ENV,
             "Support Upload Drop",
             paths.logs_dir().join("support-upload"),
-        );
+        )
+        .into_iter()
+        .map(ProviderTargetState::new)
+        .collect();
         Self { share, upload }
     }
 
@@ -651,9 +840,15 @@ impl FirstPartyProviders {
         }]
     }
 
-    fn stage_bundle(&self, logger: &dyn LauncherLog, bundle: &Path) -> ProviderStageReport {
-        let mut report = ProviderStageReport::default();
-        for target in &self.share {
+    fn stage_bundle(
+        &mut self,
+        logger: &dyn LauncherLog,
+        bundle: &Path,
+    ) -> (ProviderStageReport, ProviderAutomationReport) {
+        let mut stage_report = ProviderStageReport::default();
+        let mut automation_report = ProviderAutomationReport::default();
+        for state in &mut self.share {
+            let target = &state.target;
             match copy_support_bundle(bundle, &target.path) {
                 Ok(path) => {
                     let _ = logger.log_line(&format!(
@@ -661,9 +856,36 @@ impl FirstPartyProviders {
                         target.name,
                         path.display()
                     ));
-                    report.successes.push(ProviderStageSuccess {
+                    let staged_paths = vec![path];
+                    match create_submission_request(
+                        logger,
+                        target,
+                        &staged_paths,
+                        ProviderRole::Share,
+                    ) {
+                        Ok(detail) => {
+                            automation_report.successes.push(ProviderAutomationSuccess {
+                                provider: target.name.clone(),
+                                detail: detail.clone(),
+                            });
+                            state.automation = ProviderAutomationState::Submitted { detail };
+                        }
+                        Err(err) => {
+                            let message = err.to_string();
+                            let _ = logger.log_line(&format!(
+                                "failed to prepare submission request for {}: {message}",
+                                target.name
+                            ));
+                            automation_report.failures.push(ProviderAutomationFailure {
+                                provider: target.name.clone(),
+                                error: message.clone(),
+                            });
+                            state.automation = ProviderAutomationState::Failed { error: message };
+                        }
+                    }
+                    stage_report.successes.push(ProviderStageSuccess {
                         provider: target.name.clone(),
-                        paths: vec![path],
+                        paths: staged_paths,
                     });
                 }
                 Err(err) => {
@@ -672,23 +894,31 @@ impl FirstPartyProviders {
                         "failed to stage support bundle for {}: {message}",
                         target.name
                     ));
-                    report.failures.push(ProviderStageFailure {
+                    stage_report.failures.push(ProviderStageFailure {
                         provider: target.name.clone(),
-                        error: message,
+                        error: message.clone(),
                     });
+                    let reason = format!("staging failed: {message}");
+                    automation_report.skipped.push(ProviderAutomationSkip {
+                        provider: target.name.clone(),
+                        reason: reason.clone(),
+                    });
+                    state.automation = ProviderAutomationState::Skipped { reason };
                 }
             }
         }
-        report
+        (stage_report, automation_report)
     }
 
     fn stage_artifacts(
-        &self,
+        &mut self,
         logger: &dyn LauncherLog,
         artifacts: &[SupportArtifact],
-    ) -> ProviderStageReport {
-        let mut report = ProviderStageReport::default();
-        for target in &self.upload {
+    ) -> (ProviderStageReport, ProviderAutomationReport) {
+        let mut stage_report = ProviderStageReport::default();
+        let mut automation_report = ProviderAutomationReport::default();
+        for state in &mut self.upload {
+            let target = &state.target;
             match copy_support_artifacts(artifacts, &target.path) {
                 Ok(paths) => {
                     let staged = paths
@@ -700,7 +930,28 @@ impl FirstPartyProviders {
                         "first-party upload staged for {} at {}",
                         target.name, staged
                     ));
-                    report.successes.push(ProviderStageSuccess {
+                    match create_submission_request(logger, target, &paths, ProviderRole::Upload) {
+                        Ok(detail) => {
+                            automation_report.successes.push(ProviderAutomationSuccess {
+                                provider: target.name.clone(),
+                                detail: detail.clone(),
+                            });
+                            state.automation = ProviderAutomationState::Submitted { detail };
+                        }
+                        Err(err) => {
+                            let message = err.to_string();
+                            let _ = logger.log_line(&format!(
+                                "failed to prepare submission request for {}: {message}",
+                                target.name
+                            ));
+                            automation_report.failures.push(ProviderAutomationFailure {
+                                provider: target.name.clone(),
+                                error: message.clone(),
+                            });
+                            state.automation = ProviderAutomationState::Failed { error: message };
+                        }
+                    }
+                    stage_report.successes.push(ProviderStageSuccess {
                         provider: target.name.clone(),
                         paths,
                     });
@@ -711,31 +962,125 @@ impl FirstPartyProviders {
                         "failed to stage support artifacts for {}: {message}",
                         target.name
                     ));
-                    report.failures.push(ProviderStageFailure {
+                    stage_report.failures.push(ProviderStageFailure {
                         provider: target.name.clone(),
-                        error: message,
+                        error: message.clone(),
                     });
+                    let reason = format!("staging failed: {message}");
+                    automation_report.skipped.push(ProviderAutomationSkip {
+                        provider: target.name.clone(),
+                        reason: reason.clone(),
+                    });
+                    state.automation = ProviderAutomationState::Skipped { reason };
                 }
             }
         }
-        report
+        (stage_report, automation_report)
     }
 
-    fn share_summary(&self, report: &ProviderStageReport) -> Option<String> {
-        if self.share.is_empty() {
-            Some("no first-party share providers configured".into())
-        } else {
-            report.summary()
-        }
+    fn has_share_targets(&self) -> bool {
+        !self.share.is_empty()
     }
 
-    fn upload_summary(&self, report: &ProviderStageReport) -> Option<String> {
-        if self.upload.is_empty() {
-            Some("no first-party upload providers configured".into())
-        } else {
-            report.summary()
+    fn has_upload_targets(&self) -> bool {
+        !self.upload.is_empty()
+    }
+
+    fn diagnostics(&self) -> ProviderDiagnostics {
+        ProviderDiagnostics {
+            share: self.share.iter().map(|state| state.to_status()).collect(),
+            upload: self.upload.iter().map(|state| state.to_status()).collect(),
         }
     }
+}
+
+fn compute_path_status(path: &Path) -> ProviderPathStatus {
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                ProviderPathStatus::Ready
+            } else {
+                ProviderPathStatus::NotDirectory
+            }
+        }
+        Err(err) => match err.kind() {
+            ErrorKind::NotFound => ProviderPathStatus::Missing,
+            _ => ProviderPathStatus::Inaccessible(err.to_string()),
+        },
+    }
+}
+
+fn relative_display(base: &Path, path: &Path) -> String {
+    match path.strip_prefix(base) {
+        Ok(relative) => relative.display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+fn create_submission_request(
+    logger: &dyn LauncherLog,
+    target: &ProviderTarget,
+    staged_paths: &[PathBuf],
+    role: ProviderRole,
+) -> Result<String> {
+    if staged_paths.is_empty() {
+        return Err(anyhow!(
+            "no staged files were provided for {} submission request",
+            target.name
+        ));
+    }
+
+    fs::create_dir_all(&target.path).with_context(|| {
+        format!(
+            "failed to prepare submission directory {}",
+            target.path.display()
+        )
+    })?;
+
+    let files = staged_paths
+        .iter()
+        .map(|path| relative_display(&target.path, path))
+        .collect::<Vec<_>>();
+
+    let request = SubmissionRequest {
+        provider: &target.name,
+        role: role.as_str(),
+        generated_at: timestamp_for_log(),
+        files,
+    };
+
+    let payload = serde_json::to_vec_pretty(&request)
+        .context("failed to serialize submission request payload")?;
+    let file_name = format!(
+        "submission-request-{}-{}.json",
+        role.file_prefix(),
+        timestamp_for_filename()
+    );
+    let destination = target.path.join(&file_name);
+    fs::write(&destination, payload).with_context(|| {
+        format!(
+            "failed to write submission request {}",
+            destination.display()
+        )
+    })?;
+
+    logger
+        .log_line(&format!(
+            "submission request prepared for {} at {}",
+            target.name,
+            destination.display()
+        ))
+        .context("failed to record submission request creation")?;
+
+    Ok(file_name)
+}
+
+#[derive(Serialize)]
+struct SubmissionRequest<'a> {
+    provider: &'a str,
+    role: &'a str,
+    generated_at: String,
+    files: Vec<String>,
 }
 
 fn render_commands(surface: &mut Surface, commands: &[DrawCommand]) {
@@ -876,23 +1221,31 @@ mod tests {
         let bundle_path = source_dir.path().join("bundle.zip");
         fs::write(&bundle_path, b"bundle").unwrap();
 
-        let providers = FirstPartyProviders {
-            share: vec![ProviderTarget {
+        let mut providers = FirstPartyProviders {
+            share: vec![ProviderTargetState::new(ProviderTarget {
                 name: "Support Share".into(),
                 path: provider_dir.path().to_path_buf(),
-            }],
+            })],
             upload: Vec::new(),
         };
 
         let logger = DummyLog;
-        let report = providers.stage_bundle(&logger, &bundle_path);
-        assert!(report.failures().is_empty());
-        assert_eq!(report.successes().len(), 1);
-        let staged_path = report.successes()[0].paths[0].clone();
+        let (stage_report, automation_report) = providers.stage_bundle(&logger, &bundle_path);
+        assert!(stage_report.failures().is_empty());
+        assert_eq!(stage_report.successes().len(), 1);
+        let staged_path = stage_report.successes()[0].paths[0].clone();
         assert!(staged_path.exists());
         assert_ne!(staged_path, bundle_path);
         let contents = fs::read(staged_path).unwrap();
         assert_eq!(contents, b"bundle");
+
+        assert!(automation_report.failures().is_empty());
+        assert!(automation_report.skipped().is_empty());
+        assert_eq!(automation_report.successes().len(), 1);
+        let detail = &automation_report.successes()[0].detail;
+        assert!(detail.starts_with("submission-request-share-"));
+        let request_path = provider_dir.path().join(detail);
+        assert!(request_path.exists());
     }
 
     #[test]
@@ -907,24 +1260,32 @@ mod tests {
             role: "summary",
         };
 
-        let providers = FirstPartyProviders {
+        let mut providers = FirstPartyProviders {
             share: Vec::new(),
-            upload: vec![ProviderTarget {
+            upload: vec![ProviderTargetState::new(ProviderTarget {
                 name: "Support Upload".into(),
                 path: provider_dir.path().to_path_buf(),
-            }],
+            })],
         };
 
         let logger = DummyLog;
         let artifacts = vec![artifact];
-        let report = providers.stage_artifacts(&logger, &artifacts);
-        assert!(report.failures().is_empty());
-        assert_eq!(report.successes().len(), 1);
-        let staged_paths = &report.successes()[0].paths;
+        let (stage_report, automation_report) = providers.stage_artifacts(&logger, &artifacts);
+        assert!(stage_report.failures().is_empty());
+        assert_eq!(stage_report.successes().len(), 1);
+        let staged_paths = &stage_report.successes()[0].paths;
         assert_eq!(staged_paths.len(), artifacts.len());
         for path in staged_paths {
             assert!(path.exists());
         }
+
+        assert!(automation_report.failures().is_empty());
+        assert!(automation_report.skipped().is_empty());
+        assert_eq!(automation_report.successes().len(), 1);
+        let detail = &automation_report.successes()[0].detail;
+        assert!(detail.starts_with("submission-request-upload-"));
+        let request_path = provider_dir.path().join(detail);
+        assert!(request_path.exists());
     }
 }
 

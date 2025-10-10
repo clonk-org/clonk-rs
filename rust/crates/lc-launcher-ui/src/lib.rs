@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use lc_gui::{
     DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, GuiResult, Rect, Size, WidgetId,
 };
-use lc_launcher::{support_artifacts, LauncherShellState, SupportArtifact};
+use lc_launcher::{
+    support_artifacts, LauncherShellState, ProviderAutomationState, ProviderDiagnostics,
+    ProviderPathStatus, ProviderStatus, SupportArtifact,
+};
 
 #[derive(Debug, Clone)]
 pub enum LauncherShellMessage {
@@ -71,6 +74,7 @@ pub struct LauncherShellUi {
     layout: LauncherShellLayout,
     state: Option<LauncherShellState>,
     feedback: Option<ActionFeedback>,
+    providers: ProviderDiagnostics,
 }
 
 impl LauncherShellUi {
@@ -80,6 +84,7 @@ impl LauncherShellUi {
             layout: LauncherShellLayout::default(),
             state: None,
             feedback: None,
+            providers: ProviderDiagnostics::default(),
         };
         ui.set_state(state)?;
         Ok(ui)
@@ -92,6 +97,11 @@ impl LauncherShellUi {
 
     pub fn set_action_feedback(&mut self, feedback: Option<ActionFeedback>) -> GuiResult<()> {
         self.feedback = feedback;
+        self.rebuild()
+    }
+
+    pub fn set_providers(&mut self, providers: ProviderDiagnostics) -> GuiResult<()> {
+        self.providers = providers;
         self.rebuild()
     }
 
@@ -135,7 +145,7 @@ impl LauncherShellUi {
     fn rebuild(&mut self) -> GuiResult<()> {
         let borrowed_state = self.state.as_ref();
         let feedback = self.feedback.as_ref();
-        let (gui, layout) = build_gui(borrowed_state, feedback)?;
+        let (gui, layout) = build_gui(borrowed_state, feedback, &self.providers)?;
         self.gui = gui;
         self.layout = layout;
         Ok(())
@@ -208,6 +218,7 @@ impl WidgetAction {
 fn build_gui(
     state: Option<&LauncherShellState>,
     feedback: Option<&ActionFeedback>,
+    providers: &ProviderDiagnostics,
 ) -> GuiResult<(Gui, LauncherShellLayout)> {
     let mut gui = Gui::new();
     let mut layout = LauncherShellLayout::default();
@@ -427,7 +438,55 @@ fn build_gui(
         }
     }
 
+    add_provider_section(&mut gui, root, providers);
+
     Ok((gui, layout))
+}
+
+fn add_provider_section(gui: &mut Gui, root: WidgetId, providers: &ProviderDiagnostics) {
+    let section = gui.add_column(root, true);
+    gui.add_label(section, "First-Party Providers");
+    if providers.share.is_empty() && providers.upload.is_empty() {
+        gui.add_label(
+            section,
+            "No first-party providers are configured. Configure LC_FIRST_PARTY_* variables to enable automated submissions.",
+        );
+        return;
+    }
+
+    if !providers.share.is_empty() {
+        let share_section = gui.add_column(section, true);
+        gui.add_label(share_section, "Share Targets");
+        render_provider_list(gui, share_section, &providers.share);
+    }
+
+    if !providers.upload.is_empty() {
+        let upload_section = gui.add_column(section, true);
+        gui.add_label(upload_section, "Upload Targets");
+        render_provider_list(gui, upload_section, &providers.upload);
+    }
+}
+
+fn render_provider_list(gui: &mut Gui, parent: WidgetId, providers: &[ProviderStatus]) {
+    for provider in providers {
+        render_provider_entry(gui, parent, provider);
+    }
+}
+
+fn render_provider_entry(gui: &mut Gui, parent: WidgetId, provider: &ProviderStatus) {
+    let entry = gui.add_column(parent, true);
+    gui.add_label(
+        entry,
+        format!("{}: {}", provider.name, display_path(&provider.path)),
+    );
+    gui.add_label(
+        entry,
+        format!(
+            "Path status: {}; Automation: {}",
+            format_path_status(&provider.path_status),
+            format_automation_state(&provider.automation)
+        ),
+    );
 }
 
 fn display_path(path: &Path) -> String {
@@ -443,6 +502,26 @@ fn format_role(role: &str) -> String {
         .map(capitalize_word)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn format_path_status(status: &ProviderPathStatus) -> String {
+    match status {
+        ProviderPathStatus::Ready => "Ready".into(),
+        ProviderPathStatus::Missing => "Missing".into(),
+        ProviderPathStatus::NotDirectory => "Not a directory".into(),
+        ProviderPathStatus::Inaccessible(message) => {
+            format!("Inaccessible ({message})")
+        }
+    }
+}
+
+fn format_automation_state(state: &ProviderAutomationState) -> String {
+    match state {
+        ProviderAutomationState::Idle => "Idle".into(),
+        ProviderAutomationState::Submitted { detail } => format!("Submitted ({detail})"),
+        ProviderAutomationState::Skipped { reason } => format!("Skipped ({reason})"),
+        ProviderAutomationState::Failed { error } => format!("Failed ({error})"),
+    }
 }
 
 fn capitalize_word(word: &str) -> String {
@@ -463,7 +542,8 @@ mod tests {
     use super::*;
     use lc_gui::{GuiEvent, Point};
     use lc_launcher::{
-        LauncherSummary, LauncherTelemetryFailure, SerializableTelemetryFailure,
+        LauncherSummary, LauncherTelemetryFailure, ProviderAutomationState, ProviderDiagnostics,
+        ProviderPathStatus, ProviderStatus, SerializableTelemetryFailure,
         SerializableTelemetrySummary,
     };
     use tempfile::TempDir;
@@ -606,6 +686,41 @@ mod tests {
                 .map(|text| text.contains("Copied bundle"))
                 .unwrap_or(false),
             "feedback message should survive state rebuild"
+        );
+    }
+
+    #[test]
+    fn provider_diagnostics_are_rendered() {
+        let temp = TempDir::new().unwrap();
+        let mut diagnostics = ProviderDiagnostics::default();
+        diagnostics.share.push(ProviderStatus {
+            name: "Support Share Drop".into(),
+            path: temp.path().join("support-share"),
+            path_status: ProviderPathStatus::Ready,
+            automation: ProviderAutomationState::Submitted {
+                detail: "submission-request-1.json".into(),
+            },
+        });
+
+        let mut ui = LauncherShellUi::new(None).expect("ui");
+        ui.set_providers(diagnostics).expect("set providers");
+        ui.layout(Size::new(640.0, 480.0));
+        let commands = ui.render();
+
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { text, .. } if text.contains("Support Share Drop")
+            )),
+            "expected provider name to be rendered"
+        );
+
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { text, .. } if text.contains("Submitted (submission-request-1.json)")
+            )),
+            "expected automation status to be rendered"
         );
     }
 }
