@@ -2,6 +2,7 @@ use crate::paths::ensure_logs_dir;
 use anyhow::{Context, Result};
 use lc_platform::AppPaths;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
@@ -13,6 +14,8 @@ pub struct LauncherPreferences {
     pub last_bundle_destination: Option<String>,
     #[serde(default)]
     pub last_upload_destination: Option<String>,
+    #[serde(default)]
+    provider_overrides: HashMap<String, String>,
 }
 
 impl LauncherPreferences {
@@ -35,6 +38,25 @@ impl LauncherPreferences {
     pub fn set_upload_destination(&mut self, path: &Path) {
         self.last_upload_destination = Some(path.display().to_string());
     }
+
+    pub fn provider_override_path(&self, role: &str, name: &str) -> Option<PathBuf> {
+        self.provider_overrides
+            .get(&override_key(role, name))
+            .map(|path| PathBuf::from(path))
+    }
+
+    pub fn set_provider_override(&mut self, role: &str, name: &str, path: &Path) {
+        self.provider_overrides
+            .insert(override_key(role, name), path.display().to_string());
+    }
+
+    pub fn clear_provider_override(&mut self, role: &str, name: &str) {
+        self.provider_overrides.remove(&override_key(role, name));
+    }
+}
+
+fn override_key(role: &str, name: &str) -> String {
+    format!("{role}:{name}")
 }
 
 pub fn load_launcher_preferences(paths: &AppPaths) -> Result<LauncherPreferences> {
@@ -137,6 +159,8 @@ mod tests {
         let mut updated = LauncherPreferences::default();
         updated.last_bundle_destination = Some("/tmp/support-bundle".into());
         updated.last_upload_destination = Some("/tmp/upload-target".into());
+        updated.set_provider_override("share", "Support Share Drop", Path::new("/tmp/share"));
+        updated.set_provider_override("upload", "Support Upload Drop", Path::new("/tmp/upload"));
 
         let written = save_launcher_preferences(&paths, &updated).expect("write prefs");
         assert!(written.ends_with(PREFERENCES_FILE));
@@ -156,6 +180,14 @@ mod tests {
                 .as_deref()
                 .map(|path| path.to_path_buf()),
             Some(PathBuf::from("/tmp/upload-target"))
+        );
+        assert_eq!(
+            reloaded.provider_override_path("share", "Support Share Drop"),
+            Some(PathBuf::from("/tmp/share"))
+        );
+        assert_eq!(
+            reloaded.provider_override_path("upload", "Support Upload Drop"),
+            Some(PathBuf::from("/tmp/upload"))
         );
     }
 }

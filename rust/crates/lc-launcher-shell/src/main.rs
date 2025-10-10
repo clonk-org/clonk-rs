@@ -9,14 +9,14 @@ use lc_graphics::{Color, PixelFormat, Surface};
 use lc_gui::{DrawCommand, GuiEvent, KeyCode, Point as GuiPoint, Rect as GuiRect, Size as GuiSize};
 use lc_launcher::{
     copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_launcher_preferences,
-    load_shell_state, reveal_in_file_manager, save_launcher_preferences, timestamp_for_filename,
-    timestamp_for_log, write_launcher_summary, LauncherLog, LauncherPreferences,
-    LauncherShellState, ProviderAutomationRecord, ProviderAutomationSnapshot,
+    load_shell_state, reveal_in_file_manager, save_launcher_preferences, support_artifacts,
+    timestamp_for_filename, timestamp_for_log, write_launcher_summary, LauncherLog,
+    LauncherPreferences, LauncherShellState, ProviderAutomationRecord, ProviderAutomationSnapshot,
     ProviderAutomationState, ProviderDiagnostics, ProviderPathStatus, ProviderStatus,
     SupportArtifact, UpdateTelemetrySummary,
 };
 use lc_launcher_ui::{
-    ActionFeedback, LauncherShellMessage, LauncherShellResponse, LauncherShellUi,
+    ActionFeedback, LauncherShellMessage, LauncherShellResponse, LauncherShellUi, ProviderKind,
 };
 use lc_platform::AppPaths;
 use pixels::{Pixels, SurfaceTexture};
@@ -117,7 +117,7 @@ impl LauncherApp {
                 LauncherPreferences::default()
             }
         };
-        let providers = FirstPartyProviders::discover(&paths);
+        let providers = FirstPartyProviders::discover(&paths, &preferences);
 
         let mut app = Self {
             paths,
@@ -336,6 +336,12 @@ impl LauncherApp {
         self.persist_preferences();
     }
 
+    fn remember_provider_override(&mut self, role: ProviderRole, name: &str, path: &Path) {
+        self.preferences
+            .set_provider_override(role.as_str(), name, path);
+        self.persist_preferences();
+    }
+
     fn configure_dialog_directory(
         &self,
         dialog: FileDialog,
@@ -416,8 +422,9 @@ impl LauncherApp {
                                     ))
                                     .context("failed to log copy success")?;
                                 let state_snapshot = self.ui.state().cloned();
-                                let (stage_report, automation_report) =
-                                    self.providers.stage_bundle(&self.logger, &bundle_path);
+                                let (stage_report, automation_report) = self
+                                    .providers
+                                    .stage_bundle(&self.logger, &bundle_path, None);
                                 let diagnostics = self
                                     .update_provider_diagnostics()
                                     .context(
@@ -532,8 +539,9 @@ impl LauncherApp {
                                     .context("failed to log artifact staging success")?;
 
                                 let state_snapshot = self.ui.state().cloned();
-                                let (stage_report, automation_report) =
-                                    self.providers.stage_artifacts(&self.logger, &artifacts);
+                                let (stage_report, automation_report) = self
+                                    .providers
+                                    .stage_artifacts(&self.logger, &artifacts, None);
                                 let diagnostics = self.update_provider_diagnostics().context(
                                     "failed to refresh provider diagnostics after artifact staging",
                                 )?;
@@ -597,7 +605,197 @@ impl LauncherApp {
                     }
                 }
             }
+            LauncherShellMessage::RestageProvider { role, index } => {
+                self.handle_restage_provider(role, index)?;
+            }
+            LauncherShellMessage::RetargetProvider { role, index } => {
+                self.handle_retarget_provider(role, index)?;
+            }
         }
+        Ok(())
+    }
+
+    fn handle_restage_provider(&mut self, kind: ProviderKind, index: usize) -> Result<()> {
+        let role: ProviderRole = kind.into();
+        let provider_label = kind.label();
+        let provider_name = match self.providers.provider_name(role, index) {
+            Some(name) => name.to_string(),
+            None => {
+                let message = format!(
+                    "The {} you selected is no longer available. Refresh diagnostics and try again.",
+                    provider_label
+                );
+                self.set_feedback(ActionFeedback::error(message))?;
+                return Ok(());
+            }
+        };
+
+        let state_snapshot = self.ui.state().cloned();
+        let state_ref = match state_snapshot.as_ref() {
+            Some(state) => state,
+            None => {
+                self.set_feedback(ActionFeedback::info(
+                    "Launch `lc-game` once to generate diagnostics before restaging providers.",
+                ))?;
+                return Ok(());
+            }
+        };
+
+        self.logger
+            .log_line(&format!(
+                "restaging {} {} requested via diagnostics UI",
+                provider_label, provider_name
+            ))
+            .context("failed to log provider restage request")?;
+
+        let (stage_report, automation_report) = match kind {
+            ProviderKind::Share => {
+                let bundle_path = match &state_ref.support_bundle_path {
+                    Some(path) => path.clone(),
+                    None => {
+                        let message = format!(
+                            "Support bundle is missing; regenerate it before restaging {} {}.",
+                            provider_label, provider_name
+                        );
+                        self.logger
+                            .log_line(&message)
+                            .context("failed to log missing support bundle for restage")?;
+                        self.set_feedback(ActionFeedback::error(message))?;
+                        return Ok(());
+                    }
+                };
+                if !bundle_path.exists() {
+                    let message = format!(
+                        "Support bundle {} is missing; regenerate it before restaging {} {}.",
+                        bundle_path.display(),
+                        provider_label,
+                        provider_name
+                    );
+                    self.logger
+                        .log_line(&message)
+                        .context("failed to log missing support bundle for restage")?;
+                    self.set_feedback(ActionFeedback::error(message))?;
+                    return Ok(());
+                }
+                self.providers
+                    .stage_bundle(&self.logger, &bundle_path, Some(&[index]))
+            }
+            ProviderKind::Upload => {
+                let artifacts = support_artifacts(state_ref);
+                if artifacts.is_empty() {
+                    let message = format!(
+                        "No support artifacts are available to restage {} {}. Launch the game first.",
+                        provider_label, provider_name
+                    );
+                    self.set_feedback(ActionFeedback::info(message))?;
+                    return Ok(());
+                }
+                self.providers
+                    .stage_artifacts(&self.logger, &artifacts, Some(&[index]))
+            }
+        };
+
+        let diagnostics = self
+            .update_provider_diagnostics()
+            .context("failed to refresh provider diagnostics after provider restage")?;
+        if let Some(mut state) = state_snapshot {
+            let snapshot = self
+                .persist_provider_snapshot(&state, &diagnostics)
+                .context("failed to persist provider automation after provider restage")?;
+            state.summary.provider_automation = snapshot;
+            self.ui
+                .set_state(Some(state))
+                .map_err(|err| anyhow!(err))
+                .context("failed to refresh launcher summary after provider restage")?;
+        }
+
+        let message = format!("Restaged {} {}", provider_label, provider_name);
+        let feedback = self.feedback_from_reports(message, &stage_report, &automation_report);
+        self.set_feedback(feedback)?;
+        Ok(())
+    }
+
+    fn handle_retarget_provider(&mut self, kind: ProviderKind, index: usize) -> Result<()> {
+        let role: ProviderRole = kind.into();
+        let provider_label = kind.label();
+        let provider_name = match self.providers.provider_name(role, index) {
+            Some(name) => name.to_string(),
+            None => {
+                let message = format!(
+                    "The {} you selected is no longer available. Refresh diagnostics and try again.",
+                    provider_label
+                );
+                self.set_feedback(ActionFeedback::error(message))?;
+                return Ok(());
+            }
+        };
+
+        let current_path = self
+            .providers
+            .provider_path(role, index)
+            .map(|path| path.to_path_buf());
+        let saved_override = self
+            .preferences
+            .provider_override_path(role.as_str(), &provider_name);
+
+        let mut dialog =
+            FileDialog::new().set_title(&format!("Select directory for {}", provider_name));
+        dialog = self.configure_dialog_directory(
+            dialog,
+            saved_override,
+            current_path.as_deref().or(Some(self.paths.logs_dir())),
+        );
+
+        match dialog.pick_folder() {
+            Some(destination) => {
+                self.logger
+                    .log_line(&format!(
+                        "retargeting {} {} to {} via diagnostics UI",
+                        provider_label,
+                        provider_name,
+                        destination.display()
+                    ))
+                    .context("failed to log provider retarget request")?;
+                self.providers
+                    .retarget_provider(role, index, destination.clone())
+                    .context("failed to retarget provider")?;
+                self.remember_provider_override(role, &provider_name, &destination);
+
+                let diagnostics = self
+                    .update_provider_diagnostics()
+                    .context("failed to refresh provider diagnostics after provider retarget")?;
+                if let Some(mut state) = self.ui.state().cloned() {
+                    let snapshot = self
+                        .persist_provider_snapshot(&state, &diagnostics)
+                        .context("failed to persist provider automation after provider retarget")?;
+                    state.summary.provider_automation = snapshot;
+                    self.ui
+                        .set_state(Some(state))
+                        .map_err(|err| anyhow!(err))
+                        .context("failed to refresh launcher summary after provider retarget")?;
+                }
+
+                let message = format!(
+                    "Retargeted {} {} to {}",
+                    provider_label,
+                    provider_name,
+                    destination.display()
+                );
+                self.set_feedback(ActionFeedback::success(message))?;
+            }
+            None => {
+                self.logger
+                    .log_line(&format!(
+                        "retarget {} {} cancelled by user",
+                        provider_label, provider_name
+                    ))
+                    .context("failed to log provider retarget cancellation")?;
+                self.set_feedback(ActionFeedback::info(
+                    "Retarget cancelled. No changes were made.",
+                ))?;
+            }
+        }
+
         Ok(())
     }
 
@@ -830,6 +1028,7 @@ impl ProviderTargetState {
     }
 }
 
+#[derive(Clone, Copy)]
 enum ProviderRole {
     Share,
     Upload,
@@ -851,29 +1050,40 @@ impl ProviderRole {
     }
 }
 
+impl From<ProviderKind> for ProviderRole {
+    fn from(kind: ProviderKind) -> Self {
+        match kind {
+            ProviderKind::Share => ProviderRole::Share,
+            ProviderKind::Upload => ProviderRole::Upload,
+        }
+    }
+}
+
 struct FirstPartyProviders {
     share: Vec<ProviderTargetState>,
     upload: Vec<ProviderTargetState>,
 }
 
 impl FirstPartyProviders {
-    fn discover(paths: &AppPaths) -> Self {
-        let share = Self::parse_targets(
+    fn discover(paths: &AppPaths, preferences: &LauncherPreferences) -> Self {
+        let mut share = Self::parse_targets(
             SHARE_PROVIDERS_ENV,
             "Support Share Drop",
             paths.logs_dir().join("support-share"),
         )
         .into_iter()
         .map(ProviderTargetState::new)
-        .collect();
-        let upload = Self::parse_targets(
+        .collect::<Vec<_>>();
+        Self::apply_overrides(&mut share, ProviderRole::Share, preferences);
+        let mut upload = Self::parse_targets(
             UPLOAD_PROVIDERS_ENV,
             "Support Upload Drop",
             paths.logs_dir().join("support-upload"),
         )
         .into_iter()
         .map(ProviderTargetState::new)
-        .collect();
+        .collect::<Vec<_>>();
+        Self::apply_overrides(&mut upload, ProviderRole::Upload, preferences);
         Self { share, upload }
     }
 
@@ -909,6 +1119,20 @@ impl FirstPartyProviders {
             name: default_name.to_string(),
             path: default_path,
         }]
+    }
+
+    fn apply_overrides(
+        states: &mut [ProviderTargetState],
+        role: ProviderRole,
+        preferences: &LauncherPreferences,
+    ) {
+        for state in states {
+            if let Some(path) =
+                preferences.provider_override_path(role.as_str(), &state.target.name)
+            {
+                state.target.path = path;
+            }
+        }
     }
 
     fn hydrate_from_snapshot(&mut self, logs_dir: &Path, snapshot: &ProviderAutomationSnapshot) {
@@ -982,10 +1206,16 @@ impl FirstPartyProviders {
         &mut self,
         logger: &dyn LauncherLog,
         bundle: &Path,
+        filter: Option<&[usize]>,
     ) -> (ProviderStageReport, ProviderAutomationReport) {
         let mut stage_report = ProviderStageReport::default();
         let mut automation_report = ProviderAutomationReport::default();
-        for state in &mut self.share {
+        for (index, state) in self.share.iter_mut().enumerate() {
+            if let Some(indices) = filter {
+                if !indices.contains(&index) {
+                    continue;
+                }
+            }
             let target = &state.target;
             match copy_support_bundle(bundle, &target.path) {
                 Ok(path) => {
@@ -1052,10 +1282,16 @@ impl FirstPartyProviders {
         &mut self,
         logger: &dyn LauncherLog,
         artifacts: &[SupportArtifact],
+        filter: Option<&[usize]>,
     ) -> (ProviderStageReport, ProviderAutomationReport) {
         let mut stage_report = ProviderStageReport::default();
         let mut automation_report = ProviderAutomationReport::default();
-        for state in &mut self.upload {
+        for (index, state) in self.upload.iter_mut().enumerate() {
+            if let Some(indices) = filter {
+                if !indices.contains(&index) {
+                    continue;
+                }
+            }
             let target = &state.target;
             match copy_support_artifacts(artifacts, &target.path) {
                 Ok(paths) => {
@@ -1128,6 +1364,42 @@ impl FirstPartyProviders {
         ProviderDiagnostics {
             share: self.share.iter().map(|state| state.to_status()).collect(),
             upload: self.upload.iter().map(|state| state.to_status()).collect(),
+        }
+    }
+
+    fn provider_name(&self, role: ProviderRole, index: usize) -> Option<&str> {
+        self.states(role)
+            .get(index)
+            .map(|state| state.target.name.as_str())
+    }
+
+    fn provider_path(&self, role: ProviderRole, index: usize) -> Option<&Path> {
+        self.states(role)
+            .get(index)
+            .map(|state| state.target.path.as_path())
+    }
+
+    fn retarget_provider(&mut self, role: ProviderRole, index: usize, path: PathBuf) -> Result<()> {
+        let states = self.states_mut(role);
+        let state = states
+            .get_mut(index)
+            .ok_or_else(|| anyhow!("invalid {} provider index {}", role.as_str(), index))?;
+        state.target.path = path;
+        state.automation = ProviderAutomationState::Idle;
+        Ok(())
+    }
+
+    fn states(&self, role: ProviderRole) -> &[ProviderTargetState] {
+        match role {
+            ProviderRole::Share => &self.share,
+            ProviderRole::Upload => &self.upload,
+        }
+    }
+
+    fn states_mut(&mut self, role: ProviderRole) -> &mut [ProviderTargetState] {
+        match role {
+            ProviderRole::Share => &mut self.share,
+            ProviderRole::Upload => &mut self.upload,
         }
     }
 }
@@ -1343,8 +1615,8 @@ mod tests {
     use super::*;
     use anyhow::Result as AnyResult;
     use lc_launcher::{
-        ProviderAutomationSnapshot, ProviderAutomationState, ProviderDiagnostics,
-        ProviderPathStatus, ProviderStatus, SupportArtifact,
+        LauncherPreferences, ProviderAutomationSnapshot, ProviderAutomationState,
+        ProviderDiagnostics, ProviderPathStatus, ProviderStatus, SupportArtifact,
     };
     use std::env;
     use std::ffi::OsString;
@@ -1439,7 +1711,7 @@ mod tests {
         };
 
         let logger = DummyLog;
-        let (stage_report, automation_report) = providers.stage_bundle(&logger, &bundle_path);
+        let (stage_report, automation_report) = providers.stage_bundle(&logger, &bundle_path, None);
         assert!(stage_report.failures().is_empty());
         assert_eq!(stage_report.successes().len(), 1);
         let staged_path = stage_report.successes()[0].paths[0].clone();
@@ -1479,7 +1751,8 @@ mod tests {
 
         let logger = DummyLog;
         let artifacts = vec![artifact];
-        let (stage_report, automation_report) = providers.stage_artifacts(&logger, &artifacts);
+        let (stage_report, automation_report) =
+            providers.stage_artifacts(&logger, &artifacts, None);
         assert!(stage_report.failures().is_empty());
         assert_eq!(stage_report.successes().len(), 1);
         let staged_paths = &stage_report.successes()[0].paths;
@@ -1495,6 +1768,46 @@ mod tests {
         assert!(detail.starts_with("submission-request-upload-"));
         let request_path = provider_dir.path().join(detail);
         assert!(request_path.exists());
+    }
+
+    #[test]
+    fn retarget_provider_updates_path_and_resets_state() {
+        let initial_dir = TempDir::new().unwrap();
+        let new_dir = TempDir::new().unwrap();
+
+        let mut providers = FirstPartyProviders {
+            share: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Share Drop".into(),
+                path: initial_dir.path().to_path_buf(),
+            })],
+            upload: Vec::new(),
+        };
+        providers.share[0].automation = ProviderAutomationState::Submitted {
+            detail: "submission-request-share-1.json".into(),
+        };
+
+        providers
+            .retarget_provider(ProviderRole::Share, 0, new_dir.path().to_path_buf())
+            .expect("retarget succeeds");
+
+        assert_eq!(providers.share[0].target.path, new_dir.path());
+        assert_eq!(providers.share[0].automation, ProviderAutomationState::Idle);
+    }
+
+    #[test]
+    fn apply_overrides_updates_provider_paths() {
+        let override_dir = TempDir::new().unwrap();
+        let mut prefs = LauncherPreferences::default();
+        prefs.set_provider_override("share", "Support Share Drop", override_dir.path());
+
+        let mut states = vec![ProviderTargetState::new(ProviderTarget {
+            name: "Support Share Drop".into(),
+            path: PathBuf::from("/tmp/original"),
+        })];
+
+        FirstPartyProviders::apply_overrides(&mut states, ProviderRole::Share, &prefs);
+
+        assert_eq!(states[0].target.path, override_dir.path());
     }
 
     #[test]

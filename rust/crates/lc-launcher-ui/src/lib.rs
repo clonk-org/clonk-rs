@@ -9,12 +9,29 @@ use lc_launcher::{
     ProviderPathStatus, ProviderStatus, SupportArtifact,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    Share,
+    Upload,
+}
+
+impl ProviderKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            ProviderKind::Share => "share target",
+            ProviderKind::Upload => "upload target",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum LauncherShellMessage {
     RegenerateSupportBundle,
     CopySupportBundle { bundle_path: PathBuf },
     RevealPath { path: PathBuf, label: String },
     UploadSupportArtifacts { artifacts: Vec<SupportArtifact> },
+    RestageProvider { role: ProviderKind, index: usize },
+    RetargetProvider { role: ProviderKind, index: usize },
 }
 
 #[derive(Debug)]
@@ -187,6 +204,8 @@ enum WidgetAction {
     CopyBundle { bundle_path: PathBuf },
     Reveal { path: PathBuf, label: String },
     UploadArtifacts,
+    RestageProvider { role: ProviderKind, index: usize },
+    RetargetProvider { role: ProviderKind, index: usize },
 }
 
 impl WidgetAction {
@@ -210,6 +229,18 @@ impl WidgetAction {
                         artifacts: layout.support_artifacts.clone(),
                     })
                 }
+            }
+            WidgetAction::RestageProvider { role, index } => {
+                Some(LauncherShellMessage::RestageProvider {
+                    role: *role,
+                    index: *index,
+                })
+            }
+            WidgetAction::RetargetProvider { role, index } => {
+                Some(LauncherShellMessage::RetargetProvider {
+                    role: *role,
+                    index: *index,
+                })
             }
         }
     }
@@ -438,12 +469,17 @@ fn build_gui(
         }
     }
 
-    add_provider_section(&mut gui, root, providers);
+    add_provider_section(&mut gui, &mut layout, root, providers);
 
     Ok((gui, layout))
 }
 
-fn add_provider_section(gui: &mut Gui, root: WidgetId, providers: &ProviderDiagnostics) {
+fn add_provider_section(
+    gui: &mut Gui,
+    layout: &mut LauncherShellLayout,
+    root: WidgetId,
+    providers: &ProviderDiagnostics,
+) {
     let section = gui.add_column(root, true);
     gui.add_label(section, "First-Party Providers");
     if providers.share.is_empty() && providers.upload.is_empty() {
@@ -457,23 +493,48 @@ fn add_provider_section(gui: &mut Gui, root: WidgetId, providers: &ProviderDiagn
     if !providers.share.is_empty() {
         let share_section = gui.add_column(section, true);
         gui.add_label(share_section, "Share Targets");
-        render_provider_list(gui, share_section, &providers.share);
+        render_provider_list(
+            gui,
+            layout,
+            share_section,
+            &providers.share,
+            ProviderKind::Share,
+        );
     }
 
     if !providers.upload.is_empty() {
         let upload_section = gui.add_column(section, true);
         gui.add_label(upload_section, "Upload Targets");
-        render_provider_list(gui, upload_section, &providers.upload);
+        render_provider_list(
+            gui,
+            layout,
+            upload_section,
+            &providers.upload,
+            ProviderKind::Upload,
+        );
     }
 }
 
-fn render_provider_list(gui: &mut Gui, parent: WidgetId, providers: &[ProviderStatus]) {
-    for provider in providers {
-        render_provider_entry(gui, parent, provider);
+fn render_provider_list(
+    gui: &mut Gui,
+    layout: &mut LauncherShellLayout,
+    parent: WidgetId,
+    providers: &[ProviderStatus],
+    role: ProviderKind,
+) {
+    for (index, provider) in providers.iter().enumerate() {
+        render_provider_entry(gui, layout, parent, provider, role, index);
     }
 }
 
-fn render_provider_entry(gui: &mut Gui, parent: WidgetId, provider: &ProviderStatus) {
+fn render_provider_entry(
+    gui: &mut Gui,
+    layout: &mut LauncherShellLayout,
+    parent: WidgetId,
+    provider: &ProviderStatus,
+    role: ProviderKind,
+    index: usize,
+) {
     let entry = gui.add_column(parent, true);
     gui.add_label(
         entry,
@@ -487,6 +548,19 @@ fn render_provider_entry(gui: &mut Gui, parent: WidgetId, provider: &ProviderSta
             format_automation_state(&provider.automation)
         ),
     );
+
+    if matches!(provider.automation, ProviderAutomationState::Stale { .. }) {
+        let actions = gui.add_row(entry, false);
+        gui.add_label(actions, "Actions:");
+        let restage = gui.add_button(actions, "Restage");
+        layout
+            .action_map
+            .insert(restage, WidgetAction::RestageProvider { role, index });
+        let retarget = gui.add_button(actions, "Retarget…");
+        layout
+            .action_map
+            .insert(retarget, WidgetAction::RetargetProvider { role, index });
+    }
 }
 
 fn display_path(path: &Path) -> String {
@@ -723,6 +797,48 @@ mod tests {
                 DrawCommand::Text { text, .. } if text.contains("Submitted (submission-request-1.json)")
             )),
             "expected automation status to be rendered"
+        );
+    }
+
+    #[test]
+    fn stale_providers_offer_actions() {
+        let mut diagnostics = ProviderDiagnostics::default();
+        diagnostics.share.push(ProviderStatus {
+            name: "Support Share Drop".into(),
+            path: PathBuf::from("/tmp/support-share"),
+            path_status: ProviderPathStatus::Missing,
+            automation: ProviderAutomationState::Stale {
+                reason: "missing directory".into(),
+            },
+        });
+
+        let mut ui = LauncherShellUi::new(None).expect("ui");
+        ui.set_providers(diagnostics).expect("set providers");
+        ui.layout(Size::new(640.0, 480.0));
+
+        let restage_present = ui.layout.action_map.values().any(|action| {
+            matches!(
+                action,
+                WidgetAction::RestageProvider {
+                    role: ProviderKind::Share,
+                    index: 0
+                }
+            )
+        });
+        assert!(restage_present, "expected restage action to be registered");
+
+        let retarget_present = ui.layout.action_map.values().any(|action| {
+            matches!(
+                action,
+                WidgetAction::RetargetProvider {
+                    role: ProviderKind::Share,
+                    index: 0
+                }
+            )
+        });
+        assert!(
+            retarget_present,
+            "expected retarget action to be registered"
         );
     }
 }
