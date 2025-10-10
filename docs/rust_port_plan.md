@@ -28,7 +28,7 @@
   - Expose every required engine/AUL entry point through FFI so C++ only marshals inputs/outputs while Rust advances world state deterministically. (Runtime FFI exports `lc_engine_runtime_advance_to_frame`, `lc_engine_runtime_step`, and `lc_engine_runtime_current_frame`, and the bridge can enable authoritative stepping via `LC_RUST_ENGINE_RUNTIME_AUTHORITATIVE`.)
   - Promote the Rust VM to the primary script runtime, running scenario/system scripts in Rust while shadow-running the C++ VM for audit until clean. (Rust host now exposes container-aware `Contained` lookups and `RemoveObject`, keeping object inventories and deletions in sync so system scripts relying on inventory bookkeeping run inside lc-engine.)
 - **Phase 2 · Frontend and Platform Port**
-  - Replace `C4GraphicsSystem`, GUI, and input handling with Rust implementations (SDL/OpenGL or wgpu) that reproduce batching, overlay composition, and device quirks.
+  - Replace `C4GraphicsSystem`, GUI, and input handling with Rust implementations (SDL/OpenGL or wgpu) that reproduce batching, overlay composition, and device quirks. (New `lc-frontend` crate encapsulates viewport rendering and GUI overlays in Rust; `lc-app` now drives frames through the Rust graphics system instead of bespoke surface code.)
   - Port HUD/menus/console to Rust (`lc-gui` or successor) and ensure layout, focus, and animations match frame-perfect with legacy recordings.
   - Wire audio mixing to `lc-audio` using a real backend (e.g., cpal/SDL) with streaming music, positional effects, and identical volume curves.
 - **Phase 3 · Networking and Services**

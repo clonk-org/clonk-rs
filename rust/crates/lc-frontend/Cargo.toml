@@ -1,0 +1,13 @@
+[package]
+name = "lc-frontend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lc-engine = { path = "../lc-engine" }
+lc-graphics = { path = "../lc-graphics" }
+lc-gui = { path = "../lc-gui" }
+
+[dev-dependencies]
+rand = "0.8"
+rand_chacha = "0.3"

@@ -887,6 +887,7 @@ dependencies = [
  "lc-audio",
  "lc-core",
  "lc-engine",
+ "lc-frontend",
  "lc-graphics",
  "lc-gui",
  "lc-network",
@@ -938,6 +939,17 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "lc-frontend"
+version = "0.1.0"
+dependencies = [
+ "lc-engine",
+ "lc-graphics",
+ "lc-gui",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
 ]
 
 [[package]]

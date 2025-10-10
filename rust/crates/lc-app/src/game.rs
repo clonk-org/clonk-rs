@@ -17,10 +17,9 @@ use lc_engine::{
     EnvironmentFrame, Landscape, ObjectId, ObjectSnapshot, ObjectUpdate, PhysicsSettings, Scenario,
     ScenarioError, SimulationSnapshot, SpawnConfig, Vector2,
 };
-use lc_graphics::{Color, PixelFormat, SnapshotHasher, Surface};
-use lc_gui::{
-    DrawCommand, Gui, GuiError, Point as GuiPoint, Rect as GuiRect, Size as GuiSize, WidgetId,
-};
+use lc_frontend::{GraphicsOverlay, GraphicsSystem};
+use lc_graphics::{SnapshotHasher, Surface};
+use lc_gui::GuiError;
 use lc_network::{ClientId, ControlCoordinator, ControlError, ControlPacket, Lobby, LobbyError};
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{Group, GroupError};
@@ -78,26 +77,16 @@ pub struct DemoGame {
     engine: Engine,
     paths: AppPaths,
     object_id: ObjectId,
-    ground_height: i32,
     configured_ticks: u32,
     scenario_name: String,
-    scenario_label: String,
     system_version: String,
     system_entry_count: usize,
-    surface: Surface,
-    gui: Gui,
-    title_label: WidgetId,
-    frame_label: WidgetId,
-    status_label: WidgetId,
-    energy_gauge: WidgetId,
+    graphics: GraphicsSystem,
     audio: AudioSystem,
     bounce_sound: SoundHandle,
     control: ControlCoordinator,
     lobby: Lobby,
     control_mode: ControlMode,
-    world_width: i32,
-    viewport_x: i32,
-    viewport_y: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -598,14 +587,13 @@ impl DemoGame {
             .map(|landscape| landscape.width() as i32)
             .unwrap_or(SURFACE_WIDTH as i32);
 
-        let mut gui = Gui::new();
-        let root = gui.root();
-        let title_label = gui.add_label(root, &scenario_label);
-        let frame_label = gui.add_label(root, "FRAME 000 X 000 Y 000 VX P00 VY P00");
-        let status_label = gui.add_label(root, "READY 00OF00 GROUND 00 BATCH 000");
-        let energy_gauge = gui.add_gauge(root);
-        gui.set_gauge_fraction(energy_gauge, 1.0)?;
-        gui.layout(GuiSize::new(SURFACE_WIDTH as f32, 120.0));
+        let mut graphics = GraphicsSystem::new(
+            SURFACE_WIDTH,
+            SURFACE_HEIGHT,
+            ground_height,
+            &scenario_label,
+        );
+        graphics.set_world_width(world_width);
 
         let audio =
             AudioSystem::new(MIX_CHANNELS).map_err(|err| GameError::Audio(err.to_string()))?;
@@ -658,33 +646,20 @@ impl DemoGame {
             })
             .unwrap_or_else(|| "Unknown".to_string());
 
-        let mut surface = Surface::new(SURFACE_WIDTH, SURFACE_HEIGHT, PixelFormat::Rgba8888);
-        surface.fill(Color::opaque(8, 12, 24));
-
         Ok(Self {
             engine,
             paths,
             object_id,
-            ground_height,
             configured_ticks,
             scenario_name,
-            scenario_label,
             system_version,
             system_entry_count,
-            surface,
-            gui,
-            title_label,
-            frame_label,
-            status_label,
-            energy_gauge,
+            graphics,
             audio,
             bounce_sound,
             control,
             lobby,
             control_mode,
-            world_width,
-            viewport_x: 0,
-            viewport_y: 0,
         })
     }
 
@@ -742,8 +717,7 @@ impl DemoGame {
                 .find(|object| object.id == self.object_id)
                 .cloned()
                 .unwrap_or_else(|| snapshot.objects[0].clone());
-            self.update_viewport(&object);
-            let on_ground = self.is_on_ground(&object);
+            let on_ground = self.is_on_ground(&object, snapshot.landscape.as_ref());
 
             if on_ground && !was_grounded {
                 self.audio
@@ -765,10 +739,10 @@ impl DemoGame {
                 ground_hits,
                 &snapshot.environment,
             )?;
-            self.draw_frame(&snapshot);
-            self.control_mode.after_frame(&self.surface)?;
+            self.graphics.render_frame(&snapshot, &object);
+            self.control_mode.after_frame(self.graphics.surface())?;
 
-            hasher.update_surface(&self.surface);
+            hasher.update_surface(self.graphics.surface());
             last_snapshot = Some(snapshot);
             executed_ticks += 1;
         }
@@ -856,13 +830,13 @@ impl DemoGame {
             precip_display,
         );
 
-        self.gui
-            .set_label_text(self.title_label, &self.scenario_label)?;
-        self.gui.set_label_text(self.frame_label, frame_text)?;
-        self.gui.set_label_text(self.status_label, status_text)?;
         let energy_fraction = (object.energy as f32).clamp(0.0, 100.0) / 100.0;
-        self.gui
-            .set_gauge_fraction(self.energy_gauge, energy_fraction)?;
+        let overlay = GraphicsOverlay {
+            frame_text: &frame_text,
+            status_text: &status_text,
+            energy_fraction,
+        };
+        self.graphics.update_overlay(&overlay)?;
 
         Ok(())
     }
@@ -875,7 +849,7 @@ impl DemoGame {
 
         let mut velocity = snapshot.velocity;
         velocity.x = (control.horizontal as i32) * HORIZONTAL_SPEED;
-        if control.jump && self.is_on_ground(&snapshot) {
+        if control.jump && self.is_on_ground(&snapshot, self.engine.landscape()) {
             velocity.y = JUMP_VELOCITY;
         }
 
@@ -888,185 +862,9 @@ impl DemoGame {
         Ok(())
     }
 
-    fn draw_frame(&mut self, snapshot: &SimulationSnapshot) {
-        let sky = snapshot
-            .environment
-            .sky_color
-            .map(|color| Color::opaque(color.r, color.g, color.b))
-            .unwrap_or_else(|| {
-                Self::sky_color_for_temperature(snapshot.environment.ambient_temperature)
-            });
-        self.surface.fill(sky);
-        self.draw_precipitation(snapshot.environment.precipitation, snapshot.frame);
-        self.draw_ground(snapshot.environment.ambient_temperature);
-        self.draw_objects(snapshot);
-        self.draw_gui_overlay();
-    }
-
-    fn draw_ground(&mut self, ambient_temperature: i32) {
-        let ground_color = Self::ground_color_for_temperature(ambient_temperature);
-        for screen_x in 0..SURFACE_WIDTH {
-            let world_x = self.viewport_x + screen_x as i32;
-            let ground_world = self.ground_height_at(world_x);
-            let mut ground_screen = ground_world - self.viewport_y;
-            if ground_screen < 0 {
-                ground_screen = 0;
-            }
-            if ground_screen >= SURFACE_HEIGHT as i32 {
-                continue;
-            }
-            let ground_screen = ground_screen as u32;
-            for y in ground_screen..SURFACE_HEIGHT {
-                let _ = self.surface.set_pixel(screen_x, y, ground_color);
-            }
-        }
-    }
-
-    fn draw_precipitation(&mut self, precipitation: i32, frame: u64) {
-        if precipitation == 0 {
-            return;
-        }
-
-        if precipitation > 0 {
-            let intensity = precipitation.clamp(0, 100) as usize;
-            let streaks = intensity.saturating_mul(3).max(12);
-            for idx in 0..streaks {
-                let offset = frame as usize * 11 + idx * 17;
-                let x = ((idx * 53 + offset) % SURFACE_WIDTH as usize) as u32;
-                let base_y = (offset % SURFACE_HEIGHT as usize) as i32;
-                for step in 0..4 {
-                    let y = base_y - step;
-                    if y < 0 {
-                        continue;
-                    }
-                    let color = Color::new(148, 176, 220, 160);
-                    let _ = self.surface.set_pixel(x, y as u32, color);
-                }
-            }
-        } else {
-            let dryness = precipitation.saturating_neg().clamp(0, 100) as usize;
-            let shimmer_count = dryness.saturating_mul(2).max(8);
-            for idx in 0..shimmer_count {
-                let offset = frame as usize * 5 + idx * 23;
-                let x = ((idx * 67 + offset) % SURFACE_WIDTH as usize) as u32;
-                let band = offset % 6;
-                let y = SURFACE_HEIGHT.saturating_sub(1 + band as u32);
-                let color = if band % 2 == 0 {
-                    Color::new(212, 180, 88, 200)
-                } else {
-                    Color::new(176, 132, 64, 180)
-                };
-                let _ = self.surface.set_pixel(x, y, color);
-            }
-        }
-    }
-
-    fn sky_color_for_temperature(temperature: i32) -> Color {
-        let factor = Self::temperature_factor(temperature);
-        let cold = (10, 16, 32);
-        let warm = (84, 52, 16);
-        Color::opaque(
-            Self::blend_channel(cold.0, warm.0, factor),
-            Self::blend_channel(cold.1, warm.1, factor),
-            Self::blend_channel(cold.2, warm.2, factor),
-        )
-    }
-
-    fn ground_color_for_temperature(temperature: i32) -> Color {
-        let factor = Self::temperature_factor(temperature);
-        let cold = (28, 84, 44);
-        let warm = (108, 90, 32);
-        Color::opaque(
-            Self::blend_channel(cold.0, warm.0, factor),
-            Self::blend_channel(cold.1, warm.1, factor),
-            Self::blend_channel(cold.2, warm.2, factor),
-        )
-    }
-
-    fn temperature_factor(temperature: i32) -> f32 {
-        let clamped = temperature.clamp(-50, 50);
-        (clamped as f32 + 50.0) / 100.0
-    }
-
-    fn blend_channel(cold: u8, warm: u8, factor: f32) -> u8 {
-        let factor = factor.clamp(0.0, 1.0);
-        let cold = cold as f32;
-        let warm = warm as f32;
-        let value = cold + (warm - cold) * factor;
-        value.round().clamp(0.0, 255.0) as u8
-    }
-
-    fn draw_objects(&mut self, snapshot: &SimulationSnapshot) {
-        for object in &snapshot.objects {
-            self.paint_object(object);
-        }
-    }
-
-    fn paint_object(&mut self, object: &ObjectSnapshot) {
-        let screen_x = object.position.x - self.viewport_x;
-        let screen_y = object.position.y - self.viewport_y;
-        if screen_x < -10
-            || screen_y < -10
-            || screen_x > SURFACE_WIDTH as i32 + 10
-            || screen_y > SURFACE_HEIGHT as i32 + 10
-        {
-            return;
-        }
-        let energy = object.energy.max(0).min(100) as u8;
-        let color = if energy > 50 {
-            Color::opaque(252, 196, 64)
-        } else {
-            Color::opaque(220, 72, 72)
-        };
-        let size = 6i32;
-        let rect = GuiRect::from_origin_size(
-            GuiPoint::new(
-                (screen_x - size / 2).max(0) as f32,
-                (screen_y - size / 2).max(0) as f32,
-            ),
-            GuiSize::new(size as f32, size as f32),
-        );
-        fill_rect(&mut self.surface, &rect, color);
-    }
-
-    fn draw_gui_overlay(&mut self) {
-        self.gui.layout(GuiSize::new(SURFACE_WIDTH as f32, 120.0));
-        for command in self.gui.render() {
-            match command {
-                DrawCommand::Quad { rect, color } => fill_rect(&mut self.surface, &rect, color),
-                DrawCommand::Text { rect, text, color } => {
-                    draw_text(&mut self.surface, &rect, &text, color)
-                }
-            }
-        }
-    }
-
-    fn update_viewport(&mut self, focus: &ObjectSnapshot) {
-        let half_width = (SURFACE_WIDTH / 2) as i32;
-        let mut desired = focus.position.x - half_width;
-        if desired < 0 {
-            desired = 0;
-        }
-        let max_offset = (self.world_width - SURFACE_WIDTH as i32).max(0);
-        if desired > max_offset {
-            desired = max_offset;
-        }
-        self.viewport_x = desired;
-    }
-
-    fn is_on_ground(&self, object: &ObjectSnapshot) -> bool {
-        let ground = self.ground_height_at(object.position.x);
+    fn is_on_ground(&self, object: &ObjectSnapshot, landscape: Option<&Landscape>) -> bool {
+        let ground = self.graphics.ground_height_at(landscape, object.position.x);
         object.position.y >= ground
-    }
-
-    fn ground_height_at(&self, x: i32) -> i32 {
-        self.surface_height_at(x).unwrap_or(self.ground_height)
-    }
-
-    fn surface_height_at(&self, x: i32) -> Option<i32> {
-        self.engine
-            .landscape()
-            .and_then(|landscape| landscape.surface_height(x))
     }
 }
 
@@ -1123,54 +921,6 @@ fn abs_u32(value: i32) -> u32 {
         i32::MAX as u32
     } else {
         value.abs() as u32
-    }
-}
-
-fn fill_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
-    let x0 = rect.origin.x.floor() as i32;
-    let y0 = rect.origin.y.floor() as i32;
-    let x1 = (rect.origin.x + rect.size.width).ceil() as i32;
-    let y1 = (rect.origin.y + rect.size.height).ceil() as i32;
-
-    let x0 = x0.clamp(0, SURFACE_WIDTH as i32);
-    let y0 = y0.clamp(0, SURFACE_HEIGHT as i32);
-    let x1 = x1.clamp(0, SURFACE_WIDTH as i32);
-    let y1 = y1.clamp(0, SURFACE_HEIGHT as i32);
-
-    for y in y0..y1 {
-        for x in x0..x1 {
-            let _ = surface.set_pixel(x as u32, y as u32, color);
-        }
-    }
-}
-
-fn draw_text(surface: &mut Surface, rect: &GuiRect, text: &str, color: Color) {
-    let mut cursor_x = rect.origin.x;
-    let baseline = rect.origin.y;
-    let glyph_width = 6.0f32;
-    let glyph_height = rect.size.height.clamp(6.0, 14.0);
-
-    for ch in text.chars() {
-        if cursor_x > SURFACE_WIDTH as f32 {
-            break;
-        }
-        if ch == ' ' {
-            cursor_x += glyph_width;
-            continue;
-        }
-        let intensity = ((ch as u32).wrapping_mul(17) % 80) as u8;
-        let glyph_color = Color::new(
-            color.r.saturating_add(intensity / 2),
-            color.g.saturating_add(intensity / 3),
-            color.b.saturating_add(intensity / 4),
-            255,
-        );
-        let glyph_rect = GuiRect::from_origin_size(
-            GuiPoint::new(cursor_x, baseline),
-            GuiSize::new(glyph_width - 1.0, glyph_height),
-        );
-        fill_rect(surface, &glyph_rect, glyph_color);
-        cursor_x += glyph_width;
     }
 }
 

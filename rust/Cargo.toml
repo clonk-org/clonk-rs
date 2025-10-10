@@ -5,6 +5,7 @@ members = [
     "crates/lc-script",
     "crates/lc-engine",
     "crates/lc-graphics",
+    "crates/lc-frontend",
     "crates/lc-audio",
     "crates/lc-network",
     "crates/lc-gui",
