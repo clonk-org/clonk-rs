@@ -14,9 +14,10 @@ use clap::Parser;
 use lc_launcher::{
     create_support_bundle, digest_update_telemetry, load_launcher_summary,
     regenerate_support_bundle, timestamp_for_filename, timestamp_for_log, write_launcher_summary,
-    LauncherLog, LauncherSummaryRecord, ProviderAutomationRecord, ProviderAutomationState,
-    ProviderBulkRetargetRecord, ProviderOverrideSourceRecord, ProviderPathStatus,
-    UpdateTelemetrySummary,
+    LauncherLog, LauncherSummary, LauncherSummaryRecord, ProviderAutomationRecord,
+    ProviderAutomationSnapshot, ProviderAutomationState, ProviderBulkRetargetRecord,
+    ProviderBulkRetargetSummary, ProviderOverrideSourceRecord, ProviderPathStatus,
+    SerializableTelemetrySummary, UpdateTelemetrySummary,
 };
 use lc_platform::AppPaths;
 
@@ -871,106 +872,149 @@ fn emit_provider_snapshot(paths: &AppPaths) {
 }
 
 fn print_provider_sections(record: &LauncherSummaryRecord) {
+    for line in provider_report_lines(record) {
+        println!("{line}");
+    }
+}
+
+fn provider_report_lines(record: &LauncherSummaryRecord) -> Vec<String> {
     let snapshot = &record.summary.provider_automation;
-    if snapshot.share.is_empty() && snapshot.upload.is_empty() {
-        println!("First-party providers: no automation targets recorded.");
-        return;
+    let has_share = !snapshot.share.is_empty();
+    let has_upload = !snapshot.upload.is_empty();
+    let has_automation = has_share || has_upload;
+
+    let mut lines = Vec::new();
+    if has_automation {
+        lines.push(format!(
+            "First-party providers (logs dir: {}):",
+            record.logs_dir.display()
+        ));
+        if has_share {
+            lines.push("  Share targets:".into());
+            lines.extend(provider_category_lines(&snapshot.share, &record.logs_dir));
+        }
+        if has_upload {
+            lines.push("  Upload targets:".into());
+            lines.extend(provider_category_lines(&snapshot.upload, &record.logs_dir));
+        }
+    } else {
+        lines.push("First-party providers: no automation targets recorded.".into());
     }
 
-    println!(
-        "First-party providers (logs dir: {}):",
-        record.logs_dir.display()
-    );
+    if let Some(summary) = record.summary.provider_bulk_retarget.as_ref() {
+        lines.extend(bulk_retarget_lines(summary, &record.logs_dir));
+    }
 
-    if !snapshot.share.is_empty() {
-        print_provider_category("Share targets", &snapshot.share, &record.logs_dir);
-    }
-    if !snapshot.upload.is_empty() {
-        print_provider_category("Upload targets", &snapshot.upload, &record.logs_dir);
-    }
-    print_bulk_retarget_sections(record);
+    lines
 }
 
-fn print_provider_category(label: &str, providers: &[ProviderAutomationRecord], logs_dir: &Path) {
-    println!("  {label}:");
+fn provider_category_lines(providers: &[ProviderAutomationRecord], logs_dir: &Path) -> Vec<String> {
+    let mut lines = Vec::new();
     for provider in providers {
-        print_provider_entry("    ", provider, logs_dir);
+        lines.extend(provider_entry_lines("    ", provider, logs_dir));
     }
+    lines
 }
 
-fn print_provider_entry(indent: &str, provider: &ProviderAutomationRecord, logs_dir: &Path) {
+fn provider_entry_lines(
+    indent: &str,
+    provider: &ProviderAutomationRecord,
+    logs_dir: &Path,
+) -> Vec<String> {
+    let mut lines = Vec::new();
     let current_path = resolve_summary_entry(logs_dir, &provider.path);
-    println!(
+    lines.push(format!(
         "{indent}- {} ({})",
         provider.name,
         describe_provider_path_status(&provider.path_status)
-    );
-    println!("{indent}  Current path: {}", current_path.display());
-    println!(
+    ));
+    lines.push(format!(
+        "{indent}  Current path: {}",
+        current_path.display()
+    ));
+    lines.push(format!(
         "{indent}  Automation: {}",
         describe_provider_automation(&provider.automation)
-    );
+    ));
 
     let default_entry = provider.default_path.as_deref().unwrap_or(&provider.path);
     let default_path = resolve_summary_entry(logs_dir, default_entry);
-    println!("{indent}  Default path: {}", default_path.display());
+    lines.push(format!(
+        "{indent}  Default path: {}",
+        default_path.display()
+    ));
 
     if provider.overrides.is_empty() {
-        println!("{indent}  Overrides: none recorded.");
+        lines.push(format!("{indent}  Overrides: none recorded."));
     } else {
-        println!("{indent}  Overrides:");
+        lines.push(format!("{indent}  Overrides:"));
         for override_entry in &provider.overrides {
             let path = resolve_summary_entry(logs_dir, &override_entry.path);
             let source = describe_override_source(&override_entry.source);
-            println!("{indent}    - {} -> {}", source, path.display());
+            lines.push(format!("{indent}    - {} -> {}", source, path.display()));
         }
     }
+    lines
 }
 
-fn print_bulk_retarget_sections(record: &LauncherSummaryRecord) {
-    let Some(summary) = record.summary.provider_bulk_retarget.as_ref() else {
-        return;
-    };
+fn bulk_retarget_lines(summary: &ProviderBulkRetargetSummary, logs_dir: &Path) -> Vec<String> {
+    let mut lines = Vec::new();
     let has_records = !summary.share.is_empty() || !summary.upload.is_empty();
     if !has_records && summary.history_cleared_at.is_none() {
-        return;
+        return lines;
     }
 
-    println!("  Bulk retarget history:");
+    lines.push("  Bulk retarget history:".into());
     if has_records {
-        print_bulk_retarget_category("Share targets", &summary.share, &record.logs_dir);
-        print_bulk_retarget_category("Upload targets", &summary.upload, &record.logs_dir);
-    }
-    if let Some(cleared_at) = &summary.history_cleared_at {
-        if has_records {
-            println!("    History last cleared at {cleared_at}.");
-        } else {
-            println!(
-                "    History cleared at {cleared_at}; all providers currently use default staging paths."
-            );
+        if !summary.share.is_empty() {
+            lines.push("    Share targets:".into());
+            lines.extend(bulk_retarget_category_lines(
+                "      ",
+                &summary.share,
+                logs_dir,
+            ));
+        }
+        if !summary.upload.is_empty() {
+            lines.push("    Upload targets:".into());
+            lines.extend(bulk_retarget_category_lines(
+                "      ",
+                &summary.upload,
+                logs_dir,
+            ));
         }
     }
+
+    if let Some(cleared_at) = &summary.history_cleared_at {
+        let message = if has_records {
+            format!("    Bulk retarget history last cleared at {cleared_at}.")
+        } else {
+            format!(
+                "    Bulk retarget history was cleared at {cleared_at}. No retarget records remain while providers use default staging paths."
+            )
+        };
+        lines.push(message);
+    }
+
+    lines
 }
 
-fn print_bulk_retarget_category(
-    label: &str,
+fn bulk_retarget_category_lines(
+    indent: &str,
     records: &[ProviderBulkRetargetRecord],
     logs_dir: &Path,
-) {
-    if records.is_empty() {
-        return;
-    }
-    println!("    {label}:");
+) -> Vec<String> {
+    let mut lines = Vec::new();
     for record in records {
         let base_path = resolve_summary_entry(logs_dir, &record.base_path);
-        println!(
-            "      - {} (last retargeted at {}, changed {} of {} targets)",
+        lines.push(format!(
+            "{indent}- {} (last retargeted at {}, changed {} of {} targets)",
             base_path.display(),
             record.retargeted_at,
             record.changed,
             record.total
-        );
+        ));
     }
+    lines
 }
 
 fn resolve_summary_entry(logs_dir: &Path, entry: &str) -> PathBuf {
@@ -1612,6 +1656,99 @@ mod tests {
         assert!(
             entries.iter().any(|name| name == "telemetry-summary.json"),
             "bundle should include telemetry summary entries: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn provider_report_surfaces_history_cleared_without_records() {
+        let temp = TempDir::new().unwrap();
+        let mut bulk_summary = ProviderBulkRetargetSummary::default();
+        bulk_summary.history_cleared_at = Some("2024-06-05T18:30:00Z".into());
+
+        let summary = LauncherSummaryRecord {
+            summary: LauncherSummary {
+                schema_version: 1,
+                generated_at: "2024-06-05T18:45:00Z".into(),
+                launcher_log: "lc-launcher.log".into(),
+                runtime_logs: Vec::new(),
+                crash_reports: Vec::new(),
+                support_bundle: None,
+                update_telemetry: SerializableTelemetrySummary {
+                    successes: Vec::new(),
+                    failures: Vec::new(),
+                },
+                provider_automation: ProviderAutomationSnapshot::default(),
+                provider_bulk_retarget: Some(bulk_summary),
+            },
+            path: temp.path().join("launcher-summary.json"),
+            logs_dir: temp.path().to_path_buf(),
+        };
+
+        let lines = provider_report_lines(&summary);
+        assert!(
+            lines.iter().any(|line| line == "  Bulk retarget history:"),
+            "expected bulk retarget history headline to be rendered: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains(
+                "Bulk retarget history was cleared at 2024-06-05T18:30:00Z. No retarget records remain while providers use default staging paths."
+            )),
+            "expected history cleared annotation to match UI wording: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn provider_report_surfaces_history_cleared_alongside_records() {
+        let temp = TempDir::new().unwrap();
+        let mut bulk_summary = ProviderBulkRetargetSummary::default();
+        bulk_summary.share.push(ProviderBulkRetargetRecord {
+            base_path: "support-share".into(),
+            retargeted_at: "2024-06-02T16:00:00Z".into(),
+            total: 3,
+            changed: 2,
+        });
+        bulk_summary.history_cleared_at = Some("2024-06-05T18:30:00Z".into());
+
+        let mut automation = ProviderAutomationSnapshot::default();
+        automation.share.push(ProviderAutomationRecord {
+            name: "Support Share Drop".into(),
+            path: "support-share".into(),
+            path_status: ProviderPathStatus::Ready,
+            automation: ProviderAutomationState::Idle,
+            default_path: Some("support-share-default".into()),
+            overrides: Vec::new(),
+        });
+
+        let summary = LauncherSummaryRecord {
+            summary: LauncherSummary {
+                schema_version: 1,
+                generated_at: "2024-06-05T19:00:00Z".into(),
+                launcher_log: "lc-launcher.log".into(),
+                runtime_logs: Vec::new(),
+                crash_reports: Vec::new(),
+                support_bundle: None,
+                update_telemetry: SerializableTelemetrySummary {
+                    successes: Vec::new(),
+                    failures: Vec::new(),
+                },
+                provider_automation: automation,
+                provider_bulk_retarget: Some(bulk_summary),
+            },
+            path: temp.path().join("launcher-summary.json"),
+            logs_dir: temp.path().to_path_buf(),
+        };
+
+        let lines = provider_report_lines(&summary);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line
+                    .contains("Bulk retarget history last cleared at 2024-06-05T18:30:00Z")),
+            "expected history cleared annotation alongside records: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("support-share")),
+            "expected share base path to appear in report: {lines:?}"
         );
     }
 }
