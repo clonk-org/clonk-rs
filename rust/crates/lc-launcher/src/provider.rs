@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderPathStatus {
@@ -25,11 +25,70 @@ impl Default for ProviderAutomationState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderPathProvenance {
+    default_path: PathBuf,
+    overrides: Vec<ProviderPathOverride>,
+}
+
+impl ProviderPathProvenance {
+    pub fn new(default_path: PathBuf) -> Self {
+        Self {
+            default_path,
+            overrides: Vec::new(),
+        }
+    }
+
+    pub fn default_path(&self) -> &Path {
+        &self.default_path
+    }
+
+    pub fn overrides(&self) -> &[ProviderPathOverride] {
+        &self.overrides
+    }
+
+    pub fn has_overrides(&self) -> bool {
+        !self.overrides.is_empty()
+    }
+
+    pub fn apply_override(&mut self, path: PathBuf, source: ProviderOverrideSource) {
+        if let Some(latest) = self.overrides.last() {
+            if latest.path == path && latest.source == source {
+                return;
+            }
+        }
+        self.overrides.push(ProviderPathOverride { path, source });
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderPathOverride {
+    path: PathBuf,
+    source: ProviderOverrideSource,
+}
+
+impl ProviderPathOverride {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn source(&self) -> &ProviderOverrideSource {
+        &self.source
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderOverrideSource {
+    Preference,
+    Retargeted { applied_at: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderStatus {
     pub name: String,
     pub path: PathBuf,
     pub path_status: ProviderPathStatus,
     pub automation: ProviderAutomationState,
+    pub path_provenance: ProviderPathProvenance,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

@@ -12,7 +12,8 @@ pub use bundle::{create_support_bundle, regenerate_support_bundle};
 pub use log::LauncherLog;
 pub use preferences::{load_launcher_preferences, save_launcher_preferences, LauncherPreferences};
 pub use provider::{
-    ProviderAutomationState, ProviderDiagnostics, ProviderPathStatus, ProviderStatus,
+    ProviderAutomationState, ProviderDiagnostics, ProviderOverrideSource, ProviderPathProvenance,
+    ProviderPathStatus, ProviderStatus,
 };
 pub use shell::{
     copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_shell_state,
@@ -21,7 +22,8 @@ pub use shell::{
 };
 pub use summary::{
     load_launcher_summary, write_launcher_summary, LauncherSummary, LauncherSummaryRecord,
-    ProviderAutomationRecord, ProviderAutomationSnapshot,
+    ProviderAutomationRecord, ProviderAutomationSnapshot, ProviderOverrideRecord,
+    ProviderOverrideSourceRecord,
 };
 pub use telemetry::{
     digest_update_telemetry, SerializableTelemetryFailure, SerializableTelemetrySummary,
@@ -407,6 +409,7 @@ mod tests {
             automation: ProviderAutomationState::Submitted {
                 detail: "submission-request-share-test.json".into(),
             },
+            path_provenance: ProviderPathProvenance::new(share_dir.clone()),
         });
 
         let snapshot = ProviderAutomationSnapshot::from_diagnostics(&diagnostics, paths.logs_dir());
@@ -436,6 +439,92 @@ mod tests {
         assert_eq!(
             entry["automation"]["Submitted"]["detail"].as_str(),
             Some("submission-request-share-test.json")
+        );
+    }
+
+    #[test]
+    fn write_launcher_summary_includes_override_provenance() {
+        let install_dir = TempDir::new().unwrap();
+        prepare_install_root(install_dir.path());
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+
+        let logger = TestLogger::new(paths.logs_dir().join("lc-launcher.log"));
+        logger
+            .log_line("override provenance test start")
+            .expect("log line");
+
+        let runtime_log = paths.logs_dir().join("Clonk-provider.log");
+        fs::write(&runtime_log, "runtime").unwrap();
+
+        let default_path = paths.logs_dir().join("support-share");
+        let override_path = PathBuf::from("/tmp/custom-support-share");
+        fs::create_dir_all(&default_path).unwrap();
+
+        let mut provenance = ProviderPathProvenance::new(default_path.clone());
+        provenance.apply_override(
+            override_path.clone(),
+            ProviderOverrideSource::Retargeted {
+                applied_at: "2024-05-01T12:34:56Z".into(),
+            },
+        );
+
+        let mut telemetry = UpdateTelemetrySummary::default();
+        telemetry.record_success(runtime_log.clone());
+
+        let mut diagnostics = ProviderDiagnostics::default();
+        diagnostics.share.push(ProviderStatus {
+            name: "Support Share Drop".into(),
+            path: override_path.clone(),
+            path_status: ProviderPathStatus::Ready,
+            automation: ProviderAutomationState::Submitted {
+                detail: "submission-request-share-test.json".into(),
+            },
+            path_provenance: provenance,
+        });
+
+        let snapshot = ProviderAutomationSnapshot::from_diagnostics(&diagnostics, paths.logs_dir());
+
+        write_launcher_summary(
+            &paths,
+            &logger,
+            logger.path(),
+            &[runtime_log],
+            &[],
+            &telemetry,
+            None,
+            Some(snapshot),
+        )
+        .unwrap();
+
+        let summary_path = paths.logs_dir().join("launcher-summary.json");
+        let summary_json = fs::read_to_string(summary_path).unwrap();
+        let document: Value = serde_json::from_str(&summary_json).unwrap();
+
+        let share_entries = document["provider_automation"]["share"]
+            .as_array()
+            .expect("share array");
+        assert_eq!(share_entries.len(), 1);
+
+        let entry = &share_entries[0];
+        assert_eq!(entry["path"].as_str(), Some("/tmp/custom-support-share"));
+        assert_eq!(entry["default_path"].as_str(), Some("support-share"));
+        let overrides = entry["overrides"].as_array().expect("overrides array");
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(
+            overrides[0]["path"].as_str(),
+            Some("/tmp/custom-support-share")
+        );
+        assert_eq!(overrides[0]["source"]["kind"].as_str(), Some("retargeted"));
+        assert_eq!(
+            overrides[0]["source"]["applied_at"].as_str(),
+            Some("2024-05-01T12:34:56Z")
         );
     }
 }

@@ -1,7 +1,8 @@
 use crate::log::LauncherLog;
 use crate::paths::{ensure_logs_dir, launcher_summary_path, relative_to_logs};
 use crate::provider::{
-    ProviderAutomationState, ProviderDiagnostics, ProviderPathStatus, ProviderStatus,
+    ProviderAutomationState, ProviderDiagnostics, ProviderOverrideSource, ProviderPathProvenance,
+    ProviderPathStatus, ProviderStatus,
 };
 use crate::telemetry::{SerializableTelemetrySummary, UpdateTelemetrySummary};
 use crate::time::timestamp_for_log;
@@ -63,15 +64,70 @@ pub struct ProviderAutomationRecord {
     pub path: String,
     pub path_status: ProviderPathStatus,
     pub automation: ProviderAutomationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<ProviderOverrideRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderOverrideRecord {
+    pub path: String,
+    pub source: ProviderOverrideSourceRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderOverrideSourceRecord {
+    Preference,
+    Retargeted { applied_at: String },
 }
 
 impl ProviderAutomationRecord {
     fn from_status(status: &ProviderStatus, logs_dir: &Path) -> Self {
+        let path = relative_to_logs(&status.path, logs_dir);
+        let default_path = record_default_path(&status.path_provenance, logs_dir, &path);
+        let overrides = status
+            .path_provenance
+            .overrides()
+            .iter()
+            .map(|override_entry| ProviderOverrideRecord {
+                path: relative_to_logs(override_entry.path(), logs_dir),
+                source: ProviderOverrideSourceRecord::from(override_entry.source()),
+            })
+            .collect::<Vec<_>>();
+
         Self {
             name: status.name.clone(),
-            path: relative_to_logs(&status.path, logs_dir),
+            path,
             path_status: status.path_status.clone(),
             automation: status.automation.clone(),
+            default_path,
+            overrides,
+        }
+    }
+}
+
+fn record_default_path(
+    provenance: &ProviderPathProvenance,
+    logs_dir: &Path,
+    current_path: &str,
+) -> Option<String> {
+    let default_path = relative_to_logs(provenance.default_path(), logs_dir);
+    if provenance.has_overrides() || default_path != current_path {
+        Some(default_path)
+    } else {
+        None
+    }
+}
+
+impl From<&ProviderOverrideSource> for ProviderOverrideSourceRecord {
+    fn from(source: &ProviderOverrideSource) -> Self {
+        match source {
+            ProviderOverrideSource::Preference => Self::Preference,
+            ProviderOverrideSource::Retargeted { applied_at } => Self::Retargeted {
+                applied_at: applied_at.clone(),
+            },
         }
     }
 }

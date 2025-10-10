@@ -618,8 +618,9 @@ mod tests {
     use lc_gui::{GuiEvent, Point};
     use lc_launcher::{
         LauncherSummary, LauncherTelemetryFailure, ProviderAutomationSnapshot,
-        ProviderAutomationState, ProviderDiagnostics, ProviderPathStatus, ProviderStatus,
-        SerializableTelemetryFailure, SerializableTelemetrySummary,
+        ProviderAutomationState, ProviderDiagnostics, ProviderPathProvenance,
+        ProviderPathStatus, ProviderStatus, SerializableTelemetryFailure,
+        SerializableTelemetrySummary,
     };
     use tempfile::TempDir;
 
@@ -776,6 +777,7 @@ mod tests {
             automation: ProviderAutomationState::Submitted {
                 detail: "submission-request-1.json".into(),
             },
+            path_provenance: ProviderPathProvenance::new(temp.path().join("support-share")),
         });
 
         let mut ui = LauncherShellUi::new(None).expect("ui");
@@ -810,6 +812,7 @@ mod tests {
             automation: ProviderAutomationState::Stale {
                 reason: "missing directory".into(),
             },
+            path_provenance: ProviderPathProvenance::new(PathBuf::from("/tmp/support-share")),
         });
 
         let mut ui = LauncherShellUi::new(None).expect("ui");

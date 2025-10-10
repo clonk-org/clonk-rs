@@ -12,7 +12,8 @@ use lc_launcher::{
     load_shell_state, reveal_in_file_manager, save_launcher_preferences, support_artifacts,
     timestamp_for_filename, timestamp_for_log, write_launcher_summary, LauncherLog,
     LauncherPreferences, LauncherShellState, ProviderAutomationRecord, ProviderAutomationSnapshot,
-    ProviderAutomationState, ProviderDiagnostics, ProviderPathStatus, ProviderStatus,
+    ProviderAutomationState, ProviderDiagnostics, ProviderOverrideSource,
+    ProviderOverrideSourceRecord, ProviderPathProvenance, ProviderPathStatus, ProviderStatus,
     SupportArtifact, UpdateTelemetrySummary,
 };
 use lc_launcher_ui::{
@@ -1007,13 +1008,16 @@ struct ProviderTarget {
 #[derive(Clone)]
 struct ProviderTargetState {
     target: ProviderTarget,
+    provenance: ProviderPathProvenance,
     automation: ProviderAutomationState,
 }
 
 impl ProviderTargetState {
     fn new(target: ProviderTarget) -> Self {
+        let provenance = ProviderPathProvenance::new(target.path.clone());
         Self {
             target,
+            provenance,
             automation: ProviderAutomationState::Idle,
         }
     }
@@ -1024,7 +1028,62 @@ impl ProviderTargetState {
             path: self.target.path.clone(),
             path_status: compute_path_status(&self.target.path),
             automation: self.automation.clone(),
+            path_provenance: self.provenance.clone(),
         }
+    }
+
+    fn apply_override(&mut self, path: PathBuf, source: ProviderOverrideSource) {
+        if self.target.path == path
+            && self
+                .provenance
+                .overrides()
+                .last()
+                .map(|override_entry| {
+                    override_entry.path() == path.as_path() && override_entry.source() == &source
+                })
+                .unwrap_or(false)
+        {
+            return;
+        }
+        self.target.path = path.clone();
+        self.provenance.apply_override(path, source);
+        self.automation = ProviderAutomationState::Idle;
+    }
+
+    fn sync_provenance_from_record(&mut self, logs_dir: &Path, record: &ProviderAutomationRecord) {
+        let mut provenance = match &record.default_path {
+            Some(entry) => {
+                let default_path = resolve_snapshot_path(logs_dir, entry);
+                ProviderPathProvenance::new(default_path)
+            }
+            None => ProviderPathProvenance::new(self.provenance.default_path().to_path_buf()),
+        };
+
+        for override_record in &record.overrides {
+            let path = resolve_snapshot_path(logs_dir, &override_record.path);
+            let source = match &override_record.source {
+                ProviderOverrideSourceRecord::Preference => ProviderOverrideSource::Preference,
+                ProviderOverrideSourceRecord::Retargeted { applied_at } => {
+                    ProviderOverrideSource::Retargeted {
+                        applied_at: applied_at.clone(),
+                    }
+                }
+            };
+            provenance.apply_override(path, source);
+        }
+
+        let current_target = &self.target.path;
+        let last_recorded_path = provenance
+            .overrides()
+            .last()
+            .map(|override_entry| override_entry.path())
+            .unwrap_or_else(|| provenance.default_path());
+
+        if !paths_equivalent(last_recorded_path, current_target) {
+            provenance.apply_override(current_target.clone(), ProviderOverrideSource::Preference);
+        }
+
+        self.provenance = provenance;
     }
 }
 
@@ -1130,7 +1189,7 @@ impl FirstPartyProviders {
             if let Some(path) =
                 preferences.provider_override_path(role.as_str(), &state.target.name)
             {
-                state.target.path = path;
+                state.apply_override(path, ProviderOverrideSource::Preference);
             }
         }
     }
@@ -1142,13 +1201,13 @@ impl FirstPartyProviders {
             if let Some(state) = find_state_mut(&mut self.share, |state| {
                 paths_equivalent(&state.target.path, &resolved)
             }) {
-                Self::apply_snapshot_record(state, record, &resolved, true);
+                Self::apply_snapshot_record(state, logs_dir, record, &resolved, true);
                 continue;
             }
             if let Some(state) =
                 find_state_mut(&mut self.share, |state| state.target.name == record.name)
             {
-                Self::apply_snapshot_record(state, record, &resolved, false);
+                Self::apply_snapshot_record(state, logs_dir, record, &resolved, false);
             }
         }
         for record in &snapshot.upload {
@@ -1156,23 +1215,30 @@ impl FirstPartyProviders {
             if let Some(state) = find_state_mut(&mut self.upload, |state| {
                 paths_equivalent(&state.target.path, &resolved)
             }) {
-                Self::apply_snapshot_record(state, record, &resolved, true);
+                Self::apply_snapshot_record(state, logs_dir, record, &resolved, true);
                 continue;
             }
             if let Some(state) =
                 find_state_mut(&mut self.upload, |state| state.target.name == record.name)
             {
-                Self::apply_snapshot_record(state, record, &resolved, false);
+                Self::apply_snapshot_record(state, logs_dir, record, &resolved, false);
             }
         }
     }
 
     fn apply_snapshot_record(
         state: &mut ProviderTargetState,
+        logs_dir: &Path,
         record: &ProviderAutomationRecord,
         resolved: &Path,
         matched_by_path: bool,
     ) {
+        state.sync_provenance_from_record(logs_dir, record);
+
+        if matched_by_path && !paths_equivalent(&state.target.path, resolved) {
+            state.target.path = resolved.to_path_buf();
+        }
+
         if should_mark_submission_as_stale(&record.automation) {
             if !matched_by_path {
                 let reason = format!(
@@ -1384,8 +1450,8 @@ impl FirstPartyProviders {
         let state = states
             .get_mut(index)
             .ok_or_else(|| anyhow!("invalid {} provider index {}", role.as_str(), index))?;
-        state.target.path = path;
-        state.automation = ProviderAutomationState::Idle;
+        let applied_at = timestamp_for_log();
+        state.apply_override(path, ProviderOverrideSource::Retargeted { applied_at });
         Ok(())
     }
 
@@ -1616,7 +1682,8 @@ mod tests {
     use anyhow::Result as AnyResult;
     use lc_launcher::{
         LauncherPreferences, ProviderAutomationSnapshot, ProviderAutomationState,
-        ProviderDiagnostics, ProviderPathStatus, ProviderStatus, SupportArtifact,
+        ProviderDiagnostics, ProviderOverrideSource, ProviderPathStatus, ProviderStatus,
+        SupportArtifact,
     };
     use std::env;
     use std::ffi::OsString;
@@ -1808,6 +1875,15 @@ mod tests {
         FirstPartyProviders::apply_overrides(&mut states, ProviderRole::Share, &prefs);
 
         assert_eq!(states[0].target.path, override_dir.path());
+        let override_entry = states[0]
+            .provenance
+            .overrides()
+            .last()
+            .expect("expected override to be recorded");
+        assert!(matches!(
+            override_entry.source(),
+            ProviderOverrideSource::Preference
+        ));
     }
 
     #[test]
@@ -1832,6 +1908,7 @@ mod tests {
                 automation: ProviderAutomationState::Submitted {
                     detail: "submission-request-share-123.json".into(),
                 },
+                path_provenance: ProviderPathProvenance::new(share_path.clone()),
             }],
             upload: Vec::new(),
         };
@@ -1876,6 +1953,7 @@ mod tests {
                 automation: ProviderAutomationState::Submitted {
                     detail: "submission-request-share-456.json".into(),
                 },
+                path_provenance: ProviderPathProvenance::new(original_path.clone()),
             }],
             upload: Vec::new(),
         };
@@ -1926,6 +2004,7 @@ mod tests {
                 automation: ProviderAutomationState::Submitted {
                     detail: "submission-request-share-123.json".into(),
                 },
+                path_provenance: ProviderPathProvenance::new(share_path.clone()),
             }],
             upload: vec![ProviderStatus {
                 name: "Support Upload Drop".into(),
@@ -1934,6 +2013,7 @@ mod tests {
                 automation: ProviderAutomationState::Failed {
                     error: "network failure".into(),
                 },
+                path_provenance: ProviderPathProvenance::new(upload_path.clone()),
             }],
         };
 
@@ -1948,6 +2028,55 @@ mod tests {
         assert!(matches!(
             providers.upload[0].automation,
             ProviderAutomationState::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn hydrate_from_snapshot_restores_override_history() {
+        let logs_dir = TempDir::new().unwrap();
+        let default_path = logs_dir.path().join("support-share");
+        let override_path = PathBuf::from("/tmp/custom-support-share");
+        fs::create_dir_all(&default_path).unwrap();
+
+        let mut providers = FirstPartyProviders {
+            share: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Share Drop".into(),
+                path: override_path.clone(),
+            })],
+            upload: Vec::new(),
+        };
+
+        let mut provenance = ProviderPathProvenance::new(default_path.clone());
+        provenance.apply_override(
+            override_path.clone(),
+            ProviderOverrideSource::Retargeted {
+                applied_at: "2024-05-01T12:34:56Z".into(),
+            },
+        );
+
+        let diagnostics = ProviderDiagnostics {
+            share: vec![ProviderStatus {
+                name: "Support Share Drop".into(),
+                path: override_path.clone(),
+                path_status: ProviderPathStatus::Ready,
+                automation: ProviderAutomationState::Submitted {
+                    detail: "submission-request-share-override.json".into(),
+                },
+                path_provenance: provenance,
+            }],
+            upload: Vec::new(),
+        };
+
+        let snapshot = ProviderAutomationSnapshot::from_diagnostics(&diagnostics, logs_dir.path());
+        providers.reset_automation();
+        providers.hydrate_from_snapshot(logs_dir.path(), &snapshot);
+
+        let overrides = providers.share[0].provenance.overrides();
+        assert_eq!(overrides.len(), 1, "expected restored override entry");
+        assert!(paths_equivalent(overrides[0].path(), &override_path));
+        assert!(matches!(
+            overrides[0].source(),
+            ProviderOverrideSource::Retargeted { .. }
         ));
     }
 }
