@@ -1,3 +1,4 @@
+use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{LineWriter, Write};
 use std::path::{Path, PathBuf};
@@ -7,8 +8,9 @@ use anyhow::{anyhow, Context, Result};
 use lc_graphics::{Color, PixelFormat, Surface};
 use lc_gui::{DrawCommand, GuiEvent, KeyCode, Point as GuiPoint, Rect as GuiRect, Size as GuiSize};
 use lc_launcher::{
-    copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_shell_state,
-    reveal_in_file_manager, timestamp_for_filename, timestamp_for_log, LauncherLog,
+    copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_launcher_preferences,
+    load_shell_state, reveal_in_file_manager, save_launcher_preferences, timestamp_for_filename,
+    timestamp_for_log, LauncherLog, LauncherPreferences, SupportArtifact,
 };
 use lc_launcher_ui::{
     ActionFeedback, LauncherShellMessage, LauncherShellResponse, LauncherShellUi,
@@ -77,6 +79,8 @@ struct LauncherApp {
     logger: ShellLogger,
     ui: LauncherShellUi,
     surface: Surface,
+    preferences: LauncherPreferences,
+    providers: FirstPartyProviders,
     pointer_position: Option<GuiPoint>,
 }
 
@@ -100,12 +104,24 @@ impl LauncherApp {
             .context("failed to record launcher startup")?;
 
         let ui = LauncherShellUi::new(None).map_err(|err| anyhow!(err))?;
+        let preferences = match load_launcher_preferences(&paths) {
+            Ok(preferences) => preferences,
+            Err(err) => {
+                logger
+                    .log_line(&format!("failed to load launcher preferences: {err}"))
+                    .context("failed to record launcher preferences load failure")?;
+                LauncherPreferences::default()
+            }
+        };
+        let providers = FirstPartyProviders::discover(&paths);
 
         let mut app = Self {
             paths,
             logger,
             ui,
             surface: Surface::new(width, height, PixelFormat::Rgba8888),
+            preferences,
+            providers,
             pointer_position: None,
         };
         app.refresh_state()
@@ -248,6 +264,39 @@ impl LauncherApp {
         self.update_feedback(Some(feedback))
     }
 
+    fn persist_preferences(&self) {
+        if let Err(err) = save_launcher_preferences(&self.paths, &self.preferences) {
+            let _ = self
+                .logger
+                .log_line(&format!("failed to persist launcher preferences: {err}"));
+        }
+    }
+
+    fn remember_bundle_destination(&mut self, path: &Path) {
+        self.preferences.set_bundle_destination(path);
+        self.persist_preferences();
+    }
+
+    fn remember_upload_destination(&mut self, path: &Path) {
+        self.preferences.set_upload_destination(path);
+        self.persist_preferences();
+    }
+
+    fn configure_dialog_directory(
+        &self,
+        dialog: FileDialog,
+        saved: Option<PathBuf>,
+        fallback: Option<&Path>,
+    ) -> FileDialog {
+        if let Some(saved_path) = saved {
+            return dialog.set_directory(saved_path);
+        }
+        if let Some(fallback) = fallback {
+            return dialog.set_directory(fallback);
+        }
+        dialog.set_directory(self.paths.logs_dir())
+    }
+
     fn handle_message(&mut self, message: LauncherShellMessage) -> Result<()> {
         match message {
             LauncherShellMessage::RegenerateSupportBundle => {
@@ -294,37 +343,52 @@ impl LauncherApp {
                     return Ok(());
                 }
 
-                let mut dialog =
-                    FileDialog::new().set_title("Choose where to copy the support bundle");
-                if let Some(parent) = bundle_path.parent() {
-                    dialog = dialog.set_directory(parent);
-                } else {
-                    dialog = dialog.set_directory(self.paths.logs_dir());
-                }
+                let dialog = FileDialog::new().set_title("Choose where to copy the support bundle");
+                let dialog = self.configure_dialog_directory(
+                    dialog,
+                    self.preferences.bundle_destination_path(),
+                    bundle_path.parent(),
+                );
 
                 match dialog.pick_folder() {
-                    Some(destination) => match copy_support_bundle(&bundle_path, &destination) {
-                        Ok(staged_path) => {
-                            self.logger
-                                .log_line(&format!(
-                                    "support bundle copied to {}",
-                                    staged_path.display()
-                                ))
-                                .context("failed to log copy success")?;
-                            self.set_feedback(ActionFeedback::success(format!(
-                                "Support bundle copied to {}",
-                                staged_path.display()
-                            )))?;
+                    Some(destination) => {
+                        self.remember_bundle_destination(&destination);
+                        match copy_support_bundle(&bundle_path, &destination) {
+                            Ok(staged_path) => {
+                                self.logger
+                                    .log_line(&format!(
+                                        "support bundle copied to {}",
+                                        staged_path.display()
+                                    ))
+                                    .context("failed to log copy success")?;
+                                let provider_report =
+                                    self.providers.stage_bundle(&self.logger, &bundle_path);
+                                let summary = self.providers.share_summary(&provider_report);
+                                let mut feedback_message =
+                                    format!("Support bundle copied to {}", staged_path.display());
+                                if let Some(summary) = summary {
+                                    feedback_message.push_str("; ");
+                                    feedback_message.push_str(&summary);
+                                }
+                                let feedback = if provider_report.failures().is_empty() {
+                                    ActionFeedback::success(feedback_message)
+                                } else if provider_report.successes().is_empty() {
+                                    ActionFeedback::error(feedback_message)
+                                } else {
+                                    ActionFeedback::info(feedback_message)
+                                };
+                                self.set_feedback(feedback)?;
+                            }
+                            Err(err) => {
+                                self.logger
+                                    .log_line(&format!("support bundle copy failed: {err}"))
+                                    .context("failed to log copy failure")?;
+                                self.set_feedback(ActionFeedback::error(format!(
+                                    "Failed to copy support bundle: {err}"
+                                )))?;
+                            }
                         }
-                        Err(err) => {
-                            self.logger
-                                .log_line(&format!("support bundle copy failed: {err}"))
-                                .context("failed to log copy failure")?;
-                            self.set_feedback(ActionFeedback::error(format!(
-                                "Failed to copy support bundle: {err}"
-                            )))?;
-                        }
-                    },
+                    }
                     None => {
                         self.logger
                             .log_line("support bundle copy cancelled by user")
@@ -354,37 +418,60 @@ impl LauncherApp {
                 }
 
                 let dialog = FileDialog::new()
-                    .set_title("Select where to stage support artifacts for upload")
-                    .set_directory(self.paths.logs_dir());
+                    .set_title("Select where to stage support artifacts for upload");
+                let dialog = self.configure_dialog_directory(
+                    dialog,
+                    self.preferences.upload_destination_path(),
+                    Some(self.paths.logs_dir()),
+                );
 
                 match dialog.pick_folder() {
-                    Some(destination) => match copy_support_artifacts(&artifacts, &destination) {
-                        Ok(paths) => {
-                            let staged_list = paths
-                                .iter()
-                                .map(|path| path.display().to_string())
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            let summary = format!(
-                                "Staged {} artifact{} in {}",
-                                paths.len(),
-                                if paths.len() == 1 { "" } else { "s" },
-                                destination.display()
-                            );
-                            self.logger
-                                .log_line(&format!("{} ({})", summary, staged_list))
-                                .context("failed to log artifact staging success")?;
-                            self.set_feedback(ActionFeedback::success(summary))?;
+                    Some(destination) => {
+                        self.remember_upload_destination(&destination);
+                        match copy_support_artifacts(&artifacts, &destination) {
+                            Ok(paths) => {
+                                let staged_list = paths
+                                    .iter()
+                                    .map(|path| path.display().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                let mut summary = format!(
+                                    "Staged {} artifact{} in {}",
+                                    paths.len(),
+                                    if paths.len() == 1 { "" } else { "s" },
+                                    destination.display()
+                                );
+                                self.logger
+                                    .log_line(&format!("{} ({})", summary, staged_list))
+                                    .context("failed to log artifact staging success")?;
+
+                                let provider_report =
+                                    self.providers.stage_artifacts(&self.logger, &artifacts);
+                                if let Some(extra) = self.providers.upload_summary(&provider_report)
+                                {
+                                    summary.push_str("; ");
+                                    summary.push_str(&extra);
+                                }
+
+                                let feedback = if provider_report.failures().is_empty() {
+                                    ActionFeedback::success(summary)
+                                } else if provider_report.successes().is_empty() {
+                                    ActionFeedback::error(summary)
+                                } else {
+                                    ActionFeedback::info(summary)
+                                };
+                                self.set_feedback(feedback)?;
+                            }
+                            Err(err) => {
+                                self.logger
+                                    .log_line(&format!("artifact staging failed: {err}"))
+                                    .context("failed to log artifact staging failure")?;
+                                self.set_feedback(ActionFeedback::error(format!(
+                                    "Failed to stage artifacts: {err}"
+                                )))?;
+                            }
                         }
-                        Err(err) => {
-                            self.logger
-                                .log_line(&format!("artifact staging failed: {err}"))
-                                .context("failed to log artifact staging failure")?;
-                            self.set_feedback(ActionFeedback::error(format!(
-                                "Failed to stage artifacts: {err}"
-                            )))?;
-                        }
-                    },
+                    }
                     None => {
                         self.logger
                             .log_line("artifact upload staging cancelled by user")
@@ -432,6 +519,222 @@ impl LauncherApp {
         debug_assert_eq!(frame.len(), (width as usize) * (height as usize) * 4);
         frame.copy_from_slice(self.surface.pixels());
         Ok(())
+    }
+}
+
+const SHARE_PROVIDERS_ENV: &str = "LC_FIRST_PARTY_SHARE_DIRS";
+const UPLOAD_PROVIDERS_ENV: &str = "LC_FIRST_PARTY_UPLOAD_DIRS";
+
+#[derive(Default)]
+struct ProviderStageReport {
+    successes: Vec<ProviderStageSuccess>,
+    failures: Vec<ProviderStageFailure>,
+}
+
+impl ProviderStageReport {
+    fn summary(&self) -> Option<String> {
+        if self.successes.is_empty() && self.failures.is_empty() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if !self.successes.is_empty() {
+            let labels = self
+                .successes
+                .iter()
+                .map(|success| success.display_label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("staged for {}", labels));
+        }
+        if !self.failures.is_empty() {
+            let labels = self
+                .failures
+                .iter()
+                .map(|failure| failure.display_label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("failed for {}", labels));
+        }
+        Some(parts.join("; "))
+    }
+
+    fn successes(&self) -> &[ProviderStageSuccess] {
+        &self.successes
+    }
+
+    fn failures(&self) -> &[ProviderStageFailure] {
+        &self.failures
+    }
+}
+
+struct ProviderStageSuccess {
+    provider: String,
+    paths: Vec<PathBuf>,
+}
+
+impl ProviderStageSuccess {
+    fn display_label(&self) -> String {
+        let count = self.paths.len();
+        let suffix = if count == 1 { "file" } else { "files" };
+        format!("{} ({} {})", self.provider, count, suffix)
+    }
+}
+
+struct ProviderStageFailure {
+    provider: String,
+    error: String,
+}
+
+impl ProviderStageFailure {
+    fn display_label(&self) -> String {
+        format!("{} ({})", self.provider, self.error)
+    }
+}
+
+#[derive(Clone)]
+struct ProviderTarget {
+    name: String,
+    path: PathBuf,
+}
+
+struct FirstPartyProviders {
+    share: Vec<ProviderTarget>,
+    upload: Vec<ProviderTarget>,
+}
+
+impl FirstPartyProviders {
+    fn discover(paths: &AppPaths) -> Self {
+        let share = Self::parse_targets(
+            SHARE_PROVIDERS_ENV,
+            "Support Share Drop",
+            paths.logs_dir().join("support-share"),
+        );
+        let upload = Self::parse_targets(
+            UPLOAD_PROVIDERS_ENV,
+            "Support Upload Drop",
+            paths.logs_dir().join("support-upload"),
+        );
+        Self { share, upload }
+    }
+
+    fn parse_targets(
+        env_var: &str,
+        default_name: &str,
+        default_path: PathBuf,
+    ) -> Vec<ProviderTarget> {
+        let base = default_path.parent().map(|dir| dir.to_path_buf());
+        if let Some(raw) = env::var_os(env_var) {
+            let mut targets = Vec::new();
+            for (index, path_value) in env::split_paths(&raw).enumerate() {
+                if path_value.as_os_str().is_empty() {
+                    continue;
+                }
+                let mut path = path_value;
+                if path.is_relative() {
+                    if let Some(base) = &base {
+                        path = base.join(&path);
+                    }
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|component| component.to_str())
+                    .filter(|name| !name.is_empty())
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| format!("{default_name} {}", index + 1));
+                targets.push(ProviderTarget { name, path });
+            }
+            return targets;
+        }
+        vec![ProviderTarget {
+            name: default_name.to_string(),
+            path: default_path,
+        }]
+    }
+
+    fn stage_bundle(&self, logger: &dyn LauncherLog, bundle: &Path) -> ProviderStageReport {
+        let mut report = ProviderStageReport::default();
+        for target in &self.share {
+            match copy_support_bundle(bundle, &target.path) {
+                Ok(path) => {
+                    let _ = logger.log_line(&format!(
+                        "first-party share staged for {} at {}",
+                        target.name,
+                        path.display()
+                    ));
+                    report.successes.push(ProviderStageSuccess {
+                        provider: target.name.clone(),
+                        paths: vec![path],
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = logger.log_line(&format!(
+                        "failed to stage support bundle for {}: {message}",
+                        target.name
+                    ));
+                    report.failures.push(ProviderStageFailure {
+                        provider: target.name.clone(),
+                        error: message,
+                    });
+                }
+            }
+        }
+        report
+    }
+
+    fn stage_artifacts(
+        &self,
+        logger: &dyn LauncherLog,
+        artifacts: &[SupportArtifact],
+    ) -> ProviderStageReport {
+        let mut report = ProviderStageReport::default();
+        for target in &self.upload {
+            match copy_support_artifacts(artifacts, &target.path) {
+                Ok(paths) => {
+                    let staged = paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let _ = logger.log_line(&format!(
+                        "first-party upload staged for {} at {}",
+                        target.name, staged
+                    ));
+                    report.successes.push(ProviderStageSuccess {
+                        provider: target.name.clone(),
+                        paths,
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = logger.log_line(&format!(
+                        "failed to stage support artifacts for {}: {message}",
+                        target.name
+                    ));
+                    report.failures.push(ProviderStageFailure {
+                        provider: target.name.clone(),
+                        error: message,
+                    });
+                }
+            }
+        }
+        report
+    }
+
+    fn share_summary(&self, report: &ProviderStageReport) -> Option<String> {
+        if self.share.is_empty() {
+            Some("no first-party share providers configured".into())
+        } else {
+            report.summary()
+        }
+    }
+
+    fn upload_summary(&self, report: &ProviderStageReport) -> Option<String> {
+        if self.upload.is_empty() {
+            Some("no first-party upload providers configured".into())
+        } else {
+            report.summary()
+        }
     }
 }
 
@@ -489,6 +792,139 @@ fn draw_text(surface: &mut Surface, rect: &GuiRect, text: &str, color: Color) {
         );
         fill_rect(surface, &glyph_rect, glyph_color);
         cursor_x += glyph_width;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result as AnyResult;
+    use lc_launcher::SupportArtifact;
+    use std::env;
+    use std::ffi::OsString;
+    use std::fs;
+    use tempfile::TempDir;
+
+    struct DummyLog;
+    impl LauncherLog for DummyLog {
+        fn log_line(&self, _message: &str) -> AnyResult<()> {
+            Ok(())
+        }
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let previous = env::var_os(key);
+            match value {
+                Some(val) => env::set_var(key, val),
+                None => env::remove_var(key),
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.take() {
+                env::set_var(self.key, value);
+            } else {
+                env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn parse_targets_uses_default_when_env_unset() {
+        let base = TempDir::new().unwrap();
+        let default_path = base.path().join("support-share");
+        let _guard = EnvVarGuard::set(SHARE_PROVIDERS_ENV, None);
+        let targets = FirstPartyProviders::parse_targets(
+            SHARE_PROVIDERS_ENV,
+            "Support Share Drop",
+            default_path.clone(),
+        );
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "Support Share Drop");
+        assert_eq!(targets[0].path, default_path);
+    }
+
+    #[test]
+    fn parse_targets_resolves_relative_env_paths() {
+        let base = TempDir::new().unwrap();
+        let default_path = base.path().join("support-share");
+        let relative = format!("custom{}drop", std::path::MAIN_SEPARATOR);
+        let _guard = EnvVarGuard::set(SHARE_PROVIDERS_ENV, Some(&relative));
+        let targets = FirstPartyProviders::parse_targets(
+            SHARE_PROVIDERS_ENV,
+            "Support Share Drop",
+            default_path.clone(),
+        );
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "drop");
+        assert_eq!(targets[0].path, base.path().join("custom").join("drop"));
+    }
+
+    #[test]
+    fn stage_bundle_reports_success() {
+        let provider_dir = TempDir::new().unwrap();
+        let source_dir = TempDir::new().unwrap();
+        let bundle_path = source_dir.path().join("bundle.zip");
+        fs::write(&bundle_path, b"bundle").unwrap();
+
+        let providers = FirstPartyProviders {
+            share: vec![ProviderTarget {
+                name: "Support Share".into(),
+                path: provider_dir.path().to_path_buf(),
+            }],
+            upload: Vec::new(),
+        };
+
+        let logger = DummyLog;
+        let report = providers.stage_bundle(&logger, &bundle_path);
+        assert!(report.failures().is_empty());
+        assert_eq!(report.successes().len(), 1);
+        let staged_path = report.successes()[0].paths[0].clone();
+        assert!(staged_path.exists());
+        assert_ne!(staged_path, bundle_path);
+        let contents = fs::read(staged_path).unwrap();
+        assert_eq!(contents, b"bundle");
+    }
+
+    #[test]
+    fn stage_artifacts_reports_success() {
+        let provider_dir = TempDir::new().unwrap();
+        let source_dir = TempDir::new().unwrap();
+        let summary_path = source_dir.path().join("launcher-summary.json");
+        fs::write(&summary_path, b"{}").unwrap();
+
+        let artifact = SupportArtifact {
+            path: summary_path.clone(),
+            role: "summary",
+        };
+
+        let providers = FirstPartyProviders {
+            share: Vec::new(),
+            upload: vec![ProviderTarget {
+                name: "Support Upload".into(),
+                path: provider_dir.path().to_path_buf(),
+            }],
+        };
+
+        let logger = DummyLog;
+        let artifacts = vec![artifact];
+        let report = providers.stage_artifacts(&logger, &artifacts);
+        assert!(report.failures().is_empty());
+        assert_eq!(report.successes().len(), 1);
+        let staged_paths = &report.successes()[0].paths;
+        assert_eq!(staged_paths.len(), artifacts.len());
+        for path in staged_paths {
+            assert!(path.exists());
+        }
     }
 }
 

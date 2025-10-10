@@ -1748,6 +1748,7 @@ dependencies = [
  "lc-platform",
  "pixels",
  "rfd",
+ "tempfile",
  "winit",
 ]
 

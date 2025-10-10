@@ -13,3 +13,6 @@ lc-platform = { path = "../lc-platform" }
 pixels = "0.13"
 rfd = "0.14"
 winit = "0.28"
+
+[dev-dependencies]
+tempfile = "3.10"
