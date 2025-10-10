@@ -12,7 +12,9 @@ pub use action::{
     ActionLibrary, ActionProcedure, ActionSpec, ActionState, ActionUpdate, ActionUpdateResult,
 };
 pub use effect::EffectState;
-pub use landscape::{CollisionResolution, Landscape, LandscapeCommand, LandscapeError};
+pub use landscape::{
+    CollisionResolution, Landscape, LandscapeCommand, LandscapeError, LiquidColumn, LiquidSegment,
+};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
 

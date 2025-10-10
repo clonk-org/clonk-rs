@@ -6,10 +6,10 @@ use std::rc::Rc;
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::{
     ActionLibrary, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, Direction,
-    EnvironmentSettings, FloatVector2, Landscape, ObjectId, ObjectStatus, ObjectUpdate,
-    ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PhysicsSettings,
-    QueuedCommand, SpawnConfig, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION,
-    CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
+    EnvironmentSettings, FloatVector2, Landscape, LiquidSegment, ObjectId, ObjectStatus,
+    ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope,
+    PhysicsSettings, QueuedCommand, SpawnConfig, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT,
+    CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -3204,15 +3204,12 @@ fn evaluate_landscape_query(
     y: i32,
 ) -> bool {
     match landscape {
-        Some(landscape) => {
-            let solid = landscape.is_solid_at(x, y);
-            match query {
-                LandscapeQuery::Solid => solid,
-                LandscapeQuery::SemiSolid => solid,
-                LandscapeQuery::Liquid => false,
-                LandscapeQuery::Sky => !solid,
-            }
-        }
+        Some(landscape) => match query {
+            LandscapeQuery::Solid => landscape.is_solid_at(x, y),
+            LandscapeQuery::SemiSolid => landscape.is_solid_at(x, y),
+            LandscapeQuery::Liquid => landscape.is_liquid_at(x, y),
+            LandscapeQuery::Sky => !landscape.is_solid_at(x, y),
+        },
         None => fallback_without_context(query),
     }
 }
@@ -5810,6 +5807,23 @@ mod tests {
         });
         let value = result.expect("GBackLiquid succeeds");
         assert_eq!(value, Value::Bool(false));
+    }
+
+    #[test]
+    fn g_back_liquid_detects_liquid_column() {
+        let mut landscape = Landscape::flat(8, 4);
+        landscape.set_liquid_column(1, vec![LiquidSegment::new(5, 9)]);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            1,
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            g_back_liquid(&[Value::Int(1), Value::Int(6)])
+        });
+        let value = result.expect("GBackLiquid succeeds");
+        assert_eq!(value, Value::Bool(true));
     }
 
     #[test]

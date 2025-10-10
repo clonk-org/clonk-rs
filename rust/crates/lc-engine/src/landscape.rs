@@ -1,5 +1,8 @@
+use std::mem;
+
 use crate::Vector2;
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -8,10 +11,24 @@ pub enum LandscapeError {
     InvalidHeightMap { width: u32, found: usize },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LiquidColumn {
+    #[serde(default)]
+    segments: Vec<LiquidSegment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiquidSegment {
+    pub top: i32,
+    pub bottom: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Landscape {
     width: u32,
     surface: Vec<i32>,
+    #[serde(default)]
+    liquids: Vec<LiquidColumn>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,13 +44,18 @@ impl Landscape {
                 found: surface.len(),
             });
         }
-        Ok(Self { width, surface })
+        Ok(Self {
+            width,
+            surface,
+            liquids: vec![LiquidColumn::default(); width as usize],
+        })
     }
 
     pub fn flat(width: u32, height: i32) -> Self {
         Self {
             width,
             surface: vec![height; width as usize],
+            liquids: vec![LiquidColumn::default(); width as usize],
         }
     }
 
@@ -45,9 +67,29 @@ impl Landscape {
         &self.surface
     }
 
+    pub fn liquids(&self) -> &[LiquidColumn] {
+        &self.liquids
+    }
+
     pub fn set_height(&mut self, x: u32, height: i32) {
         if let Some(slot) = self.surface.get_mut(x as usize) {
             *slot = height;
+        }
+    }
+
+    pub fn set_liquid_column(&mut self, x: u32, segments: Vec<LiquidSegment>) {
+        if self.liquids.len() != self.surface.len() {
+            self.liquids
+                .resize(self.surface.len(), LiquidColumn::default());
+        }
+        if let Some(column) = self.liquids.get_mut(x as usize) {
+            *column = LiquidColumn::from_segments(segments);
+        }
+    }
+
+    pub fn clear_liquid_column(&mut self, x: u32) {
+        if let Some(column) = self.liquids.get_mut(x as usize) {
+            column.clear();
         }
     }
 
@@ -83,6 +125,20 @@ impl Landscape {
             return None;
         }
         self.surface.get(x as usize).copied()
+    }
+
+    pub fn is_liquid_at(&self, x: i32, y: i32) -> bool {
+        if x < 0 {
+            return false;
+        }
+        let index = match usize::try_from(x) {
+            Ok(index) => index,
+            Err(_) => return false,
+        };
+        match self.liquids.get(index) {
+            Some(column) => column.contains(y),
+            None => false,
+        }
     }
 
     pub fn is_solid_at(&self, x: i32, y: i32) -> bool {
@@ -187,6 +243,110 @@ impl LandscapeCommand {
     }
 }
 
+impl LiquidColumn {
+    pub fn from_segments(segments: Vec<LiquidSegment>) -> Self {
+        let mut column = Self { segments };
+        column.normalize();
+        column
+    }
+
+    pub fn contains(&self, y: i32) -> bool {
+        self.segments.iter().any(|segment| segment.contains(y))
+    }
+
+    pub fn clear(&mut self) {
+        self.segments.clear();
+    }
+
+    pub fn segments(&self) -> &[LiquidSegment] {
+        &self.segments
+    }
+
+    fn normalize(&mut self) {
+        if self.segments.is_empty() {
+            return;
+        }
+        let mut segments = mem::take(&mut self.segments);
+        for segment in &mut segments {
+            if segment.bottom < segment.top {
+                mem::swap(&mut segment.top, &mut segment.bottom);
+            }
+        }
+        segments.retain(|segment| segment.top <= segment.bottom);
+        segments.sort_by(|a, b| a.top.cmp(&b.top).then_with(|| a.bottom.cmp(&b.bottom)));
+        let mut merged: Vec<LiquidSegment> = Vec::with_capacity(segments.len());
+        for segment in segments {
+            if let Some(last) = merged.last_mut() {
+                if segment.top <= last.bottom + 1 {
+                    if segment.bottom > last.bottom {
+                        last.bottom = segment.bottom;
+                    }
+                    continue;
+                }
+            }
+            merged.push(segment);
+        }
+        self.segments = merged;
+    }
+}
+
+impl LiquidSegment {
+    pub fn new(top: i32, bottom: i32) -> Self {
+        if bottom < top {
+            Self {
+                top: bottom,
+                bottom: top,
+            }
+        } else {
+            Self { top, bottom }
+        }
+    }
+
+    pub fn contains(&self, y: i32) -> bool {
+        self.top <= y && y <= self.bottom
+    }
+}
+
+impl<'de> Deserialize<'de> for Landscape {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct LandscapeData {
+            width: u32,
+            surface: Vec<i32>,
+            #[serde(default)]
+            liquids: Vec<LiquidColumn>,
+        }
+
+        let mut data = LandscapeData::deserialize(deserializer)?;
+        let expected = data.width as usize;
+        if data.surface.len() != expected {
+            return Err(D::Error::custom(format!(
+                "height map length {} does not match width {}",
+                data.surface.len(),
+                data.width
+            )));
+        }
+
+        if data.liquids.len() < expected {
+            data.liquids.resize(expected, LiquidColumn::default());
+        } else if data.liquids.len() > expected {
+            data.liquids.truncate(expected);
+        }
+        for column in &mut data.liquids {
+            column.normalize();
+        }
+
+        Ok(Landscape {
+            width: data.width,
+            surface: data.surface,
+            liquids: data.liquids,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollisionResolution {
     pub position: Vector2,
@@ -260,5 +420,44 @@ mod tests {
         let hit = collision.unwrap();
         assert!(hit.y >= 8);
         assert!(!landscape.path_is_clear(start, end));
+    }
+
+    #[test]
+    fn liquid_column_contains_points_in_segment() {
+        let mut landscape = Landscape::flat(6, 10);
+        landscape.set_liquid_column(2, vec![LiquidSegment::new(4, 7)]);
+        assert!(landscape.is_liquid_at(2, 4));
+        assert!(landscape.is_liquid_at(2, 6));
+        assert!(landscape.is_liquid_at(2, 7));
+        assert!(!landscape.is_liquid_at(2, 3));
+        assert!(!landscape.is_liquid_at(2, 8));
+        assert!(!landscape.is_liquid_at(5, 5));
+    }
+
+    #[test]
+    fn liquid_column_merges_overlapping_segments() {
+        let mut landscape = Landscape::flat(4, 10);
+        landscape.set_liquid_column(
+            1,
+            vec![
+                LiquidSegment::new(2, 4),
+                LiquidSegment::new(5, 6),
+                LiquidSegment::new(8, 9),
+                LiquidSegment::new(3, 7),
+            ],
+        );
+        let column = &landscape.liquids()[1];
+        assert_eq!(column.segments(), &[LiquidSegment::new(2, 9)]);
+    }
+
+    #[test]
+    fn liquid_column_retains_disjoint_segments() {
+        let mut landscape = Landscape::flat(4, 10);
+        landscape.set_liquid_column(1, vec![LiquidSegment::new(2, 4), LiquidSegment::new(7, 8)]);
+        let column = &landscape.liquids()[1];
+        assert_eq!(
+            column.segments(),
+            &[LiquidSegment::new(2, 4), LiquidSegment::new(7, 8)]
+        );
     }
 }
