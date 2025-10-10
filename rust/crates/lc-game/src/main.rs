@@ -15,7 +15,8 @@ use lc_launcher::{
     create_support_bundle, digest_update_telemetry, load_launcher_summary,
     regenerate_support_bundle, timestamp_for_filename, timestamp_for_log, write_launcher_summary,
     LauncherLog, LauncherSummaryRecord, ProviderAutomationRecord, ProviderAutomationState,
-    ProviderOverrideSourceRecord, ProviderPathStatus, UpdateTelemetrySummary,
+    ProviderBulkRetargetRecord, ProviderOverrideSourceRecord, ProviderPathStatus,
+    UpdateTelemetrySummary,
 };
 use lc_platform::AppPaths;
 
@@ -887,6 +888,7 @@ fn print_provider_sections(record: &LauncherSummaryRecord) {
     if !snapshot.upload.is_empty() {
         print_provider_category("Upload targets", &snapshot.upload, &record.logs_dir);
     }
+    print_bulk_retarget_sections(record);
 }
 
 fn print_provider_category(label: &str, providers: &[ProviderAutomationRecord], logs_dir: &Path) {
@@ -922,6 +924,40 @@ fn print_provider_entry(indent: &str, provider: &ProviderAutomationRecord, logs_
             let source = describe_override_source(&override_entry.source);
             println!("{indent}    - {} -> {}", source, path.display());
         }
+    }
+}
+
+fn print_bulk_retarget_sections(record: &LauncherSummaryRecord) {
+    let Some(summary) = record.summary.provider_bulk_retarget.as_ref() else {
+        return;
+    };
+    if summary.share.is_empty() && summary.upload.is_empty() {
+        return;
+    }
+
+    println!("  Bulk retarget history:");
+    print_bulk_retarget_category("Share targets", &summary.share, &record.logs_dir);
+    print_bulk_retarget_category("Upload targets", &summary.upload, &record.logs_dir);
+}
+
+fn print_bulk_retarget_category(
+    label: &str,
+    records: &[ProviderBulkRetargetRecord],
+    logs_dir: &Path,
+) {
+    if records.is_empty() {
+        return;
+    }
+    println!("    {label}:");
+    for record in records {
+        let base_path = resolve_summary_entry(logs_dir, &record.base_path);
+        println!(
+            "      - {} (last retargeted at {}, changed {} of {} targets)",
+            base_path.display(),
+            record.retargeted_at,
+            record.changed,
+            record.total
+        );
     }
 }
 

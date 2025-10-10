@@ -5,8 +5,9 @@ use lc_gui::{
     DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, GuiResult, Rect, Size, WidgetId,
 };
 use lc_launcher::{
-    support_artifacts, LauncherShellState, ProviderAutomationState, ProviderDiagnostics,
-    ProviderOverrideSource, ProviderPathStatus, ProviderStatus, SupportArtifact,
+    support_artifacts, LauncherShellState, ProviderAutomationState, ProviderBulkRetargetRecord,
+    ProviderBulkRetargetSummary, ProviderDiagnostics, ProviderOverrideSource, ProviderPathStatus,
+    ProviderStatus, SupportArtifact,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -495,7 +496,7 @@ fn build_gui(
         }
     }
 
-    add_provider_section(&mut gui, &mut layout, root, providers);
+    add_provider_section(&mut gui, &mut layout, root, providers, state);
 
     Ok((gui, layout))
 }
@@ -505,14 +506,25 @@ fn add_provider_section(
     layout: &mut LauncherShellLayout,
     root: WidgetId,
     providers: &ProviderDiagnostics,
+    state: Option<&LauncherShellState>,
 ) {
     let section = gui.add_column(root, true);
     gui.add_label(section, "First-Party Providers");
+    let (logs_dir, bulk_summary) = match state {
+        Some(state) => (
+            Some(state.logs_dir.as_path()),
+            state.summary.provider_bulk_retarget.as_ref(),
+        ),
+        None => (None, None),
+    };
     if providers.share.is_empty() && providers.upload.is_empty() {
         gui.add_label(
             section,
             "No first-party providers are configured. Configure LC_FIRST_PARTY_* variables to enable automated submissions.",
         );
+        if let Some(summary) = bulk_summary {
+            add_bulk_retarget_summary(gui, section, summary, logs_dir);
+        }
         return;
     }
 
@@ -551,6 +563,10 @@ fn add_provider_section(
             &providers.upload,
             ProviderKind::Upload,
         );
+    }
+
+    if let Some(summary) = bulk_summary {
+        add_bulk_retarget_summary(gui, section, summary, logs_dir);
     }
 }
 
@@ -700,15 +716,64 @@ fn capitalize_word(word: &str) -> String {
     }
 }
 
+fn add_bulk_retarget_summary(
+    gui: &mut Gui,
+    section: WidgetId,
+    summary: &ProviderBulkRetargetSummary,
+    logs_dir: Option<&Path>,
+) {
+    if summary.share.is_empty() && summary.upload.is_empty() {
+        return;
+    }
+    gui.add_label(section, "Bulk retarget history:");
+    add_bulk_retarget_records(gui, section, "  Share targets:", &summary.share, logs_dir);
+    add_bulk_retarget_records(gui, section, "  Upload targets:", &summary.upload, logs_dir);
+}
+
+fn add_bulk_retarget_records(
+    gui: &mut Gui,
+    section: WidgetId,
+    label: &str,
+    records: &[ProviderBulkRetargetRecord],
+    logs_dir: Option<&Path>,
+) {
+    if records.is_empty() {
+        return;
+    }
+    gui.add_label(section, label.to_string());
+    for record in records {
+        let base_path = resolve_logs_entry(logs_dir, &record.base_path);
+        gui.add_label(
+            section,
+            format!(
+                "    - {} (last retargeted at {}, changed {} of {} targets)",
+                display_path(&base_path),
+                record.retargeted_at,
+                record.changed,
+                record.total
+            ),
+        );
+    }
+}
+
+fn resolve_logs_entry(logs_dir: Option<&Path>, entry: &str) -> PathBuf {
+    let candidate = Path::new(entry);
+    if candidate.is_absolute() || logs_dir.is_none() {
+        candidate.to_path_buf()
+    } else {
+        logs_dir.unwrap().join(candidate)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lc_gui::{GuiEvent, Point};
     use lc_launcher::{
         LauncherSummary, LauncherTelemetryFailure, ProviderAutomationSnapshot,
-        ProviderAutomationState, ProviderDiagnostics, ProviderOverrideSource,
-        ProviderPathProvenance, ProviderPathStatus, ProviderStatus, SerializableTelemetryFailure,
-        SerializableTelemetrySummary,
+        ProviderAutomationState, ProviderBulkRetargetRecord, ProviderBulkRetargetSummary,
+        ProviderDiagnostics, ProviderOverrideSource, ProviderPathProvenance, ProviderPathStatus,
+        ProviderStatus, SerializableTelemetryFailure, SerializableTelemetrySummary,
     };
     use tempfile::TempDir;
 
@@ -972,6 +1037,54 @@ mod tests {
                 DrawCommand::Text { text, .. } if text.contains("support-share-retarget")
             )),
             "override path should be rendered"
+        );
+    }
+
+    #[test]
+    fn bulk_retarget_history_is_rendered() {
+        let temp = TempDir::new().unwrap();
+        let mut state = sample_state(temp.path());
+        let mut summary = ProviderBulkRetargetSummary::default();
+        summary.share.push(ProviderBulkRetargetRecord {
+            base_path: "support-share".into(),
+            retargeted_at: "2024-06-02T15:00:00Z".into(),
+            total: 3,
+            changed: 2,
+        });
+        summary.upload.push(ProviderBulkRetargetRecord {
+            base_path: "support-upload".into(),
+            retargeted_at: "2024-06-02T16:00:00Z".into(),
+            total: 2,
+            changed: 1,
+        });
+        state.summary.provider_bulk_retarget = Some(summary);
+
+        let mut ui = LauncherShellUi::new(Some(state)).expect("ui");
+        ui.layout(Size::new(640.0, 480.0));
+        let commands = ui.render();
+
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { text, .. } if text.contains("Bulk retarget history:")
+            )),
+            "expected bulk retarget heading to be rendered"
+        );
+
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { text, .. } if text.contains("support-share")
+            )),
+            "expected share base directory to be rendered"
+        );
+
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { text, .. } if text.contains("support-upload")
+            )),
+            "expected upload base directory to be rendered"
         );
     }
 
