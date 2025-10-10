@@ -10,7 +10,6 @@ members = [
     "crates/lc-network",
     "crates/lc-gui",
     "crates/lc-platform",
-    "crates/lc-app",
     "crates/lc-game",
     "xtask",
 ]

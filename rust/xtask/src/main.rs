@@ -158,17 +158,17 @@ fn load_recording(path: &Path) -> Result<Recording> {
 
 fn package() -> Result<()> {
     let paths = WorkspacePaths::detect()?;
-    build_lc_app(&paths)?;
+    build_lc_game(&paths)?;
     let package_dir = assemble_package_layout(&paths)?;
     let archive = create_archive(&paths, &package_dir)?;
     println!("Packaged Rust port to {}", archive.display());
     Ok(())
 }
 
-fn build_lc_app(paths: &WorkspacePaths) -> Result<()> {
-    println!("Building lc-app (release)...");
+fn build_lc_game(paths: &WorkspacePaths) -> Result<()> {
+    println!("Building lc-game (release)...");
     let status = Command::new("cargo")
-        .args(["build", "--release", "-p", "lc-app"])
+        .args(["build", "--release", "-p", "lc-game"])
         .current_dir(&paths.workspace_dir)
         .status()
         .context("failed to invoke cargo build")?;
@@ -193,14 +193,14 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
     fs::create_dir_all(&bin_dir)
         .with_context(|| format!("failed to create {}", bin_dir.display()))?;
 
-    let exe_name = format!("lc-app{}", env::consts::EXE_SUFFIX);
+    let exe_name = format!("lc-game{}", env::consts::EXE_SUFFIX);
     let built_binary = paths
         .workspace_dir
         .join("target")
         .join("release")
         .join(&exe_name);
     if !built_binary.exists() {
-        bail!("expected lc-app binary at {}", built_binary.display());
+        bail!("expected lc-game binary at {}", built_binary.display());
     }
     let packaged_binary = bin_dir.join(&exe_name);
     fs::copy(&built_binary, &packaged_binary).with_context(|| {

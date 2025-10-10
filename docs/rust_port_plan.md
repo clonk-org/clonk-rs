@@ -7,7 +7,7 @@
 
 ## Reality Check
 - Rust crates (`lc-engine`, `lc-script`, `lc-graphics`, `lc-network`, `lc-audio`, `lc-gui`, `lc-platform`) currently back parity tooling; `C4Game`, `C4GraphicsSystem`, and `C4Gui` still drive the live runtime.
-- `lc-app` remains a headless demo runner: no windowing, hardware rendering, input, or audio output.
+- `lc-app` demo harness retired; workspace packaging now targets the `lc-game` launcher that bridges into the shipping runtime.
 - `RustEngineBridge` mirrors frames when `USE_RUST_ENGINE_VALIDATION` is enabled, but the authoritative scheduler, effects, pathfinding, lobby, and UI stacks are still C++.
 - Build, packaging, and updater flows are CMake-first; Cargo outputs are never shipped to players or CI artifacts.
 
@@ -24,8 +24,8 @@
 
 ## Porting Strategy
 1. **Platform Bootstrap**
-   - Status: `lc-game` (Rust) now owns path discovery, prepares user directories, migrates legacy configs into `LC_CONFIG_FILE`, captures runtime stdout/stderr into timestamped logs, and launches the shipping C++ runtime so `cargo run -p lc-game` opens the Startup Menu with live input.
-   - Next: formally retire the `lc-app` demo harness once validation coverage is in place and keep tightening launcher validation around updater/logging parity.
+   - Status: `lc-game` (Rust) now owns path discovery, prepares user directories, migrates legacy configs into `LC_CONFIG_FILE`, captures runtime stdout/stderr into timestamped logs, launches the shipping C++ runtime so `cargo run -p lc-game` opens the Startup Menu with live input, and the deprecated `lc-app` demo harness has been removed from the workspace/package outputs.
+   - Next: tighten launcher validation around updater/logging parity and validate patcher/updater hooks from the Rust entrypoint.
    - **Gate:** `cargo run -p lc-game` opens the shipping Startup Menu with live input routed through Rust scaffolding.
 
 2. **Runtime Authority**
