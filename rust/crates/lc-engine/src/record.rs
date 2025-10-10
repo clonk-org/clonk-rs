@@ -348,6 +348,7 @@ mod tests {
                 contents: Vec::new(),
                 status: ObjectStatus::Normal,
                 owner: OWNER_NONE,
+                category: crate::DEFAULT_CATEGORY,
                 crew_member: false,
                 alive: true,
             }],
@@ -364,6 +365,7 @@ mod tests {
             surfaces: Vec::new(),
             controls: Vec::new(),
             network_packets: Vec::new(),
+            definition_categories: HashMap::new(),
         }
     }
 

@@ -9,7 +9,7 @@ use crate::{
     EnvironmentSettings, FloatVector2, Landscape, ObjectId, ObjectStatus, ObjectUpdate,
     ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PhysicsSettings,
     QueuedCommand, SpawnConfig, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION,
-    CNAT_RIGHT, CNAT_TOP, OWNER_NONE,
+    CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -41,6 +41,7 @@ pub(crate) struct HostWorldObject {
     pub action_target2: Option<ObjectId>,
     pub action_procedure: Option<String>,
     pub owner: i32,
+    pub category: i32,
     pub energy: i32,
     pub position: Vector2,
     #[allow(dead_code)]
@@ -53,6 +54,7 @@ pub(crate) struct HostWorldObject {
 }
 
 impl HostWorldObject {
+    #[cfg(test)]
     pub(crate) fn new(
         id: ObjectId,
         definition_id: impl Into<String>,
@@ -70,6 +72,44 @@ impl HostWorldObject {
         action_ticks: u32,
         container: Option<ObjectId>,
     ) -> Self {
+        Self::with_category(
+            id,
+            definition_id,
+            status,
+            action_name,
+            action_target,
+            action_target2,
+            action_procedure,
+            owner,
+            DEFAULT_CATEGORY,
+            energy,
+            position,
+            velocity,
+            vertices,
+            action_data,
+            action_ticks,
+            container,
+        )
+    }
+
+    pub(crate) fn with_category(
+        id: ObjectId,
+        definition_id: impl Into<String>,
+        status: ObjectStatus,
+        action_name: impl Into<String>,
+        action_target: Option<ObjectId>,
+        action_target2: Option<ObjectId>,
+        action_procedure: Option<String>,
+        owner: i32,
+        category: i32,
+        energy: i32,
+        position: Vector2,
+        velocity: Vector2,
+        vertices: Vec<ObjectVertex>,
+        action_data: i32,
+        action_ticks: u32,
+        container: Option<ObjectId>,
+    ) -> Self {
         Self {
             id,
             definition_id: definition_id.into(),
@@ -79,6 +119,7 @@ impl HostWorldObject {
             action_target2,
             action_procedure,
             owner,
+            category,
             energy,
             position,
             velocity,
@@ -111,6 +152,10 @@ impl HostWorldObject {
 
     pub fn owner(&self) -> i32 {
         self.owner
+    }
+
+    pub fn category(&self) -> i32 {
+        self.category
     }
 
     pub fn energy(&self) -> i32 {
@@ -152,6 +197,7 @@ pub(crate) struct HostWorldContext {
     objects: Rc<HashMap<ObjectId, HostWorldObject>>,
     order: Rc<Vec<ObjectId>>,
     landscape: Option<Rc<Landscape>>,
+    definitions: Rc<HashMap<DefinitionId, i32>>,
     next_object_id: u64,
 }
 
@@ -161,6 +207,7 @@ impl Default for HostWorldContext {
             objects: Rc::new(HashMap::new()),
             order: Rc::new(Vec::new()),
             landscape: None,
+            definitions: Rc::new(HashMap::new()),
             next_object_id: 1,
         }
     }
@@ -172,12 +219,13 @@ impl HostWorldContext {
     where
         I: IntoIterator<Item = HostWorldObject>,
     {
-        Self::with_landscape(objects, None, 1)
+        Self::with_landscape(objects, None, HashMap::new(), 1)
     }
 
     pub(crate) fn with_landscape<I>(
         objects: I,
         landscape: Option<Landscape>,
+        definitions: HashMap<DefinitionId, i32>,
         next_object_id: u64,
     ) -> Self
     where
@@ -195,6 +243,7 @@ impl HostWorldContext {
             objects: Rc::new(lookup),
             order: Rc::new(order),
             landscape: landscape.map(Rc::new),
+            definitions: Rc::new(definitions),
             next_object_id,
         }
     }
@@ -213,6 +262,10 @@ impl HostWorldContext {
 
     pub(crate) fn next_object_id(&self) -> u64 {
         self.next_object_id
+    }
+
+    pub(crate) fn definition_category(&self, id: &str) -> Option<i32> {
+        self.definitions.get(id).copied()
     }
 }
 
@@ -745,6 +798,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CreateParticle", create_particle);
     script.register_host_function("ClearParticles", clear_particles);
     script.register_host_function("Contained", contained);
+    script.register_host_function("GetCategory", get_category);
+    script.register_host_function("SetCategory", set_category);
     script.register_host_function("SetOwner", set_owner);
     script.register_host_function("GetOwner", get_owner);
     script.register_host_function("SetObjectStatus", set_object_status);
@@ -786,6 +841,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub status: ObjectStatus,
     pub energy: i32,
     pub owner: i32,
+    pub category: i32,
     pub position: Vector2,
     pub velocity: Vector2,
     pub effects: &'a [EffectState],
@@ -801,6 +857,7 @@ pub(crate) struct HostObjectContext<'a> {
 }
 
 impl<'a> HostObjectContext<'a> {
+    #[cfg(test)]
     pub fn new(
         id: ObjectId,
         container: Option<ObjectId>,
@@ -820,12 +877,55 @@ impl<'a> HostObjectContext<'a> {
         action_target2: Option<ObjectId>,
         vertices: &'a [ObjectVertex],
     ) -> Self {
+        Self::with_category(
+            id,
+            container,
+            status,
+            energy,
+            owner,
+            position,
+            velocity,
+            effects,
+            action_name,
+            action_ticks,
+            action_data,
+            action_library,
+            direction,
+            command_direction,
+            action_target,
+            action_target2,
+            vertices,
+            DEFAULT_CATEGORY,
+        )
+    }
+
+    pub fn with_category(
+        id: ObjectId,
+        container: Option<ObjectId>,
+        status: ObjectStatus,
+        energy: i32,
+        owner: i32,
+        position: Vector2,
+        velocity: Vector2,
+        effects: &'a [EffectState],
+        action_name: impl Into<String>,
+        action_ticks: u32,
+        action_data: i32,
+        action_library: ActionLibrary,
+        direction: Direction,
+        command_direction: CommandDirection,
+        action_target: Option<ObjectId>,
+        action_target2: Option<ObjectId>,
+        vertices: &'a [ObjectVertex],
+        category: i32,
+    ) -> Self {
         Self {
             id,
             container,
             status,
             energy,
             owner,
+            category,
             position,
             velocity,
             effects,
@@ -3761,6 +3861,10 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_mut()
             .ok_or_else(|| RuntimeError::new("CreateObject requires an active engine context"))?;
 
+        let definition_category = context
+            .definition_category(&definition)
+            .unwrap_or(DEFAULT_CATEGORY);
+
         let base_position = context
             .object_context()
             .map(|object| object.effective_position())
@@ -3781,9 +3885,10 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         let spawn = SpawnConfig::new(definition.clone())
             .with_position(position)
             .with_owner(owner)
+            .with_category(definition_category)
             .with_id(id);
 
-        let preview = HostWorldObject::new(
+        let preview = HostWorldObject::with_category(
             id,
             definition,
             ObjectStatus::Normal,
@@ -3792,6 +3897,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             None,
             None,
             owner,
+            definition_category,
             0,
             position,
             Vector2::ZERO,
@@ -4033,6 +4139,95 @@ fn contained(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         Ok(to_value(object.container()))
+    })
+}
+
+fn get_category(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "GetCategory expects at most 2 arguments: target, definition",
+        ));
+    }
+
+    let target_value = args.get(0).unwrap_or(&Value::Nil);
+    let target_id = parse_object_reference_argument(target_value, "GetCategory", "target")?;
+    let definition = parse_definition_argument(args.get(1), "GetCategory")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(definition_id) = definition {
+            if let Some(category) = context.definition_category(&definition_id) {
+                return Ok(Value::Int(category));
+            }
+            return Ok(Value::Nil);
+        }
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if object.id() == target {
+                    return Ok(Value::Int(object.category()));
+                }
+            }
+            if let Some(other) = context.get_world_object(target) {
+                return Ok(Value::Int(other.category()))
+            }
+            return Ok(Value::Nil);
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        Ok(Value::Int(object.category()))
+    })
+}
+
+fn set_category(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetCategory expects at least 1 argument: category",
+        ));
+    }
+
+    let category = value_to_i32(&args[0], "SetCategory", "category")?;
+
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(index) {
+        target_id = parse_object_reference_argument(arg, "SetCategory", "target")?;
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetCategory: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetCategory requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        object.set_category(category);
+        Ok(Value::Bool(true))
     })
 }
 
@@ -4554,6 +4749,7 @@ impl EffectHostContext {
                 action_target,
                 action_target2,
                 vertices,
+                category,
             } = ctx;
             ObjectScopeContext::new(
                 id,
@@ -4561,11 +4757,12 @@ impl EffectHostContext {
                 status,
                 energy,
                 owner,
-                position,
-                velocity,
-                effects.to_vec(),
-                action_library,
-                action_name,
+                category,
+                    position,
+                    velocity,
+                    effects.to_vec(),
+                    action_library,
+                    action_name,
                 action_ticks,
                 action_data,
                 direction,
@@ -4637,6 +4834,10 @@ impl EffectHostContext {
         let mut ids = self.world.object_ids().to_vec();
         ids.extend(self.pending_order.iter().copied());
         ids
+    }
+
+    fn definition_category(&self, id: &str) -> Option<i32> {
+        self.world.definition_category(id)
     }
 
     fn landscape_ref(&self) -> Option<&Landscape> {
@@ -4839,6 +5040,7 @@ struct ObjectScopeContext {
     current_energy: i32,
     max_energy: i32,
     current_owner: i32,
+    current_category: i32,
     current_direction: Direction,
     current_command_direction: CommandDirection,
     current_position: Vector2,
@@ -4853,6 +5055,7 @@ impl ObjectScopeContext {
         status: ObjectStatus,
         energy: i32,
         owner: i32,
+        category: i32,
         position: Vector2,
         velocity: Vector2,
         effects: Vec<EffectState>,
@@ -4886,6 +5089,7 @@ impl ObjectScopeContext {
             current_energy: energy,
             max_energy,
             current_owner: owner,
+            current_category: category,
             current_direction: direction,
             current_command_direction: command_direction,
             current_position: position,
@@ -4914,6 +5118,18 @@ impl ObjectScopeContext {
     fn set_owner(&mut self, owner: i32) {
         self.current_owner = owner;
         self.pending_update.owner = Some(owner);
+    }
+
+    fn category(&self) -> i32 {
+        self.pending_update
+            .category
+            .unwrap_or(self.current_category)
+    }
+
+    fn set_category(&mut self, category: i32) {
+        let normalized = crate::normalize_category(category, self.current_category);
+        self.current_category = normalized;
+        self.pending_update.category = Some(normalized);
     }
 
     fn container(&self) -> Option<ObjectId> {
@@ -6408,7 +6624,7 @@ mod tests {
     fn get_vertex_contact_uses_landscape_sampling() {
         let vertices = [ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER | CNAT_BOTTOM)];
         let landscape = Landscape::flat(8, 0);
-        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape), 1);
+        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape), HashMap::new(), 1);
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
@@ -6446,7 +6662,7 @@ mod tests {
             ObjectVertex::new(0, -5).with_cnat(CNAT_TOP),
         ];
         let landscape = Landscape::flat(4, 0);
-        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape), 1);
+        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape), HashMap::new(), 1);
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
@@ -6886,7 +7102,7 @@ mod tests {
     #[test]
     fn set_position_clamps_coordinates_when_requested() {
         let landscape = Landscape::flat(4, 6);
-        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape), 1);
+        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape), HashMap::new(), 1);
         let args = [
             Value::Int(10),
             Value::Int(20),

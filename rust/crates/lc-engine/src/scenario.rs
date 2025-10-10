@@ -57,6 +57,7 @@ struct ScenarioDefinition {
     actions: Option<DefinitionActions>,
     crew_member: bool,
     movement: MovementProfile,
+    category: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +158,7 @@ impl Scenario {
             }
             compiled.set_crew_member(definition.crew_member);
             compiled.set_movement_profile(definition.movement);
+            compiled.set_category(definition.category);
             engine.register_definition(compiled)?;
         }
 
@@ -232,6 +234,7 @@ impl Scenario {
                 actions,
                 crew_member,
                 movement,
+                category,
             } = definition;
 
             if !seen_ids.insert(id.clone()) {
@@ -259,6 +262,10 @@ impl Scenario {
                 None => MovementProfile::default(),
             };
 
+            let normalized_category = category
+                .map(|value| crate::normalize_category(value, crate::DEFAULT_CATEGORY))
+                .unwrap_or(crate::DEFAULT_CATEGORY);
+
             definitions.push(ScenarioDefinition {
                 id,
                 name,
@@ -266,6 +273,7 @@ impl Scenario {
                 actions,
                 crew_member,
                 movement: movement_profile,
+                category: normalized_category,
             });
         }
 
@@ -308,6 +316,7 @@ impl Scenario {
                 status,
                 handle,
                 container,
+                category,
             } = object;
 
             let mut spawn = SpawnConfig::new(definition.clone());
@@ -349,6 +358,11 @@ impl Scenario {
             }
             if let Some(status) = status {
                 spawn = spawn.with_status(status.into());
+            }
+
+            if let Some(category) = category {
+                spawn =
+                    spawn.with_category(crate::normalize_category(category, crate::DEFAULT_CATEGORY));
             }
 
             let handle = handle
@@ -467,6 +481,8 @@ struct DefinitionManifest {
     crew_member: bool,
     #[serde(default)]
     movement: Option<MovementManifest>,
+    #[serde(default)]
+    category: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -672,6 +688,8 @@ struct ObjectManifest {
     handle: Option<String>,
     #[serde(default)]
     container: Option<String>,
+    #[serde(default)]
+    category: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -1752,6 +1770,7 @@ global func Step(state, frame, random)
                 actions: None,
                 crew_member: false,
                 movement: MovementProfile::default(),
+                category: crate::DEFAULT_CATEGORY,
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
@@ -1814,6 +1833,7 @@ global func Step(state, frame, random)
                 actions: None,
                 crew_member: false,
                 movement: MovementProfile::default(),
+                category: crate::DEFAULT_CATEGORY,
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,

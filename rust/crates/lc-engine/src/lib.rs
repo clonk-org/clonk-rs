@@ -47,8 +47,39 @@ pub const CNAT_CENTER: u32 = 16;
 pub const CNAT_MULTI_ATTACH: u32 = 32;
 pub const CNAT_NO_COLLISION: u32 = 64;
 
+pub const CATEGORY_STATIC_BACK: i32 = 1 << 0;
+pub const CATEGORY_STRUCTURE: i32 = 1 << 1;
+pub const CATEGORY_VEHICLE: i32 = 1 << 2;
+pub const CATEGORY_LIVING: i32 = 1 << 3;
+pub const CATEGORY_OBJECT: i32 = 1 << 4;
+pub const CATEGORY_SORT_LIMIT: i32 = CATEGORY_STATIC_BACK
+    | CATEGORY_STRUCTURE
+    | CATEGORY_VEHICLE
+    | CATEGORY_LIVING
+    | CATEGORY_OBJECT;
+pub const DEFAULT_CATEGORY: i32 = CATEGORY_STATIC_BACK;
+
 fn default_rng() -> ChaCha8Rng {
     ChaCha8Rng::seed_from_u64(0)
+}
+
+pub(crate) fn normalize_category(raw: i32, fallback: i32) -> i32 {
+    let sort_bits = raw & CATEGORY_SORT_LIMIT;
+    if sort_bits != 0 {
+        raw
+    } else {
+        let fallback_bits = fallback & CATEGORY_SORT_LIMIT;
+        let replacement = if fallback_bits != 0 {
+            fallback_bits
+        } else {
+            CATEGORY_STATIC_BACK
+        };
+        (raw & !CATEGORY_SORT_LIMIT) | replacement
+    }
+}
+
+pub(crate) fn default_category() -> i32 {
+    DEFAULT_CATEGORY
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1030,6 +1061,8 @@ pub struct ObjectState {
     pub status: ObjectStatus,
     #[serde(default = "default_owner")]
     pub owner: i32,
+    #[serde(default = "default_category")]
+    pub category: i32,
     #[serde(default)]
     pub crew_member: bool,
     #[serde(default = "default_alive")]
@@ -1093,6 +1126,9 @@ impl ObjectState {
         if let Some(owner) = delta.owner {
             self.owner = owner;
         }
+        if let Some(category) = delta.category {
+            self.category = category;
+        }
         if let Some(crew_member) = delta.crew_member {
             self.crew_member = crew_member;
         }
@@ -1130,6 +1166,7 @@ struct ObjectDelta {
     action: Option<ActionUpdate>,
     status: Option<ObjectStatus>,
     owner: Option<i32>,
+    category: Option<i32>,
     crew_member: Option<bool>,
     container: Option<Option<ObjectId>>,
     vertices: Option<Vec<ObjectVertex>>,
@@ -1154,6 +1191,9 @@ impl ObjectDelta {
         }
         if let Some(owner) = update.owner {
             self.owner = Some(owner);
+        }
+        if let Some(category) = update.category {
+            self.category = Some(category);
         }
         if let Some(crew_member) = update.crew_member {
             self.crew_member = Some(crew_member);
@@ -1187,6 +1227,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             action: update.action,
             status: update.status,
             owner: update.owner,
+            category: update.category,
             crew_member: update.crew_member,
             container: update.container,
             vertices: update.vertices,
@@ -1208,6 +1249,8 @@ pub struct ObjectUpdate {
     pub status: Option<ObjectStatus>,
     #[serde(default)]
     pub owner: Option<i32>,
+    #[serde(default)]
+    pub category: Option<i32>,
     #[serde(default)]
     pub crew_member: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1281,6 +1324,11 @@ impl ObjectUpdate {
 
     pub fn with_owner(mut self, owner: i32) -> Self {
         self.owner = Some(owner);
+        self
+    }
+
+    pub fn with_category(mut self, category: i32) -> Self {
+        self.category = Some(category);
         self
     }
 
@@ -1577,6 +1625,7 @@ impl Object {
             contents: self.state.contents.clone(),
             status: self.state.status,
             owner: self.state.owner,
+            category: self.state.category,
             crew_member: self.state.crew_member,
             alive: self.state.alive,
         }
@@ -1840,6 +1889,8 @@ pub struct SpawnConfig {
     pub container: Option<ObjectId>,
     #[serde(default)]
     pub alive: Option<bool>,
+    #[serde(default)]
+    pub category: Option<i32>,
 }
 
 impl SpawnConfig {
@@ -1860,6 +1911,7 @@ impl SpawnConfig {
             status: None,
             container: None,
             alive: None,
+            category: None,
         }
     }
 
@@ -1918,6 +1970,11 @@ impl SpawnConfig {
         self
     }
 
+    pub fn with_category(mut self, category: i32) -> Self {
+        self.category = Some(category);
+        self
+    }
+
     pub fn with_id(mut self, id: ObjectId) -> Self {
         self.id = Some(id);
         self
@@ -1971,6 +2028,8 @@ pub struct ObjectSnapshot {
     pub status: ObjectStatus,
     #[serde(default = "default_owner")]
     pub owner: i32,
+    #[serde(default = "default_category")]
+    pub category: i32,
     #[serde(default)]
     pub crew_member: bool,
     #[serde(default = "default_alive")]
@@ -2009,6 +2068,8 @@ pub struct SimulationSnapshot {
     pub controls: Vec<String>,
     #[serde(default)]
     pub network_packets: Vec<NetworkPacketSnapshot>,
+    #[serde(default)]
+    pub definition_categories: HashMap<DefinitionId, i32>,
 }
 
 impl SimulationSnapshot {
@@ -2138,6 +2199,7 @@ pub struct Definition {
     action_library: ActionLibrary,
     crew_member: bool,
     movement: MovementProfile,
+    category: i32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2187,6 +2249,7 @@ impl Definition {
             action_library: ActionLibrary::default(),
             crew_member: false,
             movement: MovementProfile::default(),
+            category: DEFAULT_CATEGORY,
         })
     }
 
@@ -2234,6 +2297,14 @@ impl Definition {
         self.movement = movement;
     }
 
+    pub fn category(&self) -> i32 {
+        self.category
+    }
+
+    pub fn set_category(&mut self, category: i32) {
+        self.category = normalize_category(category, DEFAULT_CATEGORY);
+    }
+
     fn call_initialize(
         &self,
         state: &ObjectState,
@@ -2258,7 +2329,7 @@ impl Definition {
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let (result, host_effects) = compat::with_effect_context(
-            Some(compat::HostObjectContext::new(
+            Some(compat::HostObjectContext::with_category(
                 object_id,
                 state.container,
                 state.status,
@@ -2276,6 +2347,7 @@ impl Definition {
                 state.action.target,
                 state.action.target2,
                 &state.vertices,
+                state.category,
             )),
             global_effects,
             world,
@@ -2371,7 +2443,7 @@ impl Definition {
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let (result, host_effects) = compat::with_effect_context(
-            Some(compat::HostObjectContext::new(
+            Some(compat::HostObjectContext::with_category(
                 object_id,
                 state.container,
                 state.status,
@@ -2389,6 +2461,7 @@ impl Definition {
                 state.action.target,
                 state.action.target2,
                 &state.vertices,
+                state.category,
             )),
             global_effects,
             world,
@@ -2485,7 +2558,7 @@ impl Definition {
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let (result, host_effects) = compat::with_effect_context(
-            Some(compat::HostObjectContext::new(
+            Some(compat::HostObjectContext::with_category(
                 object_id,
                 state.container,
                 state.status,
@@ -2503,6 +2576,7 @@ impl Definition {
                 state.action.target,
                 state.action.target2,
                 &state.vertices,
+                state.category,
             )),
             global_effects,
             world,
@@ -2660,7 +2734,7 @@ impl Definition {
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let (result, mut commands) = compat::with_effect_context(
-            Some(compat::HostObjectContext::new(
+            Some(compat::HostObjectContext::with_category(
                 object_id,
                 state.container,
                 state.status,
@@ -2678,6 +2752,7 @@ impl Definition {
                 state.action.target,
                 state.action.target2,
                 &state.vertices,
+                state.category,
             )),
             global_effects,
             world,
@@ -3262,6 +3337,11 @@ impl Engine {
 
     fn host_world_context(&self) -> HostWorldContext {
         let landscape = self.landscape.clone();
+        let definition_categories: HashMap<DefinitionId, i32> = self
+            .definitions
+            .iter()
+            .map(|(id, definition)| (id.clone(), definition.category()))
+            .collect();
         HostWorldContext::with_landscape(
             self.objects.iter().map(|object| {
                 let procedure = self
@@ -3273,7 +3353,7 @@ impl Engine {
                             .procedure_name_for_action(&object.state.action.name)
                     })
                     .map(|name| name.to_string());
-                HostWorldObject::new(
+                HostWorldObject::with_category(
                     object.id,
                     object.definition_id.clone(),
                     object.state.status,
@@ -3282,6 +3362,7 @@ impl Engine {
                     object.state.action.target2,
                     procedure,
                     object.state.owner,
+                    object.state.category,
                     object.state.energy,
                     object.state.position,
                     object.state.velocity,
@@ -3292,6 +3373,7 @@ impl Engine {
                 )
             }),
             landscape,
+            definition_categories,
             self.next_object_id,
         )
     }
@@ -3988,6 +4070,7 @@ impl Engine {
             crew_member,
             container,
             vertices,
+            ..
         } = update;
 
         let definition_id = self.objects[index].definition_id.clone();
@@ -4431,6 +4514,11 @@ impl Engine {
                 eliminated,
             });
         }
+        let definition_categories = self
+            .definitions
+            .iter()
+            .map(|(id, definition)| (id.clone(), definition.category()))
+            .collect();
         SimulationSnapshot {
             frame: self.frame,
             physics: Some(self.physics),
@@ -4450,6 +4538,7 @@ impl Engine {
             },
             controls: Vec::new(),
             network_packets: Vec::new(),
+            definition_categories,
         }
     }
 
@@ -4559,6 +4648,7 @@ impl Engine {
                     contents: Vec::new(),
                     status: snapshot.status,
                     owner: snapshot.owner,
+                    category: snapshot.category,
                     crew_member: snapshot.crew_member,
                     alive: snapshot.alive,
                 },
@@ -5947,19 +6037,27 @@ impl Engine {
             status,
             container,
             alive,
+            category,
         } = config;
 
-        let definition_ref = self
-            .definitions
-            .get(&definition_id)
-            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        let action_library = definition_ref.action_library().clone();
+        let (action_library, definition_category, default_action_state, default_crew_member) = {
+            let definition_ref = self
+                .definitions
+                .get(&definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+            (
+                definition_ref.action_library().clone(),
+                definition_ref.category(),
+                definition_ref.default_action_state(),
+                definition_ref.is_crew(),
+            )
+        };
         let mut initial_action = match action {
             Some(state) => state,
-            None => definition_ref.default_action_state(),
+            None => default_action_state,
         };
         initial_action.reconcile_with_library(&action_library);
-        let initial_crew_member = crew_member.unwrap_or_else(|| definition_ref.is_crew());
+        let initial_crew_member = crew_member.unwrap_or(default_crew_member);
 
         let id = match explicit_id {
             Some(explicit) => {
@@ -5974,6 +6072,10 @@ impl Engine {
             }
             None => self.next_object_id(),
         };
+        let initial_category = category
+            .map(|value| normalize_category(value, definition_category))
+            .unwrap_or(definition_category);
+
         let mut object = Object::new(
             id,
             definition_id.clone(),
@@ -5990,6 +6092,7 @@ impl Engine {
                 contents: Vec::new(),
                 status: status.unwrap_or_default(),
                 owner,
+                category: initial_category,
                 crew_member: initial_crew_member,
                 alive: alive.unwrap_or(true),
             },
@@ -6037,7 +6140,7 @@ impl Engine {
                     .definitions
                     .get(&definition_id)
                     .expect("definition must exist");
-                definition.call_initialize(
+        definition.call_initialize(
                     &object.state,
                     id,
                     random,
@@ -6170,6 +6273,7 @@ fn build_state_value(
         Value::Int(state.command_direction.to_script_value()),
     );
     map.insert("owner".into(), Value::Int(state.owner));
+    map.insert("category".into(), Value::Int(state.category));
     map.insert("crew_member".into(), Value::Bool(state.crew_member));
     map.insert("status".into(), Value::Int(state.status.to_script_value()));
     match state.container {
@@ -6265,6 +6369,7 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
         Value::Int(snapshot.command_direction.to_script_value()),
     );
     map.insert("owner".into(), Value::Int(snapshot.owner));
+    map.insert("category".into(), Value::Int(snapshot.category));
     map.insert("crew_member".into(), Value::Bool(snapshot.crew_member));
     map.insert(
         "status".into(),
@@ -6334,7 +6439,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         .saturating_add(1);
     HostWorldContext::with_landscape(
         snapshot.objects.iter().map(|object| {
-            HostWorldObject::new(
+            HostWorldObject::with_category(
                 object.id,
                 object.definition_id.clone(),
                 object.status,
@@ -6343,6 +6448,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.action.target2,
                 object.action_procedure.clone(),
                 object.owner,
+                object.category,
                 object.energy,
                 object.position,
                 object.velocity,
@@ -6353,6 +6459,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
             )
         }),
         snapshot.landscape.clone(),
+        snapshot.definition_categories.clone(),
         next_object_id,
     )
 }

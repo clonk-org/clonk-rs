@@ -49,6 +49,7 @@ typedef struct LcEngineObjectSnapshot {
     int32_t velocity_y;
     int32_t energy;
     int32_t owner;
+    int32_t category;
     bool crew_member;
     bool alive;
     const char *action_name;
@@ -203,6 +204,7 @@ typedef struct LcEngineRuntimeObjectState {
     int32_t velocity_y;
     int32_t energy;
     int32_t owner;
+    int32_t category;
     bool crew_member;
     bool alive;
     int32_t status;

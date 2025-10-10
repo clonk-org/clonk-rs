@@ -23,14 +23,21 @@
         "action": {
           "name": "Idle",
           "phase": 1,
-          "ticks": 0
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
         },
+        "direction": 0,
+        "command_direction": 0,
         "action_procedure": null,
         "effects": [],
+        "vertices": [],
         "container": null,
         "contents": [],
         "status": "normal",
         "owner": -1,
+        "category": 1,
         "crew_member": false,
         "alive": true
       }
@@ -46,12 +53,17 @@
         "temperature_period": 0,
         "temperature_phase": 0,
         "time_of_day": 0,
-        "time_speed": 0
+        "time_speed": 0,
+        "precipitation": 0,
+        "sky_color": null
       },
       "wind_force": 0,
-      "ambient_temperature": 0
+      "ambient_temperature": 0,
+      "precipitation": 0,
+      "sky_color": null
     },
     "global_effects": [],
+    "particles": [],
     "crew_selection": {},
     "crew_roles": {},
     "known_crew_owners": [],
@@ -94,6 +106,15 @@
       ],
       "stream": 0,
       "word_pos": 2
+    },
+    "surfaces": [],
+    "hud": {
+      "players": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Mover": 1
     }
   },
   {
@@ -120,14 +141,21 @@
         "action": {
           "name": "Idle",
           "phase": 2,
-          "ticks": 0
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
         },
+        "direction": 0,
+        "command_direction": 0,
         "action_procedure": null,
         "effects": [],
+        "vertices": [],
         "container": null,
         "contents": [],
         "status": "normal",
         "owner": -1,
+        "category": 1,
         "crew_member": false,
         "alive": true
       }
@@ -143,12 +171,17 @@
         "temperature_period": 0,
         "temperature_phase": 0,
         "time_of_day": 0,
-        "time_speed": 0
+        "time_speed": 0,
+        "precipitation": 0,
+        "sky_color": null
       },
       "wind_force": 0,
-      "ambient_temperature": 0
+      "ambient_temperature": 0,
+      "precipitation": 0,
+      "sky_color": null
     },
     "global_effects": [],
+    "particles": [],
     "crew_selection": {},
     "crew_roles": {},
     "known_crew_owners": [],
@@ -191,6 +224,15 @@
       ],
       "stream": 0,
       "word_pos": 3
+    },
+    "surfaces": [],
+    "hud": {
+      "players": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Mover": 1
     }
   },
   {
@@ -217,14 +259,21 @@
         "action": {
           "name": "Idle",
           "phase": 3,
-          "ticks": 0
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
         },
+        "direction": 0,
+        "command_direction": 0,
         "action_procedure": null,
         "effects": [],
+        "vertices": [],
         "container": null,
         "contents": [],
         "status": "normal",
         "owner": -1,
+        "category": 1,
         "crew_member": false,
         "alive": true
       },
@@ -243,14 +292,21 @@
         "action": {
           "name": "Idle",
           "phase": 0,
-          "ticks": 0
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
         },
+        "direction": 0,
+        "command_direction": 0,
         "action_procedure": null,
         "effects": [],
+        "vertices": [],
         "container": null,
         "contents": [],
         "status": "normal",
         "owner": -1,
+        "category": 1,
         "crew_member": false,
         "alive": true
       }
@@ -266,12 +322,17 @@
         "temperature_period": 0,
         "temperature_phase": 0,
         "time_of_day": 0,
-        "time_speed": 0
+        "time_speed": 0,
+        "precipitation": 0,
+        "sky_color": null
       },
       "wind_force": 0,
-      "ambient_temperature": 0
+      "ambient_temperature": 0,
+      "precipitation": 0,
+      "sky_color": null
     },
     "global_effects": [],
+    "particles": [],
     "crew_selection": {},
     "crew_roles": {},
     "known_crew_owners": [],
@@ -314,6 +375,15 @@
       ],
       "stream": 0,
       "word_pos": 5
+    },
+    "surfaces": [],
+    "hud": {
+      "players": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Mover": 1
     }
   },
   {
@@ -340,14 +410,21 @@
         "action": {
           "name": "Idle",
           "phase": 4,
-          "ticks": 0
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
         },
+        "direction": 0,
+        "command_direction": 0,
         "action_procedure": null,
         "effects": [],
+        "vertices": [],
         "container": null,
         "contents": [],
         "status": "normal",
         "owner": -1,
+        "category": 1,
         "crew_member": false,
         "alive": true
       },
@@ -366,14 +443,21 @@
         "action": {
           "name": "Idle",
           "phase": 1,
-          "ticks": 0
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
         },
+        "direction": 0,
+        "command_direction": 0,
         "action_procedure": null,
         "effects": [],
+        "vertices": [],
         "container": null,
         "contents": [],
         "status": "normal",
         "owner": -1,
+        "category": 1,
         "crew_member": false,
         "alive": true
       }
@@ -389,12 +473,17 @@
         "temperature_period": 0,
         "temperature_phase": 0,
         "time_of_day": 0,
-        "time_speed": 0
+        "time_speed": 0,
+        "precipitation": 0,
+        "sky_color": null
       },
       "wind_force": 0,
-      "ambient_temperature": 0
+      "ambient_temperature": 0,
+      "precipitation": 0,
+      "sky_color": null
     },
     "global_effects": [],
+    "particles": [],
     "crew_selection": {},
     "crew_roles": {},
     "known_crew_owners": [],
@@ -437,6 +526,15 @@
       ],
       "stream": 0,
       "word_pos": 7
+    },
+    "surfaces": [],
+    "hud": {
+      "players": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Mover": 1
     }
   },
   {
@@ -463,14 +561,21 @@
         "action": {
           "name": "Idle",
           "phase": 5,
-          "ticks": 0
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
         },
+        "direction": 0,
+        "command_direction": 0,
         "action_procedure": null,
         "effects": [],
+        "vertices": [],
         "container": null,
         "contents": [],
         "status": "normal",
         "owner": -1,
+        "category": 1,
         "crew_member": false,
         "alive": true
       },
@@ -489,14 +594,21 @@
         "action": {
           "name": "Idle",
           "phase": 2,
-          "ticks": 0
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
         },
+        "direction": 0,
+        "command_direction": 0,
         "action_procedure": null,
         "effects": [],
+        "vertices": [],
         "container": null,
         "contents": [],
         "status": "normal",
         "owner": -1,
+        "category": 1,
         "crew_member": false,
         "alive": true
       }
@@ -512,12 +624,17 @@
         "temperature_period": 0,
         "temperature_phase": 0,
         "time_of_day": 0,
-        "time_speed": 0
+        "time_speed": 0,
+        "precipitation": 0,
+        "sky_color": null
       },
       "wind_force": 0,
-      "ambient_temperature": 0
+      "ambient_temperature": 0,
+      "precipitation": 0,
+      "sky_color": null
     },
     "global_effects": [],
+    "particles": [],
     "crew_selection": {},
     "crew_roles": {},
     "known_crew_owners": [],
@@ -560,6 +677,15 @@
       ],
       "stream": 0,
       "word_pos": 9
+    },
+    "surfaces": [],
+    "hud": {
+      "players": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Mover": 1
     }
   },
   {
@@ -582,12 +708,17 @@
         "temperature_period": 0,
         "temperature_phase": 0,
         "time_of_day": 0,
-        "time_speed": 0
+        "time_speed": 0,
+        "precipitation": 0,
+        "sky_color": null
       },
       "wind_force": 0,
-      "ambient_temperature": 0
+      "ambient_temperature": 0,
+      "precipitation": 0,
+      "sky_color": null
     },
     "global_effects": [],
+    "particles": [],
     "crew_selection": {},
     "crew_roles": {},
     "known_crew_owners": [],
@@ -630,6 +761,15 @@
       ],
       "stream": 0,
       "word_pos": 11
+    },
+    "surfaces": [],
+    "hud": {
+      "players": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Mover": 1
     }
   }
 ]

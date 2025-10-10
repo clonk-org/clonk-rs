@@ -218,6 +218,17 @@ bool WouldIntroduceContainerCycle(C4Object &object, C4Object *candidate) {
     return false;
 }
 
+static int32_t NormalizeCategory(int32_t desired, int32_t fallback) {
+    if (desired & C4D_SortLimit) {
+        return desired;
+    }
+    int32_t sort_bits = fallback & C4D_SortLimit;
+    if (!sort_bits) {
+        sort_bits = C4D_StaticBack;
+    }
+    return (desired & ~C4D_SortLimit) | sort_bits;
+}
+
 C4Object *CreateRuntimeObject(
     C4Game &game,
     const LcEngineRuntimeObjectState &state,
@@ -276,6 +287,9 @@ C4Object *CreateRuntimeObject(
         return nullptr;
     }
 
+    const int32_t normalized_category = NormalizeCategory(state.category, definition->Category);
+    object->SetCategory(normalized_category);
+
     object->Con = FullCon;
     object->UpdateMass();
     object->UpdateFace(true);
@@ -331,6 +345,11 @@ void ApplyRuntimeObjectStateToC4Object(
     object.Energy = state.energy;
     if (object.Owner != state.owner) {
         object.SetOwner(state.owner);
+    }
+
+    const int32_t normalized_category = NormalizeCategory(state.category, object.Category);
+    if (object.Category != normalized_category) {
+        object.SetCategory(normalized_category);
     }
 
     object.SetAlive(state.alive);
@@ -966,6 +985,7 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
         entry.snapshot.velocity_y = fixtoi(object->ydir);
         entry.snapshot.energy = object->Energy;
         entry.snapshot.owner = static_cast<int32_t>(object->Owner);
+        entry.snapshot.category = object->Category;
         entry.snapshot.crew_member = (object->OCF & OCF_CrewMember) != 0;
         entry.snapshot.alive = object->Alive != 0;
         entry.action = object->Action.Name;
