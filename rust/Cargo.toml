@@ -8,6 +8,7 @@ members = [
     "crates/lc-frontend",
     "crates/lc-launcher",
     "crates/lc-launcher-ui",
+    "crates/lc-launcher-shell",
     "crates/lc-audio",
     "crates/lc-network",
     "crates/lc-gui",
