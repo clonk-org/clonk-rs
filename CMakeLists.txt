@@ -43,7 +43,8 @@ option(USE_RUST_CONFIG "Use Rust-based configuration loader" OFF)
 option(USE_RUST_GROUP_VALIDATION "Cross-check group contents with the Rust port" OFF)
 option(USE_RUST_ENGINE_VALIDATION "Validate C++ engine snapshots against the Rust port" ON)
 option(USE_RUST_GUI_VALIDATION "Validate GUI layouts against the Rust port" OFF)
-if(USE_RUST_CONFIG OR USE_RUST_GROUP_VALIDATION OR USE_RUST_ENGINE_VALIDATION OR USE_RUST_GUI_VALIDATION)
+option(USE_RUST_PLATFORM_PATHS "Use Rust-discovered platform paths" OFF)
+if(USE_RUST_CONFIG OR USE_RUST_GROUP_VALIDATION OR USE_RUST_ENGINE_VALIDATION OR USE_RUST_GUI_VALIDATION OR USE_RUST_PLATFORM_PATHS)
     find_package(Threads REQUIRED)
     if (CMAKE_BUILD_TYPE AND NOT DEFINED CMAKE_BUILD_TYPE_LOWER)
         string(TOLOWER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_LOWER)
@@ -62,6 +63,9 @@ if(USE_RUST_CONFIG OR USE_RUST_GROUP_VALIDATION OR USE_RUST_ENGINE_VALIDATION OR
     endif()
     if (USE_RUST_GUI_VALIDATION)
         add_definitions(-DUSE_RUST_GUI_VALIDATION)
+    endif()
+    if (USE_RUST_PLATFORM_PATHS)
+        add_definitions(-DUSE_RUST_PLATFORM_PATHS)
     endif()
 
     add_library(lc_core STATIC IMPORTED GLOBAL)
@@ -116,8 +120,33 @@ if(USE_RUST_CONFIG OR USE_RUST_GROUP_VALIDATION OR USE_RUST_ENGINE_VALIDATION OR
         IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_gui.a"
     )
 
+    if (USE_RUST_PLATFORM_PATHS)
+        add_library(lc_platform STATIC IMPORTED GLOBAL)
+        set_target_properties(lc_platform PROPERTIES
+            IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_platform.a"
+        )
+        add_library(lc_platform_cdylib SHARED IMPORTED GLOBAL)
+        set_target_properties(lc_platform_cdylib PROPERTIES
+            IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_platform.dylib"
+        )
+        add_library(lc_platform_static STATIC IMPORTED GLOBAL)
+        set_target_properties(lc_platform_static PROPERTIES
+            IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_platform.a"
+        )
+    endif()
+
+    set(RUST_BUILD_PACKAGES
+        --package lc-core
+        --package lc-resources
+        --package lc-engine
+        --package lc-gui
+    )
+    if (USE_RUST_PLATFORM_PATHS)
+        list(APPEND RUST_BUILD_PACKAGES --package lc-platform)
+    endif()
+
     add_custom_target(rust_build ALL
-        COMMAND cargo build --manifest-path ${CMAKE_SOURCE_DIR}/rust/Cargo.toml --lib --package lc-core --package lc-resources --package lc-engine --package lc-gui
+        COMMAND cargo build --manifest-path ${CMAKE_SOURCE_DIR}/rust/Cargo.toml --lib ${RUST_BUILD_PACKAGES}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/rust
         COMMENT "Building Rust workspace"
     )
@@ -275,6 +304,9 @@ endif ()
 if (USE_RUST_GUI_VALIDATION)
 	list(APPEND CLONK_SOURCES src/rust/RustGuiBridge.cpp)
 endif ()
+if (USE_RUST_PLATFORM_PATHS)
+	list(APPEND CLONK_SOURCES src/rust/RustPlatformBridge.cpp)
+endif ()
 
 set(LICENSES
 	"COPYING@LegacyClonk@ISC"
@@ -383,6 +415,9 @@ if (USE_RUST_ENGINE_VALIDATION)
 endif ()
 if (USE_RUST_GUI_VALIDATION)
 	target_link_libraries(clonk PRIVATE lc_gui_static Threads::Threads)
+endif ()
+if (USE_RUST_PLATFORM_PATHS)
+	target_link_libraries(clonk PRIVATE lc_platform_static Threads::Threads)
 endif ()
 
 if (USE_SDL_MIXER AND WIN32)

@@ -37,6 +37,9 @@
 #ifdef USE_RUST_CONFIG
 #include "rust/RustConfigBridge.h"
 #endif
+#ifdef USE_RUST_PLATFORM_PATHS
+#include "rust/RustPlatformBridge.h"
+#endif
 
 #ifdef _WIN32
 #include "StdRegistry.h"
@@ -1243,6 +1246,30 @@ bool C4Config::SyncRust()
 
 void C4ConfigGeneral::DeterminePaths(bool forceWorkingDirectory)
 {
+#ifdef USE_RUST_PLATFORM_PATHS
+	if (const auto paths = RustPlatformBridge::DiscoverPaths())
+	{
+		SCopy(paths->install_root.c_str(), ExePath, CFG_MaxString);
+		AppendBackslash(ExePath);
+		SCopy(paths->temp_dir.c_str(), TempPath, CFG_MaxString);
+		AppendBackslash(TempPath);
+		SCopy(paths->logs_dir.c_str(), LogPath, CFG_MaxString);
+		AppendBackslash(LogPath);
+		SCopy(paths->user_data_dir.c_str(), UserPath, CFG_MaxString);
+		SCopy(ExePath, ScreenshotPath, CFG_MaxString - 1);
+		if (ScreenshotFolder.getLength() + SLen(ScreenshotPath) + 1 <= CFG_MaxString)
+		{
+			SAppend(ScreenshotFolder.getData(), ScreenshotPath);
+			AppendBackslash(ScreenshotPath);
+		}
+		if (forceWorkingDirectory)
+			SetWorkingDirectory(ExePath);
+		if (PlayerPath[0])
+			AppendBackslash(PlayerPath);
+		RustPlatformBridge::EnsureUserDirectories();
+		return;
+	}
+#endif
 #ifdef _WIN32
 	// Exe path
 	if (GetModuleFileNameA(nullptr, ExePath, CFG_MaxString))
