@@ -92,6 +92,67 @@ impl Landscape {
         }
     }
 
+    pub fn path_is_clear(&self, start: Vector2, end: Vector2) -> bool {
+        self.first_collision_on_line(start, end).is_none()
+    }
+
+    pub fn first_collision_on_line(&self, start: Vector2, end: Vector2) -> Option<Vector2> {
+        const MIN_COORD: i64 = i32::MIN as i64;
+        const MAX_COORD: i64 = i32::MAX as i64;
+
+        let mut x0 = i64::from(start.x);
+        let mut y0 = i64::from(start.y);
+        let x1 = i64::from(end.x);
+        let y1 = i64::from(end.y);
+
+        let dx = (x1 - x0).abs();
+        let sx = if x0 < x1 {
+            1
+        } else if x0 > x1 {
+            -1
+        } else {
+            0
+        };
+        let dy = -(y1 - y0).abs();
+        let sy = if y0 < y1 {
+            1
+        } else if y0 > y1 {
+            -1
+        } else {
+            0
+        };
+        let mut err = dx + dy;
+
+        loop {
+            let clamped_x = x0.clamp(MIN_COORD, MAX_COORD) as i32;
+            let clamped_y = y0.clamp(MIN_COORD, MAX_COORD) as i32;
+            if self.is_solid_at(clamped_x, clamped_y) {
+                return Some(Vector2::new(clamped_x, clamped_y));
+            }
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let double_error = err * 2;
+            if double_error >= dy {
+                err += dy;
+                if sx != 0 {
+                    x0 += sx;
+                }
+            }
+            if double_error <= dx {
+                err += dx;
+                if sy != 0 {
+                    y0 += sy;
+                }
+            }
+            if sx == 0 && sy == 0 {
+                break;
+            }
+        }
+
+        None
+    }
+
     pub fn resolve_collision(&self, position: Vector2, velocity: Vector2) -> CollisionResolution {
         match self.surface_height(position.x) {
             Some(surface_y) if position.y > surface_y => {
@@ -178,5 +239,26 @@ mod tests {
         landscape.lower_range(0, 5, 6);
         assert_eq!(landscape.surface()[2], 18);
         assert_eq!(landscape.surface()[4], 12);
+    }
+
+    #[test]
+    fn path_free_reports_clear_segment_above_surface() {
+        let landscape = Landscape::flat(16, 8);
+        let start = Vector2::new(0, 0);
+        let end = Vector2::new(15, 1);
+        assert!(landscape.path_is_clear(start, end));
+        assert!(landscape.first_collision_on_line(start, end).is_none());
+    }
+
+    #[test]
+    fn path_free_reports_collision_when_line_enters_surface() {
+        let landscape = Landscape::flat(16, 8);
+        let start = Vector2::new(0, 0);
+        let end = Vector2::new(15, 16);
+        let collision = landscape.first_collision_on_line(start, end);
+        assert!(collision.is_some());
+        let hit = collision.unwrap();
+        assert!(hit.y >= 8);
+        assert!(!landscape.path_is_clear(start, end));
     }
 }

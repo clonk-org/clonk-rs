@@ -727,6 +727,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetVertex", get_vertex);
     script.register_host_function("GetVertexContact", get_vertex_contact);
     script.register_host_function("GetContact", get_contact);
+    script.register_host_function("PathFree", path_free);
     script.register_host_function("SetDir", set_dir);
     script.register_host_function("GetDir", get_dir);
     script.register_host_function("SetComDir", set_com_dir);
@@ -2889,6 +2890,34 @@ fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
         let contact =
             compute_vertex_contact(landscape, position, &vertices[vertex_index as usize], mask);
         Ok(Value::Int(contact as i32))
+    })
+}
+
+fn path_free(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 4 {
+        return Err(RuntimeError::new(
+            "PathFree expects 4 arguments: x1, y1, x2, y2",
+        ));
+    }
+
+    let x1 = value_to_i32(&args[0], "PathFree", "x1")?;
+    let y1 = value_to_i32(&args[1], "PathFree", "y1")?;
+    let x2 = value_to_i32(&args[2], "PathFree", "x2")?;
+    let y2 = value_to_i32(&args[3], "PathFree", "y2")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Bool(true)),
+        };
+
+        let Some(landscape) = context.landscape_ref() else {
+            return Ok(Value::Bool(true));
+        };
+
+        let clear = landscape.path_is_clear(Vector2::new(x1, y1), Vector2::new(x2, y2));
+        Ok(Value::Bool(clear))
     })
 }
 

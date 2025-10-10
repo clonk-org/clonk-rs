@@ -7675,6 +7675,29 @@ mod tests {
     }
     "#;
 
+    const PATHFINDING_HELPER_SCRIPT: &str = r#"
+    global func Initialize(state, random)
+    {
+        var success = PathFree(0, 0, 10, 0);
+        var failure = PathFree(0, 0, 10, 12);
+        var value = 0;
+        if (success)
+        {
+            value = value + 1;
+        }
+        if (failure)
+        {
+            value = value + 2;
+        }
+        return { energy = value };
+    }
+
+    global func Step(state, frame, random)
+    {
+        return nil;
+    }
+    "#;
+
     fn build_lift_definition(id: &str) -> Definition {
         let mut definition =
             Definition::from_script(id, id, PROCEDURE_MOVEMENT_SCRIPT).expect("script compiles");
@@ -7704,6 +7727,31 @@ mod tests {
         }
         "#;
         Definition::from_script("Test", "Test", source).expect("script compiles")
+    }
+
+    #[test]
+    fn path_free_host_function_queries_landscape() {
+        let mut definition =
+            Definition::from_script("PathTester", "PathTester", PATHFINDING_HELPER_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_landscape(Landscape::flat(32, 8));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("PathTester"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine
+            .object_snapshot(id)
+            .expect("object snapshot available");
+        assert_eq!(snapshot.energy, 1);
     }
 
     #[test]
