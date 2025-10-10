@@ -9130,9 +9130,7 @@ mod tests {
             .expect("definition registers");
 
         let id = engine
-            .spawn_object(
-                SpawnConfig::new("Bridger").with_action(ActionState::new("Bridge")),
-            )
+            .spawn_object(SpawnConfig::new("Bridger").with_action(ActionState::new("Bridge")))
             .expect("spawn succeeds");
 
         let snapshot = engine
@@ -9145,13 +9143,12 @@ mod tests {
 
     #[test]
     fn set_bridge_action_data_returns_false_when_not_in_bridge_procedure() {
-        let mut definition =
-            Definition::from_script(
-                "IdleActor",
-                "IdleActor",
-                SET_BRIDGE_ACTION_DATA_FAILURE_SCRIPT,
-            )
-            .expect("script compiles");
+        let mut definition = Definition::from_script(
+            "IdleActor",
+            "IdleActor",
+            SET_BRIDGE_ACTION_DATA_FAILURE_SCRIPT,
+        )
+        .expect("script compiles");
         let mut actions = HashMap::new();
         actions.insert("Idle".to_string(), ActionSpec::default());
         definition.configure_actions(Some("Idle".to_string()), actions);

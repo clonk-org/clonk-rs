@@ -789,7 +789,10 @@ dependencies = [
  "anyhow",
  "clap",
  "lc-platform",
+ "serde",
+ "serde_json",
  "tempfile",
+ "zip",
 ]
 
 [[package]]

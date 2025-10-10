@@ -12,6 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use lc_platform::AppPaths;
+use serde::Serialize;
+use zip::write::FileOptions;
+use zip::CompressionMethod;
 
 const SKIP_PATCHER_VALIDATION_ENV: &str = "LC_GAME_SKIP_PATCHER_CHECK";
 const LEGACY_LOG_PREFIX: &str = "Clonk";
@@ -92,14 +95,44 @@ fn run() -> Result<()> {
     }
 
     let copied_logs = log_collection_result?;
+    let crash_reports = crash_report_result?;
+
     let telemetry_result = digest_update_telemetry(&copied_logs, &logger);
     if let Err(err) = &telemetry_result {
         logger
             .log_line(format!("failed to extract updater telemetry: {err}"))
             .ok();
     }
-    telemetry_result?;
-    crash_report_result?;
+    let telemetry_summary = telemetry_result?;
+
+    let bundle_result = create_support_bundle(
+        &paths,
+        &logger,
+        &copied_logs,
+        &crash_reports,
+        &telemetry_summary,
+    );
+    if let Err(err) = &bundle_result {
+        logger
+            .log_line(format!("failed to create support bundle: {err}"))
+            .ok();
+    }
+    let support_bundle = bundle_result?;
+
+    let summary_result = write_launcher_summary(
+        &paths,
+        &logger,
+        &copied_logs,
+        &crash_reports,
+        &telemetry_summary,
+        support_bundle.as_ref(),
+    );
+    if let Err(err) = &summary_result {
+        logger
+            .log_line(format!("failed to emit launcher summary: {err}"))
+            .ok();
+    }
+    summary_result?;
 
     if status.success() {
         Ok(())
@@ -745,16 +778,79 @@ fn collect_crash_reports(
     Ok(captured)
 }
 
-fn digest_update_telemetry(log_paths: &[PathBuf], logger: &LauncherLogger) -> Result<()> {
+#[derive(Debug, Clone, Serialize)]
+struct UpdateTelemetryFailure {
+    log_path: PathBuf,
+    message: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+struct UpdateTelemetrySummary {
+    success_sources: Vec<PathBuf>,
+    failures: Vec<UpdateTelemetryFailure>,
+}
+
+impl UpdateTelemetrySummary {
+    fn record_success(&mut self, path: PathBuf) {
+        if !self
+            .success_sources
+            .iter()
+            .any(|existing| existing == &path)
+        {
+            self.success_sources.push(path);
+        }
+    }
+
+    fn record_failure(&mut self, path: PathBuf, message: String) {
+        self.failures.push(UpdateTelemetryFailure {
+            log_path: path,
+            message,
+        });
+    }
+
+    fn to_serializable(&self, base: &Path) -> SerializableTelemetrySummary {
+        SerializableTelemetrySummary {
+            successes: self
+                .success_sources
+                .iter()
+                .map(|path| relative_to_logs(path, base))
+                .collect(),
+            failures: self
+                .failures
+                .iter()
+                .map(|failure| SerializableTelemetryFailure {
+                    log: relative_to_logs(&failure.log_path, base),
+                    message: failure.message.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct SerializableTelemetrySummary {
+    successes: Vec<String>,
+    failures: Vec<SerializableTelemetryFailure>,
+}
+
+#[derive(Debug, Serialize)]
+struct SerializableTelemetryFailure {
+    log: String,
+    message: String,
+}
+
+fn digest_update_telemetry(
+    log_paths: &[PathBuf],
+    logger: &LauncherLogger,
+) -> Result<UpdateTelemetrySummary> {
     if log_paths.is_empty() {
         logger
             .log_line("no runtime logs were captured; updater telemetry unavailable")
             .context("failed to log updater telemetry absence")?;
-        return Ok(());
+        return Ok(UpdateTelemetrySummary::default());
     }
 
-    let mut failure_events = Vec::new();
-    let mut success_sources = HashSet::new();
+    let mut summary = UpdateTelemetrySummary::default();
 
     for path in log_paths {
         let file = File::open(path)
@@ -769,25 +865,26 @@ fn digest_update_telemetry(log_paths: &[PathBuf], logger: &LauncherLogger) -> Re
             if lower.contains("c4group returned status")
                 || lower.contains("c4group killed with signal")
             {
-                failure_events.push((path.clone(), trimmed.to_string()));
+                summary.record_failure(path.clone(), trimmed.to_string());
             } else if trimmed == "Done." {
-                success_sources.insert(path.clone());
+                summary.record_success(path.clone());
             }
         }
     }
 
-    for (path, message) in &failure_events {
+    for failure in &summary.failures {
         logger
             .log_line(format!(
                 "updater telemetry [{}]: {}",
-                filename_or_display(path),
-                message
+                filename_or_display(&failure.log_path),
+                failure.message
             ))
             .context("failed to log updater telemetry failure")?;
     }
 
-    if !success_sources.is_empty() {
-        let sources = success_sources
+    if !summary.success_sources.is_empty() {
+        let sources = summary
+            .success_sources
             .iter()
             .map(|path| filename_or_display(path))
             .collect::<Vec<_>>()
@@ -797,13 +894,214 @@ fn digest_update_telemetry(log_paths: &[PathBuf], logger: &LauncherLogger) -> Re
             .context("failed to log updater telemetry success")?;
     }
 
-    if failure_events.is_empty() && success_sources.is_empty() {
+    if summary.failures.is_empty() && summary.success_sources.is_empty() {
         logger
             .log_line("no updater telemetry found in captured runtime logs")
             .context("failed to log updater telemetry absence")?;
     }
 
+    Ok(summary)
+}
+
+fn create_support_bundle(
+    paths: &AppPaths,
+    logger: &LauncherLogger,
+    runtime_logs: &[PathBuf],
+    crash_reports: &[PathBuf],
+    telemetry_summary: &UpdateTelemetrySummary,
+) -> Result<Option<PathBuf>> {
+    let logs_dir = paths.logs_dir();
+    fs::create_dir_all(&logs_dir).with_context(|| {
+        format!(
+            "failed to ensure logs directory {} exists for support bundle",
+            logs_dir.display()
+        )
+    })?;
+
+    let bundle_path = logs_dir.join(format!("support-bundle-{}.zip", timestamp_for_filename()));
+    let file = File::create(&bundle_path).with_context(|| {
+        format!(
+            "failed to create support bundle archive at {}",
+            bundle_path.display()
+        )
+    })?;
+
+    let mut writer = zip::ZipWriter::new(file);
+    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+    let mut entries_written = 0usize;
+
+    let launcher_name = logger
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("lc-game.log");
+    let launcher_entry_name = format!("launcher/{launcher_name}");
+    match add_file_to_bundle(
+        &mut writer,
+        &launcher_entry_name,
+        logger.path(),
+        options,
+        "launcher log",
+    ) {
+        Ok(()) => entries_written += 1,
+        Err(err) => {
+            logger
+                .log_line(format!(
+                    "failed to include launcher log in support bundle: {err}"
+                ))
+                .ok();
+        }
+    }
+
+    for (index, path) in runtime_logs.iter().enumerate() {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("runtime.log");
+        let entry_name = format!("runtime/{:02}_{}", index + 1, file_name);
+        match add_file_to_bundle(&mut writer, &entry_name, path, options, "runtime log") {
+            Ok(()) => entries_written += 1,
+            Err(err) => {
+                logger
+                    .log_line(format!(
+                        "failed to include runtime log {}: {err}",
+                        path.display()
+                    ))
+                    .ok();
+            }
+        }
+    }
+
+    for (index, path) in crash_reports.iter().enumerate() {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("crash.dmp");
+        let entry_name = format!("crash/{:02}_{}", index + 1, file_name);
+        match add_file_to_bundle(&mut writer, &entry_name, path, options, "crash artifact") {
+            Ok(()) => entries_written += 1,
+            Err(err) => {
+                logger
+                    .log_line(format!(
+                        "failed to include crash artifact {}: {err}",
+                        path.display()
+                    ))
+                    .ok();
+            }
+        }
+    }
+
+    let telemetry_payload = serde_json::to_vec_pretty(&telemetry_summary.to_serializable(logs_dir))
+        .context("failed to serialize telemetry summary for support bundle")?;
+    writer
+        .start_file("telemetry-summary.json", options)
+        .context("failed to create telemetry summary entry in support bundle")?;
+    writer
+        .write_all(&telemetry_payload)
+        .context("failed to write telemetry summary into support bundle")?;
+    entries_written += 1;
+
+    writer
+        .finish()
+        .context("failed to finish writing support bundle")?;
+
+    if entries_written > 0 {
+        logger
+            .log_line(format!(
+                "created support bundle at {}",
+                bundle_path.display()
+            ))
+            .context("failed to log support bundle path")?;
+        Ok(Some(bundle_path))
+    } else {
+        logger
+            .log_line("support bundle skipped because no entries could be written")
+            .context("failed to log support bundle skip")?;
+        Ok(None)
+    }
+}
+
+fn add_file_to_bundle(
+    writer: &mut zip::ZipWriter<File>,
+    entry_name: &str,
+    source: &Path,
+    options: FileOptions,
+    role: &str,
+) -> Result<()> {
+    let mut file = File::open(source)
+        .with_context(|| format!("failed to open {role} {} for bundling", source.display()))?;
+    writer
+        .start_file(entry_name, options)
+        .with_context(|| format!("failed to create archive entry {entry_name}"))?;
+    io::copy(&mut file, writer)
+        .with_context(|| format!("failed to copy {role} {} into bundle", source.display()))?;
     Ok(())
+}
+
+fn write_launcher_summary(
+    paths: &AppPaths,
+    logger: &LauncherLogger,
+    runtime_logs: &[PathBuf],
+    crash_reports: &[PathBuf],
+    telemetry_summary: &UpdateTelemetrySummary,
+    support_bundle: Option<&PathBuf>,
+) -> Result<()> {
+    let logs_dir = paths.logs_dir();
+    fs::create_dir_all(&logs_dir).with_context(|| {
+        format!(
+            "failed to ensure logs directory {} exists for summary",
+            logs_dir.display()
+        )
+    })?;
+
+    let summary = LauncherSummary {
+        schema_version: 1,
+        generated_at: timestamp_for_log(),
+        launcher_log: relative_to_logs(logger.path(), &logs_dir),
+        runtime_logs: runtime_logs
+            .iter()
+            .map(|path| relative_to_logs(path, &logs_dir))
+            .collect(),
+        crash_reports: crash_reports
+            .iter()
+            .map(|path| relative_to_logs(path, &logs_dir))
+            .collect(),
+        support_bundle: support_bundle.map(|path| relative_to_logs(path, &logs_dir)),
+        update_telemetry: telemetry_summary.to_serializable(&logs_dir),
+    };
+
+    let summary_path = logs_dir.join("launcher-summary.json");
+    let file = File::create(&summary_path).with_context(|| {
+        format!(
+            "failed to create launcher summary file {}",
+            summary_path.display()
+        )
+    })?;
+    serde_json::to_writer_pretty(file, &summary).context("failed to serialize launcher summary")?;
+    logger
+        .log_line(format!(
+            "wrote launcher summary to {}",
+            summary_path.display()
+        ))
+        .context("failed to log launcher summary path")?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct LauncherSummary {
+    schema_version: u32,
+    generated_at: String,
+    launcher_log: String,
+    runtime_logs: Vec<String>,
+    crash_reports: Vec<String>,
+    support_bundle: Option<String>,
+    update_telemetry: SerializableTelemetrySummary,
+}
+
+fn relative_to_logs(path: &Path, logs_dir: &Path) -> String {
+    path.strip_prefix(logs_dir)
+        .map(|relative| relative.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
 }
 
 fn filename_or_display(path: &Path) -> String {
@@ -816,11 +1114,14 @@ fn filename_or_display(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::env;
     use std::fs;
+    use std::io::Read;
     use std::path::Path;
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
+    use zip::ZipArchive;
 
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -1072,7 +1373,25 @@ mod tests {
         )
         .unwrap();
 
-        digest_update_telemetry(&[telemetry_log.clone()], &logger).unwrap();
+        let summary = digest_update_telemetry(&[telemetry_log.clone()], &logger).unwrap();
+        assert_eq!(summary.failures.len(), 1, "expected one failure event");
+        assert_eq!(
+            summary.success_sources.len(),
+            1,
+            "expected one success source"
+        );
+        assert_eq!(
+            summary.failures[0].log_path, telemetry_log,
+            "failure should reference telemetry log"
+        );
+        assert_eq!(
+            summary.failures[0].message, "c4group returned status 2",
+            "failure message should match telemetry line"
+        );
+        assert_eq!(
+            summary.success_sources[0], telemetry_log,
+            "success should reference telemetry log"
+        );
 
         let launcher_log = fs::read_to_string(logger.path()).unwrap();
         assert!(
@@ -1083,6 +1402,185 @@ mod tests {
         assert!(
             launcher_log.contains("updater telemetry: success recorded in Clonk-session.log"),
             "launcher log should record success telemetry, contents:\n{launcher_log}"
+        );
+    }
+
+    #[test]
+    fn create_support_bundle_packages_artifacts() {
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        let logger = LauncherLogger::new(&paths).unwrap();
+        logger.log_line("bundle integration test start").unwrap();
+
+        let runtime_log = paths.logs_dir().join("Clonk-session.log");
+        fs::write(&runtime_log, "runtime log payload").unwrap();
+        let crash_log = paths.logs_dir().join("LegacyClonk-crash-2024.dmp");
+        fs::write(&crash_log, "crash dump payload").unwrap();
+
+        let mut telemetry = UpdateTelemetrySummary::default();
+        telemetry.record_success(runtime_log.clone());
+        telemetry.record_failure(runtime_log.clone(), "c4group returned status 0".into());
+
+        let bundle_path = create_support_bundle(
+            &paths,
+            &logger,
+            &[runtime_log.clone()],
+            &[crash_log.clone()],
+            &telemetry,
+        )
+        .unwrap()
+        .expect("bundle path should be returned");
+
+        assert!(
+            bundle_path.exists(),
+            "support bundle {} should exist",
+            bundle_path.display()
+        );
+
+        let file = fs::File::open(&bundle_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let mut entries = Vec::new();
+        for idx in 0..archive.len() {
+            let entry = archive.by_index(idx).unwrap();
+            entries.push(entry.name().to_string());
+        }
+        assert!(
+            entries.iter().any(|name| name.starts_with("launcher/")),
+            "bundle should include launcher log, entries: {entries:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|name| name.starts_with("runtime/01_Clonk-session.log")),
+            "bundle should include runtime log, entries: {entries:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|name| name.starts_with("crash/01_LegacyClonk-crash-2024.dmp")),
+            "bundle should include crash artifact, entries: {entries:?}"
+        );
+        assert!(
+            entries.contains(&"telemetry-summary.json".to_string()),
+            "bundle should include telemetry summary, entries: {entries:?}"
+        );
+
+        let mut telemetry_json = String::new();
+        archive
+            .by_name("telemetry-summary.json")
+            .unwrap()
+            .read_to_string(&mut telemetry_json)
+            .unwrap();
+        let value: Value = serde_json::from_str(&telemetry_json).unwrap();
+        assert_eq!(
+            value["successes"][0].as_str(),
+            Some("Clonk-session.log"),
+            "telemetry summary should list runtime log success"
+        );
+    }
+
+    #[test]
+    fn write_launcher_summary_emits_machine_readable_output() {
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        let logger = LauncherLogger::new(&paths).unwrap();
+        logger.log_line("summary integration test start").unwrap();
+
+        let runtime_log = paths.logs_dir().join("Clonk-summary.log");
+        fs::write(&runtime_log, "summary runtime log").unwrap();
+        let crash_log = paths.logs_dir().join("LegacyClonk-crash-summary.dmp");
+        fs::write(&crash_log, "summary crash dump").unwrap();
+        let bundle_path = paths.logs_dir().join("support-bundle-test.zip");
+        fs::write(&bundle_path, b"bundle").unwrap();
+
+        let mut telemetry = UpdateTelemetrySummary::default();
+        telemetry.record_success(runtime_log.clone());
+        telemetry.record_failure(runtime_log.clone(), "c4group returned status 1".into());
+
+        write_launcher_summary(
+            &paths,
+            &logger,
+            &[runtime_log.clone()],
+            &[crash_log.clone()],
+            &telemetry,
+            Some(&bundle_path),
+        )
+        .unwrap();
+
+        let summary_path = paths.logs_dir().join("launcher-summary.json");
+        assert!(
+            summary_path.exists(),
+            "summary file {} should exist",
+            summary_path.display()
+        );
+
+        let contents = fs::read_to_string(&summary_path).unwrap();
+        let value: Value = serde_json::from_str(&contents).unwrap();
+
+        assert_eq!(
+            value["schema_version"].as_u64(),
+            Some(1),
+            "summary should include schema version"
+        );
+        assert!(
+            value["launcher_log"]
+                .as_str()
+                .unwrap()
+                .starts_with("lc-game"),
+            "summary should include launcher log path"
+        );
+        assert_eq!(
+            value["runtime_logs"][0].as_str(),
+            Some("Clonk-summary.log"),
+            "summary should include runtime log relative path"
+        );
+        assert_eq!(
+            value["crash_reports"][0].as_str(),
+            Some("LegacyClonk-crash-summary.dmp"),
+            "summary should include crash artifact relative path"
+        );
+        assert_eq!(
+            value["support_bundle"].as_str(),
+            Some("support-bundle-test.zip"),
+            "summary should reference support bundle"
+        );
+        assert!(
+            value["update_telemetry"]["successes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.as_str() == Some("Clonk-summary.log")),
+            "summary should record telemetry success: {value}"
+        );
+        assert!(
+            value["update_telemetry"]["failures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["message"].as_str() == Some("c4group returned status 1")),
+            "summary should record telemetry failure: {value}"
         );
     }
 }

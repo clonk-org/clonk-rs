@@ -7,10 +7,9 @@ use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, CommandDirection,
     DefinitionId, Direction, EnvironmentSettings, FloatVector2, Landscape, LiquidSegment, ObjectId,
-    ObjectStatus,
-    ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope,
-    PhysicsSettings, QueuedCommand, SpawnConfig, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT,
-    CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
+    ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer,
+    ParticleScope, PhysicsSettings, QueuedCommand, SpawnConfig, Vector2, CNAT_BOTTOM, CNAT_CENTER,
+    CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -2456,11 +2455,8 @@ fn set_bridge_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
 
     if let Some(Value::Proplist(_)) = args.last() {
         param_count -= 1;
-        target_id = parse_object_reference_argument(
-            &args[param_count],
-            "SetBridgeActionData",
-            "object",
-        )?;
+        target_id =
+            parse_object_reference_argument(&args[param_count], "SetBridgeActionData", "object")?;
     }
 
     if param_count == 0 {
