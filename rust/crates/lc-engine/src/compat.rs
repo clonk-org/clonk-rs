@@ -789,6 +789,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetVertexContact", get_vertex_contact);
     script.register_host_function("GetContact", get_contact);
     script.register_host_function("PathFree", path_free);
+    script.register_host_function("GBackSolid", g_back_solid);
+    script.register_host_function("GBackSemiSolid", g_back_semi_solid);
+    script.register_host_function("GBackLiquid", g_back_liquid);
+    script.register_host_function("GBackSky", g_back_sky);
     script.register_host_function("SetDir", set_dir);
     script.register_host_function("GetDir", get_dir);
     script.register_host_function("SetComDir", set_com_dir);
@@ -3132,6 +3136,92 @@ fn path_free(args: &[Value]) -> Result<Value, RuntimeError> {
         let clear = landscape.path_is_clear(Vector2::new(x1, y1), Vector2::new(x2, y2));
         Ok(Value::Bool(clear))
     })
+}
+
+#[derive(Clone, Copy)]
+enum LandscapeQuery {
+    Solid,
+    SemiSolid,
+    Liquid,
+    Sky,
+}
+
+fn g_back_solid(args: &[Value]) -> Result<Value, RuntimeError> {
+    g_back_common(args, "GBackSolid", LandscapeQuery::Solid)
+}
+
+fn g_back_semi_solid(args: &[Value]) -> Result<Value, RuntimeError> {
+    g_back_common(args, "GBackSemiSolid", LandscapeQuery::SemiSolid)
+}
+
+fn g_back_liquid(args: &[Value]) -> Result<Value, RuntimeError> {
+    g_back_common(args, "GBackLiquid", LandscapeQuery::Liquid)
+}
+
+fn g_back_sky(args: &[Value]) -> Result<Value, RuntimeError> {
+    g_back_common(args, "GBackSky", LandscapeQuery::Sky)
+}
+
+fn g_back_common(
+    args: &[Value],
+    function: &str,
+    query: LandscapeQuery,
+) -> Result<Value, RuntimeError> {
+    if args.len() != 2 {
+        return Err(RuntimeError::new(format!(
+            "{function} expects 2 arguments: x, y"
+        )));
+    }
+
+    let local_x = value_to_i32(&args[0], function, "x")?;
+    let local_y = value_to_i32(&args[1], function, "y")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Bool(fallback_without_context(query))),
+        };
+
+        let mut global_x = local_x;
+        let mut global_y = local_y;
+        if let Some(object) = context.object_context() {
+            let position = object.effective_position();
+            global_x = global_x.saturating_add(position.x);
+            global_y = global_y.saturating_add(position.y);
+        }
+
+        let landscape = context.landscape_ref();
+        let result = evaluate_landscape_query(landscape, query, global_x, global_y);
+        Ok(Value::Bool(result))
+    })
+}
+
+fn evaluate_landscape_query(
+    landscape: Option<&Landscape>,
+    query: LandscapeQuery,
+    x: i32,
+    y: i32,
+) -> bool {
+    match landscape {
+        Some(landscape) => {
+            let solid = landscape.is_solid_at(x, y);
+            match query {
+                LandscapeQuery::Solid => solid,
+                LandscapeQuery::SemiSolid => solid,
+                LandscapeQuery::Liquid => false,
+                LandscapeQuery::Sky => !solid,
+            }
+        }
+        None => fallback_without_context(query),
+    }
+}
+
+fn fallback_without_context(query: LandscapeQuery) -> bool {
+    match query {
+        LandscapeQuery::Sky => true,
+        LandscapeQuery::Solid | LandscapeQuery::SemiSolid | LandscapeQuery::Liquid => false,
+    }
 }
 
 fn find_object(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -5604,6 +5694,122 @@ mod tests {
         let result = func();
         let delta = guard.finish();
         (result, delta)
+    }
+
+    #[test]
+    fn g_back_solid_returns_false_without_landscape() {
+        let (result, _) = with_effect_context(None, &[], HostWorldContext::default(), 1, || {
+            g_back_solid(&[Value::Int(0), Value::Int(0)])
+        });
+        let value = result.expect("GBackSolid without landscape succeeds");
+        assert_eq!(value, Value::Bool(false));
+    }
+
+    #[test]
+    fn g_back_solid_detects_surface_in_landscape() {
+        let landscape = Landscape::flat(32, 10);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            1,
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            g_back_solid(&[Value::Int(5), Value::Int(12)])
+        });
+        let value = result.expect("GBackSolid with landscape succeeds");
+        assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn g_back_solid_respects_surface_height() {
+        let landscape = Landscape::flat(16, 20);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            1,
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            g_back_solid(&[Value::Int(3), Value::Int(15)])
+        });
+        let value = result.expect("GBackSolid above surface succeeds");
+        assert_eq!(value, Value::Bool(false));
+    }
+
+    #[test]
+    fn g_back_solid_applies_object_relative_coordinates() {
+        let object_id = ObjectId::new(7);
+        let landscape = Landscape::flat(32, 12);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            8,
+        );
+        let object_context = HostObjectContext::new(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::new(4, 6),
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+        );
+        let (result, _) = with_effect_context(Some(object_context), &[], world, 9, || {
+            g_back_solid(&[Value::Int(0), Value::Int(7)])
+        });
+        let value = result.expect("GBackSolid with object context succeeds");
+        assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn g_back_sky_reports_inverse_of_solid() {
+        let landscape = Landscape::flat(20, 5);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            1,
+        );
+        let (solid, _) = with_effect_context(None, &[], world.clone(), 1, || {
+            g_back_solid(&[Value::Int(2), Value::Int(2)])
+        });
+        let (sky, _) = with_effect_context(None, &[], world, 1, || {
+            g_back_sky(&[Value::Int(2), Value::Int(2)])
+        });
+        let solid_value = solid.expect("GBackSolid succeeds");
+        let sky_value = sky.expect("GBackSky succeeds");
+        match (solid_value, sky_value) {
+            (Value::Bool(solid), Value::Bool(sky)) => assert_eq!(sky, !solid),
+            other => panic!("expected bool results, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn g_back_liquid_returns_false_in_height_landscape() {
+        let landscape = Landscape::flat(8, 4);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            1,
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            g_back_liquid(&[Value::Int(1), Value::Int(6)])
+        });
+        let value = result.expect("GBackLiquid succeeds");
+        assert_eq!(value, Value::Bool(false));
     }
 
     #[test]
