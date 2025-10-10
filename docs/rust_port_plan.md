@@ -24,8 +24,8 @@
 
 ## Porting Strategy
 1. **Platform Bootstrap**
-   - Status: `lc-game` (Rust) now owns path discovery, prepares user directories, migrates legacy configs into `LC_CONFIG_FILE`, captures runtime stdout/stderr into timestamped logs, launches the shipping C++ runtime so `cargo run -p lc-game` opens the Startup Menu with live input, and the deprecated `lc-app` demo harness has been removed from the workspace/package outputs.
-   - Next: tighten launcher validation around updater/logging parity and validate patcher/updater hooks from the Rust entrypoint.
+   - Status: `lc-game` (Rust) now owns path discovery, prepares user directories, migrates legacy configs into `LC_CONFIG_FILE`, captures runtime stdout/stderr into timestamped logs, launches the shipping C++ runtime so `cargo run -p lc-game` opens the Startup Menu with live input, validates the bundled `c4group` updater, and syncs fresh `Clonk*.log` files into the Rust logs directory; the deprecated `lc-app` demo harness has been removed from the workspace/package outputs.
+   - Next: wire launcher crash/reporting parity (stderr, dumps, exit codes) and plumb updater exit telemetry back into the Rust logger.
    - **Gate:** `cargo run -p lc-game` opens the shipping Startup Menu with live input routed through Rust scaffolding.
 
 2. **Runtime Authority**
