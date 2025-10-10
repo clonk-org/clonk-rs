@@ -168,6 +168,52 @@ impl ControlCoordinator {
         self.clients.keys().copied()
     }
 
+    /// Returns the current missing control ranges for all registered clients.
+    pub fn missing_ranges(&self) -> Vec<MissingRange> {
+        let mut missing = Vec::new();
+        let target_tick = self
+            .clients
+            .values()
+            .filter_map(|state| state.highest_tick_seen)
+            .max()
+            .unwrap_or(self.current_tick);
+
+        for (&client_id, state) in &self.clients {
+            let mut expected = self.current_tick;
+            for &tick in state.pending.keys() {
+                if tick < expected {
+                    continue;
+                }
+                if tick > expected {
+                    missing.push(MissingRange::new(client_id, expected, tick));
+                }
+                expected = tick.saturating_add(1);
+            }
+
+            let effective_highest = state.highest_tick_seen.unwrap_or(target_tick);
+            if effective_highest >= expected {
+                missing.push(MissingRange::new(
+                    client_id,
+                    expected,
+                    effective_highest.saturating_add(1),
+                ));
+            }
+        }
+
+        if self.backlog_limit > 0 {
+            let min_allowed = self.current_tick.saturating_sub(self.backlog_limit as Tick);
+            for range in &mut missing {
+                range.from = range.from.max(min_allowed);
+                if range.to <= range.from {
+                    range.to = range.from;
+                }
+            }
+            missing.retain(|range| range.len() > 0);
+        }
+
+        merge_adjacent_ranges(missing)
+    }
+
     fn collect_ready(&mut self) -> Vec<ReadyBatch> {
         let mut ready = Vec::new();
         loop {

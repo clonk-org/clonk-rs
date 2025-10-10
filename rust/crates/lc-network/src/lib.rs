@@ -1,5 +1,6 @@
 mod control;
 mod lobby;
+mod resync;
 mod transport;
 
 pub use control::{
@@ -7,6 +8,7 @@ pub use control::{
     InsertStatus, MissingRange, ReadyBatch,
 };
 pub use lobby::{Lobby, LobbyError, LobbyParticipant, LobbySettings, ParticipantKind};
+pub use resync::{ControlBacklog, ResyncRequest, ResyncScheduler};
 pub use transport::{ControlDelivery, ControlMessage, ControlTransport, TransportError};
 
 pub type ClientId = u32;
