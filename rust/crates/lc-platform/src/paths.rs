@@ -5,6 +5,12 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 const APP_NAME: &str = "LegacyClonk";
+#[cfg(target_os = "macos")]
+const CONFIG_FILE_NAME: &str = "legacyclonk.config";
+#[cfg(target_os = "windows")]
+const CONFIG_FILE_NAME: &str = "LegacyClonk.cfg";
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+const CONFIG_FILE_NAME: &str = "config";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PathsError {
@@ -65,6 +71,10 @@ impl AppPaths {
 
     pub fn config_dir(&self) -> PathBuf {
         self.user_data_dir.join("Config")
+    }
+
+    pub fn config_file(&self) -> PathBuf {
+        self.config_dir().join(CONFIG_FILE_NAME)
     }
 
     pub fn recordings_dir(&self) -> PathBuf {
@@ -282,6 +292,23 @@ mod tests {
         let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(install_dir.path()))]);
         let result = AppPaths::discover();
         assert!(matches!(result, Err(PathsError::SystemGroupMissing { .. })));
+    }
+
+    #[test]
+    fn config_file_is_nested_under_config_dir() {
+        let paths = AppPaths::discover().unwrap();
+        let config_file = paths.config_file();
+        let config_dir = paths.config_dir();
+        assert!(
+            config_file.starts_with(&config_dir),
+            "config file {} should live under {}",
+            config_file.display(),
+            config_dir.display()
+        );
+        assert_eq!(
+            config_file.file_name().and_then(|name| name.to_str()),
+            Some(CONFIG_FILE_NAME)
+        );
     }
 
     #[test]

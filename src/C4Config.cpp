@@ -750,6 +750,8 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
 		rustConfigActive = false;
 		RustConfigBridge::Unload();
 #endif
+		StdStrBuf filename;
+		bool explicitConfig = false;
 #ifdef _WIN32
 		// Windows: Default load from registry, if no explicit config file is specified
 		if (!szConfigFile)
@@ -760,12 +762,18 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
 		else
 #endif
 		{
-			// Nonwindows or explicit config file: Determine filename to load config from
-			StdStrBuf filename;
-			if (szConfigFile)
+			explicitConfig = false;
+			filename.Clear();
+			if (const char *envConfig = getenv("LC_CONFIG_FILE"); envConfig && *envConfig)
+			{
+				filename.Copy(envConfig);
+				explicitConfig = true;
+			}
+			else if (szConfigFile)
 			{
 				// Config filename is specified
 				filename.Ref(szConfigFile);
+				explicitConfig = true;
 				// make sure we're at the correct path to load it
 				if (forceWorkingDirectory) General.DeterminePaths(true);
 			}
@@ -1145,7 +1153,14 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
 	}
 #endif
 	fConfigLoaded = true;
-	if (szConfigFile) ConfigFilename.Copy(szConfigFile); else ConfigFilename.Clear();
+	if (explicitConfig)
+	{
+		ConfigFilename.Copy(filename.getData());
+	}
+	else
+	{
+		ConfigFilename.Clear();
+	}
 	return true;
 }
 

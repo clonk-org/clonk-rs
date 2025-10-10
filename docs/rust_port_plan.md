@@ -24,8 +24,8 @@
 
 ## Porting Strategy
 1. **Platform Bootstrap**
-   - Status: `lc-game` (Rust) discovers install/user paths via `lc-platform`, prepares user directories, and launches the shipping C++ runtime so `cargo run -p lc-game` opens the Startup Menu with live input.
-   - Next: migrate logging/config ownership into the launcher and formally retire the `lc-app` demo harness once validation coverage is in place.
+   - Status: `lc-game` (Rust) now owns path discovery, prepares user directories, migrates legacy configs into `LC_CONFIG_FILE`, captures runtime stdout/stderr into timestamped logs, and launches the shipping C++ runtime so `cargo run -p lc-game` opens the Startup Menu with live input.
+   - Next: formally retire the `lc-app` demo harness once validation coverage is in place and keep tightening launcher validation around updater/logging parity.
    - **Gate:** `cargo run -p lc-game` opens the shipping Startup Menu with live input routed through Rust scaffolding.
 
 2. **Runtime Authority**
