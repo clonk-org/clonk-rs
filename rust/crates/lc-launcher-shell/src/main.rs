@@ -327,6 +327,20 @@ impl LauncherApp {
             bulk_summary.clone(),
         )
         .context("failed to persist provider automation snapshot")?;
+        if let Some(summary) = bulk_summary.as_ref() {
+            if let Some(cleared_at) = summary.history_cleared_at.as_ref() {
+                let previous_cleared = state
+                    .summary
+                    .provider_bulk_retarget
+                    .as_ref()
+                    .and_then(|previous| previous.history_cleared_at.as_ref());
+                if previous_cleared != Some(cleared_at) {
+                    let _ = self
+                        .logger
+                        .log_line(&format!("bulk retarget history cleared at {cleared_at}"));
+                }
+            }
+        }
         Ok((snapshot, bulk_summary))
     }
 
@@ -1211,15 +1225,28 @@ fn prune_bulk_retarget_history(
     diagnostics: &ProviderDiagnostics,
 ) -> Option<ProviderBulkRetargetSummary> {
     let mut summary = summary?;
+    let mut share_cleared = false;
     if role_uses_default_paths(&diagnostics.share) {
+        share_cleared = !summary.share.is_empty();
         summary.share.clear();
     }
+    let mut upload_cleared = false;
     if role_uses_default_paths(&diagnostics.upload) {
+        upload_cleared = !summary.upload.is_empty();
         summary.upload.clear();
     }
-    if summary.is_empty() {
-        None
+
+    if summary.share.is_empty() && summary.upload.is_empty() {
+        if (share_cleared || upload_cleared) && summary.history_cleared_at.is_none() {
+            summary.history_cleared_at = Some(timestamp_for_log());
+        }
+        if summary.history_cleared_at.is_some() {
+            Some(summary)
+        } else {
+            None
+        }
     } else {
+        summary.history_cleared_at = None;
         Some(summary)
     }
 }
@@ -2855,6 +2882,10 @@ mod tests {
             1,
             "upload history should be preserved when overrides remain"
         );
+        assert!(
+            pruned.history_cleared_at.is_none(),
+            "history cleared marker should not be recorded while records remain"
+        );
     }
 
     #[test]
@@ -2890,10 +2921,15 @@ mod tests {
             changed: 1,
         });
 
-        let pruned = prune_bulk_retarget_history(Some(summary), &diagnostics);
+        let pruned = prune_bulk_retarget_history(Some(summary), &diagnostics)
+            .expect("summary should persist");
         assert!(
-            pruned.is_none(),
-            "bulk retarget history should be cleared once every provider uses default paths"
+            pruned.share.is_empty() && pruned.upload.is_empty(),
+            "all bulk retarget records should be cleared once defaults are restored"
+        );
+        assert!(
+            pruned.history_cleared_at.is_some(),
+            "history cleared marker should be recorded when defaults are restored"
         );
     }
 

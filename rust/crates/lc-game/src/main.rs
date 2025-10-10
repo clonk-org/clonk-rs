@@ -931,13 +931,25 @@ fn print_bulk_retarget_sections(record: &LauncherSummaryRecord) {
     let Some(summary) = record.summary.provider_bulk_retarget.as_ref() else {
         return;
     };
-    if summary.share.is_empty() && summary.upload.is_empty() {
+    let has_records = !summary.share.is_empty() || !summary.upload.is_empty();
+    if !has_records && summary.history_cleared_at.is_none() {
         return;
     }
 
     println!("  Bulk retarget history:");
-    print_bulk_retarget_category("Share targets", &summary.share, &record.logs_dir);
-    print_bulk_retarget_category("Upload targets", &summary.upload, &record.logs_dir);
+    if has_records {
+        print_bulk_retarget_category("Share targets", &summary.share, &record.logs_dir);
+        print_bulk_retarget_category("Upload targets", &summary.upload, &record.logs_dir);
+    }
+    if let Some(cleared_at) = &summary.history_cleared_at {
+        if has_records {
+            println!("    History last cleared at {cleared_at}.");
+        } else {
+            println!(
+                "    History cleared at {cleared_at}; all providers currently use default staging paths."
+            );
+        }
+    }
 }
 
 fn print_bulk_retarget_category(

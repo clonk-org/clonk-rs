@@ -608,4 +608,49 @@ mod tests {
             "changed bulk retarget count should match"
         );
     }
+
+    #[test]
+    fn write_launcher_summary_records_history_cleared_marker() {
+        let install_dir = TempDir::new().unwrap();
+        prepare_install_root(install_dir.path());
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+
+        let logger = TestLogger::new(paths.logs_dir().join("lc-launcher.log"));
+        let runtime_log = paths.logs_dir().join("Clonk-bulk.log");
+        fs::write(&runtime_log, "runtime").unwrap();
+
+        let telemetry = UpdateTelemetrySummary::default();
+
+        let mut summary = ProviderBulkRetargetSummary::default();
+        summary.history_cleared_at = Some("2024-06-05T08:15:00Z".into());
+
+        write_launcher_summary(
+            &paths,
+            &logger,
+            logger.path(),
+            &[runtime_log],
+            &[],
+            &telemetry,
+            None,
+            None,
+            Some(summary),
+        )
+        .unwrap();
+
+        let summary_path = paths.logs_dir().join("launcher-summary.json");
+        let summary_json = fs::read_to_string(summary_path).unwrap();
+        let document: Value = serde_json::from_str(&summary_json).unwrap();
+        assert_eq!(
+            document["provider_bulk_retarget"]["history_cleared_at"].as_str(),
+            Some("2024-06-05T08:15:00Z"),
+            "history cleared marker should be persisted"
+        );
+    }
 }

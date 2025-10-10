@@ -84,11 +84,13 @@ pub struct ProviderBulkRetargetSummary {
     pub share: Vec<ProviderBulkRetargetRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub upload: Vec<ProviderBulkRetargetRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_cleared_at: Option<String>,
 }
 
 impl ProviderBulkRetargetSummary {
     pub fn is_empty(&self) -> bool {
-        self.share.is_empty() && self.upload.is_empty()
+        self.share.is_empty() && self.upload.is_empty() && self.history_cleared_at.is_none()
     }
 }
 

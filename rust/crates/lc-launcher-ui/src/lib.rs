@@ -722,12 +722,25 @@ fn add_bulk_retarget_summary(
     summary: &ProviderBulkRetargetSummary,
     logs_dir: Option<&Path>,
 ) {
-    if summary.share.is_empty() && summary.upload.is_empty() {
+    let has_records = !summary.share.is_empty() || !summary.upload.is_empty();
+    if !has_records && summary.history_cleared_at.is_none() {
         return;
     }
-    gui.add_label(section, "Bulk retarget history:");
-    add_bulk_retarget_records(gui, section, "  Share targets:", &summary.share, logs_dir);
-    add_bulk_retarget_records(gui, section, "  Upload targets:", &summary.upload, logs_dir);
+    if has_records {
+        gui.add_label(section, "Bulk retarget history:");
+        add_bulk_retarget_records(gui, section, "  Share targets:", &summary.share, logs_dir);
+        add_bulk_retarget_records(gui, section, "  Upload targets:", &summary.upload, logs_dir);
+    }
+    if let Some(cleared_at) = &summary.history_cleared_at {
+        let message = if has_records {
+            format!("Bulk retarget history last cleared at {cleared_at}.")
+        } else {
+            format!(
+                "Bulk retarget history was cleared at {cleared_at}. No retarget records remain while providers use default staging paths."
+            )
+        };
+        gui.add_label(section, message);
+    }
 }
 
 fn add_bulk_retarget_records(
@@ -1085,6 +1098,27 @@ mod tests {
                 DrawCommand::Text { text, .. } if text.contains("support-upload")
             )),
             "expected upload base directory to be rendered"
+        );
+    }
+
+    #[test]
+    fn bulk_retarget_history_cleared_annotation_is_rendered() {
+        let temp = TempDir::new().unwrap();
+        let mut state = sample_state(temp.path());
+        let mut summary = ProviderBulkRetargetSummary::default();
+        summary.history_cleared_at = Some("2024-06-05T18:30:00Z".into());
+        state.summary.provider_bulk_retarget = Some(summary);
+
+        let mut ui = LauncherShellUi::new(Some(state)).expect("ui");
+        ui.layout(Size::new(640.0, 480.0));
+        let commands = ui.render();
+
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { text, .. } if text.contains("Bulk retarget history was cleared at 2024-06-05T18:30:00Z")
+            )),
+            "history cleared annotation should be rendered"
         );
     }
 
