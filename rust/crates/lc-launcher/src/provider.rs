@@ -50,6 +50,12 @@ impl ProviderPathProvenance {
         !self.overrides.is_empty()
     }
 
+    pub fn has_preference_override(&self) -> bool {
+        self.overrides.iter().any(|override_entry| {
+            matches!(override_entry.source, ProviderOverrideSource::Preference)
+        })
+    }
+
     pub fn apply_override(&mut self, path: PathBuf, source: ProviderOverrideSource) {
         if let Some(latest) = self.overrides.last() {
             if latest.path == path && latest.source == source {
@@ -57,6 +63,12 @@ impl ProviderPathProvenance {
             }
         }
         self.overrides.push(ProviderPathOverride { path, source });
+    }
+
+    pub fn remove_preference_overrides(&mut self) {
+        self.overrides.retain(|override_entry| {
+            !matches!(override_entry.source, ProviderOverrideSource::Preference)
+        });
     }
 }
 

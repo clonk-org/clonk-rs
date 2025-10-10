@@ -343,6 +343,12 @@ impl LauncherApp {
         self.persist_preferences();
     }
 
+    fn forget_provider_override(&mut self, role: ProviderRole, name: &str) {
+        self.preferences
+            .clear_provider_override(role.as_str(), name);
+        self.persist_preferences();
+    }
+
     fn configure_dialog_directory(
         &self,
         dialog: FileDialog,
@@ -612,6 +618,9 @@ impl LauncherApp {
             LauncherShellMessage::RetargetProvider { role, index } => {
                 self.handle_retarget_provider(role, index)?;
             }
+            LauncherShellMessage::ClearProviderOverride { role, index } => {
+                self.handle_clear_provider_override(role, index)?;
+            }
         }
         Ok(())
     }
@@ -796,6 +805,99 @@ impl LauncherApp {
                 ))?;
             }
         }
+
+        Ok(())
+    }
+
+    fn handle_clear_provider_override(&mut self, kind: ProviderKind, index: usize) -> Result<()> {
+        let role: ProviderRole = kind.into();
+        let provider_label = kind.label();
+        let provider_name = match self.providers.provider_name(role, index) {
+            Some(name) => name.to_string(),
+            None => {
+                let message = format!(
+                    "The {} you selected is no longer available. Refresh diagnostics and try again.",
+                    provider_label
+                );
+                self.set_feedback(ActionFeedback::error(message))?;
+                return Ok(());
+            }
+        };
+
+        let default_path = match self.providers.provider_default_path(role, index) {
+            Some(path) => path.to_path_buf(),
+            None => {
+                self.set_feedback(ActionFeedback::error(format!(
+                    "Unable to determine the default path for {} {}.",
+                    provider_label, provider_name
+                )))?;
+                return Ok(());
+            }
+        };
+
+        let had_preference_override = self
+            .preferences
+            .provider_override_path(role.as_str(), &provider_name)
+            .is_some();
+        let previous_path = self
+            .providers
+            .provider_path(role, index)
+            .map(|path| path.to_path_buf());
+        let was_default_path = previous_path
+            .as_ref()
+            .map(|path| paths_equivalent(path, &default_path))
+            .unwrap_or(false);
+
+        if !had_preference_override && was_default_path {
+            self.set_feedback(ActionFeedback::info(format!(
+                "{} {} already uses the default path.",
+                provider_label, provider_name
+            )))?;
+            return Ok(());
+        }
+
+        self.logger
+            .log_line(&format!(
+                "clearing overrides for {} {} via diagnostics UI",
+                provider_label, provider_name
+            ))
+            .context("failed to log provider override clearing request")?;
+
+        let path_changed = self
+            .providers
+            .restore_default(role, index)
+            .context("failed to restore provider default path")?;
+
+        self.forget_provider_override(role, &provider_name);
+
+        let diagnostics = self
+            .update_provider_diagnostics()
+            .context("failed to refresh provider diagnostics after clearing override")?;
+        if let Some(mut state) = self.ui.state().cloned() {
+            let snapshot = self
+                .persist_provider_snapshot(&state, &diagnostics)
+                .context("failed to persist provider automation after clearing override")?;
+            state.summary.provider_automation = snapshot;
+            self.ui
+                .set_state(Some(state))
+                .map_err(|err| anyhow!(err))
+                .context("failed to refresh launcher summary after clearing override")?;
+        }
+
+        let message = if path_changed {
+            format!(
+                "Restored {} {} to default path {}",
+                provider_label,
+                provider_name,
+                default_path.display()
+            )
+        } else {
+            format!(
+                "Cleared saved overrides for {} {} (already using default path).",
+                provider_label, provider_name
+            )
+        };
+        self.set_feedback(ActionFeedback::success(message))?;
 
         Ok(())
     }
@@ -1445,6 +1547,12 @@ impl FirstPartyProviders {
             .map(|state| state.target.path.as_path())
     }
 
+    fn provider_default_path(&self, role: ProviderRole, index: usize) -> Option<&Path> {
+        self.states(role)
+            .get(index)
+            .map(|state| state.provenance.default_path())
+    }
+
     fn retarget_provider(&mut self, role: ProviderRole, index: usize, path: PathBuf) -> Result<()> {
         let states = self.states_mut(role);
         let state = states
@@ -1453,6 +1561,23 @@ impl FirstPartyProviders {
         let applied_at = timestamp_for_log();
         state.apply_override(path, ProviderOverrideSource::Retargeted { applied_at });
         Ok(())
+    }
+
+    fn restore_default(&mut self, role: ProviderRole, index: usize) -> Result<bool> {
+        let states = self.states_mut(role);
+        let state = states
+            .get_mut(index)
+            .ok_or_else(|| anyhow!("invalid {} provider index {}", role.as_str(), index))?;
+        state.provenance.remove_preference_overrides();
+        let default_path = state.provenance.default_path().to_path_buf();
+        let previous_path = state.target.path.clone();
+        let path_changed = !paths_equivalent(&previous_path, &default_path);
+        let applied_at = timestamp_for_log();
+        state.apply_override(
+            default_path,
+            ProviderOverrideSource::Retargeted { applied_at },
+        );
+        Ok(path_changed)
     }
 
     fn states(&self, role: ProviderRole) -> &[ProviderTargetState] {
@@ -1859,6 +1984,84 @@ mod tests {
 
         assert_eq!(providers.share[0].target.path, new_dir.path());
         assert_eq!(providers.share[0].automation, ProviderAutomationState::Idle);
+    }
+
+    #[test]
+    fn restore_default_resets_path_and_prunes_preference_overrides() {
+        let default_dir = TempDir::new().unwrap();
+        let override_dir = TempDir::new().unwrap();
+
+        let mut providers = FirstPartyProviders {
+            share: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Share Drop".into(),
+                path: default_dir.path().to_path_buf(),
+            })],
+            upload: Vec::new(),
+        };
+        providers.share[0].apply_override(
+            override_dir.path().to_path_buf(),
+            ProviderOverrideSource::Preference,
+        );
+
+        let changed = providers
+            .restore_default(ProviderRole::Share, 0)
+            .expect("restore default succeeds");
+        assert!(changed, "expected restore_default to report path change");
+
+        let state = &providers.share[0];
+        assert!(
+            paths_equivalent(&state.target.path, default_dir.path()),
+            "expected provider path to revert to default"
+        );
+        assert!(
+            !state.provenance.has_preference_override(),
+            "preference overrides should be removed"
+        );
+        let last_override = state
+            .provenance
+            .overrides()
+            .last()
+            .expect("expected default override entry");
+        assert!(
+            paths_equivalent(last_override.path(), default_dir.path()),
+            "expected default override path"
+        );
+        assert!(
+            matches!(
+                last_override.source(),
+                ProviderOverrideSource::Retargeted { .. }
+            ),
+            "expected default override to be recorded as retargeted"
+        );
+    }
+
+    #[test]
+    fn restore_default_reports_no_change_when_already_default() {
+        let default_dir = TempDir::new().unwrap();
+
+        let mut providers = FirstPartyProviders {
+            share: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Share Drop".into(),
+                path: default_dir.path().to_path_buf(),
+            })],
+            upload: Vec::new(),
+        };
+        providers.share[0].apply_override(
+            default_dir.path().to_path_buf(),
+            ProviderOverrideSource::Preference,
+        );
+
+        let changed = providers
+            .restore_default(ProviderRole::Share, 0)
+            .expect("restore default succeeds");
+        assert!(
+            !changed,
+            "expected restore_default to report no path change when already default"
+        );
+        assert!(
+            !providers.share[0].provenance.has_preference_override(),
+            "preference overrides should be cleared even when no path change occurs"
+        );
     }
 
     #[test]

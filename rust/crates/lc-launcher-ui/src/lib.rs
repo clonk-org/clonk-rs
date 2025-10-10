@@ -32,6 +32,7 @@ pub enum LauncherShellMessage {
     UploadSupportArtifacts { artifacts: Vec<SupportArtifact> },
     RestageProvider { role: ProviderKind, index: usize },
     RetargetProvider { role: ProviderKind, index: usize },
+    ClearProviderOverride { role: ProviderKind, index: usize },
 }
 
 #[derive(Debug)]
@@ -206,6 +207,7 @@ enum WidgetAction {
     UploadArtifacts,
     RestageProvider { role: ProviderKind, index: usize },
     RetargetProvider { role: ProviderKind, index: usize },
+    ClearProviderOverride { role: ProviderKind, index: usize },
 }
 
 impl WidgetAction {
@@ -238,6 +240,12 @@ impl WidgetAction {
             }
             WidgetAction::RetargetProvider { role, index } => {
                 Some(LauncherShellMessage::RetargetProvider {
+                    role: *role,
+                    index: *index,
+                })
+            }
+            WidgetAction::ClearProviderOverride { role, index } => {
+                Some(LauncherShellMessage::ClearProviderOverride {
                     role: *role,
                     index: *index,
                 })
@@ -571,6 +579,22 @@ fn render_provider_entry(
                 ),
             );
         }
+    }
+
+    let has_preference_override = provider.path_provenance.has_preference_override();
+    let path_is_default = provider.path == provider.path_provenance.default_path();
+    if has_preference_override || !path_is_default {
+        let controls = gui.add_row(entry, false);
+        gui.add_label(controls, "Override controls:");
+        let label = if path_is_default {
+            "Clear saved overrides"
+        } else {
+            "Restore default path"
+        };
+        let button = gui.add_button(controls, label);
+        layout
+            .action_map
+            .insert(button, WidgetAction::ClearProviderOverride { role, index });
     }
 
     if matches!(provider.automation, ProviderAutomationState::Stale { .. }) {
@@ -934,5 +958,54 @@ mod tests {
             retarget_present,
             "expected retarget action to be registered"
         );
+    }
+
+    #[test]
+    fn overridden_providers_offer_restore_controls() {
+        let temp = TempDir::new().unwrap();
+        let default_path = temp.path().join("support-share-default");
+        let override_path = temp.path().join("support-share-override");
+        let mut provenance = ProviderPathProvenance::new(default_path.clone());
+        provenance.apply_override(override_path.clone(), ProviderOverrideSource::Preference);
+
+        let mut diagnostics = ProviderDiagnostics::default();
+        diagnostics.share.push(ProviderStatus {
+            name: "Support Share Drop".into(),
+            path: override_path,
+            path_status: ProviderPathStatus::Ready,
+            automation: ProviderAutomationState::Idle,
+            path_provenance: provenance,
+        });
+
+        let mut ui = LauncherShellUi::new(None).expect("ui");
+        ui.set_providers(diagnostics).expect("set providers");
+        ui.layout(Size::new(640.0, 480.0));
+
+        let button = {
+            let (button, _) = ui
+                .layout
+                .action_map
+                .iter()
+                .find(|(_, action)| {
+                    matches!(
+                        action,
+                        WidgetAction::ClearProviderOverride {
+                            role: ProviderKind::Share,
+                            index: 0
+                        }
+                    )
+                })
+                .expect("restore override control");
+            *button
+        };
+
+        let response = click_button(&mut ui, button);
+        assert!(matches!(
+            response.messages.as_slice(),
+            [LauncherShellMessage::ClearProviderOverride {
+                role: ProviderKind::Share,
+                index: 0
+            }]
+        ));
     }
 }
