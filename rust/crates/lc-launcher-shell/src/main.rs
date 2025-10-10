@@ -10,8 +10,9 @@ use lc_gui::{DrawCommand, GuiEvent, KeyCode, Point as GuiPoint, Rect as GuiRect,
 use lc_launcher::{
     copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_launcher_preferences,
     load_shell_state, reveal_in_file_manager, save_launcher_preferences, timestamp_for_filename,
-    timestamp_for_log, LauncherLog, LauncherPreferences, ProviderAutomationState,
-    ProviderDiagnostics, ProviderPathStatus, ProviderStatus, SupportArtifact,
+    timestamp_for_log, write_launcher_summary, LauncherLog, LauncherPreferences,
+    ProviderAutomationSnapshot, ProviderAutomationState, ProviderDiagnostics, ProviderPathStatus,
+    ProviderStatus, SupportArtifact, UpdateTelemetrySummary,
 };
 use lc_launcher_ui::{
     ActionFeedback, LauncherShellMessage, LauncherShellResponse, LauncherShellUi,
@@ -266,11 +267,12 @@ impl LauncherApp {
         self.update_feedback(Some(feedback))
     }
 
-    fn update_provider_diagnostics(&mut self) -> Result<()> {
+    fn update_provider_diagnostics(&mut self) -> Result<ProviderDiagnostics> {
         let diagnostics = self.providers.diagnostics();
         self.ui
-            .set_providers(diagnostics)
-            .map_err(|err| anyhow!(err))
+            .set_providers(diagnostics.clone())
+            .map_err(|err| anyhow!(err))?;
+        Ok(diagnostics)
     }
 
     fn feedback_from_reports(
@@ -289,6 +291,30 @@ impl LauncherApp {
         } else {
             ActionFeedback::info(message)
         }
+    }
+
+    fn persist_provider_snapshot(
+        &self,
+        state: &LauncherShellState,
+        diagnostics: &ProviderDiagnostics,
+    ) -> Result<ProviderAutomationSnapshot> {
+        let telemetry = UpdateTelemetrySummary::from_serializable(
+            &state.summary.update_telemetry,
+            &state.logs_dir,
+        );
+        let snapshot = ProviderAutomationSnapshot::from_diagnostics(diagnostics, &state.logs_dir);
+        write_launcher_summary(
+            &self.paths,
+            &self.logger,
+            &state.launcher_log_path,
+            &state.runtime_log_paths,
+            &state.crash_report_paths,
+            &telemetry,
+            state.support_bundle_path.as_deref(),
+            Some(snapshot.clone()),
+        )
+        .context("failed to persist provider automation snapshot")?;
+        Ok(snapshot)
     }
 
     fn persist_preferences(&self) {
@@ -388,11 +414,32 @@ impl LauncherApp {
                                         staged_path.display()
                                     ))
                                     .context("failed to log copy success")?;
+                                let state_snapshot = self.ui.state().cloned();
                                 let (stage_report, automation_report) =
                                     self.providers.stage_bundle(&self.logger, &bundle_path);
-                                self.update_provider_diagnostics().context(
-                                    "failed to refresh provider diagnostics after support bundle staging",
-                                )?;
+                                let diagnostics = self
+                                    .update_provider_diagnostics()
+                                    .context(
+                                        "failed to refresh provider diagnostics after support bundle staging",
+                                    )?;
+                                if let Some(mut state) = state_snapshot {
+                                    let snapshot = self
+                                        .persist_provider_snapshot(&state, &diagnostics)
+                                        .context(
+                                        "failed to persist provider automation after bundle staging",
+                                    )?;
+                                    state.summary.provider_automation = snapshot;
+                                    self.ui
+                                        .set_state(Some(state))
+                                        .map_err(|err| anyhow!(err))
+                                        .context(
+                                        "failed to refresh launcher summary after bundle staging",
+                                    )?;
+                                } else {
+                                    let _ = self.logger.log_line(
+                                        "provider automation could not be recorded because no launcher summary is loaded",
+                                    );
+                                }
 
                                 let mut feedback_message =
                                     format!("Support bundle copied to {}", staged_path.display());
@@ -483,11 +530,30 @@ impl LauncherApp {
                                     .log_line(&format!("{} ({})", summary, staged_list))
                                     .context("failed to log artifact staging success")?;
 
+                                let state_snapshot = self.ui.state().cloned();
                                 let (stage_report, automation_report) =
                                     self.providers.stage_artifacts(&self.logger, &artifacts);
-                                self.update_provider_diagnostics().context(
+                                let diagnostics = self.update_provider_diagnostics().context(
                                     "failed to refresh provider diagnostics after artifact staging",
                                 )?;
+                                if let Some(mut state) = state_snapshot {
+                                    let snapshot = self
+                                        .persist_provider_snapshot(&state, &diagnostics)
+                                        .context(
+                                            "failed to persist provider automation after artifact staging",
+                                        )?;
+                                    state.summary.provider_automation = snapshot;
+                                    self.ui
+                                        .set_state(Some(state))
+                                        .map_err(|err| anyhow!(err))
+                                        .context(
+                                        "failed to refresh launcher summary after artifact staging",
+                                    )?;
+                                } else {
+                                    let _ = self.logger.log_line(
+                                        "provider automation could not be recorded because no launcher summary is loaded",
+                                    );
+                                }
 
                                 if self.providers.has_upload_targets() {
                                     if let Some(extra) = stage_report.summary() {
@@ -554,7 +620,8 @@ impl LauncherApp {
             }
         }
         self.update_provider_diagnostics()
-            .context("failed to refresh provider diagnostics")
+            .context("failed to refresh provider diagnostics")?;
+        Ok(())
     }
 
     fn render(&mut self, frame: &mut [u8]) -> Result<()> {

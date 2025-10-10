@@ -1,5 +1,8 @@
 use crate::log::LauncherLog;
 use crate::paths::{ensure_logs_dir, launcher_summary_path, relative_to_logs};
+use crate::provider::{
+    ProviderAutomationState, ProviderDiagnostics, ProviderPathStatus, ProviderStatus,
+};
 use crate::telemetry::{SerializableTelemetrySummary, UpdateTelemetrySummary};
 use crate::time::timestamp_for_log;
 use anyhow::{anyhow, Context, Result};
@@ -17,12 +20,60 @@ pub struct LauncherSummary {
     pub crash_reports: Vec<String>,
     pub support_bundle: Option<String>,
     pub update_telemetry: SerializableTelemetrySummary,
+    #[serde(default, skip_serializing_if = "ProviderAutomationSnapshot::is_empty")]
+    pub provider_automation: ProviderAutomationSnapshot,
 }
 
 pub struct LauncherSummaryRecord {
     pub summary: LauncherSummary,
     pub path: PathBuf,
     pub logs_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderAutomationSnapshot {
+    pub share: Vec<ProviderAutomationRecord>,
+    pub upload: Vec<ProviderAutomationRecord>,
+}
+
+impl ProviderAutomationSnapshot {
+    pub fn from_diagnostics(diagnostics: &ProviderDiagnostics, logs_dir: &Path) -> Self {
+        Self {
+            share: diagnostics
+                .share
+                .iter()
+                .map(|status| ProviderAutomationRecord::from_status(status, logs_dir))
+                .collect(),
+            upload: diagnostics
+                .upload
+                .iter()
+                .map(|status| ProviderAutomationRecord::from_status(status, logs_dir))
+                .collect(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.share.is_empty() && self.upload.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderAutomationRecord {
+    pub name: String,
+    pub path: String,
+    pub path_status: ProviderPathStatus,
+    pub automation: ProviderAutomationState,
+}
+
+impl ProviderAutomationRecord {
+    fn from_status(status: &ProviderStatus, logs_dir: &Path) -> Self {
+        Self {
+            name: status.name.clone(),
+            path: relative_to_logs(&status.path, logs_dir),
+            path_status: status.path_status.clone(),
+            automation: status.automation.clone(),
+        }
+    }
 }
 
 pub fn write_launcher_summary(
@@ -33,6 +84,7 @@ pub fn write_launcher_summary(
     crash_reports: &[PathBuf],
     telemetry_summary: &UpdateTelemetrySummary,
     support_bundle: Option<&Path>,
+    provider_snapshot: Option<ProviderAutomationSnapshot>,
 ) -> Result<PathBuf> {
     if !launcher_log_path.exists() {
         return Err(anyhow!(
@@ -56,6 +108,7 @@ pub fn write_launcher_summary(
             .collect(),
         support_bundle: support_bundle.map(|path| relative_to_logs(path, &logs_dir)),
         update_telemetry: telemetry_summary.to_serializable(&logs_dir),
+        provider_automation: provider_snapshot.unwrap_or_default(),
     };
 
     let summary_path = launcher_summary_path(&logs_dir);

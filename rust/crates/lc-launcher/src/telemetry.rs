@@ -1,5 +1,5 @@
 use crate::log::LauncherLog;
-use crate::paths::relative_to_logs;
+use crate::paths::{relative_to_logs, resolve_logs_entry};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -31,6 +31,20 @@ pub struct UpdateTelemetrySummary {
 }
 
 impl UpdateTelemetrySummary {
+    pub fn from_serializable(summary: &SerializableTelemetrySummary, logs_dir: &Path) -> Self {
+        let mut telemetry = UpdateTelemetrySummary::default();
+        for entry in &summary.successes {
+            telemetry.record_success(resolve_logs_entry(logs_dir, entry));
+        }
+        for failure in &summary.failures {
+            telemetry.record_failure(
+                resolve_logs_entry(logs_dir, &failure.log),
+                failure.message.clone(),
+            );
+        }
+        telemetry
+    }
+
     pub fn record_success(&mut self, path: PathBuf) {
         if !self
             .success_sources

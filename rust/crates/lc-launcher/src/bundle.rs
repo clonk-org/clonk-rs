@@ -147,16 +147,10 @@ pub fn regenerate_support_bundle(
         .map(|entry| resolve_logs_entry(&record.logs_dir, entry))
         .collect::<Vec<_>>();
 
-    let mut telemetry = UpdateTelemetrySummary::default();
-    for entry in &record.summary.update_telemetry.successes {
-        telemetry.record_success(resolve_logs_entry(&record.logs_dir, entry));
-    }
-    for failure in &record.summary.update_telemetry.failures {
-        telemetry.record_failure(
-            resolve_logs_entry(&record.logs_dir, &failure.log),
-            failure.message.clone(),
-        );
-    }
+    let telemetry = UpdateTelemetrySummary::from_serializable(
+        &record.summary.update_telemetry,
+        &record.logs_dir,
+    );
 
     let bundle = create_support_bundle(
         paths,
@@ -176,6 +170,7 @@ pub fn regenerate_support_bundle(
         &crash_reports,
         &telemetry,
         Some(&bundle),
+        Some(record.summary.provider_automation.clone()),
     )?;
 
     Ok((bundle, telemetry))

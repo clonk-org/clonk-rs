@@ -21,6 +21,7 @@ pub use shell::{
 };
 pub use summary::{
     load_launcher_summary, write_launcher_summary, LauncherSummary, LauncherSummaryRecord,
+    ProviderAutomationSnapshot,
 };
 pub use telemetry::{
     digest_update_telemetry, SerializableTelemetryFailure, SerializableTelemetrySummary,
@@ -158,6 +159,7 @@ mod tests {
             &[crash_log.clone()],
             &telemetry,
             Some(&bundle_path),
+            None,
         )
         .unwrap();
 
@@ -213,6 +215,7 @@ mod tests {
             &[runtime_log],
             &[crash_log],
             &telemetry,
+            None,
             None,
         )
         .unwrap();
@@ -341,6 +344,7 @@ mod tests {
             &[crash_log],
             &telemetry,
             Some(&bundle_path),
+            None,
         )
         .unwrap();
 
@@ -365,6 +369,73 @@ mod tests {
         assert!(
             err.to_string().contains("does not exist"),
             "expected missing path error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn write_launcher_summary_records_provider_automation() {
+        let install_dir = TempDir::new().unwrap();
+        prepare_install_root(install_dir.path());
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+
+        let logger = TestLogger::new(paths.logs_dir().join("lc-launcher.log"));
+        logger.log_line("provider automation test start").unwrap();
+
+        let runtime_log = paths.logs_dir().join("Clonk-provider.log");
+        fs::write(&runtime_log, "runtime").unwrap();
+        let crash_log = paths.logs_dir().join("LegacyClonk-crash-provider.dmp");
+        fs::write(&crash_log, "crash").unwrap();
+
+        let share_dir = paths.logs_dir().join("support-share");
+        fs::create_dir_all(&share_dir).unwrap();
+
+        let mut telemetry = UpdateTelemetrySummary::default();
+        telemetry.record_success(runtime_log.clone());
+
+        let mut diagnostics = ProviderDiagnostics::default();
+        diagnostics.share.push(ProviderStatus {
+            name: "Support Share Drop".into(),
+            path: share_dir.clone(),
+            path_status: ProviderPathStatus::Ready,
+            automation: ProviderAutomationState::Submitted {
+                detail: "submission-request-share-test.json".into(),
+            },
+        });
+
+        let snapshot = ProviderAutomationSnapshot::from_diagnostics(&diagnostics, paths.logs_dir());
+
+        write_launcher_summary(
+            &paths,
+            &logger,
+            logger.path(),
+            &[runtime_log],
+            &[crash_log],
+            &telemetry,
+            None,
+            Some(snapshot),
+        )
+        .unwrap();
+
+        let summary_path = paths.logs_dir().join("launcher-summary.json");
+        let summary_json = fs::read_to_string(summary_path).unwrap();
+        let document: Value = serde_json::from_str(&summary_json).unwrap();
+
+        let share_entries = document["provider_automation"]["share"].as_array().unwrap();
+        assert_eq!(share_entries.len(), 1, "expected one share provider entry");
+        let entry = &share_entries[0];
+        assert_eq!(entry["name"].as_str(), Some("Support Share Drop"));
+        assert_eq!(entry["path"].as_str(), Some("support-share"));
+        assert_eq!(entry["path_status"].as_str(), Some("Ready"));
+        assert_eq!(
+            entry["automation"]["Submitted"]["detail"].as_str(),
+            Some("submission-request-share-test.json")
         );
     }
 }

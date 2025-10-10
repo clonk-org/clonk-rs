@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderPathStatus {
     Ready,
     Missing,
@@ -8,7 +9,7 @@ pub enum ProviderPathStatus {
     Inaccessible(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderAutomationState {
     Idle,
     Submitted { detail: String },
