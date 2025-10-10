@@ -1,9 +1,10 @@
+use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, LineWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,6 +16,7 @@ use lc_platform::AppPaths;
 const SKIP_PATCHER_VALIDATION_ENV: &str = "LC_GAME_SKIP_PATCHER_CHECK";
 const LEGACY_LOG_PREFIX: &str = "Clonk";
 const LEGACY_LOG_SUFFIX: &str = ".log";
+const CRASH_ARTIFACT_MARKER: &str = "-crash-";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -74,17 +76,36 @@ fn run() -> Result<()> {
         .context("failed to write binary resolution log")?;
 
     let runtime_start = SystemTime::now();
-    let launch_result = launch_runtime(&binary, &paths, &config_path, &cli.forwarded, &logger);
+    let status = launch_runtime(&binary, &paths, &config_path, &cli.forwarded, &logger)?;
     let log_collection_result = collect_runtime_logs(&paths, runtime_start, &logger);
+    let crash_report_result = collect_crash_reports(&paths, runtime_start, &logger);
 
     if let Err(err) = &log_collection_result {
         logger
             .log_line(format!("failed to collect runtime logs: {err}"))
             .ok();
     }
+    if let Err(err) = &crash_report_result {
+        logger
+            .log_line(format!("failed to collect crash artifacts: {err}"))
+            .ok();
+    }
 
-    launch_result?;
-    log_collection_result
+    let copied_logs = log_collection_result?;
+    let telemetry_result = digest_update_telemetry(&copied_logs, &logger);
+    if let Err(err) = &telemetry_result {
+        logger
+            .log_line(format!("failed to extract updater telemetry: {err}"))
+            .ok();
+    }
+    telemetry_result?;
+    crash_report_result?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("LegacyClonk exited {}", describe_exit_status(&status));
+    }
 }
 
 fn resolve_runtime_binary(override_path: Option<&Path>, install_root: &Path) -> Result<PathBuf> {
@@ -124,7 +145,7 @@ fn launch_runtime(
     config_path: &Path,
     forwarded: &[OsString],
     logger: &LauncherLogger,
-) -> Result<()> {
+) -> Result<ExitStatus> {
     let mut command = Command::new(binary);
     command.current_dir(paths.install_root());
     command.args(forwarded);
@@ -177,15 +198,15 @@ fn launch_runtime(
             .map_err(|err| anyhow!("stderr forwarding thread panicked: {:?}", err))??
     }
 
+    let exit_summary = describe_exit_status(&status);
     logger
-        .log_line(format!("runtime exited with status {}", status))
+        .log_line(format!(
+            "runtime exited with {} (raw status {})",
+            exit_summary, status
+        ))
         .context("failed to log runtime status")?;
 
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("LegacyClonk exited with status {status}");
-    }
+    Ok(status)
 }
 
 fn candidate_binaries(install_root: &Path) -> Vec<PathBuf> {
@@ -344,6 +365,10 @@ impl LauncherLogger {
         }
         self.log_line(format!("{}: {}", kind.label(), trimmed))
     }
+
+    fn path(&self) -> &Path {
+        &self.inner.path
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -475,12 +500,17 @@ fn collect_runtime_logs(
     paths: &AppPaths,
     started_at: SystemTime,
     logger: &LauncherLogger,
-) -> Result<()> {
+) -> Result<Vec<PathBuf>> {
     let install_root = paths.install_root();
     let logs_dir = paths.logs_dir();
 
     if install_root == logs_dir {
-        return Ok(());
+        logger
+            .log_line(
+                "skipping runtime log sync because install root and logs directory are identical",
+            )
+            .context("failed to record runtime log sync skip")?;
+        return Ok(Vec::new());
     }
 
     fs::create_dir_all(logs_dir).with_context(|| {
@@ -492,6 +522,7 @@ fn collect_runtime_logs(
 
     let copy_stamp = timestamp_for_filename();
     let mut copied = 0usize;
+    let mut copies = Vec::new();
 
     for entry in fs::read_dir(install_root).with_context(|| {
         format!(
@@ -527,6 +558,7 @@ fn collect_runtime_logs(
                 dest_path.display()
             )
         })?;
+        copies.push(dest_path.clone());
         logger
             .log_line(format!(
                 "copied runtime log {} -> {}",
@@ -549,7 +581,7 @@ fn collect_runtime_logs(
             .context("failed to summarise runtime log copy")?;
     }
 
-    Ok(())
+    Ok(copies)
 }
 
 fn is_legacy_log(path: &Path) -> bool {
@@ -566,13 +598,228 @@ fn is_legacy_log(path: &Path) -> bool {
     }
 }
 
+fn is_crash_artifact(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some(name) => name.to_ascii_lowercase().contains(CRASH_ARTIFACT_MARKER),
+        None => false,
+    }
+}
+
+fn describe_exit_status(status: &ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(code) = status.code() {
+            return if status.success() {
+                format!("success (code {code})")
+            } else {
+                format!("exit code {code}")
+            };
+        }
+        if let Some(signal) = status.signal() {
+            let mut description = format!("signal {signal}");
+            if status.core_dumped() {
+                description.push_str(" (core dumped)");
+            }
+            return description;
+        }
+    }
+    if let Some(code) = status.code() {
+        return if status.success() {
+            format!("success (code {code})")
+        } else {
+            format!("exit code {code}")
+        };
+    }
+    format!("{status}")
+}
+
+fn collect_crash_reports(
+    paths: &AppPaths,
+    started_at: SystemTime,
+    logger: &LauncherLogger,
+) -> Result<Vec<PathBuf>> {
+    let logs_dir = paths.logs_dir();
+    fs::create_dir_all(&logs_dir).with_context(|| {
+        format!(
+            "failed to ensure logs directory {} exists for crash artifacts",
+            logs_dir.display()
+        )
+    })?;
+
+    let mut sources = vec![
+        paths.user_data_dir().to_path_buf(),
+        paths.install_root().to_path_buf(),
+    ];
+    if !sources.iter().any(|dir| dir == &logs_dir) {
+        sources.push(logs_dir.to_path_buf());
+    }
+
+    let mut captured = Vec::new();
+    let mut processed = HashSet::new();
+    let mut copies = 0usize;
+    let stamp = timestamp_for_filename();
+
+    for source in sources {
+        if !source.exists() || !source.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&source).with_context(|| {
+            format!(
+                "failed to enumerate crash artifacts under {}",
+                source.display()
+            )
+        })? {
+            let entry = entry?;
+            let path = entry.path();
+            if !is_crash_artifact(&path) {
+                continue;
+            }
+            if !processed.insert(path.clone()) {
+                continue;
+            }
+            let include = match entry.metadata() {
+                Ok(metadata) => match metadata.modified() {
+                    Ok(modified) => modified >= started_at,
+                    Err(_) => true,
+                },
+                Err(_) => true,
+            };
+            if !include {
+                continue;
+            }
+
+            let dest_path = if path.starts_with(&logs_dir) {
+                logger
+                    .log_line(format!(
+                        "detected crash artifact already in logs dir: {}",
+                        path.display()
+                    ))
+                    .context("failed to record existing crash artifact")?;
+                path.clone()
+            } else {
+                copies += 1;
+                let suffix = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("LegacyClonk-crash.dmp");
+                let dest_name = format!("crash-{}-{:02}-{}", stamp, copies, suffix);
+                let dest_path = logs_dir.join(dest_name);
+                fs::copy(&path, &dest_path).with_context(|| {
+                    format!(
+                        "failed to copy crash artifact {} to {}",
+                        path.display(),
+                        dest_path.display()
+                    )
+                })?;
+                logger
+                    .log_line(format!(
+                        "copied crash artifact {} -> {}",
+                        path.display(),
+                        dest_path.display()
+                    ))
+                    .context("failed to record crash artifact copy")?;
+                dest_path
+            };
+            captured.push(dest_path);
+        }
+    }
+
+    if captured.is_empty() {
+        logger
+            .log_line("no crash artifacts generated during this session")
+            .context("failed to record crash artifact summary")?;
+    } else {
+        logger
+            .log_line(format!(
+                "captured {} crash artifact(s) in {}",
+                captured.len(),
+                logs_dir.display()
+            ))
+            .context("failed to summarise crash artifact capture")?;
+    }
+
+    Ok(captured)
+}
+
+fn digest_update_telemetry(log_paths: &[PathBuf], logger: &LauncherLogger) -> Result<()> {
+    if log_paths.is_empty() {
+        logger
+            .log_line("no runtime logs were captured; updater telemetry unavailable")
+            .context("failed to log updater telemetry absence")?;
+        return Ok(());
+    }
+
+    let mut failure_events = Vec::new();
+    let mut success_sources = HashSet::new();
+
+    for path in log_paths {
+        let file = File::open(path)
+            .with_context(|| format!("failed to open runtime log {}", path.display()))?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line.with_context(|| {
+                format!("failed to read telemetry line from {}", path.display())
+            })?;
+            let trimmed = line.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            if lower.contains("c4group returned status")
+                || lower.contains("c4group killed with signal")
+            {
+                failure_events.push((path.clone(), trimmed.to_string()));
+            } else if trimmed == "Done." {
+                success_sources.insert(path.clone());
+            }
+        }
+    }
+
+    for (path, message) in &failure_events {
+        logger
+            .log_line(format!(
+                "updater telemetry [{}]: {}",
+                filename_or_display(path),
+                message
+            ))
+            .context("failed to log updater telemetry failure")?;
+    }
+
+    if !success_sources.is_empty() {
+        let sources = success_sources
+            .iter()
+            .map(|path| filename_or_display(path))
+            .collect::<Vec<_>>()
+            .join(", ");
+        logger
+            .log_line(format!("updater telemetry: success recorded in {sources}"))
+            .context("failed to log updater telemetry success")?;
+    }
+
+    if failure_events.is_empty() && success_sources.is_empty() {
+        logger
+            .log_line("no updater telemetry found in captured runtime logs")
+            .context("failed to log updater telemetry absence")?;
+    }
+
+    Ok(())
+}
+
+fn filename_or_display(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::env;
     use std::fs;
     use std::path::Path;
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
 
     struct EnvGuard {
@@ -740,22 +987,102 @@ mod tests {
         )
         .unwrap();
 
-        collect_runtime_logs(&paths, start, &logger).unwrap();
+        let copies = collect_runtime_logs(&paths, start, &logger).unwrap();
 
-        let mut found = false;
-        for entry in fs::read_dir(paths.logs_dir()).unwrap() {
-            let entry = entry.unwrap();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(LEGACY_LOG_PREFIX) && name.ends_with(LEGACY_LOG_SUFFIX) {
-                found = true;
-                break;
-            }
-        }
-        assert!(
-            found,
-            "expected copied legacy log in {}",
+        assert_eq!(
+            copies.len(),
+            1,
+            "expected exactly one copied log in {}",
             paths.logs_dir().display()
+        );
+        assert!(
+            copies[0].starts_with(paths.logs_dir()),
+            "expected copied log to live in {}",
+            paths.logs_dir().display()
+        );
+        assert!(
+            copies[0].exists(),
+            "copied log {} should exist",
+            copies[0].display()
+        );
+    }
+
+    #[test]
+    fn collect_crash_reports_copies_recent_artifacts() {
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let crash_file = user_dir
+            .path()
+            .join("LegacyClonk-crash-2024-01-01-00-00-00.dmp");
+        fs::write(&crash_file, b"crash").unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        let logger = LauncherLogger::new(&paths).unwrap();
+
+        let start = SystemTime::now() - Duration::from_secs(60);
+        let artifacts = collect_crash_reports(&paths, start, &logger).unwrap();
+
+        assert!(
+            artifacts
+                .iter()
+                .any(|path| path.starts_with(paths.logs_dir())),
+            "expected crash artifact to be copied into logs dir {}",
+            paths.logs_dir().display()
+        );
+        for artifact in artifacts {
+            assert!(
+                artifact.exists(),
+                "expected crash artifact {} to exist",
+                artifact.display()
+            );
+        }
+    }
+
+    #[test]
+    fn digest_update_telemetry_detects_failure_lines() {
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        let logger = LauncherLogger::new(&paths).unwrap();
+
+        let telemetry_log = paths.logs_dir().join("Clonk-session.log");
+        fs::write(
+            &telemetry_log,
+            "c4group returned status 2\nDone.\nRandom other line\n",
+        )
+        .unwrap();
+
+        digest_update_telemetry(&[telemetry_log.clone()], &logger).unwrap();
+
+        let launcher_log = fs::read_to_string(logger.path()).unwrap();
+        assert!(
+            launcher_log
+                .contains("updater telemetry [Clonk-session.log]: c4group returned status 2"),
+            "launcher log should record failure telemetry, contents:\n{launcher_log}"
+        );
+        assert!(
+            launcher_log.contains("updater telemetry: success recorded in Clonk-session.log"),
+            "launcher log should record success telemetry, contents:\n{launcher_log}"
         );
     }
 }
