@@ -311,7 +311,10 @@ impl LauncherApp {
             &state.logs_dir,
         );
         let snapshot = ProviderAutomationSnapshot::from_diagnostics(diagnostics, &state.logs_dir);
-        let bulk_summary = bulk_retarget.or_else(|| state.summary.provider_bulk_retarget.clone());
+        let bulk_summary = prune_bulk_retarget_history(
+            bulk_retarget.or_else(|| state.summary.provider_bulk_retarget.clone()),
+            diagnostics,
+        );
         write_launcher_summary(
             &self.paths,
             &self.logger,
@@ -1201,6 +1204,33 @@ impl LauncherApp {
         frame.copy_from_slice(self.surface.pixels());
         Ok(())
     }
+}
+
+fn prune_bulk_retarget_history(
+    summary: Option<ProviderBulkRetargetSummary>,
+    diagnostics: &ProviderDiagnostics,
+) -> Option<ProviderBulkRetargetSummary> {
+    let mut summary = summary?;
+    if role_uses_default_paths(&diagnostics.share) {
+        summary.share.clear();
+    }
+    if role_uses_default_paths(&diagnostics.upload) {
+        summary.upload.clear();
+    }
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary)
+    }
+}
+
+fn role_uses_default_paths(statuses: &[ProviderStatus]) -> bool {
+    if statuses.is_empty() {
+        return true;
+    }
+    statuses
+        .iter()
+        .all(|status| status.path == status.path_provenance.default_path())
 }
 
 const SHARE_PROVIDERS_ENV: &str = "LC_FIRST_PARTY_SHARE_DIRS";
@@ -2365,8 +2395,8 @@ mod tests {
     use anyhow::Result as AnyResult;
     use lc_launcher::{
         LauncherPreferences, ProviderAutomationSnapshot, ProviderAutomationState,
-        ProviderDiagnostics, ProviderOverrideSource, ProviderPathStatus, ProviderStatus,
-        SupportArtifact,
+        ProviderBulkRetargetRecord, ProviderBulkRetargetSummary, ProviderDiagnostics,
+        ProviderOverrideSource, ProviderPathStatus, ProviderStatus, SupportArtifact,
     };
     use std::env;
     use std::ffi::OsString;
@@ -2771,6 +2801,99 @@ mod tests {
         assert!(
             !providers.upload[0].provenance.has_preference_override(),
             "upload preference overrides should be cleared"
+        );
+    }
+
+    #[test]
+    fn prune_bulk_retarget_history_drops_records_when_role_defaults_restored() {
+        let share_default = TempDir::new().unwrap();
+        let upload_default = TempDir::new().unwrap();
+        let upload_override = TempDir::new().unwrap();
+
+        let share_state = ProviderTargetState::new(ProviderTarget {
+            name: "Support Share Drop".into(),
+            path: share_default.path().to_path_buf(),
+        });
+        let mut upload_state = ProviderTargetState::new(ProviderTarget {
+            name: "Support Upload Drop".into(),
+            path: upload_default.path().to_path_buf(),
+        });
+        upload_state.apply_override(
+            upload_override.path().to_path_buf(),
+            ProviderOverrideSource::Retargeted {
+                applied_at: "2024-06-02T12:00:00Z".into(),
+            },
+        );
+
+        let diagnostics = ProviderDiagnostics {
+            share: vec![share_state.to_status()],
+            upload: vec![upload_state.to_status()],
+        };
+
+        let mut summary = ProviderBulkRetargetSummary::default();
+        summary.share.push(ProviderBulkRetargetRecord {
+            base_path: "support-share".into(),
+            retargeted_at: "2024-05-01T12:00:00Z".into(),
+            total: 2,
+            changed: 2,
+        });
+        summary.upload.push(ProviderBulkRetargetRecord {
+            base_path: "support-upload".into(),
+            retargeted_at: "2024-05-03T09:30:00Z".into(),
+            total: 1,
+            changed: 1,
+        });
+
+        let pruned =
+            prune_bulk_retarget_history(Some(summary), &diagnostics).expect("upload should remain");
+        assert!(
+            pruned.share.is_empty(),
+            "share history should be cleared once defaults are restored"
+        );
+        assert_eq!(
+            pruned.upload.len(),
+            1,
+            "upload history should be preserved when overrides remain"
+        );
+    }
+
+    #[test]
+    fn prune_bulk_retarget_history_clears_summary_when_all_defaults_restored() {
+        let share_default = TempDir::new().unwrap();
+        let upload_default = TempDir::new().unwrap();
+
+        let share_state = ProviderTargetState::new(ProviderTarget {
+            name: "Support Share Drop".into(),
+            path: share_default.path().to_path_buf(),
+        });
+        let upload_state = ProviderTargetState::new(ProviderTarget {
+            name: "Support Upload Drop".into(),
+            path: upload_default.path().to_path_buf(),
+        });
+
+        let diagnostics = ProviderDiagnostics {
+            share: vec![share_state.to_status()],
+            upload: vec![upload_state.to_status()],
+        };
+
+        let mut summary = ProviderBulkRetargetSummary::default();
+        summary.share.push(ProviderBulkRetargetRecord {
+            base_path: "support-share".into(),
+            retargeted_at: "2024-05-01T12:00:00Z".into(),
+            total: 2,
+            changed: 2,
+        });
+        summary.upload.push(ProviderBulkRetargetRecord {
+            base_path: "support-upload".into(),
+            retargeted_at: "2024-05-03T09:30:00Z".into(),
+            total: 1,
+            changed: 1,
+        });
+
+        let pruned = prune_bulk_retarget_history(Some(summary), &diagnostics);
+        assert!(
+            pruned.is_none(),
+            "bulk retarget history should be cleared once every provider uses default paths"
         );
     }
 
