@@ -43,6 +43,7 @@ pub(crate) struct HostWorldObject {
     pub owner: i32,
     pub category: i32,
     pub energy: i32,
+    pub damage: i32,
     pub position: Vector2,
     #[allow(dead_code)]
     pub velocity: Vector2,
@@ -83,6 +84,7 @@ impl HostWorldObject {
             owner,
             DEFAULT_CATEGORY,
             energy,
+            0,
             position,
             velocity,
             vertices,
@@ -103,6 +105,7 @@ impl HostWorldObject {
         owner: i32,
         category: i32,
         energy: i32,
+        damage: i32,
         position: Vector2,
         velocity: Vector2,
         vertices: Vec<ObjectVertex>,
@@ -121,6 +124,7 @@ impl HostWorldObject {
             owner,
             category,
             energy,
+            damage,
             position,
             velocity,
             vertices,
@@ -160,6 +164,10 @@ impl HostWorldObject {
 
     pub fn energy(&self) -> i32 {
         self.energy
+    }
+
+    pub fn damage(&self) -> i32 {
+        self.damage
     }
 
     pub fn action_name(&self) -> &str {
@@ -807,6 +815,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("RemoveObject", remove_object);
     script.register_host_function("GetEnergy", get_energy);
     script.register_host_function("DoEnergy", do_energy);
+    script.register_host_function("DoDamage", do_damage);
     script.register_host_function("Random", random);
     script.register_host_function("SetGravity", set_gravity);
     script.register_host_function("GetGravity", get_gravity);
@@ -840,6 +849,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub container: Option<ObjectId>,
     pub status: ObjectStatus,
     pub energy: i32,
+    pub damage: i32,
     pub owner: i32,
     pub category: i32,
     pub position: Vector2,
@@ -882,6 +892,7 @@ impl<'a> HostObjectContext<'a> {
             container,
             status,
             energy,
+            0,
             owner,
             position,
             velocity,
@@ -904,6 +915,7 @@ impl<'a> HostObjectContext<'a> {
         container: Option<ObjectId>,
         status: ObjectStatus,
         energy: i32,
+        damage: i32,
         owner: i32,
         position: Vector2,
         velocity: Vector2,
@@ -924,6 +936,7 @@ impl<'a> HostObjectContext<'a> {
             container,
             status,
             energy,
+            damage,
             owner,
             category,
             position,
@@ -2161,6 +2174,106 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         }
 
         object.adjust_energy(change, exact);
+        Ok(Value::Bool(true))
+    })
+}
+
+fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "DoDamage expects at least 1 argument: change",
+        ));
+    }
+
+    let change = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "DoDamage: expected int or nil for change, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            Value::Int(value) if *value == 0 => {
+                index += 1;
+            }
+            Value::Int(value) if *value > 0 => {
+                target_id = Some(ObjectId::new(*value as u64));
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Int(_) | Value::Nil => {
+                index += 1;
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "DoDamage: expected int or nil for damage type, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Int(_) | Value::Nil => {
+                index += 1;
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "DoDamage: expected int or nil for caused by, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "DoDamage: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("DoDamage requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        object.adjust_damage(change);
         Ok(Value::Bool(true))
     })
 }
@@ -3899,6 +4012,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             owner,
             definition_category,
             0,
+            0,
             position,
             Vector2::ZERO,
             Vec::new(),
@@ -4174,7 +4288,7 @@ fn get_category(args: &[Value]) -> Result<Value, RuntimeError> {
                 }
             }
             if let Some(other) = context.get_world_object(target) {
-                return Ok(Value::Int(other.category()))
+                return Ok(Value::Int(other.category()));
             }
             return Ok(Value::Nil);
         }
@@ -4736,6 +4850,7 @@ impl EffectHostContext {
                 container,
                 status,
                 energy,
+                damage,
                 owner,
                 position,
                 velocity,
@@ -4756,13 +4871,14 @@ impl EffectHostContext {
                 container,
                 status,
                 energy,
+                damage,
                 owner,
                 category,
-                    position,
-                    velocity,
-                    effects.to_vec(),
-                    action_library,
-                    action_name,
+                position,
+                velocity,
+                effects.to_vec(),
+                action_library,
+                action_name,
                 action_ticks,
                 action_data,
                 direction,
@@ -5038,6 +5154,7 @@ struct ObjectScopeContext {
     current_action_data: i32,
     current_action_ticks: u32,
     current_energy: i32,
+    current_damage: i32,
     max_energy: i32,
     current_owner: i32,
     current_category: i32,
@@ -5054,6 +5171,7 @@ impl ObjectScopeContext {
         container: Option<ObjectId>,
         status: ObjectStatus,
         energy: i32,
+        damage: i32,
         owner: i32,
         category: i32,
         position: Vector2,
@@ -5071,6 +5189,7 @@ impl ObjectScopeContext {
     ) -> Self {
         let blocks_other_actions = action_library.blocks_other_actions(&action_name);
         let max_energy = energy.max(DEFAULT_MAX_ENERGY);
+        let clamped_damage = damage.max(0);
         Self {
             id,
             current_container: container,
@@ -5087,6 +5206,7 @@ impl ObjectScopeContext {
             current_action_data: action_data,
             current_action_ticks: action_ticks,
             current_energy: energy,
+            current_damage: clamped_damage,
             max_energy,
             current_owner: owner,
             current_category: category,
@@ -5287,6 +5407,26 @@ impl ObjectScopeContext {
             self.max_energy = energy;
         }
         self.pending_update.energy = Some(energy);
+    }
+
+    fn damage(&self) -> i32 {
+        self.pending_update.damage.unwrap_or(self.current_damage)
+    }
+
+    fn set_damage(&mut self, damage: i32) {
+        let clamped = damage.max(0);
+        self.current_damage = clamped;
+        self.pending_update.damage = Some(clamped);
+    }
+
+    fn adjust_damage(&mut self, delta: i32) -> i32 {
+        let current = self.damage();
+        let mut next = current.saturating_add(delta);
+        if next < 0 {
+            next = 0;
+        }
+        self.set_damage(next);
+        next
     }
 
     fn direction(&self) -> Direction {
@@ -6624,7 +6764,8 @@ mod tests {
     fn get_vertex_contact_uses_landscape_sampling() {
         let vertices = [ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER | CNAT_BOTTOM)];
         let landscape = Landscape::flat(8, 0);
-        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape), HashMap::new(), 1);
+        let world =
+            HostWorldContext::with_landscape(Vec::new(), Some(landscape), HashMap::new(), 1);
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
@@ -6662,7 +6803,8 @@ mod tests {
             ObjectVertex::new(0, -5).with_cnat(CNAT_TOP),
         ];
         let landscape = Landscape::flat(4, 0);
-        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape), HashMap::new(), 1);
+        let world =
+            HostWorldContext::with_landscape(Vec::new(), Some(landscape), HashMap::new(), 1);
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
@@ -7102,7 +7244,8 @@ mod tests {
     #[test]
     fn set_position_clamps_coordinates_when_requested() {
         let landscape = Landscape::flat(4, 6);
-        let world = HostWorldContext::with_landscape(Vec::new(), Some(landscape), HashMap::new(), 1);
+        let world =
+            HostWorldContext::with_landscape(Vec::new(), Some(landscape), HashMap::new(), 1);
         let args = [
             Value::Int(10),
             Value::Int(20),
@@ -7562,6 +7705,32 @@ mod tests {
         let args = [Value::Int(-10), Value::Proplist(target)];
         let (result, outcome) = with_object_host_context(|| do_energy(&args));
         let value = result.expect("DoEnergy returns bool");
+        assert_eq!(value, Value::Bool(false));
+        assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
+    fn do_damage_applies_delta_and_clamps() {
+        let (result, outcome) = with_object_host_context(|| do_damage(&[Value::Int(15)]));
+        let value = result.expect("DoDamage returns bool");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("damage update recorded");
+        assert_eq!(update.damage, Some(15));
+
+        let (result, outcome) = with_object_host_context(|| do_damage(&[Value::Int(-20)]));
+        let value = result.expect("DoDamage returns bool");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("damage update recorded");
+        assert_eq!(update.damage, Some(0));
+    }
+
+    #[test]
+    fn do_damage_respects_target_argument() {
+        let mut target = HashMap::new();
+        target.insert("id".into(), Value::Int(77));
+        let args = [Value::Int(5), Value::Proplist(target)];
+        let (result, outcome) = with_object_host_context(|| do_damage(&args));
+        let value = result.expect("DoDamage returns bool");
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.object_update.is_none());
     }

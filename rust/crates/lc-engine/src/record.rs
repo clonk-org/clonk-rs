@@ -338,6 +338,7 @@ mod tests {
                 position: Vector2::new(1, 2),
                 velocity: Vector2::new(0, 0),
                 energy,
+                damage: 0,
                 action: ActionState::default(),
                 direction: Direction::default(),
                 command_direction: CommandDirection::default(),

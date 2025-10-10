@@ -344,6 +344,7 @@ void ApplyRuntimeObjectStateToC4Object(
     object.ydir = itofix(vel_y);
 
     object.Energy = state.energy;
+    object.Damage = std::max<int32_t>(state.damage, 0);
     if (object.Owner != state.owner) {
         object.SetOwner(state.owner);
     }
@@ -1117,6 +1118,7 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
         entry.snapshot.velocity_x = fixtoi(object->xdir);
         entry.snapshot.velocity_y = fixtoi(object->ydir);
         entry.snapshot.energy = object->Energy;
+        entry.snapshot.damage = object->Damage;
         entry.snapshot.owner = static_cast<int32_t>(object->Owner);
         entry.snapshot.category = object->Category;
         entry.snapshot.crew_member = (object->OCF & OCF_CrewMember) != 0;

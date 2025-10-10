@@ -814,6 +814,54 @@ impl Default for MovementProfile {
     }
 }
 
+#[derive(Clone, Copy)]
+struct BridgeParameters {
+    duration: u32,
+    move_clonk: bool,
+    wall: bool,
+    _material: Option<u8>,
+}
+
+impl BridgeParameters {
+    fn from_action_data(data: i32) -> Self {
+        let raw = data as u32;
+        let duration_raw = ((raw >> 16) & 0xFFFF) as u32;
+        let duration = if duration_raw == 0 { 100 } else { duration_raw };
+        let move_clonk = (raw & 0x100) != 0;
+        let wall = (raw & 0x200) != 0;
+        let material_byte = (raw & 0xFF) as u8;
+        let material = if material_byte == 0xFF {
+            None
+        } else {
+            Some(material_byte)
+        };
+        Self {
+            duration,
+            move_clonk,
+            wall,
+            _material: material,
+        }
+    }
+
+    fn step_interval(&self, direction: CommandDirection) -> Option<u32> {
+        use CommandDirection::*;
+        if self.wall {
+            match direction {
+                Left | Right => Some(4),
+                UpLeft | UpRight | Up => Some(5),
+                _ => None,
+            }
+        } else {
+            match direction {
+                Left | Right => Some(5),
+                Up => Some(4),
+                UpLeft | UpRight => Some(6),
+                _ => None,
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentSettings {
     pub wind: i32,
@@ -1045,6 +1093,8 @@ pub struct ObjectState {
     pub position: Vector2,
     pub velocity: Vector2,
     pub energy: i32,
+    #[serde(default)]
+    pub damage: i32,
     pub action: ActionState,
     #[serde(default)]
     pub direction: Direction,
@@ -1100,6 +1150,9 @@ impl ObjectState {
         }
         if let Some(energy) = delta.energy {
             self.energy = energy;
+        }
+        if let Some(damage) = delta.damage {
+            self.damage = damage.max(0);
         }
         if let Some(direction) = delta.direction {
             self.direction = direction;
@@ -1161,6 +1214,7 @@ struct ObjectDelta {
     position: Option<Vector2>,
     velocity: Option<Vector2>,
     energy: Option<i32>,
+    damage: Option<i32>,
     direction: Option<Direction>,
     command_direction: Option<CommandDirection>,
     action: Option<ActionUpdate>,
@@ -1182,6 +1236,9 @@ impl ObjectDelta {
         }
         if let Some(energy) = update.energy {
             self.energy = Some(energy);
+        }
+        if let Some(damage) = update.damage {
+            self.damage = Some(damage);
         }
         if let Some(direction) = update.direction {
             self.direction = Some(direction);
@@ -1222,6 +1279,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             position: update.position,
             velocity: update.velocity,
             energy: update.energy,
+            damage: update.damage,
             direction: update.direction,
             command_direction: update.command_direction,
             action: update.action,
@@ -1240,6 +1298,8 @@ pub struct ObjectUpdate {
     pub position: Option<Vector2>,
     pub velocity: Option<Vector2>,
     pub energy: Option<i32>,
+    #[serde(default)]
+    pub damage: Option<i32>,
     pub action: Option<ActionUpdate>,
     #[serde(default)]
     pub direction: Option<Direction>,
@@ -1277,6 +1337,15 @@ impl ObjectUpdate {
     pub fn with_energy(mut self, energy: i32) -> Self {
         self.energy = Some(energy);
         self
+    }
+
+    pub fn with_damage(mut self, damage: i32) -> Self {
+        self.damage = Some(damage);
+        self
+    }
+
+    pub fn set_damage(&mut self, damage: i32) {
+        self.damage = Some(damage);
     }
 
     pub fn with_direction(mut self, direction: Direction) -> Self {
@@ -1356,6 +1425,7 @@ impl ObjectUpdate {
         self.position.is_none()
             && self.velocity.is_none()
             && self.energy.is_none()
+            && self.damage.is_none()
             && self.direction.is_none()
             && self.command_direction.is_none()
             && self.action.is_none()
@@ -1615,6 +1685,7 @@ impl Object {
             position: self.state.position,
             velocity: self.state.velocity,
             energy: self.state.energy,
+            damage: self.state.damage,
             action: self.state.action.clone(),
             direction: self.state.direction,
             command_direction: self.state.command_direction,
@@ -2009,6 +2080,8 @@ pub struct ObjectSnapshot {
     pub velocity: Vector2,
     pub energy: i32,
     #[serde(default)]
+    pub damage: i32,
+    #[serde(default)]
     pub action: ActionState,
     #[serde(default)]
     pub direction: Direction,
@@ -2334,6 +2407,7 @@ impl Definition {
                 state.container,
                 state.status,
                 state.energy,
+                state.damage,
                 state.owner,
                 state.position,
                 state.velocity,
@@ -2448,6 +2522,7 @@ impl Definition {
                 state.container,
                 state.status,
                 state.energy,
+                state.damage,
                 state.owner,
                 state.position,
                 state.velocity,
@@ -2563,6 +2638,7 @@ impl Definition {
                 state.container,
                 state.status,
                 state.energy,
+                state.damage,
                 state.owner,
                 state.position,
                 state.velocity,
@@ -2739,6 +2815,7 @@ impl Definition {
                 state.container,
                 state.status,
                 state.energy,
+                state.damage,
                 state.owner,
                 state.position,
                 state.velocity,
@@ -3364,6 +3441,7 @@ impl Engine {
                     object.state.owner,
                     object.state.category,
                     object.state.energy,
+                    object.state.damage,
                     object.state.position,
                     object.state.velocity,
                     object.state.vertices.clone(),
@@ -4639,6 +4717,7 @@ impl Engine {
                     position: snapshot.position,
                     velocity: snapshot.velocity,
                     energy: snapshot.energy,
+                    damage: snapshot.damage,
                     action: snapshot.action.clone(),
                     direction: snapshot.direction,
                     command_direction: snapshot.command_direction,
@@ -5019,6 +5098,12 @@ impl Engine {
             }
         };
 
+        if matches!(procedure, ActionProcedure::Bridge) {
+            if !self.apply_bridge_procedure(idx, command_direction, &definition_id) {
+                return;
+            }
+        }
+
         if matches!(procedure, ActionProcedure::Fight) {
             if !self.apply_fight_procedure(idx, movement_profile, &definition_id) {
                 return;
@@ -5228,6 +5313,54 @@ impl Engine {
         } else {
             let (_, targets) = self.objects.split_at_mut(target_idx);
             adjust_velocity(&mut targets[0]);
+        }
+
+        true
+    }
+
+    fn apply_bridge_procedure(
+        &mut self,
+        idx: usize,
+        command_direction: CommandDirection,
+        definition_id: &DefinitionId,
+    ) -> bool {
+        let parameters = BridgeParameters::from_action_data(self.objects[idx].state.action.data);
+        let action_time = self.objects[idx].state.action.phase.max(0) as u32;
+
+        if action_time >= parameters.duration {
+            self.reset_action_to_default(idx, definition_id, false);
+            return false;
+        }
+
+        let Some(step_interval) = parameters.step_interval(command_direction) else {
+            return true;
+        };
+
+        if step_interval == 0 || action_time % step_interval != 0 {
+            return true;
+        }
+
+        let step_index = (action_time / step_interval) as i32;
+        let direction_sign: i32 = match command_direction {
+            CommandDirection::Left | CommandDirection::UpLeft | CommandDirection::DownLeft => -1,
+            CommandDirection::Right | CommandDirection::UpRight | CommandDirection::DownRight => 1,
+            _ => 0,
+        };
+
+        let base_position = self.objects[idx].state.position;
+        let target_column = base_position
+            .x
+            .saturating_add(direction_sign.saturating_mul(step_index));
+
+        if let Some(landscape) = self.landscape.as_mut() {
+            let start = target_column;
+            let end = target_column.saturating_add(1);
+            landscape.lower_range(start, end, base_position.y);
+        }
+
+        if parameters.move_clonk && direction_sign != 0 && action_time > 0 {
+            let object = &mut self.objects[idx];
+            object.state.position.x = object.state.position.x.saturating_add(direction_sign);
         }
 
         true
@@ -6083,6 +6216,7 @@ impl Engine {
                 position,
                 velocity,
                 energy,
+                damage: 0,
                 action: initial_action,
                 direction,
                 command_direction,
@@ -6140,7 +6274,7 @@ impl Engine {
                     .definitions
                     .get(&definition_id)
                     .expect("definition must exist");
-        definition.call_initialize(
+                definition.call_initialize(
                     &object.state,
                     id,
                     random,
@@ -6348,7 +6482,7 @@ fn build_state_value(
 }
 
 fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
-    let mut map = HashMap::with_capacity(10);
+    let mut map = HashMap::with_capacity(11);
     map.insert(
         "definition".into(),
         Value::String(snapshot.definition_id.clone()),
@@ -6360,6 +6494,7 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
     map.insert("position".into(), snapshot.position.to_value());
     map.insert("velocity".into(), snapshot.velocity.to_value());
     map.insert("energy".into(), Value::Int(snapshot.energy));
+    map.insert("damage".into(), Value::Int(snapshot.damage));
     map.insert(
         "direction".into(),
         Value::Int(snapshot.direction.to_script_value()),
@@ -6450,6 +6585,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.owner,
                 object.category,
                 object.energy,
+                object.damage,
                 object.position,
                 object.velocity,
                 object.vertices.clone(),
@@ -7836,6 +7972,24 @@ mod tests {
         Definition::from_script("Test", "Test", source).expect("script compiles")
     }
 
+    fn encode_bridge_data(duration: u32, move_clonk: bool, wall: bool, material: i32) -> i32 {
+        let duration = duration & 0xFFFF;
+        let mut raw = duration << 16;
+        if move_clonk {
+            raw |= 1 << 8;
+        }
+        if wall {
+            raw |= 1 << 9;
+        }
+        let material_byte = if material < 0 {
+            0xFF
+        } else {
+            (material as u32) & 0xFF
+        };
+        raw |= material_byte;
+        raw as i32
+    }
+
     #[test]
     fn path_free_host_function_queries_landscape() {
         let mut definition =
@@ -8915,6 +9069,56 @@ mod tests {
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity, Vector2::ZERO);
+    }
+
+    #[test]
+    fn bridge_procedure_updates_landscape_height() {
+        let mut definition =
+            Definition::from_script("Bridger", "Bridger", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        actions.insert(
+            "Bridge".to_string(),
+            ActionSpec::default().with_procedure("bridge"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(17);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let mut heights = vec![5; 16];
+        for column in 6..16 {
+            heights[column] = 0;
+        }
+        engine.set_landscape(Landscape::new(16, heights).expect("landscape constructs"));
+
+        let mut action = ActionState::new("Bridge");
+        action.data = encode_bridge_data(10, false, false, -1);
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Bridger")
+                    .with_position(Vector2::new(5, 5))
+                    .with_direction(Direction::Right)
+                    .with_command_direction(CommandDirection::Right)
+                    .with_action(action),
+            )
+            .expect("spawn succeeds");
+
+        let mut snapshot = engine.tick().expect("tick succeeds");
+        for _ in 1..10 {
+            snapshot = engine.tick().expect("tick succeeds");
+        }
+
+        let landscape = snapshot.landscape.as_ref().expect("landscape present");
+        assert_eq!(landscape.surface()[5], 5);
+        assert_eq!(landscape.surface()[6], 5);
+
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Idle");
     }
 
     #[test]

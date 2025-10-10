@@ -361,8 +361,8 @@ impl Scenario {
             }
 
             if let Some(category) = category {
-                spawn =
-                    spawn.with_category(crate::normalize_category(category, crate::DEFAULT_CATEGORY));
+                spawn = spawn
+                    .with_category(crate::normalize_category(category, crate::DEFAULT_CATEGORY));
             }
 
             let handle = handle
