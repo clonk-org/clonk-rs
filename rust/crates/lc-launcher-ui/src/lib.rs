@@ -6,7 +6,7 @@ use lc_gui::{
 };
 use lc_launcher::{
     support_artifacts, LauncherShellState, ProviderAutomationState, ProviderDiagnostics,
-    ProviderPathStatus, ProviderStatus, SupportArtifact,
+    ProviderOverrideSource, ProviderPathStatus, ProviderStatus, SupportArtifact,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,6 +548,30 @@ fn render_provider_entry(
             format_automation_state(&provider.automation)
         ),
     );
+    gui.add_label(
+        entry,
+        format!(
+            "Default path: {}",
+            display_path(provider.path_provenance.default_path())
+        ),
+    );
+
+    let overrides = provider.path_provenance.overrides();
+    if overrides.is_empty() {
+        gui.add_label(entry, "Override history: none recorded.");
+    } else {
+        gui.add_label(entry, "Override history:");
+        for override_entry in overrides {
+            gui.add_label(
+                entry,
+                format!(
+                    "  - {} -> {}",
+                    format_override_source(override_entry.source()),
+                    display_path(override_entry.path())
+                ),
+            );
+        }
+    }
 
     if matches!(provider.automation, ProviderAutomationState::Stale { .. }) {
         let actions = gui.add_row(entry, false);
@@ -599,6 +623,15 @@ fn format_automation_state(state: &ProviderAutomationState) -> String {
     }
 }
 
+fn format_override_source(source: &ProviderOverrideSource) -> String {
+    match source {
+        ProviderOverrideSource::Preference => "Launcher preference".into(),
+        ProviderOverrideSource::Retargeted { applied_at } => {
+            format!("Retargeted at {applied_at}")
+        }
+    }
+}
+
 fn capitalize_word(word: &str) -> String {
     let mut chars = word.chars();
     match chars.next() {
@@ -618,8 +651,8 @@ mod tests {
     use lc_gui::{GuiEvent, Point};
     use lc_launcher::{
         LauncherSummary, LauncherTelemetryFailure, ProviderAutomationSnapshot,
-        ProviderAutomationState, ProviderDiagnostics, ProviderPathProvenance,
-        ProviderPathStatus, ProviderStatus, SerializableTelemetryFailure,
+        ProviderAutomationState, ProviderDiagnostics, ProviderOverrideSource,
+        ProviderPathProvenance, ProviderPathStatus, ProviderStatus, SerializableTelemetryFailure,
         SerializableTelemetrySummary,
     };
     use tempfile::TempDir;
@@ -799,6 +832,64 @@ mod tests {
                 DrawCommand::Text { text, .. } if text.contains("Submitted (submission-request-1.json)")
             )),
             "expected automation status to be rendered"
+        );
+
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { text, .. } if text.contains("Default path:")
+            )),
+            "default path should be rendered"
+        );
+
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { text, .. } if text.contains("Override history: none recorded.")
+            )),
+            "override history placeholder should be rendered"
+        );
+    }
+
+    #[test]
+    fn override_entries_are_listed() {
+        let temp = TempDir::new().unwrap();
+        let mut provenance = ProviderPathProvenance::new(temp.path().join("support-share-default"));
+        provenance.apply_override(
+            temp.path().join("support-share-retarget"),
+            ProviderOverrideSource::Retargeted {
+                applied_at: "2024-06-01T12:00:00Z".into(),
+            },
+        );
+
+        let mut diagnostics = ProviderDiagnostics::default();
+        diagnostics.share.push(ProviderStatus {
+            name: "Support Share Drop".into(),
+            path: temp.path().join("support-share-retarget"),
+            path_status: ProviderPathStatus::Ready,
+            automation: ProviderAutomationState::Idle,
+            path_provenance: provenance,
+        });
+
+        let mut ui = LauncherShellUi::new(None).expect("ui");
+        ui.set_providers(diagnostics).expect("set providers");
+        ui.layout(Size::new(640.0, 480.0));
+        let commands = ui.render();
+
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { text, .. } if text.contains("Retargeted at 2024-06-01T12:00:00Z")
+            )),
+            "override timestamp should be rendered"
+        );
+
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { text, .. } if text.contains("support-share-retarget")
+            )),
+            "override path should be rendered"
         );
     }
 

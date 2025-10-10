@@ -12,9 +12,10 @@ use std::time::SystemTime;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use lc_launcher::{
-    create_support_bundle, digest_update_telemetry, regenerate_support_bundle,
-    timestamp_for_filename, timestamp_for_log, write_launcher_summary, LauncherLog,
-    UpdateTelemetrySummary,
+    create_support_bundle, digest_update_telemetry, load_launcher_summary,
+    regenerate_support_bundle, timestamp_for_filename, timestamp_for_log, write_launcher_summary,
+    LauncherLog, LauncherSummaryRecord, ProviderAutomationRecord, ProviderAutomationState,
+    ProviderOverrideSourceRecord, ProviderPathStatus, UpdateTelemetrySummary,
 };
 use lc_platform::AppPaths;
 
@@ -837,6 +838,9 @@ fn print_launcher_report(
     } else {
         println!("Updater telemetry: no signals captured in the collected runtime logs.");
     }
+
+    emit_provider_snapshot(paths);
+
     match support_bundle {
         Some(_) => println!(
             "Share the support bundle when filing bugs to include launcher, runtime, and telemetry logs."
@@ -844,6 +848,116 @@ fn print_launcher_report(
         None => println!(
             "Share launcher-summary.json when filing bugs so support can collect the right logs."
         ),
+    }
+}
+
+fn emit_provider_snapshot(paths: &AppPaths) {
+    match load_launcher_summary(paths) {
+        Ok(Some(record)) => {
+            println!();
+            print_provider_sections(&record);
+        }
+        Ok(None) => {
+            println!();
+            println!("First-party providers: launcher summary not available yet.");
+        }
+        Err(err) => {
+            println!();
+            println!("First-party providers: failed to load launcher summary ({err}).");
+        }
+    }
+}
+
+fn print_provider_sections(record: &LauncherSummaryRecord) {
+    let snapshot = &record.summary.provider_automation;
+    if snapshot.share.is_empty() && snapshot.upload.is_empty() {
+        println!("First-party providers: no automation targets recorded.");
+        return;
+    }
+
+    println!(
+        "First-party providers (logs dir: {}):",
+        record.logs_dir.display()
+    );
+
+    if !snapshot.share.is_empty() {
+        print_provider_category("Share targets", &snapshot.share, &record.logs_dir);
+    }
+    if !snapshot.upload.is_empty() {
+        print_provider_category("Upload targets", &snapshot.upload, &record.logs_dir);
+    }
+}
+
+fn print_provider_category(label: &str, providers: &[ProviderAutomationRecord], logs_dir: &Path) {
+    println!("  {label}:");
+    for provider in providers {
+        print_provider_entry("    ", provider, logs_dir);
+    }
+}
+
+fn print_provider_entry(indent: &str, provider: &ProviderAutomationRecord, logs_dir: &Path) {
+    let current_path = resolve_summary_entry(logs_dir, &provider.path);
+    println!(
+        "{indent}- {} ({})",
+        provider.name,
+        describe_provider_path_status(&provider.path_status)
+    );
+    println!("{indent}  Current path: {}", current_path.display());
+    println!(
+        "{indent}  Automation: {}",
+        describe_provider_automation(&provider.automation)
+    );
+
+    let default_entry = provider.default_path.as_deref().unwrap_or(&provider.path);
+    let default_path = resolve_summary_entry(logs_dir, default_entry);
+    println!("{indent}  Default path: {}", default_path.display());
+
+    if provider.overrides.is_empty() {
+        println!("{indent}  Overrides: none recorded.");
+    } else {
+        println!("{indent}  Overrides:");
+        for override_entry in &provider.overrides {
+            let path = resolve_summary_entry(logs_dir, &override_entry.path);
+            let source = describe_override_source(&override_entry.source);
+            println!("{indent}    - {} -> {}", source, path.display());
+        }
+    }
+}
+
+fn resolve_summary_entry(logs_dir: &Path, entry: &str) -> PathBuf {
+    let candidate = Path::new(entry);
+    if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        logs_dir.join(candidate)
+    }
+}
+
+fn describe_provider_path_status(status: &ProviderPathStatus) -> String {
+    match status {
+        ProviderPathStatus::Ready => "ready".into(),
+        ProviderPathStatus::Missing => "missing".into(),
+        ProviderPathStatus::NotDirectory => "not a directory".into(),
+        ProviderPathStatus::Inaccessible(err) => format!("inaccessible ({err})"),
+    }
+}
+
+fn describe_provider_automation(state: &ProviderAutomationState) -> String {
+    match state {
+        ProviderAutomationState::Idle => "Idle".into(),
+        ProviderAutomationState::Submitted { detail } => format!("Submitted ({detail})"),
+        ProviderAutomationState::Stale { reason } => format!("Stale ({reason})"),
+        ProviderAutomationState::Skipped { reason } => format!("Skipped ({reason})"),
+        ProviderAutomationState::Failed { error } => format!("Failed ({error})"),
+    }
+}
+
+fn describe_override_source(source: &ProviderOverrideSourceRecord) -> String {
+    match source {
+        ProviderOverrideSourceRecord::Preference => "Launcher preference".into(),
+        ProviderOverrideSourceRecord::Retargeted { applied_at } => {
+            format!("Retargeted at {applied_at}")
+        }
     }
 }
 
