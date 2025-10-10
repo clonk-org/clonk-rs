@@ -2,6 +2,7 @@ use std::f32::consts::PI;
 use std::io::{stdout, Cursor};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -23,6 +24,7 @@ use lc_gui::{
 use lc_network::{ClientId, ControlCoordinator, ControlError, ControlPacket, Lobby, LobbyError};
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{Group, GroupError};
+use minifb::{Key, Window, WindowOptions};
 use serde::{Deserialize, Serialize};
 
 const DEMO_CONFIG_BYTES: &[u8] = include_bytes!("demo_config.cfg");
@@ -171,34 +173,49 @@ impl ControlPayload {
     }
 }
 
+trait InteractiveFrontend {
+    fn capture_events(&mut self, duration: Duration) -> GameResult<()>;
+    fn current_payload(&self) -> ControlPayload;
+    fn exit_requested(&self) -> bool;
+    fn present_surface(&mut self, surface: &Surface) -> GameResult<()>;
+    fn teardown(&mut self);
+}
+
 enum ControlMode {
     Scripted,
-    Interactive(InteractiveInput),
+    Interactive(Box<dyn InteractiveFrontend>),
 }
 
 impl ControlMode {
     fn next_payload(&mut self, tick: u32) -> GameResult<Option<ControlPayload>> {
         match self {
             ControlMode::Scripted => Ok(Some(scripted_control_for_tick(tick))),
-            ControlMode::Interactive(input) => {
-                input.capture_events(Duration::from_millis(TICK_DURATION_MS))?;
-                if input.exit_requested() {
+            ControlMode::Interactive(frontend) => {
+                frontend.capture_events(Duration::from_millis(TICK_DURATION_MS))?;
+                if frontend.exit_requested() {
                     Ok(None)
                 } else {
-                    Ok(Some(input.current_payload()))
+                    Ok(Some(frontend.current_payload()))
                 }
             }
         }
     }
 
+    fn after_frame(&mut self, surface: &Surface) -> GameResult<()> {
+        if let ControlMode::Interactive(frontend) = self {
+            frontend.present_surface(surface)?;
+        }
+        Ok(())
+    }
+
     fn teardown(&mut self) {
-        if let ControlMode::Interactive(input) = self {
-            input.teardown();
+        if let ControlMode::Interactive(frontend) = self {
+            frontend.teardown();
         }
     }
 }
 
-struct InteractiveInput {
+struct TerminalFrontend {
     left_held: bool,
     right_held: bool,
     jump_held: bool,
@@ -207,7 +224,7 @@ struct InteractiveInput {
     cursor_hidden: bool,
 }
 
-impl InteractiveInput {
+impl TerminalFrontend {
     fn new() -> GameResult<Self> {
         terminal::enable_raw_mode().map_err(|err| GameError::Input(err.to_string()))?;
         let mut stdout = stdout();
@@ -222,7 +239,7 @@ impl InteractiveInput {
         })
     }
 
-    fn capture_events(&mut self, duration: Duration) -> GameResult<()> {
+    fn poll_events(&mut self, duration: Duration) -> GameResult<()> {
         let start = Instant::now();
         let mut remaining = duration;
 
@@ -286,7 +303,7 @@ impl InteractiveInput {
         }
     }
 
-    fn current_payload(&self) -> ControlPayload {
+    fn payload(&self) -> ControlPayload {
         let horizontal = match (self.left_held, self.right_held) {
             (true, true) | (false, false) => 0,
             (true, false) => -1,
@@ -302,7 +319,7 @@ impl InteractiveInput {
         self.exit_requested
     }
 
-    fn teardown(&mut self) {
+    fn teardown_terminal(&mut self) {
         if self.raw_mode {
             let _ = terminal::disable_raw_mode();
             self.raw_mode = false;
@@ -315,9 +332,147 @@ impl InteractiveInput {
     }
 }
 
-impl Drop for InteractiveInput {
+impl InteractiveFrontend for TerminalFrontend {
+    fn capture_events(&mut self, duration: Duration) -> GameResult<()> {
+        self.poll_events(duration)
+    }
+
+    fn current_payload(&self) -> ControlPayload {
+        self.payload()
+    }
+
+    fn exit_requested(&self) -> bool {
+        self.exit_requested()
+    }
+
+    fn present_surface(&mut self, _surface: &Surface) -> GameResult<()> {
+        Ok(())
+    }
+
+    fn teardown(&mut self) {
+        self.teardown_terminal();
+    }
+}
+
+impl Drop for TerminalFrontend {
     fn drop(&mut self) {
-        self.teardown();
+        self.teardown_terminal();
+    }
+}
+
+struct WindowFrontend {
+    window: Window,
+    buffer: Vec<u32>,
+    width: usize,
+    height: usize,
+    exit_requested: bool,
+}
+
+impl WindowFrontend {
+    fn new(width: u32, height: u32) -> GameResult<Self> {
+        let width = width as usize;
+        let height = height as usize;
+        let mut window = Window::new(
+            "LegacyClonk (Rust demo)",
+            width,
+            height,
+            WindowOptions::default(),
+        )
+        .map_err(|err| GameError::Input(err.to_string()))?;
+        window.limit_update_rate(Some(Duration::from_millis(TICK_DURATION_MS)));
+        Ok(Self {
+            window,
+            buffer: vec![0; width * height],
+            width,
+            height,
+            exit_requested: false,
+        })
+    }
+
+    fn write_surface(&mut self, surface: &Surface) -> GameResult<()> {
+        let width = surface.width() as usize;
+        let height = surface.height() as usize;
+        if width != self.width || height != self.height {
+            return Err(GameError::Input(format!(
+                "surface size {}x{} does not match window {}x{}",
+                width, height, self.width, self.height
+            )));
+        }
+
+        for (chunk, pixel) in surface.pixels().chunks_exact(4).zip(self.buffer.iter_mut()) {
+            let r = chunk[0] as u32;
+            let g = chunk[1] as u32;
+            let b = chunk[2] as u32;
+            let a = chunk[3] as u32;
+            *pixel = (a << 24) | (r << 16) | (g << 8) | b;
+        }
+
+        Ok(())
+    }
+
+    fn request_exit(&mut self) {
+        self.exit_requested = true;
+    }
+}
+
+impl InteractiveFrontend for WindowFrontend {
+    fn capture_events(&mut self, duration: Duration) -> GameResult<()> {
+        let start = Instant::now();
+
+        if !self.window.is_open() {
+            self.request_exit();
+            return Ok(());
+        }
+
+        self.window.update();
+        if !self.window.is_open() {
+            self.request_exit();
+        }
+
+        if self.window.is_key_down(Key::Escape) || self.window.is_key_down(Key::Q) {
+            self.request_exit();
+        }
+
+        if let Some(remaining) = duration.checked_sub(start.elapsed()) {
+            if !remaining.is_zero() {
+                thread::sleep(remaining);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn current_payload(&self) -> ControlPayload {
+        let left = self.window.is_key_down(Key::Left) || self.window.is_key_down(Key::A);
+        let right = self.window.is_key_down(Key::Right) || self.window.is_key_down(Key::D);
+        let horizontal = match (left, right) {
+            (true, true) | (false, false) => 0,
+            (true, false) => -1,
+            (false, true) => 1,
+        };
+        let jump = self.window.is_key_down(Key::Space)
+            || self.window.is_key_down(Key::Up)
+            || self.window.is_key_down(Key::W);
+        ControlPayload { horizontal, jump }
+    }
+
+    fn exit_requested(&self) -> bool {
+        self.exit_requested
+    }
+
+    fn present_surface(&mut self, surface: &Surface) -> GameResult<()> {
+        self.write_surface(surface)?;
+        self.window
+            .update_with_buffer(&self.buffer, self.width, self.height)
+            .map_err(|err| GameError::Input(err.to_string()))?;
+        if !self.window.is_open() {
+            self.request_exit();
+        }
+        Ok(())
+    }
+
+    fn teardown(&mut self) {
+        self.request_exit();
     }
 }
 
@@ -470,7 +625,19 @@ impl DemoGame {
         lobby.settings_mut().script_hash = Some("demo".to_string());
 
         let control_mode = if options.interactive {
-            ControlMode::Interactive(InteractiveInput::new()?)
+            let frontend: Box<dyn InteractiveFrontend> = match WindowFrontend::new(
+                SURFACE_WIDTH,
+                SURFACE_HEIGHT,
+            ) {
+                Ok(window) => Box::new(window),
+                Err(err) => {
+                    eprintln!(
+                            "warning: failed to start window frontend ({err}). Falling back to terminal input."
+                        );
+                    Box::new(TerminalFrontend::new()?)
+                }
+            };
+            ControlMode::Interactive(frontend)
         } else {
             ControlMode::Scripted
         };
@@ -599,6 +766,7 @@ impl DemoGame {
                 &snapshot.environment,
             )?;
             self.draw_frame(&snapshot);
+            self.control_mode.after_frame(&self.surface)?;
 
             hasher.update_surface(&self.surface);
             last_snapshot = Some(snapshot);
