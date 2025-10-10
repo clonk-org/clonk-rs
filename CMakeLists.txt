@@ -41,7 +41,7 @@ project("LegacyClonk" LANGUAGES CXX ${LANGUAGE_OBJCXX})
 # Rust integration
 option(USE_RUST_CONFIG "Use Rust-based configuration loader" OFF)
 option(USE_RUST_GROUP_VALIDATION "Cross-check group contents with the Rust port" OFF)
-option(USE_RUST_ENGINE_VALIDATION "Validate C++ engine snapshots against the Rust port" OFF)
+option(USE_RUST_ENGINE_VALIDATION "Validate C++ engine snapshots against the Rust port" ON)
 option(USE_RUST_GUI_VALIDATION "Validate GUI layouts against the Rust port" OFF)
 if(USE_RUST_CONFIG OR USE_RUST_GROUP_VALIDATION OR USE_RUST_ENGINE_VALIDATION OR USE_RUST_GUI_VALIDATION)
     find_package(Threads REQUIRED)
