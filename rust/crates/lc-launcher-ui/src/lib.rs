@@ -20,10 +20,57 @@ pub struct LauncherShellResponse {
     pub messages: Vec<LauncherShellMessage>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ActionFeedback {
+    pub message: String,
+    pub kind: ActionFeedbackKind,
+}
+
+impl ActionFeedback {
+    pub fn info(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: ActionFeedbackKind::Info,
+        }
+    }
+
+    pub fn success(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: ActionFeedbackKind::Success,
+        }
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: ActionFeedbackKind::Error,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionFeedbackKind {
+    Info,
+    Success,
+    Error,
+}
+
+impl ActionFeedbackKind {
+    fn label(self) -> &'static str {
+        match self {
+            ActionFeedbackKind::Info => "Info",
+            ActionFeedbackKind::Success => "Success",
+            ActionFeedbackKind::Error => "Error",
+        }
+    }
+}
+
 pub struct LauncherShellUi {
     gui: Gui,
     layout: LauncherShellLayout,
     state: Option<LauncherShellState>,
+    feedback: Option<ActionFeedback>,
 }
 
 impl LauncherShellUi {
@@ -32,18 +79,20 @@ impl LauncherShellUi {
             gui: Gui::new(),
             layout: LauncherShellLayout::default(),
             state: None,
+            feedback: None,
         };
         ui.set_state(state)?;
         Ok(ui)
     }
 
     pub fn set_state(&mut self, state: Option<LauncherShellState>) -> GuiResult<()> {
-        let borrowed = state.as_ref();
-        let (gui, layout) = build_gui(borrowed)?;
-        self.gui = gui;
-        self.layout = layout;
         self.state = state;
-        Ok(())
+        self.rebuild()
+    }
+
+    pub fn set_action_feedback(&mut self, feedback: Option<ActionFeedback>) -> GuiResult<()> {
+        self.feedback = feedback;
+        self.rebuild()
     }
 
     pub fn layout(&mut self, available: Size) -> Size {
@@ -79,6 +128,19 @@ impl LauncherShellUi {
         self.state.as_ref()
     }
 
+    pub fn action_feedback(&self) -> Option<&ActionFeedback> {
+        self.feedback.as_ref()
+    }
+
+    fn rebuild(&mut self) -> GuiResult<()> {
+        let borrowed_state = self.state.as_ref();
+        let feedback = self.feedback.as_ref();
+        let (gui, layout) = build_gui(borrowed_state, feedback)?;
+        self.gui = gui;
+        self.layout = layout;
+        Ok(())
+    }
+
     fn process_gui_result(&mut self, gui_result: GuiEventResult) -> LauncherShellResponse {
         let mut messages = Vec::new();
 
@@ -104,6 +166,7 @@ impl LauncherShellUi {
 struct LauncherShellLayout {
     action_map: HashMap<WidgetId, WidgetAction>,
     support_artifacts: Vec<SupportArtifact>,
+    feedback_message: Option<String>,
     regenerate_button: Option<WidgetId>,
     copy_button: Option<WidgetId>,
     upload_button: Option<WidgetId>,
@@ -142,7 +205,10 @@ impl WidgetAction {
     }
 }
 
-fn build_gui(state: Option<&LauncherShellState>) -> GuiResult<(Gui, LauncherShellLayout)> {
+fn build_gui(
+    state: Option<&LauncherShellState>,
+    feedback: Option<&ActionFeedback>,
+) -> GuiResult<(Gui, LauncherShellLayout)> {
     let mut gui = Gui::new();
     let mut layout = LauncherShellLayout::default();
     let root = gui.root();
@@ -152,6 +218,12 @@ fn build_gui(state: Option<&LauncherShellState>) -> GuiResult<(Gui, LauncherShel
         root,
         "Inspect support bundles, updater telemetry, and captured logs before sharing them with support.",
     );
+
+    if let Some(feedback) = feedback {
+        let message = format_feedback_label(feedback);
+        gui.add_label(root, message.clone());
+        layout.feedback_message = Some(message);
+    }
 
     match state {
         None => {
@@ -362,6 +434,10 @@ fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
+fn format_feedback_label(feedback: &ActionFeedback) -> String {
+    format!("[{}] {}", feedback.kind.label(), feedback.message)
+}
+
 fn format_role(role: &str) -> String {
     role.split_whitespace()
         .map(capitalize_word)
@@ -503,5 +579,33 @@ mod tests {
                 message: "c4group returned status 1".into(),
             }],
         }
+    }
+
+    #[test]
+    fn action_feedback_survives_state_refresh() {
+        let temp = TempDir::new().unwrap();
+        let state = sample_state(temp.path());
+        let mut ui = LauncherShellUi::new(Some(state.clone())).expect("ui");
+
+        ui.set_action_feedback(Some(ActionFeedback::success("Copied bundle")))
+            .expect("set feedback");
+        assert!(
+            ui.layout
+                .feedback_message
+                .as_deref()
+                .map(|text| text.contains("Copied bundle"))
+                .unwrap_or(false),
+            "expected feedback message to include update text"
+        );
+
+        ui.set_state(Some(state)).expect("state refresh");
+        assert!(
+            ui.layout
+                .feedback_message
+                .as_deref()
+                .map(|text| text.contains("Copied bundle"))
+                .unwrap_or(false),
+            "feedback message should survive state rebuild"
+        );
     }
 }

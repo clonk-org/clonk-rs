@@ -107,11 +107,15 @@ pub fn ensure_support_bundle(
 }
 
 pub fn copy_support_bundle(bundle_path: &Path, destination_dir: &Path) -> Result<PathBuf> {
-    if !bundle_path.exists() {
-        return Err(anyhow!(
-            "support bundle {} does not exist",
-            bundle_path.display()
-        ));
+    copy_with_unique_name(bundle_path, destination_dir)
+}
+
+pub fn copy_support_artifacts(
+    artifacts: &[SupportArtifact],
+    destination_dir: &Path,
+) -> Result<Vec<PathBuf>> {
+    if artifacts.is_empty() {
+        return Err(anyhow!("no support artifacts were provided"));
     }
     fs::create_dir_all(destination_dir).with_context(|| {
         format!(
@@ -120,22 +124,46 @@ pub fn copy_support_bundle(bundle_path: &Path, destination_dir: &Path) -> Result
         )
     })?;
 
-    let file_name = bundle_path
+    let mut copied = Vec::with_capacity(artifacts.len());
+    for artifact in artifacts {
+        let path = copy_with_unique_name(&artifact.path, destination_dir)
+            .with_context(|| format!("failed to stage {}", artifact.path.display()))?;
+        copied.push(path);
+    }
+    Ok(copied)
+}
+
+fn copy_with_unique_name(source: &Path, destination_dir: &Path) -> Result<PathBuf> {
+    if !source.exists() {
+        return Err(anyhow!("artifact {} does not exist", source.display()));
+    }
+    fs::create_dir_all(destination_dir).with_context(|| {
+        format!(
+            "failed to create destination directory {}",
+            destination_dir.display()
+        )
+    })?;
+
+    let file_name = source
         .file_name()
-        .ok_or_else(|| anyhow!("support bundle lacks filename component"))?;
+        .ok_or_else(|| anyhow!("artifact lacks filename component"))?;
     let mut candidate = destination_dir.join(file_name);
     if candidate.exists() {
-        let stem = bundle_path
+        let stem = source
             .file_stem()
             .and_then(OsStr::to_str)
-            .unwrap_or("support-bundle");
-        let extension = bundle_path
+            .unwrap_or("support-artifact");
+        let extension = source
             .extension()
             .and_then(OsStr::to_str)
-            .unwrap_or("zip");
+            .unwrap_or_default();
         let mut counter = 1usize;
         loop {
-            let new_name = format!("{stem}-copy{counter}.{extension}");
+            let new_name = if extension.is_empty() {
+                format!("{stem}-copy{counter}")
+            } else {
+                format!("{stem}-copy{counter}.{extension}")
+            };
             candidate = destination_dir.join(new_name);
             if !candidate.exists() {
                 break;
@@ -144,8 +172,8 @@ pub fn copy_support_bundle(bundle_path: &Path, destination_dir: &Path) -> Result
         }
     }
 
-    fs::copy(bundle_path, &candidate)
-        .with_context(|| format!("failed to copy support bundle to {}", candidate.display()))?;
+    fs::copy(source, &candidate)
+        .with_context(|| format!("failed to copy artifact to {}", candidate.display()))?;
     Ok(candidate)
 }
 

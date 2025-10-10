@@ -9,9 +9,9 @@ mod time;
 pub use bundle::{create_support_bundle, regenerate_support_bundle};
 pub use log::LauncherLog;
 pub use shell::{
-    copy_support_bundle, ensure_support_bundle, load_shell_state, reveal_in_file_manager,
-    support_artifacts, LauncherShellEnsureResult, LauncherShellState, LauncherTelemetryFailure,
-    SupportArtifact,
+    copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_shell_state,
+    reveal_in_file_manager, support_artifacts, LauncherShellEnsureResult, LauncherShellState,
+    LauncherTelemetryFailure, SupportArtifact,
 };
 pub use summary::{
     load_launcher_summary, write_launcher_summary, LauncherSummary, LauncherSummaryRecord,
@@ -258,6 +258,48 @@ mod tests {
                 .map(|name| name.contains("-copy"))
                 .unwrap_or(false),
             "second copy should receive -copy suffix"
+        );
+    }
+
+    #[test]
+    fn copy_support_artifacts_stages_files_with_unique_names() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle = temp_dir.path().join("support-bundle.zip");
+        let summary = temp_dir.path().join("launcher-summary.json");
+        fs::write(&bundle, b"bundle").unwrap();
+        fs::write(&summary, b"summary").unwrap();
+
+        let artifacts = vec![
+            SupportArtifact {
+                path: bundle.clone(),
+                role: "support bundle",
+            },
+            SupportArtifact {
+                path: summary.clone(),
+                role: "launcher summary",
+            },
+        ];
+
+        let destination = TempDir::new().unwrap();
+        let copied = copy_support_artifacts(&artifacts, destination.path()).unwrap();
+        assert_eq!(copied.len(), 2, "expected both artifacts to be copied");
+        for path in &copied {
+            assert!(
+                path.exists(),
+                "copied artifact {} should exist",
+                path.display()
+            );
+        }
+
+        // Copying again should produce suffixed names.
+        let copied_again = copy_support_artifacts(&artifacts, destination.path()).unwrap();
+        assert!(
+            copied_again.iter().any(|path| path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.contains("-copy"))
+                .unwrap_or(false)),
+            "expected second copy to receive -copy suffix"
         );
     }
 

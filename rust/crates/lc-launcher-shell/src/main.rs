@@ -7,12 +7,15 @@ use anyhow::{anyhow, Context, Result};
 use lc_graphics::{Color, PixelFormat, Surface};
 use lc_gui::{DrawCommand, GuiEvent, KeyCode, Point as GuiPoint, Rect as GuiRect, Size as GuiSize};
 use lc_launcher::{
-    ensure_support_bundle, load_shell_state, reveal_in_file_manager, timestamp_for_filename,
-    timestamp_for_log, LauncherLog,
+    copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_shell_state,
+    reveal_in_file_manager, timestamp_for_filename, timestamp_for_log, LauncherLog,
 };
-use lc_launcher_ui::{LauncherShellMessage, LauncherShellResponse, LauncherShellUi};
+use lc_launcher_ui::{
+    ActionFeedback, LauncherShellMessage, LauncherShellResponse, LauncherShellUi,
+};
 use lc_platform::AppPaths;
 use pixels::{Pixels, SurfaceTexture};
+use rfd::FileDialog;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, Event, MouseButton, TouchPhase, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -235,6 +238,16 @@ impl LauncherApp {
         Ok(())
     }
 
+    fn update_feedback(&mut self, feedback: Option<ActionFeedback>) -> Result<()> {
+        self.ui
+            .set_action_feedback(feedback)
+            .map_err(|err| anyhow!(err))
+    }
+
+    fn set_feedback(&mut self, feedback: ActionFeedback) -> Result<()> {
+        self.update_feedback(Some(feedback))
+    }
+
     fn handle_message(&mut self, message: LauncherShellMessage) -> Result<()> {
         match message {
             LauncherShellMessage::RegenerateSupportBundle => {
@@ -264,13 +277,63 @@ impl LauncherApp {
                 self.refresh_state()
                     .context("failed to refresh launcher state after bundle regeneration")?;
             }
-            LauncherShellMessage::CopySupportBundle { .. } => {
-                self.logger.log_line(
-                    "copy support bundle action requested (pending native picker integration)",
-                )?;
-                println!(
-                    "Copying support bundles requires a destination picker; this will be added in a later milestone."
-                );
+            LauncherShellMessage::CopySupportBundle { bundle_path } => {
+                self.logger
+                    .log_line("copy support bundle action requested via launcher UI")
+                    .context("failed to log copy request")?;
+
+                if !bundle_path.exists() {
+                    let message = format!(
+                        "Support bundle {} is missing; regenerate it before copying.",
+                        bundle_path.display()
+                    );
+                    self.logger
+                        .log_line(&format!("support bundle copy aborted: {message}"))
+                        .context("failed to log missing bundle")?;
+                    self.set_feedback(ActionFeedback::error(message))?;
+                    return Ok(());
+                }
+
+                let mut dialog =
+                    FileDialog::new().set_title("Choose where to copy the support bundle");
+                if let Some(parent) = bundle_path.parent() {
+                    dialog = dialog.set_directory(parent);
+                } else {
+                    dialog = dialog.set_directory(self.paths.logs_dir());
+                }
+
+                match dialog.pick_folder() {
+                    Some(destination) => match copy_support_bundle(&bundle_path, &destination) {
+                        Ok(staged_path) => {
+                            self.logger
+                                .log_line(&format!(
+                                    "support bundle copied to {}",
+                                    staged_path.display()
+                                ))
+                                .context("failed to log copy success")?;
+                            self.set_feedback(ActionFeedback::success(format!(
+                                "Support bundle copied to {}",
+                                staged_path.display()
+                            )))?;
+                        }
+                        Err(err) => {
+                            self.logger
+                                .log_line(&format!("support bundle copy failed: {err}"))
+                                .context("failed to log copy failure")?;
+                            self.set_feedback(ActionFeedback::error(format!(
+                                "Failed to copy support bundle: {err}"
+                            )))?;
+                        }
+                    },
+                    None => {
+                        self.logger
+                            .log_line("support bundle copy cancelled by user")
+                            .context("failed to log copy cancellation")?;
+                        self.set_feedback(ActionFeedback::info(
+                            "Copy cancelled. No files were staged.",
+                        ))?;
+                    }
+                }
             }
             LauncherShellMessage::RevealPath { path, label } => {
                 self.logger
@@ -279,13 +342,58 @@ impl LauncherApp {
                     .with_context(|| format!("failed to reveal {}", path.display()))?;
             }
             LauncherShellMessage::UploadSupportArtifacts { artifacts } => {
-                self.logger.log_line(
-                    "upload support artifacts action requested (upload UI not yet wired)",
-                )?;
-                println!(
-                    "Upload requested for {} artifacts; UI wiring will land alongside the transfer implementation.",
-                    artifacts.len()
-                );
+                self.logger
+                    .log_line("upload support artifacts requested via launcher UI")
+                    .context("failed to log upload request")?;
+
+                if artifacts.is_empty() {
+                    self.set_feedback(ActionFeedback::info(
+                        "No support artifacts are available yet. Launch the game to generate diagnostics.",
+                    ))?;
+                    return Ok(());
+                }
+
+                let dialog = FileDialog::new()
+                    .set_title("Select where to stage support artifacts for upload")
+                    .set_directory(self.paths.logs_dir());
+
+                match dialog.pick_folder() {
+                    Some(destination) => match copy_support_artifacts(&artifacts, &destination) {
+                        Ok(paths) => {
+                            let staged_list = paths
+                                .iter()
+                                .map(|path| path.display().to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let summary = format!(
+                                "Staged {} artifact{} in {}",
+                                paths.len(),
+                                if paths.len() == 1 { "" } else { "s" },
+                                destination.display()
+                            );
+                            self.logger
+                                .log_line(&format!("{} ({})", summary, staged_list))
+                                .context("failed to log artifact staging success")?;
+                            self.set_feedback(ActionFeedback::success(summary))?;
+                        }
+                        Err(err) => {
+                            self.logger
+                                .log_line(&format!("artifact staging failed: {err}"))
+                                .context("failed to log artifact staging failure")?;
+                            self.set_feedback(ActionFeedback::error(format!(
+                                "Failed to stage artifacts: {err}"
+                            )))?;
+                        }
+                    },
+                    None => {
+                        self.logger
+                            .log_line("artifact upload staging cancelled by user")
+                            .context("failed to log upload cancellation")?;
+                        self.set_feedback(ActionFeedback::info(
+                            "Upload cancelled. No files were copied.",
+                        ))?;
+                    }
+                }
             }
         }
         Ok(())
