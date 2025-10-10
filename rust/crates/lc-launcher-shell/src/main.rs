@@ -10,13 +10,13 @@ use lc_graphics::{Color, PixelFormat, Surface};
 use lc_gui::{DrawCommand, GuiEvent, KeyCode, Point as GuiPoint, Rect as GuiRect, Size as GuiSize};
 use lc_launcher::{
     copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_launcher_preferences,
-    load_shell_state, reveal_in_file_manager, save_launcher_preferences, support_artifacts,
-    timestamp_for_filename, timestamp_for_log, write_launcher_summary, LauncherLog,
-    LauncherPreferences, LauncherShellState, ProviderAutomationRecord, ProviderAutomationSnapshot,
-    ProviderAutomationState, ProviderBulkRetargetRecord, ProviderBulkRetargetSummary,
-    ProviderDiagnostics, ProviderOverrideSource, ProviderOverrideSourceRecord,
-    ProviderPathProvenance, ProviderPathStatus, ProviderStatus, SupportArtifact,
-    UpdateTelemetrySummary,
+    load_shell_state, render_support_bundle_report, reveal_in_file_manager,
+    save_launcher_preferences, support_artifacts, timestamp_for_filename, timestamp_for_log,
+    write_launcher_summary, LauncherLog, LauncherPreferences, LauncherShellState,
+    ProviderAutomationRecord, ProviderAutomationSnapshot, ProviderAutomationState,
+    ProviderBulkRetargetRecord, ProviderBulkRetargetSummary, ProviderDiagnostics,
+    ProviderOverrideSource, ProviderOverrideSourceRecord, ProviderPathProvenance,
+    ProviderPathStatus, ProviderStatus, SupportArtifact, UpdateTelemetrySummary,
 };
 use lc_launcher_ui::{
     ActionFeedback, LauncherShellMessage, LauncherShellResponse, LauncherShellUi, ProviderKind,
@@ -279,6 +279,18 @@ impl LauncherApp {
         Ok(diagnostics)
     }
 
+    fn refresh_report_preview(&self, state: &mut LauncherShellState) {
+        let telemetry = UpdateTelemetrySummary::from_serializable(
+            &state.summary.update_telemetry,
+            &state.logs_dir,
+        );
+        state.support_bundle_report = render_support_bundle_report(
+            &self.paths,
+            state.support_bundle_path.as_deref(),
+            &telemetry,
+        );
+    }
+
     fn feedback_from_reports(
         &self,
         message: String,
@@ -478,6 +490,7 @@ impl LauncherApp {
                                     )?;
                                     state.summary.provider_automation = snapshot;
                                     state.summary.provider_bulk_retarget = bulk_summary;
+                                    self.refresh_report_preview(&mut state);
                                     self.ui
                                         .set_state(Some(state))
                                         .map_err(|err| anyhow!(err))
@@ -594,6 +607,7 @@ impl LauncherApp {
                                         )?;
                                     state.summary.provider_automation = snapshot;
                                     state.summary.provider_bulk_retarget = bulk_summary;
+                                    self.refresh_report_preview(&mut state);
                                     self.ui
                                         .set_state(Some(state))
                                         .map_err(|err| anyhow!(err))
@@ -755,6 +769,7 @@ impl LauncherApp {
                 .context("failed to persist provider automation after provider restage")?;
             state.summary.provider_automation = snapshot;
             state.summary.provider_bulk_retarget = bulk_summary;
+            self.refresh_report_preview(&mut state);
             self.ui
                 .set_state(Some(state))
                 .map_err(|err| anyhow!(err))
@@ -822,6 +837,7 @@ impl LauncherApp {
                         .context("failed to persist provider automation after provider retarget")?;
                     state.summary.provider_automation = snapshot;
                     state.summary.provider_bulk_retarget = bulk_summary;
+                    self.refresh_report_preview(&mut state);
                     self.ui
                         .set_state(Some(state))
                         .map_err(|err| anyhow!(err))
@@ -922,6 +938,7 @@ impl LauncherApp {
                 .context("failed to persist provider automation after clearing override")?;
             state.summary.provider_automation = snapshot;
             state.summary.provider_bulk_retarget = bulk_summary;
+            self.refresh_report_preview(&mut state);
             self.ui
                 .set_state(Some(state))
                 .map_err(|err| anyhow!(err))
@@ -1052,6 +1069,7 @@ impl LauncherApp {
                 .context("failed to persist provider automation after bulk retarget")?;
             state.summary.provider_automation = snapshot;
             state.summary.provider_bulk_retarget = persisted_bulk;
+            self.refresh_report_preview(&mut state);
             self.ui
                 .set_state(Some(state))
                 .map_err(|err| anyhow!(err))
@@ -1126,6 +1144,7 @@ impl LauncherApp {
                 .context("failed to persist provider automation after restoring defaults")?;
             state.summary.provider_automation = snapshot;
             state.summary.provider_bulk_retarget = bulk_summary;
+            self.refresh_report_preview(&mut state);
             self.ui
                 .set_state(Some(state))
                 .map_err(|err| anyhow!(err))
@@ -1182,12 +1201,13 @@ impl LauncherApp {
     fn refresh_state(&mut self) -> Result<()> {
         let state = load_shell_state(&self.paths).context("failed to load launcher state")?;
         match state {
-            Some(state) => {
+            Some(mut state) => {
                 self.providers
                     .hydrate_from_snapshot(&state.logs_dir, &state.summary.provider_automation);
                 self.logger
                     .set_target(state.launcher_log_path.clone())
                     .context("failed to attach launcher log to runtime log file")?;
+                self.refresh_report_preview(&mut state);
                 self.ui
                     .set_state(Some(state))
                     .map_err(|err| anyhow!(err))

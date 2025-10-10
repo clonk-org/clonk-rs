@@ -1,6 +1,7 @@
 use crate::bundle::regenerate_support_bundle;
 use crate::log::LauncherLog;
 use crate::paths::resolve_logs_entry;
+use crate::report::render_support_bundle_report;
 use crate::summary::{load_launcher_summary, LauncherSummary};
 use crate::telemetry::UpdateTelemetrySummary;
 use anyhow::{anyhow, Context, Result};
@@ -20,6 +21,7 @@ pub struct LauncherShellState {
     pub support_bundle_path: Option<PathBuf>,
     pub telemetry_success_logs: Vec<PathBuf>,
     pub telemetry_failures: Vec<LauncherTelemetryFailure>,
+    pub support_bundle_report: Vec<String>,
 }
 
 pub struct LauncherShellEnsureResult {
@@ -58,28 +60,26 @@ pub fn load_shell_state(paths: &AppPaths) -> Result<Option<LauncherShellState>> 
         .iter()
         .map(|entry| resolve_logs_entry(&record.logs_dir, entry))
         .collect();
-    let telemetry_success_logs = record
-        .summary
-        .update_telemetry
-        .successes
-        .iter()
-        .map(|entry| resolve_logs_entry(&record.logs_dir, entry))
-        .collect();
-    let telemetry_failures = record
-        .summary
-        .update_telemetry
-        .failures
-        .iter()
-        .map(|entry| LauncherTelemetryFailure {
-            log_path: resolve_logs_entry(&record.logs_dir, &entry.log),
-            message: entry.message.clone(),
-        })
-        .collect();
     let support_bundle_path = record
         .summary
         .support_bundle
         .as_ref()
         .map(|entry| resolve_logs_entry(&record.logs_dir, entry));
+    let telemetry_summary = UpdateTelemetrySummary::from_serializable(
+        &record.summary.update_telemetry,
+        &record.logs_dir,
+    );
+    let support_bundle_report =
+        render_support_bundle_report(paths, support_bundle_path.as_deref(), &telemetry_summary);
+    let telemetry_success_logs = telemetry_summary.successes().to_vec();
+    let telemetry_failures = telemetry_summary
+        .failures()
+        .iter()
+        .map(|entry| LauncherTelemetryFailure {
+            log_path: entry.log_path.clone(),
+            message: entry.message.clone(),
+        })
+        .collect();
 
     Ok(Some(LauncherShellState {
         summary_path: record.path,
@@ -91,6 +91,7 @@ pub fn load_shell_state(paths: &AppPaths) -> Result<Option<LauncherShellState>> 
         support_bundle_path,
         telemetry_success_logs,
         telemetry_failures,
+        support_bundle_report,
     }))
 }
 

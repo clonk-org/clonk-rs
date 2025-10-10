@@ -396,6 +396,19 @@ fn build_gui(
                     .insert(upload_button, WidgetAction::UploadArtifacts);
             }
 
+            let report_section = gui.add_column(root, true);
+            gui.add_label(report_section, "Support Bundle Report Preview");
+            if state.support_bundle_report.is_empty() {
+                gui.add_label(
+                    report_section,
+                    "Report preview will appear here after diagnostics are generated.",
+                );
+            } else {
+                for line in &state.support_bundle_report {
+                    gui.add_label(report_section, line.clone());
+                }
+            }
+
             let artifacts_section = gui.add_column(root, true);
             gui.add_label(artifacts_section, "Artifacts");
             if layout.support_artifacts.is_empty() {
@@ -826,7 +839,7 @@ mod tests {
             path_provenance: ProviderPathProvenance::new(share_path.clone()),
         });
         ui.set_providers(diagnostics).expect("set providers");
-        ui.layout(Size::new(800.0, 960.0));
+        ui.layout(Size::new(960.0, 1280.0));
 
         let regenerate = ui.regenerate_button().expect("regenerate button");
         let regenerate_response = click_button(&mut ui, regenerate);
@@ -928,6 +941,12 @@ mod tests {
                 log_path: runtime_log_path,
                 message: "c4group returned status 1".into(),
             }],
+            support_bundle_report: vec![
+                "Launcher summary written to Logs/launcher-summary.json".into(),
+                "Support bundle available at Logs/support-bundle.zip".into(),
+                "Share the support bundle when filing bugs to include launcher, runtime, and telemetry logs."
+                    .into(),
+            ],
         }
     }
 
