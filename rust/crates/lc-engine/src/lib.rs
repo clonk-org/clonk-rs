@@ -1187,6 +1187,9 @@ impl ObjectState {
         if let Some(crew_member) = delta.crew_member {
             self.crew_member = crew_member;
         }
+        if let Some(alive) = delta.alive {
+            self.alive = alive;
+        }
         if let Some(status) = delta.status {
             self.status = status;
         }
@@ -1224,6 +1227,7 @@ struct ObjectDelta {
     owner: Option<i32>,
     category: Option<i32>,
     crew_member: Option<bool>,
+    alive: Option<bool>,
     container: Option<Option<ObjectId>>,
     vertices: Option<Vec<ObjectVertex>>,
 }
@@ -1257,6 +1261,9 @@ impl ObjectDelta {
         if let Some(crew_member) = update.crew_member {
             self.crew_member = Some(crew_member);
         }
+        if let Some(alive) = update.alive {
+            self.alive = Some(alive);
+        }
         if let Some(container) = update.container {
             self.container = Some(container);
         }
@@ -1289,6 +1296,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             owner: update.owner,
             category: update.category,
             crew_member: update.crew_member,
+            alive: update.alive,
             container: update.container,
             vertices: update.vertices,
         }
@@ -1315,6 +1323,8 @@ pub struct ObjectUpdate {
     pub category: Option<i32>,
     #[serde(default)]
     pub crew_member: Option<bool>,
+    #[serde(default)]
+    pub alive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<Option<ObjectId>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1423,6 +1433,11 @@ impl ObjectUpdate {
         self
     }
 
+    pub fn with_alive(mut self, alive: bool) -> Self {
+        self.alive = Some(alive);
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.position.is_none()
             && self.velocity.is_none()
@@ -1433,7 +1448,9 @@ impl ObjectUpdate {
             && self.action.is_none()
             && self.status.is_none()
             && self.owner.is_none()
+            && self.category.is_none()
             && self.crew_member.is_none()
+            && self.alive.is_none()
             && self.container.is_none()
             && self.vertices.is_none()
     }
@@ -2424,7 +2441,8 @@ impl Definition {
                 state.action.target2,
                 &state.vertices,
                 state.category,
-            )),
+            )
+            .with_alive(state.alive)),
             global_effects,
             world,
             next_object_id,
@@ -2539,7 +2557,8 @@ impl Definition {
                 state.action.target2,
                 &state.vertices,
                 state.category,
-            )),
+            )
+            .with_alive(state.alive)),
             global_effects,
             world,
             next_object_id,
@@ -2655,7 +2674,8 @@ impl Definition {
                 state.action.target2,
                 &state.vertices,
                 state.category,
-            )),
+            )
+            .with_alive(state.alive)),
             global_effects,
             world,
             next_object_id,
@@ -2832,7 +2852,8 @@ impl Definition {
                 state.action.target2,
                 &state.vertices,
                 state.category,
-            )),
+            )
+            .with_alive(state.alive)),
             global_effects,
             world,
             next_object_id,
@@ -3451,6 +3472,7 @@ impl Engine {
                     object.state.action.ticks,
                     object.state.container,
                 )
+                .with_alive(object.state.alive)
             }),
             landscape,
             definition_categories,
@@ -4148,6 +4170,7 @@ impl Engine {
             status,
             owner,
             crew_member,
+            alive,
             container,
             vertices,
             ..
@@ -4204,6 +4227,9 @@ impl Engine {
             }
             if let Some(crew_member) = crew_member {
                 object.state.crew_member = crew_member;
+            }
+            if let Some(alive) = alive {
+                object.state.alive = alive;
             }
             if let Some(status) = status {
                 object.apply_status(status);

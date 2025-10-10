@@ -36,6 +36,7 @@ pub(crate) struct HostWorldObject {
     pub id: ObjectId,
     definition_id: DefinitionId,
     status: ObjectStatus,
+    alive: bool,
     pub action_name: String,
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
@@ -117,6 +118,7 @@ impl HostWorldObject {
             id,
             definition_id: definition_id.into(),
             status,
+            alive: true,
             action_name: action_name.into(),
             action_target,
             action_target2,
@@ -132,6 +134,15 @@ impl HostWorldObject {
             action_ticks,
             container,
         }
+    }
+
+    pub(crate) fn with_alive(mut self, alive: bool) -> Self {
+        self.alive = alive;
+        self
+    }
+
+    pub fn alive(&self) -> bool {
+        self.alive
     }
 
     pub fn definition_id(&self) -> &str {
@@ -812,6 +823,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Contained", contained);
     script.register_host_function("GetCategory", get_category);
     script.register_host_function("SetCategory", set_category);
+    script.register_host_function("SetAlive", set_alive);
+    script.register_host_function("GetAlive", get_alive);
     script.register_host_function("SetOwner", set_owner);
     script.register_host_function("GetOwner", get_owner);
     script.register_host_function("SetObjectStatus", set_object_status);
@@ -854,6 +867,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub status: ObjectStatus,
     pub energy: i32,
     pub damage: i32,
+    pub alive: bool,
     pub owner: i32,
     pub category: i32,
     pub position: Vector2,
@@ -941,6 +955,7 @@ impl<'a> HostObjectContext<'a> {
             status,
             energy,
             damage,
+            alive: true,
             owner,
             category,
             position,
@@ -956,6 +971,11 @@ impl<'a> HostObjectContext<'a> {
             action_target2,
             vertices,
         }
+    }
+
+    pub fn with_alive(mut self, alive: bool) -> Self {
+        self.alive = alive;
+        self
     }
 }
 
@@ -4484,6 +4504,59 @@ fn set_owner(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn set_alive(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetAlive expects at least 1 argument: alive",
+        ));
+    }
+
+    let alive = match &args[0] {
+        Value::Bool(flag) => *flag,
+        Value::Int(value) => *value != 0,
+        Value::Nil => false,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetAlive: expected bool, int, or nil for alive, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(index) {
+        target_id = parse_object_reference_argument(arg, "SetAlive", "target")?;
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetAlive: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetAlive requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        object.set_alive(alive);
+        Ok(Value::Bool(true))
+    })
+}
+
 fn get_owner(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
         return Err(RuntimeError::new(
@@ -4521,6 +4594,46 @@ fn get_owner(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         Ok(Value::Int(object.owner()))
+    })
+}
+
+fn get_alive(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetAlive expects at most 1 argument: target",
+        ));
+    }
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(0) {
+        target_id = parse_object_reference_argument(arg, "GetAlive", "target")?;
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    return Ok(Value::Bool(object.alive()));
+                }
+            }
+            if let Some(other) = context.get_world_object(target) {
+                return Ok(Value::Bool(other.alive()));
+            }
+            return Ok(Value::Nil);
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        Ok(Value::Bool(object.alive()))
     })
 }
 
@@ -4938,6 +5051,7 @@ impl EffectHostContext {
                 status,
                 energy,
                 damage,
+                alive,
                 owner,
                 position,
                 velocity,
@@ -4959,6 +5073,7 @@ impl EffectHostContext {
                 status,
                 energy,
                 damage,
+                alive,
                 owner,
                 category,
                 position,
@@ -5242,6 +5357,7 @@ struct ObjectScopeContext {
     current_action_ticks: u32,
     current_energy: i32,
     current_damage: i32,
+    current_alive: bool,
     max_energy: i32,
     current_owner: i32,
     current_category: i32,
@@ -5259,6 +5375,7 @@ impl ObjectScopeContext {
         status: ObjectStatus,
         energy: i32,
         damage: i32,
+        alive: bool,
         owner: i32,
         category: i32,
         position: Vector2,
@@ -5294,6 +5411,7 @@ impl ObjectScopeContext {
             current_action_ticks: action_ticks,
             current_energy: energy,
             current_damage: clamped_damage,
+            current_alive: alive,
             max_energy,
             current_owner: owner,
             current_category: category,
@@ -5325,6 +5443,15 @@ impl ObjectScopeContext {
     fn set_owner(&mut self, owner: i32) {
         self.current_owner = owner;
         self.pending_update.owner = Some(owner);
+    }
+
+    fn alive(&self) -> bool {
+        self.pending_update.alive.unwrap_or(self.current_alive)
+    }
+
+    fn set_alive(&mut self, alive: bool) {
+        self.current_alive = alive;
+        self.pending_update.alive = Some(alive);
     }
 
     fn category(&self) -> i32 {
@@ -7901,6 +8028,144 @@ mod tests {
         let value = result.expect("SetOwner returns bool");
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
+    fn set_alive_records_alive_update() {
+        let (result, outcome) = with_effect_context(
+            Some(
+                HostObjectContext::new(
+                    ObjectId::new(1),
+                    None,
+                    ObjectStatus::Normal,
+                    100,
+                    OWNER_NONE,
+                    Vector2::ZERO,
+                    Vector2::ZERO,
+                    &[],
+                    "Idle",
+                    0,
+                    0,
+                    ActionLibrary::default(),
+                    Direction::Left,
+                    CommandDirection::Stop,
+                    None,
+                    None,
+                    &[],
+                )
+                .with_alive(true),
+            ),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || set_alive(&[Value::Bool(false)]),
+        );
+
+        let value = result.expect("SetAlive returns bool");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("alive update recorded");
+        assert_eq!(update.alive, Some(false));
+    }
+
+    #[test]
+    fn set_alive_respects_target_filter() {
+        let mut target = HashMap::new();
+        target.insert("id".into(), Value::Int(42));
+        let args = [Value::Bool(true), Value::Proplist(target)];
+
+        let (result, outcome) = with_effect_context(
+            Some(
+                HostObjectContext::new(
+                    ObjectId::new(1),
+                    None,
+                    ObjectStatus::Normal,
+                    100,
+                    OWNER_NONE,
+                    Vector2::ZERO,
+                    Vector2::ZERO,
+                    &[],
+                    "Idle",
+                    0,
+                    0,
+                    ActionLibrary::default(),
+                    Direction::Left,
+                    CommandDirection::Stop,
+                    None,
+                    None,
+                    &[],
+                ),
+            ),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || set_alive(&args),
+        );
+
+        let value = result.expect("SetAlive returns bool");
+        assert_eq!(value, Value::Bool(false));
+        assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
+    fn get_alive_returns_current_state() {
+        let (result, _) = with_effect_context(
+            Some(
+                HostObjectContext::new(
+                    ObjectId::new(1),
+                    None,
+                    ObjectStatus::Normal,
+                    100,
+                    OWNER_NONE,
+                    Vector2::ZERO,
+                    Vector2::ZERO,
+                    &[],
+                    "Idle",
+                    0,
+                    0,
+                    ActionLibrary::default(),
+                    Direction::Left,
+                    CommandDirection::Stop,
+                    None,
+                    None,
+                    &[],
+                )
+                .with_alive(false),
+            ),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || get_alive(&[]),
+        );
+
+        let value = result.expect("GetAlive returns bool");
+        assert_eq!(value, Value::Bool(false));
+    }
+
+    #[test]
+    fn get_alive_reads_world_when_target_provided() {
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            ObjectId::new(7),
+            "Dummy",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_alive(false)]);
+        let args = [object_reference_value(ObjectId::new(7))];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_alive(&args));
+
+        let value = result.expect("GetAlive for target succeeds");
+        assert_eq!(value, Value::Bool(false));
     }
 
     #[test]
