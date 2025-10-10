@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, LineWriter, Write};
 use std::path::{Path, PathBuf};
@@ -629,6 +630,9 @@ impl LauncherApp {
             LauncherShellMessage::ClearProviderOverride { role, index } => {
                 self.handle_clear_provider_override(role, index)?;
             }
+            LauncherShellMessage::RetargetAllProviders => {
+                self.handle_retarget_all_providers()?;
+            }
             LauncherShellMessage::RestoreAllProviderDefaults => {
                 self.handle_restore_all_provider_defaults()?;
             }
@@ -913,6 +917,156 @@ impl LauncherApp {
         Ok(())
     }
 
+    fn handle_retarget_all_providers(&mut self) -> Result<()> {
+        if !self.providers.has_share_targets() && !self.providers.has_upload_targets() {
+            self.set_feedback(ActionFeedback::info(
+                "No first-party providers are configured. Configure LC_FIRST_PARTY_* variables to enable automated submissions.",
+            ))?;
+            return Ok(());
+        }
+
+        self.logger
+            .log_line("bulk retarget requested via diagnostics UI")
+            .context("failed to log bulk provider retarget request")?;
+
+        let share_base = if self.providers.has_share_targets() {
+            match self.pick_bulk_retarget_directory(ProviderRole::Share) {
+                Some(path) => Some(path),
+                None => {
+                    self.logger
+                        .log_line("bulk retarget cancelled while selecting share target directory")
+                        .context("failed to log bulk retarget cancellation")?;
+                    self.set_feedback(ActionFeedback::info(
+                        "Retarget cancelled. No changes were made.",
+                    ))?;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+
+        let upload_base = if self.providers.has_upload_targets() {
+            match self.pick_bulk_retarget_directory(ProviderRole::Upload) {
+                Some(path) => Some(path),
+                None => {
+                    self.logger
+                        .log_line("bulk retarget cancelled while selecting upload target directory")
+                        .context("failed to log bulk retarget cancellation")?;
+                    self.set_feedback(ActionFeedback::info(
+                        "Retarget cancelled. No changes were made.",
+                    ))?;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut selections = Vec::new();
+
+        if let Some(base) = share_base {
+            self.logger
+                .log_line(&format!(
+                    "bulk retargeting share targets under {}",
+                    base.display()
+                ))
+                .context("failed to log bulk share retarget target")?;
+            let outcomes = self
+                .providers
+                .retarget_all_to_base(ProviderRole::Share, &base);
+            for outcome in &outcomes {
+                self.remember_provider_override(
+                    ProviderRole::Share,
+                    &outcome.name,
+                    &outcome.new_path,
+                );
+            }
+            selections.push(RoleRetargetOutcome {
+                role: ProviderRole::Share,
+                base,
+                outcomes,
+            });
+        }
+
+        if let Some(base) = upload_base {
+            self.logger
+                .log_line(&format!(
+                    "bulk retargeting upload targets under {}",
+                    base.display()
+                ))
+                .context("failed to log bulk upload retarget target")?;
+            let outcomes = self
+                .providers
+                .retarget_all_to_base(ProviderRole::Upload, &base);
+            for outcome in &outcomes {
+                self.remember_provider_override(
+                    ProviderRole::Upload,
+                    &outcome.name,
+                    &outcome.new_path,
+                );
+            }
+            selections.push(RoleRetargetOutcome {
+                role: ProviderRole::Upload,
+                base,
+                outcomes,
+            });
+        }
+
+        let diagnostics = self
+            .update_provider_diagnostics()
+            .context("failed to refresh provider diagnostics after bulk retarget")?;
+        if let Some(mut state) = self.ui.state().cloned() {
+            let snapshot = self
+                .persist_provider_snapshot(&state, &diagnostics)
+                .context("failed to persist provider automation after bulk retarget")?;
+            state.summary.provider_automation = snapshot;
+            self.ui
+                .set_state(Some(state))
+                .map_err(|err| anyhow!(err))
+                .context("failed to refresh launcher summary after bulk retarget")?;
+        }
+
+        for selection in &selections {
+            for outcome in &selection.outcomes {
+                if outcome.changed {
+                    self.logger
+                        .log_line(&format!(
+                            "retargeted {} {} from {} to {} via bulk retarget",
+                            selection.role.label(),
+                            outcome.name,
+                            outcome.previous_path.display(),
+                            outcome.new_path.display()
+                        ))
+                        .context("failed to log bulk provider retarget outcome")?;
+                } else {
+                    self.logger
+                        .log_line(&format!(
+                            "{} {} already used {}; no change during bulk retarget",
+                            selection.role.label(),
+                            outcome.name,
+                            outcome.new_path.display()
+                        ))
+                        .context("failed to log no-op bulk provider retarget outcome")?;
+                }
+            }
+        }
+
+        let feedback_message = bulk_retarget_feedback(&selections);
+        let changed = selections
+            .iter()
+            .flat_map(|selection| selection.outcomes.iter())
+            .any(|outcome| outcome.changed);
+        let feedback = if changed {
+            ActionFeedback::success(feedback_message)
+        } else {
+            ActionFeedback::info(feedback_message)
+        };
+        self.set_feedback(feedback)?;
+
+        Ok(())
+    }
+
     fn handle_restore_all_provider_defaults(&mut self) -> Result<()> {
         if !self.providers.has_share_targets() && !self.providers.has_upload_targets() {
             self.set_feedback(ActionFeedback::info(
@@ -966,6 +1120,31 @@ impl LauncherApp {
         self.set_feedback(feedback)?;
 
         Ok(())
+    }
+
+    fn pick_bulk_retarget_directory(&self, role: ProviderRole) -> Option<PathBuf> {
+        let title = match role {
+            ProviderRole::Share => "Select base directory for share targets",
+            ProviderRole::Upload => "Select base directory for upload targets",
+        };
+        let mut dialog = FileDialog::new().set_title(title);
+        if let Some(dir) = self.bulk_retarget_start_directory(role) {
+            dialog = dialog.set_directory(dir);
+        } else {
+            dialog = dialog.set_directory(self.paths.logs_dir());
+        }
+        dialog.pick_folder()
+    }
+
+    fn bulk_retarget_start_directory(&self, role: ProviderRole) -> Option<PathBuf> {
+        if let Some(name) = self.providers.provider_name(role, 0) {
+            if let Some(path) = self.preferences.provider_override_path(role.as_str(), name) {
+                if let Some(parent) = path.parent() {
+                    return Some(parent.to_path_buf());
+                }
+            }
+        }
+        self.providers.bulk_dialog_hint(role)
     }
 
     fn refresh_state(&mut self) -> Result<()> {
@@ -1282,6 +1461,13 @@ impl ProviderRole {
             ProviderRole::Upload => "upload targets",
         }
     }
+
+    fn label(&self) -> &'static str {
+        match self {
+            ProviderRole::Share => "share target",
+            ProviderRole::Upload => "upload target",
+        }
+    }
 }
 
 impl From<ProviderKind> for ProviderRole {
@@ -1361,6 +1547,19 @@ impl RestoreAllDefaultsResult {
     }
 }
 
+struct ProviderRetargetOutcome {
+    name: String,
+    previous_path: PathBuf,
+    new_path: PathBuf,
+    changed: bool,
+}
+
+struct RoleRetargetOutcome {
+    role: ProviderRole,
+    base: PathBuf,
+    outcomes: Vec<ProviderRetargetOutcome>,
+}
+
 fn capitalize_first(input: &str) -> String {
     let mut chars = input.chars();
     match chars.next() {
@@ -1371,6 +1570,69 @@ fn capitalize_first(input: &str) -> String {
             result
         }
         None => String::new(),
+    }
+}
+
+fn sanitize_directory_component(name: &str) -> OsString {
+    let sanitized: String = name
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            ch if ch.is_control() => '_',
+            other => other,
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches(|ch: char| ch == ' ' || ch == '.');
+    if trimmed.is_empty() {
+        OsString::from("provider")
+    } else {
+        OsString::from(trimmed)
+    }
+}
+
+fn bulk_retarget_feedback(selections: &[RoleRetargetOutcome]) -> String {
+    if selections.is_empty() {
+        return "No first-party providers were retargeted.".into();
+    }
+
+    let mut sentences = Vec::new();
+    for selection in selections {
+        let total = selection.outcomes.len();
+        if total == 0 {
+            continue;
+        }
+        let changed = selection
+            .outcomes
+            .iter()
+            .filter(|outcome| outcome.changed)
+            .count();
+        let label = selection.role.plural_label();
+        let sentence = if changed == 0 {
+            format!(
+                "{} already use directories under {}.",
+                capitalize_first(label),
+                selection.base.display()
+            )
+        } else if changed == total {
+            format!(
+                "Retargeted all {} under {}.",
+                label,
+                selection.base.display()
+            )
+        } else {
+            let unchanged = total - changed;
+            format!(
+                "Retargeted {changed} of {total} {label} under {}; {unchanged} already pointed there.",
+                selection.base.display()
+            )
+        };
+        sentences.push(sentence);
+    }
+
+    if sentences.is_empty() {
+        "No first-party providers were retargeted.".into()
+    } else {
+        sentences.join(" ")
     }
 }
 
@@ -1707,6 +1969,40 @@ impl FirstPartyProviders {
             .map(|state| state.provenance.default_path())
     }
 
+    fn retarget_all_to_base(
+        &mut self,
+        role: ProviderRole,
+        base: &Path,
+    ) -> Vec<ProviderRetargetOutcome> {
+        let states = self.states_mut(role);
+        let mut outcomes = Vec::with_capacity(states.len());
+        for state in states {
+            let previous = state.target.path.clone();
+            let leaf = Self::directory_leaf(state);
+            let destination = base.join(&leaf);
+            let changed = previous != destination && !paths_equivalent(&previous, &destination);
+            let applied_at = timestamp_for_log();
+            state.apply_override(
+                destination.clone(),
+                ProviderOverrideSource::Retargeted { applied_at },
+            );
+            outcomes.push(ProviderRetargetOutcome {
+                name: state.target.name.clone(),
+                previous_path: previous,
+                new_path: destination,
+                changed,
+            });
+        }
+        outcomes
+    }
+
+    fn bulk_dialog_hint(&self, role: ProviderRole) -> Option<PathBuf> {
+        self.states(role)
+            .first()
+            .and_then(|state| state.target.path.parent())
+            .map(|parent| parent.to_path_buf())
+    }
+
     fn retarget_provider(&mut self, role: ProviderRole, index: usize, path: PathBuf) -> Result<()> {
         let states = self.states_mut(role);
         let state = states
@@ -1777,6 +2073,15 @@ impl FirstPartyProviders {
             ProviderRole::Share => &mut self.share,
             ProviderRole::Upload => &mut self.upload,
         }
+    }
+
+    fn directory_leaf(state: &ProviderTargetState) -> OsString {
+        if let Some(component) = state.target.path.file_name() {
+            if !component.is_empty() {
+                return component.to_os_string();
+            }
+        }
+        sanitize_directory_component(&state.target.name)
     }
 }
 
@@ -2169,6 +2474,58 @@ mod tests {
 
         assert_eq!(providers.share[0].target.path, new_dir.path());
         assert_eq!(providers.share[0].automation, ProviderAutomationState::Idle);
+    }
+
+    #[test]
+    fn retarget_all_to_base_updates_all_providers() {
+        let initial_root = TempDir::new().unwrap();
+        let share_initial = initial_root.path().join("share-initial");
+        let upload_initial = initial_root.path().join("upload-initial");
+
+        let mut providers = FirstPartyProviders {
+            share: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Share Drop".into(),
+                path: share_initial.clone(),
+            })],
+            upload: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Upload Drop".into(),
+                path: upload_initial.clone(),
+            })],
+        };
+        providers.share[0].automation = ProviderAutomationState::Submitted {
+            detail: "submission-request-share-1.json".into(),
+        };
+        providers.upload[0].automation = ProviderAutomationState::Failed {
+            error: "network".into(),
+        };
+
+        let destination_root = TempDir::new().unwrap();
+        let share_base = destination_root.path().join("new-share-base");
+        let upload_base = destination_root.path().join("new-upload-base");
+
+        let share_outcomes = providers.retarget_all_to_base(ProviderRole::Share, &share_base);
+        assert_eq!(share_outcomes.len(), 1);
+        let share_outcome = &share_outcomes[0];
+        assert!(share_outcome.changed);
+        assert_eq!(share_outcome.previous_path, share_initial);
+        assert_eq!(share_outcome.new_path, share_base.join("share-initial"));
+        assert_eq!(providers.share[0].target.path, share_outcome.new_path);
+        assert!(matches!(
+            providers.share[0].automation,
+            ProviderAutomationState::Idle
+        ));
+
+        let upload_outcomes = providers.retarget_all_to_base(ProviderRole::Upload, &upload_base);
+        assert_eq!(upload_outcomes.len(), 1);
+        let upload_outcome = &upload_outcomes[0];
+        assert!(upload_outcome.changed);
+        assert_eq!(upload_outcome.previous_path, upload_initial);
+        assert_eq!(upload_outcome.new_path, upload_base.join("upload-initial"));
+        assert_eq!(providers.upload[0].target.path, upload_outcome.new_path);
+        assert!(matches!(
+            providers.upload[0].automation,
+            ProviderAutomationState::Idle
+        ));
     }
 
     #[test]

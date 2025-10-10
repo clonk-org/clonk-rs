@@ -33,6 +33,7 @@ pub enum LauncherShellMessage {
     RestageProvider { role: ProviderKind, index: usize },
     RetargetProvider { role: ProviderKind, index: usize },
     ClearProviderOverride { role: ProviderKind, index: usize },
+    RetargetAllProviders,
     RestoreAllProviderDefaults,
 }
 
@@ -157,6 +158,10 @@ impl LauncherShellUi {
         self.layout.restore_defaults_button
     }
 
+    pub fn retarget_all_button(&self) -> Option<WidgetId> {
+        self.layout.retarget_all_button
+    }
+
     pub fn state(&self) -> Option<&LauncherShellState> {
         self.state.as_ref()
     }
@@ -204,6 +209,7 @@ struct LauncherShellLayout {
     copy_button: Option<WidgetId>,
     upload_button: Option<WidgetId>,
     restore_defaults_button: Option<WidgetId>,
+    retarget_all_button: Option<WidgetId>,
 }
 
 enum WidgetAction {
@@ -214,6 +220,7 @@ enum WidgetAction {
     RestageProvider { role: ProviderKind, index: usize },
     RetargetProvider { role: ProviderKind, index: usize },
     ClearProviderOverride { role: ProviderKind, index: usize },
+    RetargetAllProviders,
     RestoreAllProviderDefaults,
 }
 
@@ -257,6 +264,7 @@ impl WidgetAction {
                     index: *index,
                 })
             }
+            WidgetAction::RetargetAllProviders => Some(LauncherShellMessage::RetargetAllProviders),
             WidgetAction::RestoreAllProviderDefaults => {
                 Some(LauncherShellMessage::RestoreAllProviderDefaults)
             }
@@ -515,6 +523,11 @@ fn add_provider_section(
         .action_map
         .insert(restore_button, WidgetAction::RestoreAllProviderDefaults);
     layout.restore_defaults_button = Some(restore_button);
+    let retarget_button = gui.add_button(bulk_row, "Retarget all…");
+    layout
+        .action_map
+        .insert(retarget_button, WidgetAction::RetargetAllProviders);
+    layout.retarget_all_button = Some(retarget_button);
 
     if !providers.share.is_empty() {
         let share_section = gui.add_column(section, true);
@@ -751,6 +764,13 @@ mod tests {
         assert!(matches!(
             restore_response.messages.as_slice(),
             [LauncherShellMessage::RestoreAllProviderDefaults]
+        ));
+
+        let retarget_all = ui.retarget_all_button().expect("retarget all button");
+        let retarget_response = click_button(&mut ui, retarget_all);
+        assert!(matches!(
+            retarget_response.messages.as_slice(),
+            [LauncherShellMessage::RetargetAllProviders]
         ));
 
         let copy = ui.copy_button().expect("copy button");
