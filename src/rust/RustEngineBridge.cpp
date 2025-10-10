@@ -41,6 +41,7 @@
 #include <vector>
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace {
 
@@ -190,6 +191,32 @@ void EnsureObjectStatusMatchesRuntimeState(C4Object &object, int32_t desired_sta
     }
 }
 
+C4Object *FindObjectByRuntimeId(C4Game &game, uint64_t id) {
+    const int32_t number = RuntimeObjectNumber(id);
+    if (number <= 0) {
+        return nullptr;
+    }
+    if (C4Object *object = game.Objects.SafeObjectPointer(number)) {
+        return object;
+    }
+    return game.Objects.InactiveObjects.ObjectPointer(number);
+}
+
+bool WouldIntroduceContainerCycle(C4Object &object, C4Object *candidate) {
+    if (!candidate) {
+        return false;
+    }
+    if (&object == candidate) {
+        return true;
+    }
+    for (C4Object *ancestor = candidate->Contained; ancestor; ancestor = ancestor->Contained) {
+        if (ancestor == &object) {
+            return true;
+        }
+    }
+    return false;
+}
+
 C4Object *CreateRuntimeObject(
     C4Game &game,
     const LcEngineRuntimeObjectState &state,
@@ -326,6 +353,199 @@ void ApplyRuntimeObjectStateToC4Object(
     object.SetOCF();
 }
 
+void SynchronizeRuntimeContainers(
+    C4Game &game,
+    const LcEngineRuntimeObjectStateSlice &slice) {
+    if (!slice.objects || slice.object_count == 0) {
+        g_last_container_warning_frame = std::numeric_limits<uint64_t>::max();
+        return;
+    }
+
+    std::unordered_map<uint64_t, C4Object *> objects;
+    objects.reserve(slice.object_count);
+    for (size_t index = 0; index < slice.object_count; ++index) {
+        const LcEngineRuntimeObjectState &state = slice.objects[index];
+        if (state.status == C4OS_DELETED) {
+            continue;
+        }
+        if (C4Object *object = FindObjectByRuntimeId(game, state.id)) {
+            objects.emplace(state.id, object);
+        }
+    }
+
+    std::unordered_set<uint64_t> unresolved_container_ids;
+    size_t missing_content_targets = 0;
+    size_t reorder_failures = 0;
+
+    for (size_t index = 0; index < slice.object_count; ++index) {
+        const LcEngineRuntimeObjectState &state = slice.objects[index];
+        if (state.status == C4OS_DELETED) {
+            continue;
+        }
+
+        auto object_it = objects.find(state.id);
+        if (object_it == objects.end()) {
+            continue;
+        }
+
+        C4Object *object = object_it->second;
+        if (!object || !object->Status) {
+            continue;
+        }
+
+        C4Object *desired_container = nullptr;
+        if (state.has_container) {
+            auto container_it = objects.find(state.container_id);
+            if (container_it != objects.end()) {
+                desired_container = container_it->second;
+            }
+            if (!desired_container || !desired_container->Status ||
+                WouldIntroduceContainerCycle(*object, desired_container)) {
+                unresolved_container_ids.insert(state.id);
+                desired_container = nullptr;
+            }
+        }
+
+        if (object->Contained == desired_container) {
+            if (desired_container && !desired_container->Contents.GetLink(object)) {
+                if (desired_container->Contents.Add(object, C4ObjectList::stContents)) {
+                    desired_container->UpdateMass();
+                    desired_container->SetOCF();
+                } else {
+                    unresolved_container_ids.insert(state.id);
+                }
+            }
+            object->SetOCF();
+            continue;
+        }
+
+        if (C4Object *current = object->Contained) {
+            if (current->Contents.Remove(object)) {
+                current->UpdateMass();
+                current->SetOCF();
+            }
+            if (object->Contained == current) {
+                object->Contained = nullptr;
+            }
+        }
+
+        if (desired_container) {
+            bool attached = desired_container->Contents.GetLink(object);
+            if (!attached) {
+                attached = desired_container->Contents.Add(object, C4ObjectList::stContents);
+            }
+            if (!attached) {
+                unresolved_container_ids.insert(state.id);
+                object->Contained = nullptr;
+            } else {
+                object->Contained = desired_container;
+                desired_container->UpdateMass();
+                desired_container->SetOCF();
+            }
+        } else {
+            object->Contained = nullptr;
+        }
+
+        object->SetOCF();
+    }
+
+    for (size_t index = 0; index < slice.object_count; ++index) {
+        const LcEngineRuntimeObjectState &state = slice.objects[index];
+        if (state.status == C4OS_DELETED || state.contents_len == 0) {
+            continue;
+        }
+
+        auto container_it = objects.find(state.id);
+        if (container_it == objects.end()) {
+            continue;
+        }
+
+        C4Object *container = container_it->second;
+        if (!container || !container->Status) {
+            continue;
+        }
+
+        std::vector<C4Object *> desired_order;
+        desired_order.reserve(state.contents_len);
+        std::unordered_set<C4Object *> desired_children;
+        desired_children.reserve(state.contents_len * 2);
+
+        for (size_t content_index = 0; content_index < state.contents_len; ++content_index) {
+            uint64_t child_id = state.contents[content_index];
+            auto child_it = objects.find(child_id);
+            if (child_it == objects.end()) {
+                ++missing_content_targets;
+                continue;
+            }
+
+            C4Object *child = child_it->second;
+            if (!child || child->Contained != container) {
+                ++missing_content_targets;
+                continue;
+            }
+
+            desired_order.push_back(child);
+            desired_children.insert(child);
+        }
+
+        bool modified = false;
+        for (auto iter = container->Contents.begin(); iter != container->Contents.end();) {
+            C4Object *child = *iter;
+            ++iter;
+            if (!child || child->Contained != container) {
+                continue;
+            }
+            if (desired_children.find(child) == desired_children.end()) {
+                if (container->Contents.Remove(child)) {
+                    if (child->Contained == container) {
+                        child->Contained = nullptr;
+                    }
+                    child->SetOCF();
+                    modified = true;
+                }
+            }
+        }
+
+        if (modified) {
+            container->UpdateMass();
+            container->SetOCF();
+        }
+
+        for (size_t order_index = 1; order_index < desired_order.size(); ++order_index) {
+            C4Object *previous = desired_order[order_index - 1];
+            C4Object *current = desired_order[order_index];
+            if (!previous || !current) {
+                continue;
+            }
+            if (!container->Contents.GetLink(previous) || !container->Contents.GetLink(current)) {
+                ++reorder_failures;
+                continue;
+            }
+            if (previous->Status == C4OS_NORMAL && current->Status == C4OS_NORMAL) {
+                if (!container->Contents.OrderObjectBefore(previous, current)) {
+                    ++reorder_failures;
+                }
+            }
+        }
+    }
+
+    if (!unresolved_container_ids.empty() || missing_content_targets > 0 || reorder_failures > 0) {
+        if (slice.frame != g_last_container_warning_frame) {
+            g_last_container_warning_frame = slice.frame;
+            StdStrBuf warning;
+            warning.Format(
+                "Rust runtime container sync: %zu missing parents, %zu missing contents, %zu ordering fixes on frame %llu",
+                unresolved_container_ids.size(),
+                missing_content_targets,
+                reorder_failures,
+                static_cast<unsigned long long>(slice.frame));
+            LogWarning(warning.getData());
+        }
+    } else {
+        g_last_container_warning_frame = std::numeric_limits<uint64_t>::max();
+    }
+}
+
 void ApplyRuntimeObjectStatesToGame(
     C4Game &game,
     const LcEngineRuntimeObjectStateSlice &slice) {
@@ -397,6 +617,8 @@ void ApplyRuntimeObjectStatesToGame(
         }
         ApplyRuntimeObjectStateToC4Object(*object, *state);
     }
+
+    SynchronizeRuntimeContainers(game, slice);
 
     if (!failures.empty()) {
         if (slice.frame != g_last_missing_warning_frame) {
@@ -502,6 +724,7 @@ struct SnapshotBuffer {
 
 std::mutex g_mutex;
 uint64_t g_last_missing_warning_frame = std::numeric_limits<uint64_t>::max();
+uint64_t g_last_container_warning_frame = std::numeric_limits<uint64_t>::max();
 bool g_initialised = false;
 bool g_disabled = false;
 RecorderPtr g_recorder;
