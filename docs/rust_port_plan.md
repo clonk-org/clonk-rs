@@ -24,9 +24,8 @@
 
 ## Porting Strategy
 1. **Platform Bootstrap**
-   - Ship a Rust binary (`lc-game`) that mounts install/user paths, owns logging/config, and forwards to the existing Startup Menu through the bridge.
-   - Rust PlatformBridge now feeds path discovery and directory provisioning from `lc-platform` when `USE_RUST_PLATFORM_PATHS` is enabled in CMake.
-   - Replace the demo-only `lc-app` path while the C++ gameplay loop remains authoritative.
+   - Status: `lc-game` (Rust) discovers install/user paths via `lc-platform`, prepares user directories, and launches the shipping C++ runtime so `cargo run -p lc-game` opens the Startup Menu with live input.
+   - Next: migrate logging/config ownership into the launcher and formally retire the `lc-app` demo harness once validation coverage is in place.
    - **Gate:** `cargo run -p lc-game` opens the shipping Startup Menu with live input routed through Rust scaffolding.
 
 2. **Runtime Authority**

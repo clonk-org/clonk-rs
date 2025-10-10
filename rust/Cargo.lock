@@ -953,6 +953,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lc-game"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "lc-platform",
+ "tempfile",
+]
+
+[[package]]
 name = "lc-graphics"
 version = "0.1.0"
 dependencies = [
