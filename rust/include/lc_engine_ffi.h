@@ -245,6 +245,12 @@ typedef struct LcEngineRuntimeEnvironmentState {
 } LcEngineRuntimeEnvironmentState;
 
 typedef struct LcEngineRuntimeObjectStateArray LcEngineRuntimeObjectStateArray;
+typedef struct LcEngineRuntimeLandscapeArray LcEngineRuntimeLandscapeArray;
+
+typedef struct LcEngineRuntimeLandscapeSlice {
+    uint32_t width;
+    const int32_t *heights;
+} LcEngineRuntimeLandscapeSlice;
 
 LcEngineRuntimeObjectStateArray *lc_engine_runtime_export_object_states(
     LcEngineRuntimeHandle *handle,
@@ -294,6 +300,12 @@ bool lc_engine_runtime_export_environment(
     const LcEngineRuntimeHandle *handle,
     LcEngineRuntimeEnvironmentState *out,
     char **error_message);
+LcEngineRuntimeLandscapeArray *lc_engine_runtime_export_landscape(
+    const LcEngineRuntimeHandle *handle,
+    char **error_message);
+LcEngineRuntimeLandscapeSlice lc_engine_runtime_landscape_slice(
+    const LcEngineRuntimeLandscapeArray *buffer);
+void lc_engine_runtime_landscape_free(LcEngineRuntimeLandscapeArray *buffer);
 
 #ifdef __cplusplus
 }

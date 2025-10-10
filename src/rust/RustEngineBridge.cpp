@@ -15,6 +15,7 @@
 #include <C4Effects.h>
 #include <C4Particles.h>
 #include <C4Player.h>
+#include <C4Material.h>
 #include <C4Weather.h>
 #include <C4Viewport.h>
 #include <C4Wrappers.h>
@@ -680,6 +681,62 @@ void ApplyAuthoritativeEnvironmentState(C4Game &game) {
     game.Weather.SetClimate(environment.climate);
 }
 
+void ApplyAuthoritativeLandscapeState(C4Game &game) {
+    if (!g_runtime || g_runtime_disabled) {
+        ResetAuthoritativeLandscapeCache();
+        return;
+    }
+
+    char *error_message = nullptr;
+    LcEngineRuntimeLandscapeArray *buffer =
+        lc_engine_runtime_export_landscape(g_runtime.get(), &error_message);
+    RustStringPtr error = MakeString(error_message);
+    if (!buffer) {
+        if (error) {
+            LogWarning(std::string("Rust runtime landscape export failed: ") + error.get());
+        } else {
+            LogWarning("Rust runtime landscape export failed (no detail)");
+        }
+        return;
+    }
+
+    const LcEngineRuntimeLandscapeSlice slice =
+        lc_engine_runtime_landscape_slice(buffer);
+
+    if (!slice.heights || slice.width == 0) {
+        ResetAuthoritativeLandscapeCache();
+        lc_engine_runtime_landscape_free(buffer);
+        return;
+    }
+
+    if (g_authoritative_landscape_heights.size() != slice.width) {
+        g_authoritative_landscape_heights.assign(
+            slice.width,
+            std::numeric_limits<int32_t>::min());
+    }
+
+    const int32_t landscape_width = game.Landscape.Width;
+
+    for (uint32_t index = 0; index < slice.width; ++index) {
+        const int32_t target_height = slice.heights[index];
+        if (index >= static_cast<uint32_t>(landscape_width)) {
+            g_authoritative_landscape_heights[index] = target_height;
+            continue;
+        }
+
+        if (g_authoritative_landscape_heights[index] == target_height) {
+            continue;
+        }
+
+        const int32_t x = static_cast<int32_t>(index);
+        const int32_t current_height = DetermineSurfaceHeight(game, x);
+        AdjustLandscapeColumn(game, x, current_height, target_height);
+        g_authoritative_landscape_heights[index] = target_height;
+    }
+
+    lc_engine_runtime_landscape_free(buffer);
+}
+
 void ApplyAuthoritativeRuntimeState(C4Game &game) {
     if (!g_runtime || g_runtime_disabled) {
         return;
@@ -705,6 +762,7 @@ void ApplyAuthoritativeRuntimeState(C4Game &game) {
     lc_engine_runtime_object_states_free(buffer);
 
     ApplyAuthoritativeEnvironmentState(game);
+    ApplyAuthoritativeLandscapeState(game);
 }
 
 struct SnapshotEntry {
@@ -790,6 +848,76 @@ std::map<uint64_t, std::vector<std::string>> g_frame_controls;
 std::mutex g_network_mutex;
 std::map<uint64_t, std::vector<LcEngineNetworkPacketSnapshot>> g_frame_network_packets;
 std::atomic<bool> g_capture_network_packets{false};
+std::vector<int32_t> g_authoritative_landscape_heights;
+
+void ResetAuthoritativeLandscapeCache() {
+    g_authoritative_landscape_heights.clear();
+}
+
+int32_t DetermineSurfaceHeight(const C4Game &game, int32_t x) {
+    const int32_t width = game.Landscape.Width;
+    const int32_t height = game.Landscape.Height;
+    if (x < 0 || x >= width) {
+        return height;
+    }
+
+    for (int32_t y = 0; y < height; ++y) {
+        if (game.Landscape.GetDensity(x, y) >= C4M_Solid) {
+            return y;
+        }
+    }
+
+    return height;
+}
+
+bool AdjustLandscapeColumn(C4Game &game, int32_t x, int32_t current_height, int32_t target_height) {
+    const int32_t width = game.Landscape.Width;
+    const int32_t height = game.Landscape.Height;
+    if (x < 0 || x >= width) {
+        return false;
+    }
+
+    int32_t clamped_target = std::clamp(target_height, 0, height);
+    if (clamped_target == current_height) {
+        return false;
+    }
+
+    if (clamped_target > current_height) {
+        const int32_t clamped_end = std::min(clamped_target, height);
+        if (clamped_end > current_height) {
+            game.Landscape.ClearRect(x, current_height, 1, clamped_end - current_height);
+            return true;
+        }
+        return false;
+    }
+
+    if (current_height > height) {
+        current_height = height;
+    }
+
+    const int32_t fill_start = std::max(clamped_target, 0);
+    const int32_t fill_end = std::min(current_height, height);
+    if (fill_start >= fill_end) {
+        return false;
+    }
+
+    int32_t sample_y = fill_end;
+    if (sample_y >= height) {
+        sample_y = height - 1;
+    }
+    if (sample_y < 0) {
+        return false;
+    }
+
+    const uint8_t pix = game.Landscape.GetPix(x, sample_y);
+    C4Rect rect(x, fill_start, 1, fill_end - fill_start);
+    game.Landscape.PrepareChange(rect, false);
+    for (int32_t y = fill_start; y < fill_end; ++y) {
+        game.Landscape.SetPix(x, y, pix);
+    }
+    game.Landscape.FinishChange(rect, false);
+    return true;
+}
 
 RustStringPtr MakeString(char *raw) {
     return RustStringPtr(raw, lc_engine_string_free);
@@ -896,6 +1024,7 @@ bool InitialiseRuntime(C4Game &game) {
     if (!runtime) {
         LogWarning("Rust runtime could not be created");
         g_runtime_disabled = true;
+        ResetAuthoritativeLandscapeCache();
         return false;
     }
 
@@ -903,6 +1032,7 @@ bool InitialiseRuntime(C4Game &game) {
     if (scenario_path.empty()) {
         LogWarning("Rust runtime could not determine scenario path");
         g_runtime_disabled = true;
+        ResetAuthoritativeLandscapeCache();
         return false;
     }
 
@@ -917,16 +1047,19 @@ bool InitialiseRuntime(C4Game &game) {
             LogError("Rust runtime failed to load scenario (no detail)");
         }
         g_runtime_disabled = true;
+        ResetAuthoritativeLandscapeCache();
         return false;
     }
 
     if (!ImportRuntimeState(runtime, g_runtime_state_import_path)) {
         g_runtime_disabled = true;
+        ResetAuthoritativeLandscapeCache();
         return false;
     }
 
     g_runtime = std::move(runtime);
     g_runtime_disabled = false;
+    ResetAuthoritativeLandscapeCache();
     return true;
 }
 
@@ -1833,6 +1966,7 @@ void OnFrame(C4Game &game) {
                 }
                 g_runtime.reset();
                 g_runtime_disabled = true;
+                ResetAuthoritativeLandscapeCache();
             } else {
                 ApplyAuthoritativeRuntimeState(game);
             }
@@ -1872,6 +2006,7 @@ void OnFrame(C4Game &game) {
                 }
                 g_runtime.reset();
                 g_runtime_disabled = true;
+                ResetAuthoritativeLandscapeCache();
             }
         }
         if (g_runtime && g_runtime_snapshot_enabled && g_runtime_snapshot_stream) {
@@ -1916,6 +2051,7 @@ void Shutdown() {
     g_frame_controls.clear();
     g_runtime.reset();
     g_runtime_disabled = false;
+    ResetAuthoritativeLandscapeCache();
     if (g_runtime_snapshot_stream.is_open()) {
         g_runtime_snapshot_stream.close();
     }

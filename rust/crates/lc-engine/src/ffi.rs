@@ -5,9 +5,10 @@ use crate::{
     },
     ActionState, CommandDirection, CrewCommandTarget, CrewRole, CrewSelectionState, Direction,
     EffectState, Engine, EngineError, EngineState, EnvironmentFrame, FloatVector2,
-    HudPlayerSnapshot, HudSnapshot, NetworkPacketDirection, NetworkPacketSnapshot, ObjectId,
-    ObjectSnapshot, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleLayer, ParticleSnapshot,
-    Playback, Recorder, Recording, Scenario, SimulationSnapshot, SurfaceSnapshot, Vector2,
+    HudPlayerSnapshot, HudSnapshot, Landscape, NetworkPacketDirection, NetworkPacketSnapshot,
+    ObjectId, ObjectSnapshot, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleLayer,
+    ParticleSnapshot, Playback, Recorder, Recording, Scenario, SimulationSnapshot, SurfaceSnapshot,
+    Vector2,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -183,6 +184,49 @@ pub struct LcEngineRuntimeEnvironmentState {
     pub sky_color_r: u8,
     pub sky_color_g: u8,
     pub sky_color_b: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LcEngineRuntimeLandscapeSlice {
+    pub width: u32,
+    pub heights: *const i32,
+}
+
+impl Default for LcEngineRuntimeLandscapeSlice {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            heights: ptr::null(),
+        }
+    }
+}
+
+pub struct LcEngineRuntimeLandscapeArray {
+    slice: LcEngineRuntimeLandscapeSlice,
+    heights: Vec<i32>,
+}
+
+impl LcEngineRuntimeLandscapeArray {
+    fn from_landscape(landscape: Option<&Landscape>) -> Self {
+        let mut buffer = Self {
+            slice: LcEngineRuntimeLandscapeSlice {
+                width: 0,
+                heights: ptr::null(),
+            },
+            heights: Vec::new(),
+        };
+
+        if let Some(landscape) = landscape {
+            buffer.slice.width = landscape.width();
+            buffer.heights.extend_from_slice(landscape.surface());
+            if !buffer.heights.is_empty() {
+                buffer.slice.heights = buffer.heights.as_ptr();
+            }
+        }
+
+        buffer
+    }
 }
 
 pub struct RecorderHandle {
@@ -1448,6 +1492,47 @@ pub extern "C" fn lc_engine_runtime_export_environment(
         sky_color_b,
     };
     true
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_export_landscape(
+    handle: *const RuntimeHandle,
+    error_out: *mut *mut c_char,
+) -> *mut LcEngineRuntimeLandscapeArray {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    let Some(runtime) = (unsafe { handle.as_ref() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return ptr::null_mut();
+    };
+
+    let buffer = LcEngineRuntimeLandscapeArray::from_landscape(runtime.engine.landscape());
+    Box::into_raw(Box::new(buffer))
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_landscape_slice(
+    buffer: *const LcEngineRuntimeLandscapeArray,
+) -> LcEngineRuntimeLandscapeSlice {
+    if buffer.is_null() {
+        return LcEngineRuntimeLandscapeSlice::default();
+    }
+
+    unsafe { (*buffer).slice }
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_landscape_free(buffer: *mut LcEngineRuntimeLandscapeArray) {
+    if buffer.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(buffer));
+    }
 }
 
 #[no_mangle]
