@@ -22,8 +22,8 @@ pub use shell::{
 };
 pub use summary::{
     load_launcher_summary, write_launcher_summary, LauncherSummary, LauncherSummaryRecord,
-    ProviderAutomationRecord, ProviderAutomationSnapshot, ProviderOverrideRecord,
-    ProviderOverrideSourceRecord,
+    ProviderAutomationRecord, ProviderAutomationSnapshot, ProviderBulkRetargetRecord,
+    ProviderBulkRetargetSummary, ProviderOverrideRecord, ProviderOverrideSourceRecord,
 };
 pub use telemetry::{
     digest_update_telemetry, SerializableTelemetryFailure, SerializableTelemetrySummary,
@@ -162,6 +162,7 @@ mod tests {
             &telemetry,
             Some(&bundle_path),
             None,
+            None,
         )
         .unwrap();
 
@@ -217,6 +218,7 @@ mod tests {
             &[runtime_log],
             &[crash_log],
             &telemetry,
+            None,
             None,
             None,
         )
@@ -347,6 +349,7 @@ mod tests {
             &telemetry,
             Some(&bundle_path),
             None,
+            None,
         )
         .unwrap();
 
@@ -423,6 +426,7 @@ mod tests {
             &telemetry,
             None,
             Some(snapshot),
+            None,
         )
         .unwrap();
 
@@ -500,6 +504,7 @@ mod tests {
             &telemetry,
             None,
             Some(snapshot),
+            None,
         )
         .unwrap();
 
@@ -525,6 +530,82 @@ mod tests {
         assert_eq!(
             overrides[0]["source"]["applied_at"].as_str(),
             Some("2024-05-01T12:34:56Z")
+        );
+    }
+
+    #[test]
+    fn write_launcher_summary_records_bulk_retarget_summary() {
+        let install_dir = TempDir::new().unwrap();
+        prepare_install_root(install_dir.path());
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+
+        let logger = TestLogger::new(paths.logs_dir().join("lc-launcher.log"));
+        logger
+            .log_line("bulk retarget summary test start")
+            .expect("log line");
+
+        let runtime_log = paths.logs_dir().join("Clonk-bulk.log");
+        fs::write(&runtime_log, "runtime").unwrap();
+
+        let mut telemetry = UpdateTelemetrySummary::default();
+        telemetry.record_success(runtime_log.clone());
+
+        let mut summary = ProviderBulkRetargetSummary::default();
+        summary.share.push(ProviderBulkRetargetRecord {
+            base_path: "support-share".into(),
+            retargeted_at: "2024-06-01T00:00:00Z".into(),
+            total: 2,
+            changed: 1,
+        });
+
+        write_launcher_summary(
+            &paths,
+            &logger,
+            logger.path(),
+            &[runtime_log],
+            &[],
+            &telemetry,
+            None,
+            None,
+            Some(summary),
+        )
+        .unwrap();
+
+        let summary_path = paths.logs_dir().join("launcher-summary.json");
+        let summary_json = fs::read_to_string(summary_path).unwrap();
+        let document: Value = serde_json::from_str(&summary_json).unwrap();
+
+        let share_summary = document["provider_bulk_retarget"]["share"]
+            .as_array()
+            .expect("share bulk array");
+        assert_eq!(share_summary.len(), 1, "expected one share bulk record");
+        let record = &share_summary[0];
+        assert_eq!(
+            record["base_path"].as_str(),
+            Some("support-share"),
+            "base path should be recorded"
+        );
+        assert_eq!(
+            record["retargeted_at"].as_str(),
+            Some("2024-06-01T00:00:00Z"),
+            "bulk retarget timestamp should be recorded"
+        );
+        assert_eq!(
+            record["total"].as_u64(),
+            Some(2),
+            "total bulk retarget count should match"
+        );
+        assert_eq!(
+            record["changed"].as_u64(),
+            Some(1),
+            "changed bulk retarget count should match"
         );
     }
 }

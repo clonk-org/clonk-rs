@@ -23,6 +23,8 @@ pub struct LauncherSummary {
     pub update_telemetry: SerializableTelemetrySummary,
     #[serde(default, skip_serializing_if = "ProviderAutomationSnapshot::is_empty")]
     pub provider_automation: ProviderAutomationSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_bulk_retarget: Option<ProviderBulkRetargetSummary>,
 }
 
 pub struct LauncherSummaryRecord {
@@ -74,6 +76,28 @@ pub struct ProviderAutomationRecord {
 pub struct ProviderOverrideRecord {
     pub path: String,
     pub source: ProviderOverrideSourceRecord,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderBulkRetargetSummary {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub share: Vec<ProviderBulkRetargetRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upload: Vec<ProviderBulkRetargetRecord>,
+}
+
+impl ProviderBulkRetargetSummary {
+    pub fn is_empty(&self) -> bool {
+        self.share.is_empty() && self.upload.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderBulkRetargetRecord {
+    pub base_path: String,
+    pub retargeted_at: String,
+    pub total: usize,
+    pub changed: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +165,7 @@ pub fn write_launcher_summary(
     telemetry_summary: &UpdateTelemetrySummary,
     support_bundle: Option<&Path>,
     provider_snapshot: Option<ProviderAutomationSnapshot>,
+    bulk_retarget: Option<ProviderBulkRetargetSummary>,
 ) -> Result<PathBuf> {
     if !launcher_log_path.exists() {
         return Err(anyhow!(
@@ -165,6 +190,7 @@ pub fn write_launcher_summary(
         support_bundle: support_bundle.map(|path| relative_to_logs(path, &logs_dir)),
         update_telemetry: telemetry_summary.to_serializable(&logs_dir),
         provider_automation: provider_snapshot.unwrap_or_default(),
+        provider_bulk_retarget: bulk_retarget.filter(|summary| !summary.is_empty()),
     };
 
     let summary_path = launcher_summary_path(&logs_dir);

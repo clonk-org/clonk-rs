@@ -13,9 +13,10 @@ use lc_launcher::{
     load_shell_state, reveal_in_file_manager, save_launcher_preferences, support_artifacts,
     timestamp_for_filename, timestamp_for_log, write_launcher_summary, LauncherLog,
     LauncherPreferences, LauncherShellState, ProviderAutomationRecord, ProviderAutomationSnapshot,
-    ProviderAutomationState, ProviderDiagnostics, ProviderOverrideSource,
-    ProviderOverrideSourceRecord, ProviderPathProvenance, ProviderPathStatus, ProviderStatus,
-    SupportArtifact, UpdateTelemetrySummary,
+    ProviderAutomationState, ProviderBulkRetargetRecord, ProviderBulkRetargetSummary,
+    ProviderDiagnostics, ProviderOverrideSource, ProviderOverrideSourceRecord,
+    ProviderPathProvenance, ProviderPathStatus, ProviderStatus, SupportArtifact,
+    UpdateTelemetrySummary,
 };
 use lc_launcher_ui::{
     ActionFeedback, LauncherShellMessage, LauncherShellResponse, LauncherShellUi, ProviderKind,
@@ -300,12 +301,17 @@ impl LauncherApp {
         &self,
         state: &LauncherShellState,
         diagnostics: &ProviderDiagnostics,
-    ) -> Result<ProviderAutomationSnapshot> {
+        bulk_retarget: Option<ProviderBulkRetargetSummary>,
+    ) -> Result<(
+        ProviderAutomationSnapshot,
+        Option<ProviderBulkRetargetSummary>,
+    )> {
         let telemetry = UpdateTelemetrySummary::from_serializable(
             &state.summary.update_telemetry,
             &state.logs_dir,
         );
         let snapshot = ProviderAutomationSnapshot::from_diagnostics(diagnostics, &state.logs_dir);
+        let bulk_summary = bulk_retarget.or_else(|| state.summary.provider_bulk_retarget.clone());
         write_launcher_summary(
             &self.paths,
             &self.logger,
@@ -315,9 +321,10 @@ impl LauncherApp {
             &telemetry,
             state.support_bundle_path.as_deref(),
             Some(snapshot.clone()),
+            bulk_summary.clone(),
         )
         .context("failed to persist provider automation snapshot")?;
-        Ok(snapshot)
+        Ok((snapshot, bulk_summary))
     }
 
     fn persist_preferences(&self) {
@@ -447,12 +454,13 @@ impl LauncherApp {
                                         "failed to refresh provider diagnostics after support bundle staging",
                                     )?;
                                 if let Some(mut state) = state_snapshot {
-                                    let snapshot = self
-                                        .persist_provider_snapshot(&state, &diagnostics)
+                                    let (snapshot, bulk_summary) = self
+                                        .persist_provider_snapshot(&state, &diagnostics, None)
                                         .context(
                                         "failed to persist provider automation after bundle staging",
                                     )?;
                                     state.summary.provider_automation = snapshot;
+                                    state.summary.provider_bulk_retarget = bulk_summary;
                                     self.ui
                                         .set_state(Some(state))
                                         .map_err(|err| anyhow!(err))
@@ -562,12 +570,13 @@ impl LauncherApp {
                                     "failed to refresh provider diagnostics after artifact staging",
                                 )?;
                                 if let Some(mut state) = state_snapshot {
-                                    let snapshot = self
-                                        .persist_provider_snapshot(&state, &diagnostics)
+                                    let (snapshot, bulk_summary) = self
+                                        .persist_provider_snapshot(&state, &diagnostics, None)
                                         .context(
                                             "failed to persist provider automation after artifact staging",
                                         )?;
                                     state.summary.provider_automation = snapshot;
+                                    state.summary.provider_bulk_retarget = bulk_summary;
                                     self.ui
                                         .set_state(Some(state))
                                         .map_err(|err| anyhow!(err))
@@ -724,10 +733,11 @@ impl LauncherApp {
             .update_provider_diagnostics()
             .context("failed to refresh provider diagnostics after provider restage")?;
         if let Some(mut state) = state_snapshot {
-            let snapshot = self
-                .persist_provider_snapshot(&state, &diagnostics)
+            let (snapshot, bulk_summary) = self
+                .persist_provider_snapshot(&state, &diagnostics, None)
                 .context("failed to persist provider automation after provider restage")?;
             state.summary.provider_automation = snapshot;
+            state.summary.provider_bulk_retarget = bulk_summary;
             self.ui
                 .set_state(Some(state))
                 .map_err(|err| anyhow!(err))
@@ -790,10 +800,11 @@ impl LauncherApp {
                     .update_provider_diagnostics()
                     .context("failed to refresh provider diagnostics after provider retarget")?;
                 if let Some(mut state) = self.ui.state().cloned() {
-                    let snapshot = self
-                        .persist_provider_snapshot(&state, &diagnostics)
+                    let (snapshot, bulk_summary) = self
+                        .persist_provider_snapshot(&state, &diagnostics, None)
                         .context("failed to persist provider automation after provider retarget")?;
                     state.summary.provider_automation = snapshot;
+                    state.summary.provider_bulk_retarget = bulk_summary;
                     self.ui
                         .set_state(Some(state))
                         .map_err(|err| anyhow!(err))
@@ -889,10 +900,11 @@ impl LauncherApp {
             .update_provider_diagnostics()
             .context("failed to refresh provider diagnostics after clearing override")?;
         if let Some(mut state) = self.ui.state().cloned() {
-            let snapshot = self
-                .persist_provider_snapshot(&state, &diagnostics)
+            let (snapshot, bulk_summary) = self
+                .persist_provider_snapshot(&state, &diagnostics, None)
                 .context("failed to persist provider automation after clearing override")?;
             state.summary.provider_automation = snapshot;
+            state.summary.provider_bulk_retarget = bulk_summary;
             self.ui
                 .set_state(Some(state))
                 .map_err(|err| anyhow!(err))
@@ -1017,10 +1029,12 @@ impl LauncherApp {
             .update_provider_diagnostics()
             .context("failed to refresh provider diagnostics after bulk retarget")?;
         if let Some(mut state) = self.ui.state().cloned() {
-            let snapshot = self
-                .persist_provider_snapshot(&state, &diagnostics)
+            let bulk_summary = bulk_retarget_summary(&selections, &state.logs_dir);
+            let (snapshot, persisted_bulk) = self
+                .persist_provider_snapshot(&state, &diagnostics, bulk_summary.clone())
                 .context("failed to persist provider automation after bulk retarget")?;
             state.summary.provider_automation = snapshot;
+            state.summary.provider_bulk_retarget = persisted_bulk;
             self.ui
                 .set_state(Some(state))
                 .map_err(|err| anyhow!(err))
@@ -1090,10 +1104,11 @@ impl LauncherApp {
             .update_provider_diagnostics()
             .context("failed to refresh provider diagnostics after restoring defaults")?;
         if let Some(mut state) = self.ui.state().cloned() {
-            let snapshot = self
-                .persist_provider_snapshot(&state, &diagnostics)
+            let (snapshot, bulk_summary) = self
+                .persist_provider_snapshot(&state, &diagnostics, None)
                 .context("failed to persist provider automation after restoring defaults")?;
             state.summary.provider_automation = snapshot;
+            state.summary.provider_bulk_retarget = bulk_summary;
             self.ui
                 .set_state(Some(state))
                 .map_err(|err| anyhow!(err))
@@ -1552,6 +1567,7 @@ struct ProviderRetargetOutcome {
     previous_path: PathBuf,
     new_path: PathBuf,
     changed: bool,
+    applied_at: String,
 }
 
 struct RoleRetargetOutcome {
@@ -1634,6 +1650,55 @@ fn bulk_retarget_feedback(selections: &[RoleRetargetOutcome]) -> String {
     } else {
         sentences.join(" ")
     }
+}
+
+fn bulk_retarget_summary(
+    selections: &[RoleRetargetOutcome],
+    logs_dir: &Path,
+) -> Option<ProviderBulkRetargetSummary> {
+    let mut summary = ProviderBulkRetargetSummary::default();
+    for selection in selections {
+        if selection.outcomes.is_empty() {
+            continue;
+        }
+        let first_applied = match selection.outcomes.first() {
+            Some(outcome) => outcome.applied_at.clone(),
+            None => continue,
+        };
+        let retargeted_at = selection
+            .outcomes
+            .iter()
+            .map(|outcome| outcome.applied_at.as_str())
+            .max()
+            .map(|value| value.to_string())
+            .unwrap_or(first_applied);
+        let changed = selection
+            .outcomes
+            .iter()
+            .filter(|outcome| outcome.changed)
+            .count();
+        let record = ProviderBulkRetargetRecord {
+            base_path: relative_to_logs(&selection.base, logs_dir),
+            retargeted_at,
+            total: selection.outcomes.len(),
+            changed,
+        };
+        match selection.role {
+            ProviderRole::Share => summary.share.push(record),
+            ProviderRole::Upload => summary.upload.push(record),
+        }
+    }
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary)
+    }
+}
+
+fn relative_to_logs(path: &Path, logs_dir: &Path) -> String {
+    path.strip_prefix(logs_dir)
+        .map(|relative| relative.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
 }
 
 struct FirstPartyProviders {
@@ -1984,13 +2049,16 @@ impl FirstPartyProviders {
             let applied_at = timestamp_for_log();
             state.apply_override(
                 destination.clone(),
-                ProviderOverrideSource::Retargeted { applied_at },
+                ProviderOverrideSource::Retargeted {
+                    applied_at: applied_at.clone(),
+                },
             );
             outcomes.push(ProviderRetargetOutcome {
                 name: state.target.name.clone(),
                 previous_path: previous,
                 new_path: destination,
                 changed,
+                applied_at,
             });
         }
         outcomes

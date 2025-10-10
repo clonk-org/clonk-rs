@@ -834,6 +834,7 @@ mod tests {
                 }],
             },
             provider_automation: ProviderAutomationSnapshot::default(),
+            provider_bulk_retarget: None,
         };
 
         LauncherShellState {

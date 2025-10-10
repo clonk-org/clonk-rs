@@ -154,6 +154,7 @@ fn run() -> Result<()> {
         &telemetry_summary,
         support_bundle.as_deref(),
         None,
+        None,
     );
     if let Err(err) = &summary_result {
         logger
@@ -1377,6 +1378,7 @@ mod tests {
             &telemetry,
             Some(&bundle_path),
             None,
+            None,
         )
         .unwrap();
 
@@ -1495,6 +1497,7 @@ mod tests {
             &[runtime_log.clone()],
             &[crash_log.clone()],
             &telemetry,
+            None,
             None,
             None,
         )

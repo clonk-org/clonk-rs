@@ -171,6 +171,7 @@ pub fn regenerate_support_bundle(
         &telemetry,
         Some(&bundle),
         Some(record.summary.provider_automation.clone()),
+        record.summary.provider_bulk_retarget.clone(),
     )?;
 
     Ok((bundle, telemetry))
