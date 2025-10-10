@@ -11,8 +11,8 @@ use lc_launcher::{
     copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_launcher_preferences,
     load_shell_state, reveal_in_file_manager, save_launcher_preferences, timestamp_for_filename,
     timestamp_for_log, write_launcher_summary, LauncherLog, LauncherPreferences,
-    ProviderAutomationSnapshot, ProviderAutomationState, ProviderDiagnostics, ProviderPathStatus,
-    ProviderStatus, SupportArtifact, UpdateTelemetrySummary,
+    LauncherShellState, ProviderAutomationSnapshot, ProviderAutomationState, ProviderDiagnostics,
+    ProviderPathStatus, ProviderStatus, SupportArtifact, UpdateTelemetrySummary,
 };
 use lc_launcher_ui::{
     ActionFeedback, LauncherShellMessage, LauncherShellResponse, LauncherShellUi,
@@ -604,6 +604,8 @@ impl LauncherApp {
         let state = load_shell_state(&self.paths).context("failed to load launcher state")?;
         match state {
             Some(state) => {
+                self.providers
+                    .hydrate_from_snapshot(&state.logs_dir, &state.summary.provider_automation);
                 self.logger
                     .set_target(state.launcher_log_path.clone())
                     .context("failed to attach launcher log to runtime log file")?;
@@ -613,6 +615,7 @@ impl LauncherApp {
                     .context("failed to update launcher UI state")?;
             }
             None => {
+                self.providers.reset_automation();
                 self.ui
                     .set_state(None)
                     .map_err(|err| anyhow!(err))
@@ -907,6 +910,47 @@ impl FirstPartyProviders {
         }]
     }
 
+    fn hydrate_from_snapshot(&mut self, logs_dir: &Path, snapshot: &ProviderAutomationSnapshot) {
+        self.reset_automation();
+        for record in &snapshot.share {
+            let resolved = resolve_snapshot_path(logs_dir, &record.path);
+            if let Some(state) = find_state_mut(&mut self.share, |state| {
+                paths_equivalent(&state.target.path, &resolved)
+            }) {
+                state.automation = record.automation.clone();
+                continue;
+            }
+            if let Some(state) =
+                find_state_mut(&mut self.share, |state| state.target.name == record.name)
+            {
+                state.automation = record.automation.clone();
+            }
+        }
+        for record in &snapshot.upload {
+            let resolved = resolve_snapshot_path(logs_dir, &record.path);
+            if let Some(state) = find_state_mut(&mut self.upload, |state| {
+                paths_equivalent(&state.target.path, &resolved)
+            }) {
+                state.automation = record.automation.clone();
+                continue;
+            }
+            if let Some(state) =
+                find_state_mut(&mut self.upload, |state| state.target.name == record.name)
+            {
+                state.automation = record.automation.clone();
+            }
+        }
+    }
+
+    fn reset_automation(&mut self) {
+        for state in &mut self.share {
+            state.automation = ProviderAutomationState::Idle;
+        }
+        for state in &mut self.upload {
+            state.automation = ProviderAutomationState::Idle;
+        }
+    }
+
     fn stage_bundle(
         &mut self,
         logger: &dyn LauncherLog,
@@ -1077,6 +1121,40 @@ fn compute_path_status(path: &Path) -> ProviderPathStatus {
     }
 }
 
+fn resolve_snapshot_path(logs_dir: &Path, entry: &str) -> PathBuf {
+    let candidate = PathBuf::from(entry);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        logs_dir.join(candidate)
+    }
+}
+
+fn find_state_mut<'a, F>(
+    states: &'a mut [ProviderTargetState],
+    mut predicate: F,
+) -> Option<&'a mut ProviderTargetState>
+where
+    F: FnMut(&ProviderTargetState) -> bool,
+{
+    for state in states {
+        if predicate(state) {
+            return Some(state);
+        }
+    }
+    None
+}
+
+fn paths_equivalent(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn relative_display(base: &Path, path: &Path) -> String {
     match path.strip_prefix(base) {
         Ok(relative) => relative.display().to_string(),
@@ -1211,7 +1289,10 @@ fn draw_text(surface: &mut Surface, rect: &GuiRect, text: &str, color: Color) {
 mod tests {
     use super::*;
     use anyhow::Result as AnyResult;
-    use lc_launcher::SupportArtifact;
+    use lc_launcher::{
+        ProviderAutomationSnapshot, ProviderAutomationState, ProviderDiagnostics,
+        ProviderPathStatus, ProviderStatus, SupportArtifact,
+    };
     use std::env;
     use std::ffi::OsString;
     use std::fs;
@@ -1353,6 +1434,58 @@ mod tests {
         assert!(detail.starts_with("submission-request-upload-"));
         let request_path = provider_dir.path().join(detail);
         assert!(request_path.exists());
+    }
+
+    #[test]
+    fn hydrate_from_snapshot_restores_automation_state() {
+        let logs_dir = TempDir::new().unwrap();
+        let share_path = logs_dir.path().join("support-share");
+        let upload_path = logs_dir.path().join("support-upload");
+        fs::create_dir_all(&share_path).unwrap();
+        fs::create_dir_all(&upload_path).unwrap();
+
+        let mut providers = FirstPartyProviders {
+            share: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Share Drop".into(),
+                path: share_path.clone(),
+            })],
+            upload: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Upload Drop".into(),
+                path: upload_path.clone(),
+            })],
+        };
+
+        let diagnostics = ProviderDiagnostics {
+            share: vec![ProviderStatus {
+                name: "Support Share Drop".into(),
+                path: share_path.clone(),
+                path_status: ProviderPathStatus::Ready,
+                automation: ProviderAutomationState::Submitted {
+                    detail: "submission-request-share-123.json".into(),
+                },
+            }],
+            upload: vec![ProviderStatus {
+                name: "Support Upload Drop".into(),
+                path: upload_path.clone(),
+                path_status: ProviderPathStatus::Ready,
+                automation: ProviderAutomationState::Failed {
+                    error: "network failure".into(),
+                },
+            }],
+        };
+
+        let snapshot = ProviderAutomationSnapshot::from_diagnostics(&diagnostics, logs_dir.path());
+        providers.reset_automation();
+        providers.hydrate_from_snapshot(logs_dir.path(), &snapshot);
+
+        assert!(matches!(
+            providers.share[0].automation,
+            ProviderAutomationState::Submitted { .. }
+        ));
+        assert!(matches!(
+            providers.upload[0].automation,
+            ProviderAutomationState::Failed { .. }
+        ));
     }
 }
 
