@@ -519,6 +519,7 @@ fn format_automation_state(state: &ProviderAutomationState) -> String {
     match state {
         ProviderAutomationState::Idle => "Idle".into(),
         ProviderAutomationState::Submitted { detail } => format!("Submitted ({detail})"),
+        ProviderAutomationState::Stale { reason } => format!("Stale ({reason})"),
         ProviderAutomationState::Skipped { reason } => format!("Skipped ({reason})"),
         ProviderAutomationState::Failed { error } => format!("Failed ({error})"),
     }
@@ -542,9 +543,9 @@ mod tests {
     use super::*;
     use lc_gui::{GuiEvent, Point};
     use lc_launcher::{
-        LauncherSummary, LauncherTelemetryFailure, ProviderAutomationState, ProviderDiagnostics,
-        ProviderPathStatus, ProviderStatus, SerializableTelemetryFailure,
-        SerializableTelemetrySummary,
+        LauncherSummary, LauncherTelemetryFailure, ProviderAutomationSnapshot,
+        ProviderAutomationState, ProviderDiagnostics, ProviderPathStatus, ProviderStatus,
+        SerializableTelemetryFailure, SerializableTelemetrySummary,
     };
     use tempfile::TempDir;
 
@@ -643,6 +644,7 @@ mod tests {
                     message: "c4group returned status 1".into(),
                 }],
             },
+            provider_automation: ProviderAutomationSnapshot::default(),
         };
 
         LauncherShellState {

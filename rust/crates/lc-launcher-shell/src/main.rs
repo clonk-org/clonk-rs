@@ -11,8 +11,9 @@ use lc_launcher::{
     copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_launcher_preferences,
     load_shell_state, reveal_in_file_manager, save_launcher_preferences, timestamp_for_filename,
     timestamp_for_log, write_launcher_summary, LauncherLog, LauncherPreferences,
-    LauncherShellState, ProviderAutomationSnapshot, ProviderAutomationState, ProviderDiagnostics,
-    ProviderPathStatus, ProviderStatus, SupportArtifact, UpdateTelemetrySummary,
+    LauncherShellState, ProviderAutomationRecord, ProviderAutomationSnapshot,
+    ProviderAutomationState, ProviderDiagnostics, ProviderPathStatus, ProviderStatus,
+    SupportArtifact, UpdateTelemetrySummary,
 };
 use lc_launcher_ui::{
     ActionFeedback, LauncherShellMessage, LauncherShellResponse, LauncherShellUi,
@@ -917,13 +918,13 @@ impl FirstPartyProviders {
             if let Some(state) = find_state_mut(&mut self.share, |state| {
                 paths_equivalent(&state.target.path, &resolved)
             }) {
-                state.automation = record.automation.clone();
+                Self::apply_snapshot_record(state, record, &resolved, true);
                 continue;
             }
             if let Some(state) =
                 find_state_mut(&mut self.share, |state| state.target.name == record.name)
             {
-                state.automation = record.automation.clone();
+                Self::apply_snapshot_record(state, record, &resolved, false);
             }
         }
         for record in &snapshot.upload {
@@ -931,15 +932,41 @@ impl FirstPartyProviders {
             if let Some(state) = find_state_mut(&mut self.upload, |state| {
                 paths_equivalent(&state.target.path, &resolved)
             }) {
-                state.automation = record.automation.clone();
+                Self::apply_snapshot_record(state, record, &resolved, true);
                 continue;
             }
             if let Some(state) =
                 find_state_mut(&mut self.upload, |state| state.target.name == record.name)
             {
-                state.automation = record.automation.clone();
+                Self::apply_snapshot_record(state, record, &resolved, false);
             }
         }
+    }
+
+    fn apply_snapshot_record(
+        state: &mut ProviderTargetState,
+        record: &ProviderAutomationRecord,
+        resolved: &Path,
+        matched_by_path: bool,
+    ) {
+        if should_mark_submission_as_stale(&record.automation) {
+            if !matched_by_path {
+                let reason = format!(
+                    "staging directory changed from {} to {}; restage files to refresh submissions",
+                    resolved.display(),
+                    state.target.path.display()
+                );
+                state.automation = ProviderAutomationState::Stale { reason };
+                return;
+            }
+            let current_status = compute_path_status(&state.target.path);
+            if current_status != record.path_status {
+                let reason = stale_reason_for_status(&state.target.path, current_status);
+                state.automation = ProviderAutomationState::Stale { reason };
+                return;
+            }
+        }
+        state.automation = record.automation.clone();
     }
 
     fn reset_automation(&mut self) {
@@ -1121,6 +1148,32 @@ fn compute_path_status(path: &Path) -> ProviderPathStatus {
     }
 }
 
+fn should_mark_submission_as_stale(state: &ProviderAutomationState) -> bool {
+    matches!(state, ProviderAutomationState::Submitted { .. })
+}
+
+fn stale_reason_for_status(path: &Path, status: ProviderPathStatus) -> String {
+    match status {
+        ProviderPathStatus::Ready => format!(
+            "staging directory {} was recreated; restage files to refresh submissions",
+            path.display()
+        ),
+        ProviderPathStatus::Missing => format!(
+            "staging directory {} is missing; restage files to refresh submissions",
+            path.display()
+        ),
+        ProviderPathStatus::NotDirectory => format!(
+            "staging directory {} is not a directory; restage files to refresh submissions",
+            path.display()
+        ),
+        ProviderPathStatus::Inaccessible(err) => format!(
+            "staging directory {} is inaccessible ({}); restage files to refresh submissions",
+            path.display(),
+            err
+        ),
+    }
+}
+
 fn resolve_snapshot_path(logs_dir: &Path, entry: &str) -> PathBuf {
     let candidate = PathBuf::from(entry);
     if candidate.is_absolute() {
@@ -1296,7 +1349,13 @@ mod tests {
     use std::env;
     use std::ffi::OsString;
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     struct DummyLog;
     impl LauncherLog for DummyLog {
@@ -1333,6 +1392,7 @@ mod tests {
 
     #[test]
     fn parse_targets_uses_default_when_env_unset() {
+        let _env_guard = env_lock().lock().unwrap();
         let base = TempDir::new().unwrap();
         let default_path = base.path().join("support-share");
         let _guard = EnvVarGuard::set(SHARE_PROVIDERS_ENV, None);
@@ -1348,6 +1408,7 @@ mod tests {
 
     #[test]
     fn parse_targets_resolves_relative_env_paths() {
+        let _env_guard = env_lock().lock().unwrap();
         let base = TempDir::new().unwrap();
         let default_path = base.path().join("support-share");
         let relative = format!("custom{}drop", std::path::MAIN_SEPARATOR);
@@ -1434,6 +1495,95 @@ mod tests {
         assert!(detail.starts_with("submission-request-upload-"));
         let request_path = provider_dir.path().join(detail);
         assert!(request_path.exists());
+    }
+
+    #[test]
+    fn hydrate_marks_submitted_share_provider_stale_when_path_missing() {
+        let logs_dir = TempDir::new().unwrap();
+        let share_path = logs_dir.path().join("support-share");
+        fs::create_dir_all(&share_path).unwrap();
+
+        let mut providers = FirstPartyProviders {
+            share: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Share Drop".into(),
+                path: share_path.clone(),
+            })],
+            upload: Vec::new(),
+        };
+
+        let diagnostics = ProviderDiagnostics {
+            share: vec![ProviderStatus {
+                name: "Support Share Drop".into(),
+                path: share_path.clone(),
+                path_status: ProviderPathStatus::Ready,
+                automation: ProviderAutomationState::Submitted {
+                    detail: "submission-request-share-123.json".into(),
+                },
+            }],
+            upload: Vec::new(),
+        };
+
+        let snapshot = ProviderAutomationSnapshot::from_diagnostics(&diagnostics, logs_dir.path());
+        fs::remove_dir_all(&share_path).unwrap();
+
+        providers.hydrate_from_snapshot(logs_dir.path(), &snapshot);
+
+        match &providers.share[0].automation {
+            ProviderAutomationState::Stale { reason } => {
+                assert!(
+                    reason.contains("missing"),
+                    "expected missing path reason, got {reason}"
+                );
+            }
+            state => panic!("expected stale automation state, got {state:?}"),
+        }
+    }
+
+    #[test]
+    fn hydrate_marks_submitted_share_provider_stale_when_path_changes() {
+        let logs_dir = TempDir::new().unwrap();
+        let original_path = logs_dir.path().join("support-share-old");
+        let new_path = logs_dir.path().join("support-share-new");
+        fs::create_dir_all(&original_path).unwrap();
+        fs::create_dir_all(&new_path).unwrap();
+
+        let mut providers = FirstPartyProviders {
+            share: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Share Drop".into(),
+                path: new_path.clone(),
+            })],
+            upload: Vec::new(),
+        };
+
+        let diagnostics = ProviderDiagnostics {
+            share: vec![ProviderStatus {
+                name: "Support Share Drop".into(),
+                path: original_path.clone(),
+                path_status: ProviderPathStatus::Ready,
+                automation: ProviderAutomationState::Submitted {
+                    detail: "submission-request-share-456.json".into(),
+                },
+            }],
+            upload: Vec::new(),
+        };
+
+        let snapshot = ProviderAutomationSnapshot::from_diagnostics(&diagnostics, logs_dir.path());
+
+        providers.hydrate_from_snapshot(logs_dir.path(), &snapshot);
+
+        match &providers.share[0].automation {
+            ProviderAutomationState::Stale { reason } => {
+                assert!(
+                    reason.contains(original_path.to_str().unwrap()),
+                    "expected stale reason to mention original path, got {reason}"
+                );
+                assert!(
+                    reason.contains(new_path.to_str().unwrap()),
+                    "expected stale reason to mention new path, got {reason}"
+                );
+            }
+            state => panic!("expected stale automation state, got {state:?}"),
+        }
     }
 
     #[test]

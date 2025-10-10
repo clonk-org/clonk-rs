@@ -13,6 +13,7 @@ pub enum ProviderPathStatus {
 pub enum ProviderAutomationState {
     Idle,
     Submitted { detail: String },
+    Stale { reason: String },
     Skipped { reason: String },
     Failed { error: String },
 }

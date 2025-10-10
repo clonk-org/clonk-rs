@@ -21,7 +21,7 @@ pub use shell::{
 };
 pub use summary::{
     load_launcher_summary, write_launcher_summary, LauncherSummary, LauncherSummaryRecord,
-    ProviderAutomationSnapshot,
+    ProviderAutomationRecord, ProviderAutomationSnapshot,
 };
 pub use telemetry::{
     digest_update_telemetry, SerializableTelemetryFailure, SerializableTelemetrySummary,
