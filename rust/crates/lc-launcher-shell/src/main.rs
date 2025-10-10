@@ -349,6 +349,14 @@ impl LauncherApp {
         self.persist_preferences();
     }
 
+    fn forget_all_first_party_overrides(&mut self) {
+        self.preferences
+            .clear_provider_overrides_for_role(ProviderRole::Share.as_str());
+        self.preferences
+            .clear_provider_overrides_for_role(ProviderRole::Upload.as_str());
+        self.persist_preferences();
+    }
+
     fn configure_dialog_directory(
         &self,
         dialog: FileDialog,
@@ -620,6 +628,9 @@ impl LauncherApp {
             }
             LauncherShellMessage::ClearProviderOverride { role, index } => {
                 self.handle_clear_provider_override(role, index)?;
+            }
+            LauncherShellMessage::RestoreAllProviderDefaults => {
+                self.handle_restore_all_provider_defaults()?;
             }
         }
         Ok(())
@@ -898,6 +909,61 @@ impl LauncherApp {
             )
         };
         self.set_feedback(ActionFeedback::success(message))?;
+
+        Ok(())
+    }
+
+    fn handle_restore_all_provider_defaults(&mut self) -> Result<()> {
+        if !self.providers.has_share_targets() && !self.providers.has_upload_targets() {
+            self.set_feedback(ActionFeedback::info(
+                "No first-party providers are configured. Configure LC_FIRST_PARTY_* variables to enable automated submissions.",
+            ))?;
+            return Ok(());
+        }
+
+        self.logger
+            .log_line("restoring all first-party providers to default paths via diagnostics UI")
+            .context("failed to log bulk provider restore request")?;
+
+        let outcome = self
+            .providers
+            .restore_all_defaults()
+            .context("failed to restore default paths for first-party providers")?;
+
+        self.forget_all_first_party_overrides();
+
+        let diagnostics = self
+            .update_provider_diagnostics()
+            .context("failed to refresh provider diagnostics after restoring defaults")?;
+        if let Some(mut state) = self.ui.state().cloned() {
+            let snapshot = self
+                .persist_provider_snapshot(&state, &diagnostics)
+                .context("failed to persist provider automation after restoring defaults")?;
+            state.summary.provider_automation = snapshot;
+            self.ui
+                .set_state(Some(state))
+                .map_err(|err| anyhow!(err))
+                .context("failed to refresh launcher summary after restoring defaults")?;
+        }
+
+        let log_summary = format!(
+            "bulk provider restore results: share {}/{} reset, upload {}/{} reset",
+            outcome.share_restored,
+            outcome.share_total,
+            outcome.upload_restored,
+            outcome.upload_total
+        );
+        self.logger
+            .log_line(&log_summary)
+            .context("failed to log bulk provider restore results")?;
+
+        let feedback_message = outcome.feedback_message();
+        let feedback = if outcome.restored() > 0 {
+            ActionFeedback::success(feedback_message)
+        } else {
+            ActionFeedback::info(feedback_message)
+        };
+        self.set_feedback(feedback)?;
 
         Ok(())
     }
@@ -1209,6 +1275,13 @@ impl ProviderRole {
             ProviderRole::Upload => "upload",
         }
     }
+
+    fn plural_label(&self) -> &'static str {
+        match self {
+            ProviderRole::Share => "share targets",
+            ProviderRole::Upload => "upload targets",
+        }
+    }
 }
 
 impl From<ProviderKind> for ProviderRole {
@@ -1217,6 +1290,87 @@ impl From<ProviderKind> for ProviderRole {
             ProviderKind::Share => ProviderRole::Share,
             ProviderKind::Upload => ProviderRole::Upload,
         }
+    }
+}
+
+#[derive(Default, Debug)]
+struct RestoreAllDefaultsResult {
+    share_total: usize,
+    share_restored: usize,
+    upload_total: usize,
+    upload_restored: usize,
+}
+
+impl RestoreAllDefaultsResult {
+    fn restored(&self) -> usize {
+        self.share_restored + self.upload_restored
+    }
+
+    fn total(&self) -> usize {
+        self.share_total + self.upload_total
+    }
+
+    fn unchanged(&self) -> usize {
+        self.total().saturating_sub(self.restored())
+    }
+
+    fn feedback_message(&self) -> String {
+        let mut sentences = Vec::new();
+        if let Some(sentence) = self.role_sentence(ProviderRole::Share) {
+            sentences.push(sentence);
+        }
+        if let Some(sentence) = self.role_sentence(ProviderRole::Upload) {
+            sentences.push(sentence);
+        }
+
+        if self.total() > 0 {
+            if self.restored() == 0 {
+                sentences.push("Cleared saved overrides for all first-party providers.".into());
+            } else if self.unchanged() > 0 {
+                sentences.push("Cleared saved overrides for the remaining targets.".into());
+            } else {
+                sentences.push("Saved overrides are now reset.".into());
+            }
+        }
+
+        sentences.join(" ")
+    }
+
+    fn role_sentence(&self, role: ProviderRole) -> Option<String> {
+        let (restored, total) = match role {
+            ProviderRole::Share => (self.share_restored, self.share_total),
+            ProviderRole::Upload => (self.upload_restored, self.upload_total),
+        };
+        if total == 0 {
+            return None;
+        }
+        let label = role.plural_label();
+        if restored == total {
+            Some(format!("Restored all {label} to default paths."))
+        } else if restored == 0 {
+            Some(format!(
+                "{} already use default paths.",
+                capitalize_first(label)
+            ))
+        } else {
+            let remaining = total - restored;
+            Some(format!(
+                "Restored {restored} of {total} {label} to default paths; {remaining} already used defaults."
+            ))
+        }
+    }
+}
+
+fn capitalize_first(input: &str) -> String {
+    let mut chars = input.chars();
+    match chars.next() {
+        Some(first) => {
+            let mut result = String::with_capacity(input.len());
+            result.push(first.to_ascii_uppercase());
+            result.push_str(chars.as_str());
+            result
+        }
+        None => String::new(),
     }
 }
 
@@ -1578,6 +1732,37 @@ impl FirstPartyProviders {
             ProviderOverrideSource::Retargeted { applied_at },
         );
         Ok(path_changed)
+    }
+
+    fn restore_all_defaults(&mut self) -> Result<RestoreAllDefaultsResult> {
+        let share_total = self.share.len();
+        let upload_total = self.upload.len();
+
+        let mut result = RestoreAllDefaultsResult {
+            share_total,
+            upload_total,
+            ..RestoreAllDefaultsResult::default()
+        };
+
+        for index in 0..share_total {
+            if self
+                .restore_default(ProviderRole::Share, index)
+                .context("failed to restore share provider default path")?
+            {
+                result.share_restored += 1;
+            }
+        }
+
+        for index in 0..upload_total {
+            if self
+                .restore_default(ProviderRole::Upload, index)
+                .context("failed to restore upload provider default path")?
+            {
+                result.upload_restored += 1;
+            }
+        }
+
+        Ok(result)
     }
 
     fn states(&self, role: ProviderRole) -> &[ProviderTargetState] {
@@ -2061,6 +2246,106 @@ mod tests {
         assert!(
             !providers.share[0].provenance.has_preference_override(),
             "preference overrides should be cleared even when no path change occurs"
+        );
+    }
+
+    #[test]
+    fn restore_all_defaults_resets_all_providers() {
+        let share_default = TempDir::new().unwrap();
+        let share_override = TempDir::new().unwrap();
+        let upload_default = TempDir::new().unwrap();
+        let upload_override = TempDir::new().unwrap();
+
+        let mut providers = FirstPartyProviders {
+            share: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Share Drop".into(),
+                path: share_default.path().to_path_buf(),
+            })],
+            upload: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Upload Drop".into(),
+                path: upload_default.path().to_path_buf(),
+            })],
+        };
+        providers.share[0].apply_override(
+            share_override.path().to_path_buf(),
+            ProviderOverrideSource::Preference,
+        );
+        providers.upload[0].apply_override(
+            upload_override.path().to_path_buf(),
+            ProviderOverrideSource::Preference,
+        );
+
+        let outcome = providers
+            .restore_all_defaults()
+            .expect("bulk default restoration");
+
+        assert_eq!(outcome.share_total, 1);
+        assert_eq!(outcome.upload_total, 1);
+        assert_eq!(outcome.share_restored, 1);
+        assert_eq!(outcome.upload_restored, 1);
+
+        let share_state = &providers.share[0];
+        assert!(
+            paths_equivalent(&share_state.target.path, share_default.path()),
+            "share provider should reset to default path"
+        );
+        assert!(
+            !share_state.provenance.has_preference_override(),
+            "share provider should drop preference overrides"
+        );
+
+        let upload_state = &providers.upload[0];
+        assert!(
+            paths_equivalent(&upload_state.target.path, upload_default.path()),
+            "upload provider should reset to default path"
+        );
+        assert!(
+            !upload_state.provenance.has_preference_override(),
+            "upload provider should drop preference overrides"
+        );
+    }
+
+    #[test]
+    fn restore_all_defaults_reports_no_changes_when_paths_already_default() {
+        let share_default = TempDir::new().unwrap();
+        let upload_default = TempDir::new().unwrap();
+
+        let mut providers = FirstPartyProviders {
+            share: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Share Drop".into(),
+                path: share_default.path().to_path_buf(),
+            })],
+            upload: vec![ProviderTargetState::new(ProviderTarget {
+                name: "Support Upload Drop".into(),
+                path: upload_default.path().to_path_buf(),
+            })],
+        };
+        // Record preference overrides that point at defaults to ensure they are pruned.
+        providers.share[0].apply_override(
+            share_default.path().to_path_buf(),
+            ProviderOverrideSource::Preference,
+        );
+        providers.upload[0].apply_override(
+            upload_default.path().to_path_buf(),
+            ProviderOverrideSource::Preference,
+        );
+
+        let outcome = providers
+            .restore_all_defaults()
+            .expect("bulk default restoration");
+
+        assert_eq!(outcome.share_total, 1);
+        assert_eq!(outcome.upload_total, 1);
+        assert_eq!(outcome.share_restored, 0);
+        assert_eq!(outcome.upload_restored, 0);
+
+        assert!(
+            !providers.share[0].provenance.has_preference_override(),
+            "share preference overrides should be cleared"
+        );
+        assert!(
+            !providers.upload[0].provenance.has_preference_override(),
+            "upload preference overrides should be cleared"
         );
     }
 

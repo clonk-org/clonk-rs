@@ -33,6 +33,7 @@ pub enum LauncherShellMessage {
     RestageProvider { role: ProviderKind, index: usize },
     RetargetProvider { role: ProviderKind, index: usize },
     ClearProviderOverride { role: ProviderKind, index: usize },
+    RestoreAllProviderDefaults,
 }
 
 #[derive(Debug)]
@@ -152,6 +153,10 @@ impl LauncherShellUi {
         self.layout.upload_button
     }
 
+    pub fn restore_defaults_button(&self) -> Option<WidgetId> {
+        self.layout.restore_defaults_button
+    }
+
     pub fn state(&self) -> Option<&LauncherShellState> {
         self.state.as_ref()
     }
@@ -198,6 +203,7 @@ struct LauncherShellLayout {
     regenerate_button: Option<WidgetId>,
     copy_button: Option<WidgetId>,
     upload_button: Option<WidgetId>,
+    restore_defaults_button: Option<WidgetId>,
 }
 
 enum WidgetAction {
@@ -208,6 +214,7 @@ enum WidgetAction {
     RestageProvider { role: ProviderKind, index: usize },
     RetargetProvider { role: ProviderKind, index: usize },
     ClearProviderOverride { role: ProviderKind, index: usize },
+    RestoreAllProviderDefaults,
 }
 
 impl WidgetAction {
@@ -249,6 +256,9 @@ impl WidgetAction {
                     role: *role,
                     index: *index,
                 })
+            }
+            WidgetAction::RestoreAllProviderDefaults => {
+                Some(LauncherShellMessage::RestoreAllProviderDefaults)
             }
         }
     }
@@ -498,6 +508,14 @@ fn add_provider_section(
         return;
     }
 
+    let bulk_row = gui.add_row(section, false);
+    gui.add_label(bulk_row, "Bulk actions:");
+    let restore_button = gui.add_button(bulk_row, "Restore defaults");
+    layout
+        .action_map
+        .insert(restore_button, WidgetAction::RestoreAllProviderDefaults);
+    layout.restore_defaults_button = Some(restore_button);
+
     if !providers.share.is_empty() {
         let share_section = gui.add_column(section, true);
         gui.add_label(share_section, "Share Targets");
@@ -707,13 +725,32 @@ mod tests {
         let summary_path = state.summary_path.clone();
 
         let mut ui = LauncherShellUi::new(Some(state.clone())).expect("ui");
-        ui.layout(Size::new(800.0, 600.0));
+        let share_path = temp.path().join("support-share");
+        let mut diagnostics = ProviderDiagnostics::default();
+        diagnostics.share.push(ProviderStatus {
+            name: "Support Share Drop".into(),
+            path: share_path.clone(),
+            path_status: ProviderPathStatus::Ready,
+            automation: ProviderAutomationState::Idle,
+            path_provenance: ProviderPathProvenance::new(share_path.clone()),
+        });
+        ui.set_providers(diagnostics).expect("set providers");
+        ui.layout(Size::new(800.0, 960.0));
 
         let regenerate = ui.regenerate_button().expect("regenerate button");
         let regenerate_response = click_button(&mut ui, regenerate);
         assert!(matches!(
             regenerate_response.messages.as_slice(),
             [LauncherShellMessage::RegenerateSupportBundle]
+        ));
+
+        let restore_defaults = ui
+            .restore_defaults_button()
+            .expect("restore defaults button");
+        let restore_response = click_button(&mut ui, restore_defaults);
+        assert!(matches!(
+            restore_response.messages.as_slice(),
+            [LauncherShellMessage::RestoreAllProviderDefaults]
         ));
 
         let copy = ui.copy_button().expect("copy button");

@@ -53,6 +53,16 @@ impl LauncherPreferences {
     pub fn clear_provider_override(&mut self, role: &str, name: &str) {
         self.provider_overrides.remove(&override_key(role, name));
     }
+
+    pub fn clear_provider_overrides_for_role(&mut self, role: &str) {
+        let prefix = format!("{role}:");
+        self.provider_overrides
+            .retain(|key, _| !key.starts_with(&prefix));
+    }
+
+    pub fn clear_all_provider_overrides(&mut self) {
+        self.provider_overrides.clear();
+    }
 }
 
 fn override_key(role: &str, name: &str) -> String {
@@ -190,4 +200,42 @@ mod tests {
             Some(PathBuf::from("/tmp/upload"))
         );
     }
+}
+
+#[test]
+fn clearing_provider_overrides_removes_expected_entries() {
+    let mut prefs = LauncherPreferences::default();
+    prefs.set_provider_override("share", "Share Drop", Path::new("/tmp/share"));
+    prefs.set_provider_override("upload", "Upload Drop", Path::new("/tmp/upload"));
+    prefs.set_provider_override("custom", "Other", Path::new("/tmp/other"));
+
+    prefs.clear_provider_overrides_for_role("share");
+    assert!(
+        prefs
+            .provider_override_path("share", "Share Drop")
+            .is_none(),
+        "share override should be removed by role-specific clearing"
+    );
+    assert!(
+        prefs
+            .provider_override_path("upload", "Upload Drop")
+            .is_some(),
+        "non-matching overrides should be preserved"
+    );
+    assert!(
+        prefs.provider_override_path("custom", "Other").is_some(),
+        "overrides for other roles should survive role-specific clearing"
+    );
+
+    prefs.clear_all_provider_overrides();
+    assert!(
+        prefs
+            .provider_override_path("upload", "Upload Drop")
+            .is_none(),
+        "clearing all overrides should remove the remaining upload override"
+    );
+    assert!(
+        prefs.provider_override_path("custom", "Other").is_none(),
+        "clearing all overrides should remove custom entries"
+    );
 }
