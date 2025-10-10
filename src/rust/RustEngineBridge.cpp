@@ -15,6 +15,7 @@
 #include <C4Effects.h>
 #include <C4Particles.h>
 #include <C4Player.h>
+#include <C4Weather.h>
 #include <C4Viewport.h>
 #include <C4Wrappers.h>
 #include <StdCompiler.h>
@@ -635,6 +636,31 @@ void ApplyRuntimeObjectStatesToGame(
     }
 }
 
+void ApplyAuthoritativeEnvironmentState(C4Game &game) {
+    if (!g_runtime || g_runtime_disabled) {
+        return;
+    }
+
+    LcEngineRuntimeEnvironmentState environment{};
+    char *error_message = nullptr;
+    if (!lc_engine_runtime_export_environment(
+            g_runtime.get(),
+            &environment,
+            &error_message)) {
+        RustStringPtr error = MakeString(error_message);
+        if (error) {
+            LogWarning(std::string("Rust runtime environment export failed: ") + error.get());
+        } else {
+            LogWarning("Rust runtime environment export failed (no detail)");
+        }
+        return;
+    }
+
+    game.Weather.SetWind(environment.wind);
+    game.Weather.SetTemperature(environment.temperature);
+    game.Weather.SetClimate(environment.climate);
+}
+
 void ApplyAuthoritativeRuntimeState(C4Game &game) {
     if (!g_runtime || g_runtime_disabled) {
         return;
@@ -658,6 +684,8 @@ void ApplyAuthoritativeRuntimeState(C4Game &game) {
     ApplyRuntimeObjectStatesToGame(game, slice);
 
     lc_engine_runtime_object_states_free(buffer);
+
+    ApplyAuthoritativeEnvironmentState(game);
 }
 
 struct SnapshotEntry {

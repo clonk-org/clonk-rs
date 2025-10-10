@@ -163,6 +163,26 @@ pub struct LcEngineRuntimeObjectStateSlice {
     pub object_count: usize,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LcEngineRuntimeEnvironmentState {
+    pub wind: i32,
+    pub wind_variation: i32,
+    pub wind_period: u32,
+    pub temperature: i32,
+    pub climate: i32,
+    pub temperature_variation: i32,
+    pub temperature_period: u32,
+    pub temperature_phase: u32,
+    pub time_of_day: u16,
+    pub time_speed: i16,
+    pub precipitation: i32,
+    pub has_sky_color: bool,
+    pub sky_color_r: u8,
+    pub sky_color_g: u8,
+    pub sky_color_b: u8,
+}
+
 pub struct RecorderHandle {
     recorder: Recorder,
 }
@@ -1378,6 +1398,54 @@ pub extern "C" fn lc_engine_runtime_object_states_free(
 }
 
 #[no_mangle]
+pub extern "C" fn lc_engine_runtime_export_environment(
+    handle: *const RuntimeHandle,
+    out: *mut LcEngineRuntimeEnvironmentState,
+    error_out: *mut *mut c_char,
+) -> bool {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    let Some(runtime) = (unsafe { handle.as_ref() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return false;
+    };
+
+    let Some(out_ref) = (unsafe { out.as_mut() }) else {
+        set_error(error_out, "environment output is null".into());
+        return false;
+    };
+
+    let environment = runtime.engine.environment();
+    let (has_sky_color, sky_color_r, sky_color_g, sky_color_b) = environment
+        .sky_color
+        .map(|color| (true, color.r, color.g, color.b))
+        .unwrap_or((false, 0, 0, 0));
+
+    *out_ref = LcEngineRuntimeEnvironmentState {
+        wind: environment.wind,
+        wind_variation: environment.wind_variation,
+        wind_period: environment.wind_period,
+        temperature: environment.temperature,
+        climate: environment.climate,
+        temperature_variation: environment.temperature_variation,
+        temperature_period: environment.temperature_period,
+        temperature_phase: environment.temperature_phase,
+        time_of_day: environment.time_of_day,
+        time_speed: environment.time_speed,
+        precipitation: environment.precipitation,
+        has_sky_color,
+        sky_color_r,
+        sky_color_g,
+        sky_color_b,
+    };
+    true
+}
+
+#[no_mangle]
 pub extern "C" fn lc_engine_runtime_compare_snapshot(
     handle: *mut RuntimeHandle,
     frame: u64,
@@ -1918,7 +1986,7 @@ mod tests {
     use super::*;
     use crate::{
         control::{COM_RELEASE_OFFSET, COM_RIGHT},
-        Definition, SpawnConfig, Vector2,
+        Definition, EnvironmentSettings, RgbColor, SpawnConfig, Vector2,
     };
     use serde_json::Value;
     use std::{ffi::CString, ptr};
@@ -2858,6 +2926,46 @@ global func Step(state, frame, random)
             Some(1),
             "snapshot reports advanced frame"
         );
+    }
+
+    #[test]
+    fn runtime_export_environment_populates_state() {
+        let mut runtime = RuntimeHandle::new();
+        let mut environment = EnvironmentSettings::new(35);
+        environment.wind_variation = 12;
+        environment.wind_period = 180;
+        environment.temperature = -15;
+        environment.climate = 25;
+        environment.temperature_variation = 8;
+        environment.temperature_period = 720;
+        environment.temperature_phase = 3;
+        environment.time_of_day = 1200;
+        environment.time_speed = 15;
+        environment.precipitation = 40;
+        environment.sky_color = Some(RgbColor::new(10, 20, 30));
+        runtime.engine.set_environment(environment);
+
+        let runtime_ptr: *const RuntimeHandle = &runtime;
+        let mut state = LcEngineRuntimeEnvironmentState::default();
+        assert!(
+            lc_engine_runtime_export_environment(runtime_ptr, &mut state, ptr::null_mut()),
+            "environment export should succeed"
+        );
+        assert_eq!(state.wind, 35);
+        assert_eq!(state.wind_variation, 12);
+        assert_eq!(state.wind_period, 180);
+        assert_eq!(state.temperature, -15);
+        assert_eq!(state.climate, 25);
+        assert_eq!(state.temperature_variation, 8);
+        assert_eq!(state.temperature_period, 720);
+        assert_eq!(state.temperature_phase, 3);
+        assert_eq!(state.time_of_day, 1200);
+        assert_eq!(state.time_speed, 15);
+        assert_eq!(state.precipitation, 40);
+        assert!(state.has_sky_color, "sky color should be flagged");
+        assert_eq!(state.sky_color_r, 10);
+        assert_eq!(state.sky_color_g, 20);
+        assert_eq!(state.sky_color_b, 30);
     }
 
     #[test]

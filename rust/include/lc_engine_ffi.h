@@ -224,6 +224,24 @@ typedef struct LcEngineRuntimeObjectStateSlice {
     size_t object_count;
 } LcEngineRuntimeObjectStateSlice;
 
+typedef struct LcEngineRuntimeEnvironmentState {
+    int32_t wind;
+    int32_t wind_variation;
+    uint32_t wind_period;
+    int32_t temperature;
+    int32_t climate;
+    int32_t temperature_variation;
+    uint32_t temperature_period;
+    uint32_t temperature_phase;
+    uint16_t time_of_day;
+    int16_t time_speed;
+    int32_t precipitation;
+    bool has_sky_color;
+    uint8_t sky_color_r;
+    uint8_t sky_color_g;
+    uint8_t sky_color_b;
+} LcEngineRuntimeEnvironmentState;
+
 typedef struct LcEngineRuntimeObjectStateArray LcEngineRuntimeObjectStateArray;
 
 LcEngineRuntimeObjectStateArray *lc_engine_runtime_export_object_states(
@@ -269,6 +287,10 @@ char *lc_engine_runtime_export_state_json(
 bool lc_engine_runtime_import_state_json(
     LcEngineRuntimeHandle *handle,
     const char *json,
+    char **error_message);
+bool lc_engine_runtime_export_environment(
+    const LcEngineRuntimeHandle *handle,
+    LcEngineRuntimeEnvironmentState *out,
     char **error_message);
 
 #ifdef __cplusplus
