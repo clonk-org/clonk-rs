@@ -10,7 +10,7 @@ use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, CommandDirection,
     DefinitionId, Direction, EnvironmentSettings, FloatVector2, Landscape, ObjectId, ObjectStatus,
     ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope,
-    PhysicsSettings, QueuedCommand, SpawnConfig, TransferZoneCommand, TransferZoneRect,
+    PathFinder, PhysicsSettings, QueuedCommand, SpawnConfig, TransferZoneCommand, TransferZoneRect,
     TransferZoneState, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT,
     CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
 };
@@ -812,6 +812,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetVertexContact", get_vertex_contact);
     script.register_host_function("GetContact", get_contact);
     script.register_host_function("PathFree", path_free);
+    script.register_host_function("GetPath", get_path);
     script.register_host_function("SetTransferZone", set_transfer_zone);
     script.register_host_function("GBackSolid", g_back_solid);
     script.register_host_function("GBackSemiSolid", g_back_semi_solid);
@@ -3252,6 +3253,50 @@ fn path_free(args: &[Value]) -> Result<Value, RuntimeError> {
 
         let clear = landscape.path_is_clear(Vector2::new(x1, y1), Vector2::new(x2, y2));
         Ok(Value::Bool(clear))
+    })
+}
+
+fn get_path(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 4 {
+        return Err(RuntimeError::new(
+            "GetPath expects 4 arguments: from_x, from_y, to_x, to_y",
+        ));
+    }
+
+    let from_x = value_to_i32(&args[0], "GetPath", "from_x")?;
+    let from_y = value_to_i32(&args[1], "GetPath", "from_y")?;
+    let to_x = value_to_i32(&args[2], "GetPath", "to_x")?;
+    let to_y = value_to_i32(&args[3], "GetPath", "to_y")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+        let landscape = match context.landscape_ref() {
+            Some(landscape) => landscape,
+            None => return Ok(Value::Nil),
+        };
+        let mut finder = PathFinder::new(landscape, context.world.transfer_zones());
+        let path = match finder.find(Vector2::new(from_x, from_y), Vector2::new(to_x, to_y)) {
+            Some(path) => path,
+            None => return Ok(Value::Nil),
+        };
+        let mut result = HashMap::new();
+        result.insert("Length".into(), Value::Int(path.length));
+        let mut waypoints = Vec::with_capacity(path.waypoints.len());
+        for waypoint in path.waypoints {
+            let mut map = HashMap::new();
+            map.insert("X".into(), Value::Int(waypoint.x));
+            map.insert("Y".into(), Value::Int(waypoint.y));
+            if let Some(target) = waypoint.transfer_target {
+                map.insert("TransferTarget".into(), object_reference_value(target));
+            }
+            waypoints.push(Value::Proplist(map));
+        }
+        result.insert("Waypoints".into(), Value::Array(waypoints));
+        Ok(Value::Proplist(result))
     })
 }
 

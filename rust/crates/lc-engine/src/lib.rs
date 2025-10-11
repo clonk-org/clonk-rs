@@ -6,6 +6,7 @@ pub mod ffi;
 pub mod fixtures;
 mod input;
 mod landscape;
+mod pathfinder;
 mod record;
 pub mod scenario;
 mod transfer;
@@ -19,6 +20,7 @@ pub use input::PlayerInputState;
 pub use landscape::{
     CollisionResolution, Landscape, LandscapeCommand, LandscapeError, LiquidColumn, LiquidSegment,
 };
+pub use pathfinder::{PathFinder, PathWaypoint};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
 
