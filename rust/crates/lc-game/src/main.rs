@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::SystemTime;
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use lc_launcher::{
@@ -117,6 +120,9 @@ fn run() -> Result<()> {
         .log_line(&format!("resolved runtime binary {}", binary.display()))
         .context("failed to write binary resolution log")?;
 
+    ensure_runtime_assets(&paths, &binary, &logger)
+        .context("failed to prepare runtime assets for launch")?;
+
     let runtime_start = SystemTime::now();
     let status = launch_runtime(&binary, &paths, &config_path, &forwarded, &logger)?;
     let log_collection_result = collect_runtime_logs(&paths, runtime_start, &logger);
@@ -199,6 +205,178 @@ fn run() -> Result<()> {
         Ok(())
     } else {
         bail!("LegacyClonk exited {}", describe_exit_status(&status));
+    }
+}
+
+fn ensure_runtime_assets(paths: &AppPaths, binary: &Path, logger: &LauncherLogger) -> Result<()> {
+    let binary_dir = binary.parent().ok_or_else(|| {
+        anyhow!(
+            "resolved runtime binary {} does not have a parent directory",
+            binary.display()
+        )
+    })?;
+
+    let mut target_roots = vec![paths.install_root().to_path_buf()];
+    if !target_roots.iter().any(|root| root == binary_dir) {
+        target_roots.push(binary_dir.to_path_buf());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if binary_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map_or(false, |name| name == "MacOS")
+        {
+            if let Some(contents_dir) = binary_dir.parent() {
+                if contents_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map_or(false, |name| name == "Contents")
+                {
+                    if let Some(app_dir) = contents_dir.parent() {
+                        if app_dir
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .map_or(false, |ext| ext.eq_ignore_ascii_case("app"))
+                        {
+                            if let Some(bundle_root) = app_dir.parent() {
+                                if !target_roots.iter().any(|root| root == bundle_root) {
+                                    target_roots.push(bundle_root.to_path_buf());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for root in target_roots {
+        ensure_runtime_asset(
+            &paths.planet_dir().join("System.c4g"),
+            &root.join("System.c4g"),
+            "System.c4g",
+            logger,
+        )?;
+        ensure_runtime_asset(
+            &paths.planet_dir().join("Graphics.c4g"),
+            &root.join("Graphics.c4g"),
+            "Graphics.c4g",
+            logger,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn ensure_runtime_asset(
+    source: &Path,
+    target: &Path,
+    label: &str,
+    logger: &LauncherLogger,
+) -> Result<()> {
+    if !source.exists() {
+        bail!(
+            "required runtime asset {label} missing at {}",
+            source.display()
+        );
+    }
+
+    if target.exists() {
+        if same_file(source, target)? {
+            return Ok(());
+        }
+        let target_meta = fs::symlink_metadata(target).with_context(|| {
+            format!(
+                "failed to inspect existing runtime asset {}",
+                target.display()
+            )
+        })?;
+        if target_meta.is_dir() {
+            fs::remove_dir_all(target).with_context(|| {
+                format!("failed to remove stale directory {}", target.display())
+            })?;
+        } else {
+            fs::remove_file(target)
+                .with_context(|| format!("failed to remove stale {}", target.display()))?;
+        }
+        logger
+            .log_line(&format!("removed stale {label} at {}", target.display()))
+            .context("failed to log stale asset removal")?;
+    }
+
+    match fs::hard_link(source, target) {
+        Ok(_) => {
+            logger
+                .log_line(&format!("hard linked {label} into {}", target.display()))
+                .context("failed to log hard link creation")?;
+            return Ok(());
+        }
+        Err(link_err) => {
+            #[cfg(unix)]
+            {
+                match symlink(source, target) {
+                    Ok(_) => {
+                        logger
+                            .log_line(&format!(
+                                "symlinked {label} into {} after hard link failed: {link_err}",
+                                target.display()
+                            ))
+                            .context("failed to log symlink creation")?;
+                        return Ok(());
+                    }
+                    Err(symlink_err) => {
+                        logger
+                            .log_line(&format!(
+                                "failed to link {label}: hard link error {link_err}; \
+                                 symlink error {symlink_err}; copying instead"
+                            ))
+                            .context("failed to log link fallback")?;
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                logger
+                    .log_line(&format!(
+                        "failed to hard link {label}: {link_err}; copying instead"
+                    ))
+                    .context("failed to log link fallback")?;
+            }
+        }
+    }
+
+    fs::copy(source, target).with_context(|| {
+        format!(
+            "failed to copy {label} from {} to {}",
+            source.display(),
+            target.display()
+        )
+    })?;
+    logger
+        .log_line(&format!("copied {label} into {}", target.display()))
+        .context("failed to log asset copy")?;
+    Ok(())
+}
+
+fn same_file(a: &Path, b: &Path) -> io::Result<bool> {
+    let a_meta = fs::metadata(a)?;
+    let b_meta = fs::metadata(b)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return Ok(a_meta.ino() == b_meta.ino() && a_meta.dev() == b_meta.dev());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        return Ok(a_meta.file_index() == b_meta.file_index()
+            && a_meta.volume_serial_number() == b_meta.volume_serial_number());
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        return Ok(a_meta.len() == b_meta.len());
     }
 }
 
@@ -979,6 +1157,155 @@ mod tests {
     fn env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn ensure_runtime_assets_populates_group_files() {
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"system payload").unwrap();
+        fs::write(planet_dir.join("Graphics.c4g"), b"graphics payload").unwrap();
+
+        let binary_path = install_dir
+            .path()
+            .join("build")
+            .join("clonk.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("clonk");
+        fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
+        fs::write(&binary_path, b"stub").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        let logger = LauncherLogger::new(&paths).unwrap();
+
+        ensure_runtime_assets(&paths, &binary_path, &logger)
+            .expect("runtime assets should be linked");
+
+        let system_target = install_dir.path().join("System.c4g");
+        let graphics_target = install_dir.path().join("Graphics.c4g");
+        let binary_dir = binary_path.parent().unwrap();
+        let binary_system = binary_dir.join("System.c4g");
+        let binary_graphics = binary_dir.join("Graphics.c4g");
+        let bundle_root = binary_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .expect("bundle root should exist in test fixture");
+        let bundle_system = bundle_root.join("System.c4g");
+        let bundle_graphics = bundle_root.join("Graphics.c4g");
+        assert!(system_target.exists(), "system group should exist");
+        assert!(graphics_target.exists(), "graphics group should exist");
+        assert!(
+            binary_system.exists(),
+            "system group should exist next to the binary"
+        );
+        assert!(
+            binary_graphics.exists(),
+            "graphics group should exist next to the binary"
+        );
+        assert!(
+            bundle_system.exists(),
+            "system group should exist at mac bundle root"
+        );
+        assert!(
+            bundle_graphics.exists(),
+            "graphics group should exist at mac bundle root"
+        );
+        assert_eq!(
+            fs::read(&system_target).unwrap(),
+            b"system payload",
+            "system group contents should match source"
+        );
+        assert_eq!(
+            fs::read(&graphics_target).unwrap(),
+            b"graphics payload",
+            "graphics group contents should match source"
+        );
+        assert_eq!(
+            fs::read(&binary_system).unwrap(),
+            b"system payload",
+            "system group adjacent to binary should match source"
+        );
+        assert_eq!(
+            fs::read(&binary_graphics).unwrap(),
+            b"graphics payload",
+            "graphics group adjacent to binary should match source"
+        );
+        assert_eq!(
+            fs::read(&bundle_system).unwrap(),
+            b"system payload",
+            "system group at bundle root should match source"
+        );
+        assert_eq!(
+            fs::read(&bundle_graphics).unwrap(),
+            b"graphics payload",
+            "graphics group at bundle root should match source"
+        );
+    }
+
+    #[test]
+    fn ensure_runtime_assets_replaces_stale_targets() {
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"system payload").unwrap();
+        fs::write(planet_dir.join("Graphics.c4g"), b"graphics payload").unwrap();
+
+        let binary_path = install_dir.path().join("clonk.exe");
+        fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
+        fs::write(&binary_path, b"stub").unwrap();
+
+        let stale_system = install_dir.path().join("System.c4g");
+        let stale_graphics = install_dir.path().join("Graphics.c4g");
+        fs::write(&stale_system, b"old system").unwrap();
+        fs::write(&stale_graphics, b"old graphics").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        let logger = LauncherLogger::new(&paths).unwrap();
+
+        ensure_runtime_assets(&paths, &binary_path, &logger)
+            .expect("runtime assets should be refreshed");
+
+        assert_eq!(
+            fs::read(&stale_system).unwrap(),
+            b"system payload",
+            "system target should match updated source"
+        );
+        assert_eq!(
+            fs::read(&stale_graphics).unwrap(),
+            b"graphics payload",
+            "graphics target should match updated source"
+        );
+
+        let binary_system = binary_path.parent().unwrap().join("System.c4g");
+        let binary_graphics = binary_path.parent().unwrap().join("Graphics.c4g");
+        assert!(
+            binary_system.exists(),
+            "system group should be materialised alongside binary"
+        );
+        assert!(
+            binary_graphics.exists(),
+            "graphics group should be materialised alongside binary"
+        );
+
+        // A second run should succeed even when the targets already point at the source.
+        assert!(ensure_runtime_assets(&paths, &binary_path, &logger).is_ok());
     }
 
     #[test]
