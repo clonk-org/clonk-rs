@@ -6,13 +6,39 @@ use crate::summary::{
 };
 use crate::telemetry::UpdateTelemetrySummary;
 use lc_platform::AppPaths;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-pub fn render_support_bundle_report(
+#[derive(Debug, Clone)]
+pub struct SupportBundleReport {
+    pub lines: Vec<String>,
+    pub triage: Option<ReportSearchTriageSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportSearchTriageSummary {
+    pub label: String,
+    pub query: String,
+    pub query_display: String,
+    pub highlight: ReportSearchHighlightPreference,
+    pub match_count: usize,
+    pub active_match_index: Option<usize>,
+    pub matches: Vec<ReportSearchTriageMatch>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportSearchTriageMatch {
+    pub line_index: usize,
+    pub line_number: usize,
+    pub text: String,
+    pub active: bool,
+}
+
+pub fn build_support_bundle_report(
     paths: &AppPaths,
     support_bundle: Option<&Path>,
     telemetry_summary: &UpdateTelemetrySummary,
-) -> Vec<String> {
+) -> SupportBundleReport {
     let mut lines = Vec::new();
 
     let summary_path = paths.logs_dir().join("launcher-summary.json");
@@ -59,12 +85,26 @@ pub fn render_support_bundle_report(
 
     let base_lines = lines.clone();
     if let Some(record) = summary_record.as_ref() {
-        if let Some(annotations) = report_search_triage_lines(record, &base_lines) {
-            lines.extend(annotations);
+        let triage = report_search_triage_summary(record, &base_lines);
+        if let Some(summary) = triage.as_ref() {
+            lines.push(String::new());
+            lines.extend(render_triage_summary_lines(summary));
         }
+        return SupportBundleReport { lines, triage };
     }
 
-    lines
+    SupportBundleReport {
+        lines,
+        triage: None,
+    }
+}
+
+pub fn render_support_bundle_report(
+    paths: &AppPaths,
+    support_bundle: Option<&Path>,
+    telemetry_summary: &UpdateTelemetrySummary,
+) -> Vec<String> {
+    build_support_bundle_report(paths, support_bundle, telemetry_summary).lines
 }
 
 fn telemetry_report_lines(telemetry_summary: &UpdateTelemetrySummary) -> Vec<String> {
@@ -277,61 +317,84 @@ fn filename_or_display(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn report_search_triage_lines(
+pub fn report_search_triage_summary(
     record: &LauncherSummaryRecord,
     lines: &[String],
-) -> Option<Vec<String>> {
+) -> Option<ReportSearchTriageSummary> {
     let preferences = record.summary.report_search.as_ref()?;
-    triage_lines_for_search(preferences, lines)
+    triage_summary_for_search(preferences, lines)
 }
 
-fn triage_lines_for_search(
+fn triage_summary_for_search(
     preferences: &ReportSearchPreferences,
     lines: &[String],
-) -> Option<Vec<String>> {
+) -> Option<ReportSearchTriageSummary> {
     let normalized_query = preferences.query.to_lowercase();
     if !search_has_term(preferences.highlight, &normalized_query) {
         return None;
     }
 
     let matches = collect_search_matches(preferences.highlight, &normalized_query, lines);
-    let mut annotations = Vec::new();
-    annotations.push(String::new());
-
     let label = highlight_label(preferences.highlight);
     let query_display = query_display(preferences);
-
-    if matches.is_empty() {
-        annotations.push(format!(
-            "Search ({label}): {query_display} — no matches found."
-        ));
-        return Some(annotations);
-    }
-
-    annotations.push(format!(
-        "Search ({label}): {query_display} — {} match(es).",
-        matches.len()
-    ));
 
     let active_match = preferences
         .active_line
         .and_then(|line| matches.iter().position(|candidate| *candidate == line));
 
+    let mut match_entries = Vec::with_capacity(matches.len());
     for (index, line_index) in matches.iter().enumerate() {
-        let prefix = if Some(index) == active_match {
+        let line_number = *line_index + 1;
+        let line_text = lines
+            .get(*line_index)
+            .cloned()
+            .unwrap_or_else(|| "<line unavailable>".into());
+        match_entries.push(ReportSearchTriageMatch {
+            line_index: *line_index,
+            line_number,
+            text: line_text,
+            active: Some(index) == active_match,
+        });
+    }
+
+    Some(ReportSearchTriageSummary {
+        label: label.to_string(),
+        query: preferences.query.clone(),
+        query_display,
+        highlight: preferences.highlight,
+        match_count: match_entries.len(),
+        active_match_index: active_match,
+        matches: match_entries,
+    })
+}
+
+fn render_triage_summary_lines(summary: &ReportSearchTriageSummary) -> Vec<String> {
+    if summary.match_count == 0 {
+        return vec![format!(
+            "Search ({}): {} — no matches found.",
+            summary.label, summary.query_display
+        )];
+    }
+
+    let mut lines = Vec::with_capacity(1 + summary.matches.len());
+    lines.push(format!(
+        "Search ({}): {} — {} match(es).",
+        summary.label, summary.query_display, summary.match_count
+    ));
+
+    for (index, entry) in summary.matches.iter().enumerate() {
+        let prefix = if Some(index) == summary.active_match_index {
             "  *"
         } else {
             "   "
         };
-        let line_number = line_index + 1;
-        let line_text = lines
-            .get(*line_index)
-            .map(|line| line.as_str())
-            .unwrap_or("<line unavailable>");
-        annotations.push(format!("{prefix} Line {line_number}: {line_text}"));
+        lines.push(format!(
+            "{prefix} Line {}: {}",
+            entry.line_number, entry.text
+        ));
     }
 
-    Some(annotations)
+    lines
 }
 
 fn collect_search_matches(
@@ -411,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn triage_lines_skip_when_no_term() {
+    fn triage_summary_skip_when_no_term() {
         let lines = sample_lines();
         let preferences = ReportSearchPreferences {
             query: String::new(),
@@ -420,13 +483,13 @@ mod tests {
         };
 
         assert!(
-            triage_lines_for_search(&preferences, &lines).is_none(),
-            "triage block should be absent without a search term"
+            triage_summary_for_search(&preferences, &lines).is_none(),
+            "triage summary should be absent without a search term"
         );
     }
 
     #[test]
-    fn triage_lines_report_no_matches() {
+    fn triage_summary_reports_no_matches() {
         let lines = sample_lines();
         let preferences = ReportSearchPreferences {
             query: "missing".into(),
@@ -434,21 +497,24 @@ mod tests {
             active_line: None,
         };
 
-        let block = triage_lines_for_search(&preferences, &lines).expect("triage block");
-        assert_eq!(
-            block.len(),
-            2,
-            "block should include blank line and summary"
+        let summary =
+            triage_summary_for_search(&preferences, &lines).expect("triage summary to exist");
+        assert_eq!(summary.match_count, 0, "should report zero matches");
+        assert!(
+            summary.matches.is_empty(),
+            "no match entries should be generated"
         );
-        assert_eq!(block[0], "", "first line should be blank for separation");
+
+        let rendered = render_triage_summary_lines(&summary);
         assert_eq!(
-            block[1], "Search (text): \"missing\" — no matches found.",
-            "summary line should report no matches"
+            rendered,
+            vec!["Search (text): \"missing\" — no matches found.".to_string()],
+            "rendered summary should match legacy formatting"
         );
     }
 
     #[test]
-    fn triage_lines_report_matches_and_active_entry() {
+    fn triage_summary_reports_matches_and_active_entry() {
         let lines = sample_lines();
         let preferences = ReportSearchPreferences {
             query: "bundle".into(),
@@ -456,30 +522,45 @@ mod tests {
             active_line: Some(1),
         };
 
-        let block = triage_lines_for_search(&preferences, &lines).expect("triage block");
+        let summary =
+            triage_summary_for_search(&preferences, &lines).expect("triage summary to exist");
+        assert_eq!(summary.match_count, 2, "two matches should be detected");
         assert_eq!(
-            block.len(),
-            4,
-            "block should include summary and match entries"
-        );
-        assert_eq!(block[0], "", "first line should separate block");
-        assert_eq!(
-            block[1], "Search (text): \"bundle\" — 2 match(es).",
-            "summary should capture match count"
+            summary.active_match_index,
+            Some(0),
+            "first match should be marked as active"
         );
         assert_eq!(
-            block[2], "  * Line 2: Support bundle available at /tmp/support-bundle.zip",
-            "active match should be highlighted with an asterisk"
+            summary.matches[0].line_number, 2,
+            "line numbering should be 1-based"
+        );
+        assert!(
+            summary.matches[0].active,
+            "first match should be flagged active"
+        );
+        assert!(
+            !summary.matches[1].active,
+            "second match should be inactive"
+        );
+
+        let rendered = render_triage_summary_lines(&summary);
+        assert_eq!(
+            rendered[0], "Search (text): \"bundle\" — 2 match(es).",
+            "summary header should report match count"
         );
         assert_eq!(
-            block[3],
+            rendered[1], "  * Line 2: Support bundle available at /tmp/support-bundle.zip",
+            "active match should use asterisk prefix"
+        );
+        assert_eq!(
+            rendered[2],
             "    Line 5: Share the support bundle when filing bugs to include launcher, runtime, and telemetry logs.",
-            "non-active matches should be indented without an asterisk"
+            "inactive match should be indented without asterisk"
         );
     }
 
     #[test]
-    fn triage_lines_follow_error_preset_keywords() {
+    fn triage_summary_follows_error_preset_keywords() {
         let mut lines = sample_lines();
         lines.push("Updater issues detected:".into());
         lines.push("  /tmp/runtime.log -> fatal: updater crashed".into());
@@ -490,14 +571,29 @@ mod tests {
             active_line: Some(6),
         };
 
-        let block = triage_lines_for_search(&preferences, &lines).expect("triage block");
+        let summary =
+            triage_summary_for_search(&preferences, &lines).expect("triage summary to exist");
         assert_eq!(
-            block[1], "Search (errors): \"error\" — 1 match(es).",
-            "error preset should aggregate fatal/error keywords"
+            summary.match_count, 1,
+            "fatal keyword should count as error"
         );
         assert_eq!(
-            block[2], "  * Line 7:   /tmp/runtime.log -> fatal: updater crashed",
-            "active error match should be reported with preserved text"
+            summary.matches[0].line_number, 7,
+            "reported line number should match match position"
+        );
+        assert!(
+            summary.matches[0].active,
+            "fatal entry should be the active match"
+        );
+
+        let rendered = render_triage_summary_lines(&summary);
+        assert_eq!(
+            rendered[0], "Search (errors): \"error\" — 1 match(es).",
+            "error preset should surface summary with match count"
+        );
+        assert_eq!(
+            rendered[1], "  * Line 7:   /tmp/runtime.log -> fatal: updater crashed",
+            "fatal keyword should appear as the highlighted entry"
         );
     }
 }

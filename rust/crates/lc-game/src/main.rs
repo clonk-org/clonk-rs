@@ -12,13 +12,14 @@ use std::time::SystemTime;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use lc_launcher::{
-    append_support_bundle_report, create_support_bundle, digest_update_telemetry,
-    regenerate_support_bundle, render_support_bundle_report, timestamp_for_filename,
-    timestamp_for_log, write_launcher_summary, LauncherLog, ProviderAutomationRecord,
-    ProviderAutomationSnapshot, ProviderAutomationState, ProviderBulkRetargetRecord,
-    ProviderBulkRetargetSummary, ProviderPathStatus, UpdateTelemetrySummary,
+    append_support_bundle_report, build_support_bundle_report, create_support_bundle,
+    digest_update_telemetry, regenerate_support_bundle, timestamp_for_filename, timestamp_for_log,
+    write_launcher_summary, LauncherLog, ProviderAutomationRecord, ProviderAutomationSnapshot,
+    ProviderAutomationState, ProviderBulkRetargetRecord, ProviderBulkRetargetSummary,
+    ProviderPathStatus, ReportSearchTriageSummary, SupportBundleReport, UpdateTelemetrySummary,
 };
 use lc_platform::AppPaths;
+use serde::Serialize;
 
 const SKIP_PATCHER_VALIDATION_ENV: &str = "LC_GAME_SKIP_PATCHER_CHECK";
 const LEGACY_LOG_PREFIX: &str = "Clonk";
@@ -41,6 +42,10 @@ struct Cli {
     #[arg(long = "support-bundle-only")]
     support_bundle_only: bool,
 
+    /// Emit launcher diagnostics as JSON for automation consumers
+    #[arg(long = "automation-report")]
+    automation_report: bool,
+
     /// Arguments forwarded verbatim to the LegacyClonk runtime
     #[arg(trailing_var_arg = true)]
     forwarded: Vec<OsString>,
@@ -57,6 +62,7 @@ fn run() -> Result<()> {
     let Cli {
         binary,
         support_bundle_only,
+        automation_report,
         forwarded,
     } = Cli::parse();
 
@@ -80,7 +86,14 @@ fn run() -> Result<()> {
 
         let (bundle, telemetry) = regenerate_support_bundle(&paths, &logger, logger.path())
             .context("failed to regenerate support bundle")?;
-        print_launcher_report(&paths, Some(bundle.as_path()), &telemetry);
+        let report = build_support_bundle_report(&paths, Some(bundle.as_path()), &telemetry);
+        emit_launcher_report(
+            &paths,
+            Some(bundle.as_path()),
+            &telemetry,
+            &report,
+            automation_report,
+        )?;
         return Ok(());
     }
 
@@ -173,7 +186,14 @@ fn run() -> Result<()> {
         }
     }
 
-    print_launcher_report(&paths, support_bundle.as_deref(), &telemetry_summary);
+    let report = build_support_bundle_report(&paths, support_bundle.as_deref(), &telemetry_summary);
+    emit_launcher_report(
+        &paths,
+        support_bundle.as_deref(),
+        &telemetry_summary,
+        &report,
+        automation_report,
+    )?;
 
     if status.success() {
         Ok(())
@@ -813,14 +833,102 @@ fn collect_crash_reports(
     Ok(captured)
 }
 
-fn print_launcher_report(
+fn emit_launcher_report(
     paths: &AppPaths,
     support_bundle: Option<&Path>,
     telemetry_summary: &UpdateTelemetrySummary,
-) {
+    report: &SupportBundleReport,
+    automation_report: bool,
+) -> Result<()> {
+    if automation_report {
+        emit_automation_report(paths, support_bundle, telemetry_summary, report)
+    } else {
+        print_launcher_report(report);
+        Ok(())
+    }
+}
+
+fn print_launcher_report(report: &SupportBundleReport) {
     println!();
-    for line in render_support_bundle_report(paths, support_bundle, telemetry_summary) {
+    for line in &report.lines {
         println!("{line}");
+    }
+}
+
+fn emit_automation_report(
+    paths: &AppPaths,
+    support_bundle: Option<&Path>,
+    telemetry_summary: &UpdateTelemetrySummary,
+    report: &SupportBundleReport,
+) -> Result<()> {
+    let payload = build_automation_report(paths, support_bundle, telemetry_summary, report);
+    let json =
+        serde_json::to_string_pretty(&payload).context("failed to serialise automation report")?;
+    println!("{json}");
+    Ok(())
+}
+
+fn build_automation_report(
+    paths: &AppPaths,
+    support_bundle: Option<&Path>,
+    telemetry_summary: &UpdateTelemetrySummary,
+    report: &SupportBundleReport,
+) -> AutomationReport {
+    AutomationReport {
+        logs_dir: paths.logs_dir().display().to_string(),
+        summary_path: paths
+            .logs_dir()
+            .join("launcher-summary.json")
+            .display()
+            .to_string(),
+        support_bundle_path: support_bundle.map(|path| path.display().to_string()),
+        telemetry: AutomationTelemetry::from(telemetry_summary),
+        triage_summary: report.triage.clone(),
+        report_lines: report.lines.clone(),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AutomationReport {
+    logs_dir: String,
+    summary_path: String,
+    support_bundle_path: Option<String>,
+    telemetry: AutomationTelemetry,
+    triage_summary: Option<ReportSearchTriageSummary>,
+    report_lines: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AutomationTelemetry {
+    successes: Vec<String>,
+    failures: Vec<AutomationTelemetryFailure>,
+}
+
+#[derive(Debug, Serialize)]
+struct AutomationTelemetryFailure {
+    log_path: String,
+    message: String,
+}
+
+impl From<&UpdateTelemetrySummary> for AutomationTelemetry {
+    fn from(summary: &UpdateTelemetrySummary) -> Self {
+        let successes = summary
+            .successes()
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        let failures = summary
+            .failures()
+            .iter()
+            .map(|failure| AutomationTelemetryFailure {
+                log_path: failure.log_path.display().to_string(),
+                message: failure.message.clone(),
+            })
+            .collect();
+        Self {
+            successes,
+            failures,
+        }
     }
 }
 
@@ -1502,7 +1610,7 @@ mod tests {
         )
         .unwrap();
 
-        let lines = render_support_bundle_report(&paths, None, &telemetry);
+        let lines = build_support_bundle_report(&paths, None, &telemetry).lines;
         assert!(
             lines.iter().any(|line| line == "  Bulk retarget history:"),
             "expected bulk retarget history headline to be rendered: {lines:?}"
@@ -1568,7 +1676,7 @@ mod tests {
         )
         .unwrap();
 
-        let lines = render_support_bundle_report(&paths, None, &telemetry);
+        let lines = build_support_bundle_report(&paths, None, &telemetry).lines;
         assert!(
             lines
                 .iter()
@@ -1579,6 +1687,66 @@ mod tests {
         assert!(
             lines.iter().any(|line| line.contains("support-share")),
             "expected share base path to appear in report: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn automation_report_includes_triage_summary() {
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        let logger = LauncherLogger::new(&paths).unwrap();
+        logger.log_line("automation triage test").unwrap();
+
+        let telemetry = UpdateTelemetrySummary::default();
+        let search_preferences = lc_launcher::ReportSearchPreferences {
+            query: "support".into(),
+            highlight: lc_launcher::ReportSearchHighlightPreference::Generic,
+            active_line: None,
+        };
+
+        write_launcher_summary(
+            &paths,
+            &logger,
+            logger.path(),
+            &[],
+            &[],
+            &telemetry,
+            None,
+            None,
+            None,
+            Some(search_preferences),
+        )
+        .unwrap();
+
+        let report = build_support_bundle_report(&paths, None, &telemetry);
+        assert!(
+            report.triage.is_some(),
+            "triage summary should be attached to support bundle report"
+        );
+
+        let automation = build_automation_report(&paths, None, &telemetry, &report);
+        let triage = automation
+            .triage_summary
+            .expect("automation report should include triage summary");
+        assert_eq!(triage.query, "support");
+        assert_eq!(triage.match_count, 2);
+        assert!(
+            automation
+                .report_lines
+                .iter()
+                .any(|line| line == "Search (text): \"support\" — 2 match(es)."),
+            "rendered report lines should include triage summary header: {:?}",
+            automation.report_lines
         );
     }
 }

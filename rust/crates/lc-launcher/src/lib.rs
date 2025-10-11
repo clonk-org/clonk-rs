@@ -19,7 +19,10 @@ pub use provider::{
     ProviderAutomationState, ProviderDiagnostics, ProviderOverrideSource, ProviderPathProvenance,
     ProviderPathStatus, ProviderStatus,
 };
-pub use report::render_support_bundle_report;
+pub use report::{
+    build_support_bundle_report, render_support_bundle_report, report_search_triage_summary,
+    ReportSearchTriageMatch, ReportSearchTriageSummary, SupportBundleReport,
+};
 pub use shell::{
     copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_shell_state,
     reveal_in_file_manager, support_artifacts, LauncherShellEnsureResult, LauncherShellState,
