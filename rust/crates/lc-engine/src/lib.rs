@@ -894,6 +894,14 @@ pub(crate) fn encode_bridge_action_data(
 pub struct EnvironmentSettings {
     pub wind: i32,
     #[serde(default)]
+    pub base_wind: i32,
+    #[serde(default)]
+    pub wind_target: i32,
+    #[serde(default)]
+    pub wind_update_timer: u16,
+    #[serde(default)]
+    pub wind_update_interval: u16,
+    #[serde(default)]
     pub wind_variation: i32,
     #[serde(default)]
     pub wind_period: u32,
@@ -924,6 +932,10 @@ impl EnvironmentSettings {
     pub const fn new(wind: i32) -> Self {
         Self {
             wind,
+            base_wind: wind,
+            wind_target: wind,
+            wind_update_timer: 0,
+            wind_update_interval: 0,
             wind_variation: 0,
             wind_period: 0,
             temperature: 0,
@@ -942,10 +954,17 @@ impl EnvironmentSettings {
         if variation == 0 {
             self.wind_variation = 0;
             self.wind_period = 0;
+            self.wind_target = self.base_wind;
+            self.wind_update_interval = 0;
+            self.wind_update_timer = 0;
             return self;
         }
         self.wind_variation = variation.abs();
         self.wind_period = period.max(2);
+        self.wind_update_interval = Self::default_wind_update_interval(self.wind_period);
+        self.wind_update_timer = 0;
+        self.wind_target = self.wind;
+        self.base_wind = self.wind;
         self
     }
 
@@ -1000,6 +1019,18 @@ impl EnvironmentSettings {
         self
     }
 
+    fn default_wind_update_interval(period: u32) -> u16 {
+        if period == 0 {
+            return 60;
+        }
+        let normalized = (period / 2).max(1);
+        if normalized >= u32::from(u16::MAX) {
+            u16::MAX
+        } else {
+            normalized as u16
+        }
+    }
+
     pub fn without_sky_color(mut self) -> Self {
         self.sky_color = None;
         self
@@ -1028,13 +1059,10 @@ impl EnvironmentSettings {
         base.saturating_sub(delta)
     }
 
-    pub fn advance_frame(&mut self) {
-        if self.time_speed == 0 {
-            return;
-        }
-        let next = (i32::from(self.time_of_day) + i32::from(self.time_speed))
-            .rem_euclid(i32::from(Self::TIME_CYCLE));
-        self.time_of_day = next as u16;
+    pub fn advance_frame(&mut self, rng: &mut ChaCha8Rng) {
+        self.refresh_runtime_fields();
+        self.update_wind(rng);
+        self.advance_time_of_day();
     }
 
     pub fn time_of_day(&self) -> u16 {
@@ -1076,6 +1104,68 @@ impl EnvironmentSettings {
     fn clamp_time_speed(time_speed: i32) -> i16 {
         let max = i32::from(Self::MAX_TIME_SPEED);
         time_speed.clamp(-max, max) as i16
+    }
+
+    fn advance_time_of_day(&mut self) {
+        if self.time_speed == 0 {
+            return;
+        }
+        let next = (i32::from(self.time_of_day) + i32::from(self.time_speed))
+            .rem_euclid(i32::from(Self::TIME_CYCLE));
+        self.time_of_day = next as u16;
+    }
+
+    fn update_wind(&mut self, rng: &mut ChaCha8Rng) {
+        if self.wind_update_interval == 0 || self.wind_variation == 0 {
+            self.wind_target = self.wind;
+            self.wind_update_timer = 0;
+        } else {
+            if self.wind_update_timer == 0 {
+                self.wind_update_timer = self.wind_update_interval;
+                let range = self.wind_variation.abs();
+                let offset = rng.gen_range(-range..=range);
+                let lower = self.base_wind.saturating_sub(range);
+                let upper = self.base_wind.saturating_add(range);
+                let target = self.base_wind.saturating_add(offset).clamp(lower, upper);
+                self.wind_target = target;
+            }
+
+            if self.wind_update_timer > 0 {
+                self.wind_update_timer -= 1;
+            }
+        }
+
+        if self.wind < self.wind_target {
+            self.wind = self.wind.saturating_add(1);
+        } else if self.wind > self.wind_target {
+            self.wind = self.wind.saturating_sub(1);
+        }
+    }
+
+    pub fn refresh_runtime_fields(&mut self) {
+        if self.wind_update_interval == 0 && self.wind_variation > 0 {
+            self.wind_update_interval = Self::default_wind_update_interval(self.wind_period);
+        }
+
+        if self.wind_variation == 0 {
+            self.wind_update_interval = 0;
+            self.wind_update_timer = 0;
+            self.wind_target = self.wind;
+        } else {
+            if self.wind_update_interval == 0 {
+                self.wind_update_interval = 1;
+            }
+            if self.wind_update_timer >= self.wind_update_interval {
+                self.wind_update_timer %= self.wind_update_interval;
+            }
+            if self.wind_target == 0 && self.wind != 0 {
+                self.wind_target = self.wind;
+            }
+        }
+
+        if self.base_wind == 0 || self.wind_variation == 0 {
+            self.base_wind = self.wind;
+        }
     }
 }
 
@@ -3415,7 +3505,7 @@ impl Engine {
     }
 
     pub fn with_seed(seed: u64) -> Self {
-        Self {
+        let mut engine = Self {
             definitions: HashMap::new(),
             objects: Vec::new(),
             next_object_id: 1,
@@ -3431,7 +3521,9 @@ impl Engine {
             crew_roles: HashMap::new(),
             known_crew_owners: HashSet::new(),
             eliminated_crew_owners: HashSet::new(),
-        }
+        };
+        engine.environment.refresh_runtime_fields();
+        engine
     }
 
     pub fn frame(&self) -> u64 {
@@ -3466,6 +3558,8 @@ impl Engine {
     }
 
     pub fn set_environment(&mut self, environment: EnvironmentSettings) {
+        let mut environment = environment;
+        environment.refresh_runtime_fields();
         self.environment = environment;
     }
 
@@ -3826,7 +3920,7 @@ impl Engine {
         self.frame += 1;
         let frame = self.frame;
         self.tick_particles();
-        self.environment.advance_frame();
+        self.environment.advance_frame(&mut self.rng);
         if self.scenario_script.is_some() {
             let snapshot = self.snapshot();
             let random = self.next_random_i32();
@@ -4753,6 +4847,7 @@ impl Engine {
         self.frame = state.frame;
         self.physics = state.physics;
         self.environment = state.environment;
+        self.environment.refresh_runtime_fields();
         self.landscape = state.landscape.clone();
         self.rng = state.rng.clone();
         self.objects.clear();
@@ -7954,6 +8049,8 @@ fn value_to_liquid_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
+    use rand_chacha::ChaCha8Rng;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
@@ -8077,6 +8174,50 @@ mod tests {
         return nil;
     }
     "#;
+
+    #[test]
+    fn wind_variation_adjusts_over_time() {
+        let mut settings = EnvironmentSettings::new(5).with_wind_variation(4, 40);
+        let base = settings.base_wind;
+        let mut rng = ChaCha8Rng::seed_from_u64(1234);
+        let mut probe = rng.clone();
+        let range = settings.wind_variation.abs();
+        let lower = base.saturating_sub(range);
+        let upper = base.saturating_add(range);
+        let offset = probe.gen_range(-range..=range);
+        let expected_target = (base.saturating_add(offset)).clamp(lower, upper);
+
+        settings.advance_frame(&mut rng);
+
+        assert_eq!(
+            settings.wind_target, expected_target,
+            "wind target should move within configured variation"
+        );
+        assert_eq!(
+            settings.wind_update_timer,
+            settings.wind_update_interval.saturating_sub(1),
+            "timer should be primed for next update cycle"
+        );
+
+        if expected_target > base {
+            assert_eq!(
+                settings.wind,
+                base.saturating_add(1),
+                "wind should move toward higher target by one unit"
+            );
+        } else if expected_target < base {
+            assert_eq!(
+                settings.wind,
+                base.saturating_sub(1),
+                "wind should move toward lower target by one unit"
+            );
+        } else {
+            assert_eq!(
+                settings.wind, base,
+                "wind should remain unchanged when target equals base"
+            );
+        }
+    }
 
     const SET_BRIDGE_ACTION_DATA_SCRIPT: &str = r#"
     global func Initialize(state, random)

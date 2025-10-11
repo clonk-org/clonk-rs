@@ -23,10 +23,7 @@ where
             }),
         ),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => panic!(
-            "failed to open baseline {}: {err}",
-            baseline_path.display()
-        ),
+        Err(err) => panic!("failed to open baseline {}: {err}", baseline_path.display()),
     };
 
     let frames = baseline
