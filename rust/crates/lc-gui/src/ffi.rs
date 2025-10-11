@@ -90,6 +90,8 @@ pub struct LcGuiDrawCommand {
     pub color: LcGuiColor,
     pub text_ptr: *const c_char,
     pub text_len: usize,
+    pub font_size: f32,
+    pub padding: f32,
 }
 
 impl LcGuiDrawCommand {
@@ -100,10 +102,18 @@ impl LcGuiDrawCommand {
             color: color.into(),
             text_ptr: ptr::null(),
             text_len: 0,
+            font_size: 0.0,
+            padding: 0.0,
         }
     }
 
-    fn text(rect: Rect, text: CString, color: Color) -> (Self, CString) {
+    fn text(
+        rect: Rect,
+        text: CString,
+        color: Color,
+        font_size: f32,
+        padding: f32,
+    ) -> (Self, CString) {
         let len = text.as_bytes().len();
         let ptr = text.as_ptr();
         (
@@ -113,6 +123,8 @@ impl LcGuiDrawCommand {
                 color: color.into(),
                 text_ptr: ptr,
                 text_len: len,
+                font_size,
+                padding,
             },
             text,
         )
@@ -252,11 +264,18 @@ fn build_render_commands(commands: Vec<DrawCommand>) -> RenderHandle {
             DrawCommand::Quad { rect, color } => {
                 ffi_commands.push(LcGuiDrawCommand::quad(rect, color))
             }
-            DrawCommand::Text { rect, text, color } => {
+            DrawCommand::Text {
+                rect,
+                text,
+                color,
+                font_size,
+                padding,
+            } => {
                 let sanitized: String = text.chars().filter(|ch| *ch != '\u{0}').collect();
                 let c_string = CString::new(sanitized)
                     .unwrap_or_else(|_| CString::new("").expect("empty string"));
-                let (cmd, stored) = LcGuiDrawCommand::text(rect, c_string, color);
+                let (cmd, stored) =
+                    LcGuiDrawCommand::text(rect, c_string, color, font_size, padding);
                 ffi_commands.push(cmd);
                 texts.push(stored);
             }

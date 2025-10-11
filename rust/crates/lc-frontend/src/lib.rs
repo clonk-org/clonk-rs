@@ -278,9 +278,13 @@ impl GraphicsSystem {
         for command in self.gui.render() {
             match command {
                 DrawCommand::Quad { rect, color } => fill_rect(&mut self.surface, &rect, color),
-                DrawCommand::Text { rect, text, color } => {
-                    draw_text(&mut self.surface, &rect, &text, color)
-                }
+                DrawCommand::Text {
+                    rect,
+                    text,
+                    color,
+                    font_size,
+                    padding,
+                } => draw_text(&mut self.surface, &rect, &text, color, font_size, padding),
             }
         }
     }
@@ -465,34 +469,18 @@ fn fill_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
     }
 }
 
-fn draw_text(surface: &mut Surface, rect: &GuiRect, text: &str, color: Color) {
-    let mut cursor_x = rect.origin.x;
-    let baseline = rect.origin.y;
-    let glyph_width = 6.0f32;
-    let glyph_height = rect.size.height.clamp(6.0, 14.0);
-
-    for ch in text.chars() {
-        if cursor_x > surface.width() as f32 {
-            break;
-        }
-        if ch == ' ' {
-            cursor_x += glyph_width;
-            continue;
-        }
-        let intensity = ((ch as u32).wrapping_mul(17) % 80) as u8;
-        let glyph_color = Color::new(
-            color.r.saturating_add(intensity / 2),
-            color.g.saturating_add(intensity / 3),
-            color.b.saturating_add(intensity / 4),
-            255,
-        );
-        let glyph_rect = GuiRect::from_origin_size(
-            GuiPoint::new(cursor_x, baseline),
-            GuiSize::new(glyph_width - 1.0, glyph_height),
-        );
-        fill_rect(surface, &glyph_rect, glyph_color);
-        cursor_x += glyph_width;
-    }
+fn draw_text(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    text: &str,
+    color: Color,
+    font_size: f32,
+    padding: f32,
+) {
+    let origin_x = rect.origin.x + padding;
+    let origin_y = rect.origin.y + padding;
+    let font = lc_graphics::BitmapFont::new();
+    font.draw_text(surface, origin_x, origin_y, text, font_size.max(1.0), color);
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 thiserror = "1"
+font8x8 = "0.3"
 
 [dev-dependencies]
 rand = "0.8"

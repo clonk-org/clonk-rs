@@ -55,6 +55,8 @@ struct DrawCommand {
     Rect rect;
     Color color;
     std::string text;
+    float font_size {0.0f};
+    float padding {0.0f};
 };
 
 struct EventAction {

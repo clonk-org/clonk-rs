@@ -57,6 +57,8 @@ std::vector<DrawCommand> ConvertCommands(const LcGuiDrawCommand *commands, size_
         DrawCommand converted;
         converted.rect = ToRect(command.rect);
         converted.color = ToColor(command.color);
+        converted.font_size = command.font_size;
+        converted.padding = command.padding;
         switch (command.kind) {
         case LC_GUI_DRAW_COMMAND_QUAD:
             converted.kind = DrawCommandKind::Quad;

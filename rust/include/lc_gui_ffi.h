@@ -38,10 +38,12 @@ typedef enum LcGuiDrawCommandKind {
 
 typedef struct LcGuiDrawCommand {
     LcGuiDrawCommandKind kind;
-    LcGuiRect rect;
-    LcGuiColor color;
-    const char *text_ptr;
-    size_t text_len;
+   LcGuiRect rect;
+   LcGuiColor color;
+   const char *text_ptr;
+   size_t text_len;
+   float font_size;
+   float padding;
 } LcGuiDrawCommand;
 
 typedef enum LcGuiEventKind {

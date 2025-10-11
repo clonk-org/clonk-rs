@@ -1,7 +1,7 @@
 pub mod ffi;
 mod scenario_browser;
 
-use lc_graphics::Color;
+use lc_graphics::{BitmapFont, Color};
 use std::fmt;
 
 pub use scenario_browser::{
@@ -423,6 +423,8 @@ pub enum DrawCommand {
         rect: Rect,
         text: String,
         color: Color,
+        font_size: f32,
+        padding: f32,
     },
 }
 
@@ -667,6 +669,8 @@ impl Gui {
                     rect: node.rect,
                     text: button.text.clone(),
                     color: button.current_text_color(),
+                    font_size: button.font_size,
+                    padding: button.padding,
                 });
             }
             WidgetKind::Label(label) => {
@@ -674,6 +678,8 @@ impl Gui {
                     rect: node.rect,
                     text: label.text.clone(),
                     color: label.color,
+                    font_size: label.font_size,
+                    padding: label.padding,
                 });
             }
             WidgetKind::Gauge(gauge) => {
@@ -912,28 +918,9 @@ impl Gui {
 }
 
 fn measure_text(text: &str, font_size: f32) -> Size {
-    let glyph_width = (font_size * 0.6).max(4.0);
-    let mut max_width: f32 = 0.0;
-    let mut line_width: f32 = 0.0;
-    let mut lines = 1;
-    for ch in text.chars() {
-        if ch == '\n' {
-            max_width = max_width.max(line_width);
-            line_width = 0.0;
-            lines += 1;
-            continue;
-        }
-        line_width += match ch {
-            ' ' => glyph_width * 0.5,
-            '\t' => glyph_width * 2.0,
-            _ => glyph_width,
-        };
-    }
-    if text.is_empty() {
-        line_width = glyph_width * 0.5;
-    }
-    max_width = max_width.max(line_width);
-    Size::new(max_width, font_size * lines as f32)
+    let font = BitmapFont::new();
+    let metrics = font.measure_text(text, font_size.max(1.0));
+    Size::new(metrics.width, metrics.height)
 }
 
 fn wrong_widget_type(id: WidgetId, expected: &'static str, kind: &WidgetKind) -> GuiError {
