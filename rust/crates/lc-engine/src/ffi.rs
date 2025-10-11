@@ -1,3 +1,4 @@
+use crate::pathfinder::Path;
 use crate::{
     control::{
         interpret_player_control_command, parse_control_ini, ControlPacket, PlayerControlData,
@@ -119,6 +120,85 @@ pub struct LcEngineSurfaceSnapshot {
     pub width: i32,
     pub height: i32,
     pub hash: u64,
+}
+
+#[repr(C)]
+pub struct LcEnginePathWaypoint {
+    pub x: i32,
+    pub y: i32,
+    pub has_transfer_target: bool,
+    pub transfer_target: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LcEnginePathSlice {
+    pub found: bool,
+    pub length: i32,
+    pub waypoints: *const LcEnginePathWaypoint,
+    pub waypoint_count: usize,
+}
+
+impl Default for LcEnginePathSlice {
+    fn default() -> Self {
+        Self {
+            found: false,
+            length: 0,
+            waypoints: ptr::null(),
+            waypoint_count: 0,
+        }
+    }
+}
+
+pub struct LcEngineRuntimePathResult {
+    slice: LcEnginePathSlice,
+    waypoints: Vec<LcEnginePathWaypoint>,
+}
+
+impl LcEngineRuntimePathResult {
+    fn from_path(path: Option<Path>) -> Self {
+        match path {
+            Some(path) => {
+                let mut waypoints = Vec::with_capacity(path.waypoints.len());
+                for waypoint in path.waypoints {
+                    let (has_transfer_target, transfer_target) = match waypoint.transfer_target {
+                        Some(id) => (true, id.as_u64()),
+                        None => (false, 0),
+                    };
+                    waypoints.push(LcEnginePathWaypoint {
+                        x: waypoint.x,
+                        y: waypoint.y,
+                        has_transfer_target,
+                        transfer_target,
+                    });
+                }
+                let slice = LcEnginePathSlice {
+                    found: true,
+                    length: path.length,
+                    waypoints: if waypoints.is_empty() {
+                        ptr::null()
+                    } else {
+                        waypoints.as_ptr()
+                    },
+                    waypoint_count: waypoints.len(),
+                };
+                Self { slice, waypoints }
+            }
+            None => Self {
+                slice: LcEnginePathSlice {
+                    found: false,
+                    length: 0,
+                    waypoints: ptr::null(),
+                    waypoint_count: 0,
+                },
+                waypoints: Vec::new(),
+            },
+        }
+    }
+
+    fn slice(&self) -> LcEnginePathSlice {
+        self.slice
+    }
 }
 
 #[repr(C)]
@@ -306,6 +386,17 @@ impl RuntimeHandle {
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
+    }
+
+    fn find_path(
+        &self,
+        from: Vector2,
+        to: Vector2,
+        transfer_zones_enabled: bool,
+        level: i32,
+    ) -> Option<Path> {
+        self.engine
+            .find_path(from, to, level, transfer_zones_enabled)
     }
 
     fn set_player_command_direction(
@@ -1443,6 +1534,60 @@ pub extern "C" fn lc_engine_runtime_landscape_slice(
 
 #[no_mangle]
 pub extern "C" fn lc_engine_runtime_landscape_free(buffer: *mut LcEngineRuntimeLandscapeArray) {
+    if buffer.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(buffer));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_find_path(
+    handle: *const RuntimeHandle,
+    from_x: i32,
+    from_y: i32,
+    to_x: i32,
+    to_y: i32,
+    transfer_zones_enabled: bool,
+    level: i32,
+    error_out: *mut *mut c_char,
+) -> *mut LcEngineRuntimePathResult {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+
+    let Some(runtime) = (unsafe { handle.as_ref() }) else {
+        set_error(error_out, "runtime handle is null".into());
+        return ptr::null_mut();
+    };
+
+    if runtime.engine.landscape().is_none() {
+        set_error(error_out, "runtime landscape unavailable".into());
+        return ptr::null_mut();
+    }
+
+    let from = Vector2::new(from_x, from_y);
+    let to = Vector2::new(to_x, to_y);
+    let path = runtime.find_path(from, to, transfer_zones_enabled, level);
+    Box::into_raw(Box::new(LcEngineRuntimePathResult::from_path(path)))
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_path_slice(
+    buffer: *const LcEngineRuntimePathResult,
+) -> LcEnginePathSlice {
+    if buffer.is_null() {
+        return LcEnginePathSlice::default();
+    }
+
+    unsafe { (*buffer).slice() }
+}
+
+#[no_mangle]
+pub extern "C" fn lc_engine_runtime_path_free(buffer: *mut LcEngineRuntimePathResult) {
     if buffer.is_null() {
         return;
     }

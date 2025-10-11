@@ -1732,6 +1732,81 @@ bool IsActive() {
     return (!g_disabled && (g_recorder || g_playback)) || runtime_active;
 }
 
+bool FindPath(
+    C4Game &game,
+    int32_t from_x,
+    int32_t from_y,
+    int32_t to_x,
+    int32_t to_y,
+    bool transfer_zones_enabled,
+    int32_t level,
+    bool (*set_waypoint)(int32_t, int32_t, intptr_t, intptr_t),
+    intptr_t parameter) {
+    if (!set_waypoint) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    EnsureInitialised();
+    if (!g_runtime || g_runtime_disabled) {
+        return false;
+    }
+
+    char *error_message = nullptr;
+    LcEngineRuntimePathResult *buffer = lc_engine_runtime_find_path(
+        g_runtime.get(),
+        from_x,
+        from_y,
+        to_x,
+        to_y,
+        transfer_zones_enabled,
+        level,
+        &error_message);
+    if (!buffer) {
+        RustStringPtr error = MakeString(error_message);
+        if (error) {
+            LogWarning(std::string("Rust pathfinder request failed: ") + error.get());
+        } else {
+            LogWarning("Rust pathfinder request failed (no detail)");
+        }
+        return false;
+    }
+
+    LcEnginePathSlice slice = lc_engine_runtime_path_slice(buffer);
+    if (!slice.found || slice.waypoint_count == 0 || slice.waypoints == nullptr) {
+        lc_engine_runtime_path_free(buffer);
+        return false;
+    }
+
+    size_t start_index = 0;
+    const LcEnginePathWaypoint *waypoints = slice.waypoints;
+    if (waypoints && slice.waypoint_count > 0) {
+        const LcEnginePathWaypoint &first = waypoints[0];
+        if (first.x == from_x && first.y == from_y) {
+            start_index = 1;
+        }
+    }
+
+    bool success = true;
+    for (size_t index = start_index; index < slice.waypoint_count; ++index) {
+        const LcEnginePathWaypoint &waypoint = waypoints[index];
+        intptr_t transfer_target_ptr = 0;
+        if (waypoint.has_transfer_target) {
+            if (C4Object *target =
+                    FindObjectByRuntimeId(game, waypoint.transfer_target)) {
+                transfer_target_ptr = reinterpret_cast<intptr_t>(target);
+            }
+        }
+        if (!set_waypoint(waypoint.x, waypoint.y, transfer_target_ptr, parameter)) {
+            success = false;
+            break;
+        }
+    }
+
+    lc_engine_runtime_path_free(buffer);
+    return success;
+}
+
 void OnGameStart(C4Game &game) {
     std::lock_guard<std::mutex> lock(g_mutex);
     EnsureInitialised();

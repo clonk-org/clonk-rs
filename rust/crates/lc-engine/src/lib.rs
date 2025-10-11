@@ -3563,6 +3563,21 @@ impl Engine {
         self.landscape.as_ref()
     }
 
+    pub fn find_path(
+        &self,
+        from: Vector2,
+        to: Vector2,
+        level: i32,
+        transfer_zones_enabled: bool,
+    ) -> Option<pathfinder::Path> {
+        let landscape = self.landscape.as_ref()?;
+        let zones = self.transfer_zones.states();
+        let mut finder = PathFinder::new(landscape, &zones);
+        finder.set_level(level);
+        finder.enable_transfer_zones(transfer_zones_enabled);
+        finder.find(from, to)
+    }
+
     pub fn physics(&self) -> PhysicsSettings {
         self.physics
     }

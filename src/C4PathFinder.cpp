@@ -46,6 +46,7 @@
 
 #include <C4FacetEx.h>
 #include <C4Game.h>
+#include "rust/RustEngineBridge.h"
 
 const int32_t C4PF_MaxDepth  = 35,
               C4PF_MaxCrawl  = 800,
@@ -600,6 +601,22 @@ bool C4PathFinder::Execute()
 
 bool C4PathFinder::Find(int32_t iFromX, int32_t iFromY, int32_t iToX, int32_t iToY, bool(*fnSetWaypoint)(int32_t, int32_t, intptr_t, intptr_t), intptr_t iWaypointParameter)
 {
+#ifdef USE_RUST_ENGINE_VALIDATION
+	if (RustEngineBridge::FindPath(
+			Game,
+			iFromX,
+			iFromY,
+			iToX,
+			iToY,
+			TransferZonesEnabled,
+			Level,
+			fnSetWaypoint,
+			iWaypointParameter))
+	{
+		return true;
+	}
+#endif
+
 	// Prepare
 	Clear();
 

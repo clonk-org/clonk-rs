@@ -99,10 +99,24 @@ typedef struct LcEngineHudPlayerSnapshot {
 
 typedef struct LcEngineSurfaceSnapshot {
     const char *label;
-    int32_t width;
+   int32_t width;
     int32_t height;
     uint64_t hash;
 } LcEngineSurfaceSnapshot;
+
+typedef struct LcEnginePathWaypoint {
+   int32_t x;
+    int32_t y;
+    bool has_transfer_target;
+    uint64_t transfer_target;
+} LcEnginePathWaypoint;
+
+typedef struct LcEnginePathSlice {
+    bool found;
+   int32_t length;
+    const LcEnginePathWaypoint *waypoints;
+    size_t waypoint_count;
+} LcEnginePathSlice;
 
 typedef struct LcEngineNetworkPacketSnapshot {
     uint8_t direction; // 0 = inbound, 1 = outbound
@@ -248,6 +262,7 @@ typedef struct LcEngineRuntimeEnvironmentState {
 
 typedef struct LcEngineRuntimeObjectStateArray LcEngineRuntimeObjectStateArray;
 typedef struct LcEngineRuntimeLandscapeArray LcEngineRuntimeLandscapeArray;
+typedef struct LcEngineRuntimePathResult LcEngineRuntimePathResult;
 
 typedef struct LcEngineRuntimeLandscapeSlice {
     uint32_t width;
@@ -308,6 +323,18 @@ LcEngineRuntimeLandscapeArray *lc_engine_runtime_export_landscape(
 LcEngineRuntimeLandscapeSlice lc_engine_runtime_landscape_slice(
     const LcEngineRuntimeLandscapeArray *buffer);
 void lc_engine_runtime_landscape_free(LcEngineRuntimeLandscapeArray *buffer);
+LcEngineRuntimePathResult *lc_engine_runtime_find_path(
+    const LcEngineRuntimeHandle *handle,
+    int32_t from_x,
+    int32_t from_y,
+    int32_t to_x,
+    int32_t to_y,
+    bool transfer_zones_enabled,
+    int32_t level,
+    char **error_message);
+LcEnginePathSlice lc_engine_runtime_path_slice(
+    const LcEngineRuntimePathResult *buffer);
+void lc_engine_runtime_path_free(LcEngineRuntimePathResult *buffer);
 
 #ifdef __cplusplus
 }

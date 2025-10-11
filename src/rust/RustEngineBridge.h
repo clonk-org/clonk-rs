@@ -22,6 +22,16 @@ void OnNetworkPacket(
     bool inbound);
 void Shutdown();
 bool IsActive();
+bool FindPath(
+    C4Game &game,
+    int32_t from_x,
+    int32_t from_y,
+    int32_t to_x,
+    int32_t to_y,
+    bool transfer_zones_enabled,
+    int32_t level,
+    bool (*set_waypoint)(int32_t, int32_t, intptr_t, intptr_t),
+    intptr_t parameter);
 
 } // namespace RustEngineBridge
 
@@ -34,6 +44,27 @@ inline void OnGameStart(C4Game &) {}
 inline void OnControlFrame(const C4Control &, uint64_t) {}
 inline void Shutdown() {}
 inline bool IsActive() { return false; }
+inline bool FindPath(
+    C4Game &game,
+    int32_t from_x,
+    int32_t from_y,
+    int32_t to_x,
+    int32_t to_y,
+    bool transfer_zones_enabled,
+    int32_t level,
+    bool (*set_waypoint)(int32_t, int32_t, intptr_t, intptr_t),
+    intptr_t parameter) {
+    (void)game;
+    (void)from_x;
+    (void)from_y;
+    (void)to_x;
+    (void)to_y;
+    (void)transfer_zones_enabled;
+    (void)level;
+    (void)set_waypoint;
+    (void)parameter;
+    return false;
+}
 inline void OnNetworkPacket(
     uint8_t,
     const uint8_t *,

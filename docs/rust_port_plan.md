@@ -30,7 +30,7 @@
 
 2. **Runtime Authority**
   - Status: `lc-engine` drives the deterministic tick loop, object lifecycle, particles, landscape physics, and replay IO in Rust (`lc-engine/tests` keep regression fixtures honest). Landscape batches now cover per-column liquid placement/clearing so scripted fluid edits run entirely on the Rust side, the new `queued_commands` snapshot locks down spawn/destruction and particle parity, and weather drift (wind targets, time-of-day) now runs in `EnvironmentSettings` without touching `C4Weather`.
-  - `lc-engine` now owns scheduler ticks, save/load, transfer-zone aware path queries, and the full pathfinder search; `GetPath` runs entirely in Rust. Next step is wiring the Rust pathfinder into crew command queuing so movement waypoints stop delegating to C++.
+  - `lc-engine` now owns scheduler ticks, save/load, transfer-zone aware path queries, and the full pathfinder search; `GetPath` runs entirely in Rust, and crew MoveTo waypoints are now sourced through the Rust pathfinder instead of the legacy C++ helper. Next step is aligning crew command execution ordering with Rust's authoritative action scheduling so input and AI cues stay deterministic.
   - Mirror every AUL call/effect hook into Rust; maintain exhaustive replay fixtures for ordering and edge-case validation.
   - **Gate:** headless Rust loop reproduces the deterministic regression pack byte-for-byte against C++ recordings.
 
