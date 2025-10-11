@@ -24,7 +24,7 @@
 
 ## Porting Strategy
 1. **Platform Bootstrap**
-  - Status: `lc-game` handles config migration, per-run logging, crash/telemetry harvesting, and support bundle generation before delegating to the shipping C++ runtime. We now materialise `System.c4g`/`Graphics.c4g` into the repo root, the macOS bundle root, and `clonk.app/Contents/MacOS` so `cargo run -p lc-game` no longer dies on missing system groups; the launcher reaches SDL initialisation (current blocker: fullscreen selection on headless hosts).
+  - Status: `lc-game` handles config migration, per-run logging, crash/telemetry harvesting, and support bundle generation before delegating to the shipping C++ runtime. We now materialise `System.c4g`/`Graphics.c4g` into the repo root, the macOS bundle root, and `clonk.app/Contents/MacOS` so `cargo run -p lc-game` no longer dies on missing system groups; the launcher reaches SDL initialisation and forces windowed mode on headless hosts to keep CI boots stable.
 
 2. **Runtime Authority**
    - Expand `lc-engine` to drive scheduler ticks, object creation/destruction, particles, landscape, weather, pathfinding, and save/load without C++ intervention.

@@ -14,6 +14,7 @@ use std::os::unix::fs::symlink;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
+use lc_core::std_config::Config;
 use lc_launcher::{
     append_support_bundle_report, build_support_bundle_report, create_support_bundle,
     digest_update_telemetry, regenerate_support_bundle, timestamp_for_filename, timestamp_for_log,
@@ -25,6 +26,9 @@ use lc_platform::AppPaths;
 use serde::Serialize;
 
 const SKIP_PATCHER_VALIDATION_ENV: &str = "LC_GAME_SKIP_PATCHER_CHECK";
+const FORCE_WINDOW_ENV: &str = "LC_GAME_FORCE_WINDOW";
+const FORCE_FULLSCREEN_ENV: &str = "LC_GAME_FORCE_FULLSCREEN";
+const DISABLE_HEADLESS_GUARD_ENV: &str = "LC_GAME_DISABLE_HEADLESS_GUARD";
 const LEGACY_LOG_PREFIX: &str = "Clonk";
 const LEGACY_LOG_SUFFIX: &str = ".log";
 const CRASH_ARTIFACT_MARKER: &str = "-crash-";
@@ -538,6 +542,9 @@ fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> 
             .context("failed to log config creation")?;
     }
 
+    apply_headless_display_mode_override(&config_path, logger)
+        .context("failed to apply headless display mode override")?;
+
     Ok(config_path)
 }
 
@@ -572,6 +579,254 @@ fn legacy_config_candidates() -> Vec<PathBuf> {
     }
 
     candidates
+}
+
+fn apply_headless_display_mode_override(config_path: &Path, logger: &LauncherLogger) -> Result<()> {
+    let Some(reason) = headless_override_reason() else {
+        return Ok(());
+    };
+
+    let mut config = match Config::load(config_path) {
+        Ok(config) => config,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Config::new(),
+        Err(err) => {
+            logger
+                .log_line(&format!(
+                    "headless display guard skipped because {} could not be loaded: {err}",
+                    config_path.display()
+                ))
+                .ok();
+            return Ok(());
+        }
+    };
+
+    let current_value = config
+        .get_in(Some("Graphics"), "DisplayMode")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let already_windowed = current_value
+        .as_ref()
+        .map(|value| {
+            let lower = value.to_ascii_lowercase();
+            lower == "1" || lower == "window"
+        })
+        .unwrap_or(false);
+
+    if already_windowed {
+        logger
+            .log_line(&format!(
+                "headless display guard active ({reason}); Graphics.DisplayMode already windowed"
+            ))
+            .ok();
+        return Ok(());
+    }
+
+    let previous = current_value.as_deref().unwrap_or("unset");
+    config.set_in(Some("Graphics"), "DisplayMode", "1");
+
+    if let Err(err) = config.save(config_path) {
+        logger
+            .log_line(&format!(
+                "headless display guard failed to persist override for {}: {err}",
+                config_path.display()
+            ))
+            .ok();
+        return Ok(());
+    }
+
+    logger
+        .log_line(&format!(
+            "headless display guard forced Graphics.DisplayMode=Window (was {previous}) because {reason}"
+        ))
+        .ok();
+
+    Ok(())
+}
+
+fn headless_override_reason() -> Option<String> {
+    if env_flag(DISABLE_HEADLESS_GUARD_ENV) || env_flag(FORCE_FULLSCREEN_ENV) {
+        return None;
+    }
+    if env_flag(FORCE_WINDOW_ENV) {
+        return Some(format!("{FORCE_WINDOW_ENV} is set"));
+    }
+    if env_flag("LC_HEADLESS") {
+        return Some("LC_HEADLESS is set".to_string());
+    }
+    if env_value_equals("SDL_VIDEODRIVER", "dummy") {
+        return Some("SDL_VIDEODRIVER=dummy".to_string());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if !linux_display_available() {
+            return Some("no DISPLAY/WAYLAND/MIR environment variables detected".to_string());
+        }
+    }
+    None
+}
+
+fn env_flag(key: &str) -> bool {
+    env::var_os(key).filter(|value| !value.is_empty()).is_some()
+}
+
+fn env_value_equals(key: &str, expected: &str) -> bool {
+    env::var(key)
+        .map(|value| value.eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_display_available() -> bool {
+    env_flag("DISPLAY") || env_flag("WAYLAND_DISPLAY") || env_flag("MIR_SOCKET")
+}
+
+#[cfg(test)]
+mod headless_tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use tempfile::TempDir;
+
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Vec<(String, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&str, Option<&str>)]) -> Self {
+            let lock = env_lock().lock().unwrap();
+            let mut saved = Vec::with_capacity(vars.len());
+            for (key, value) in vars {
+                let original = env::var_os(key);
+                saved.push(((*key).to_string(), original));
+                match value {
+                    Some(val) => env::set_var(key, val),
+                    None => env::remove_var(key),
+                }
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(val) => env::set_var(&key, val),
+                    None => env::remove_var(&key),
+                }
+            }
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn test_logger(dir: &TempDir) -> LauncherLogger {
+        let log_path = dir.path().join("test.log");
+        let file = File::create(&log_path).unwrap();
+        LauncherLogger {
+            inner: Arc::new(LauncherLoggerInner {
+                writer: Mutex::new(LineWriter::new(file)),
+                path: log_path,
+            }),
+        }
+    }
+
+    #[test]
+    fn force_window_env_triggers_reason() {
+        let _guard = EnvGuard::set(&[
+            (FORCE_WINDOW_ENV, Some("1")),
+            (FORCE_FULLSCREEN_ENV, None),
+            (DISABLE_HEADLESS_GUARD_ENV, None),
+        ]);
+        let reason = headless_override_reason();
+        assert!(reason
+            .as_ref()
+            .map(|r| r.contains(FORCE_WINDOW_ENV))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn force_fullscreen_suppresses_reason() {
+        let _guard = EnvGuard::set(&[
+            (FORCE_FULLSCREEN_ENV, Some("1")),
+            (FORCE_WINDOW_ENV, None),
+            (DISABLE_HEADLESS_GUARD_ENV, None),
+            ("LC_HEADLESS", Some("1")),
+        ]);
+        assert!(headless_override_reason().is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_missing_display_triggers_guard() {
+        let _guard = EnvGuard::set(&[
+            ("DISPLAY", None),
+            ("WAYLAND_DISPLAY", None),
+            ("MIR_SOCKET", None),
+            ("SDL_VIDEODRIVER", None),
+            (FORCE_WINDOW_ENV, None),
+            (FORCE_FULLSCREEN_ENV, None),
+            (DISABLE_HEADLESS_GUARD_ENV, None),
+        ]);
+        let reason = headless_override_reason();
+        assert!(reason
+            .as_ref()
+            .map(|r| r.contains("DISPLAY") || r.contains("environment"))
+            .unwrap_or(false));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_display_variable_allows_fullscreen() {
+        let _guard = EnvGuard::set(&[
+            ("DISPLAY", Some(":0")),
+            ("WAYLAND_DISPLAY", None),
+            ("MIR_SOCKET", None),
+            ("SDL_VIDEODRIVER", None),
+            (FORCE_WINDOW_ENV, None),
+            (FORCE_FULLSCREEN_ENV, None),
+            (DISABLE_HEADLESS_GUARD_ENV, None),
+            ("LC_HEADLESS", None),
+        ]);
+        assert!(
+            headless_override_reason().is_none(),
+            "presence of DISPLAY should prevent headless override"
+        );
+    }
+
+    #[test]
+    fn apply_override_updates_config_to_window() {
+        let _guard = EnvGuard::set(&[
+            (FORCE_WINDOW_ENV, Some("1")),
+            (FORCE_FULLSCREEN_ENV, None),
+            (DISABLE_HEADLESS_GUARD_ENV, None),
+            ("LC_HEADLESS", None),
+            ("SDL_VIDEODRIVER", None),
+        ]);
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.cfg");
+        std::fs::write(&config_path, "[Graphics]\nDisplayMode=0\n").unwrap();
+        let logger = test_logger(&temp);
+        apply_headless_display_mode_override(&config_path, &logger).unwrap();
+        let cfg = Config::load(&config_path).unwrap();
+        assert_eq!(cfg.get_in(Some("Graphics"), "DisplayMode"), Some("1"));
+    }
+
+    #[test]
+    fn already_windowed_config_remains_untouched() {
+        let _guard = EnvGuard::set(&[(FORCE_WINDOW_ENV, Some("1"))]);
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.cfg");
+        std::fs::write(&config_path, "[Graphics]\nDisplayMode=1\n").unwrap();
+        let logger = test_logger(&temp);
+        apply_headless_display_mode_override(&config_path, &logger).unwrap();
+        let contents = std::fs::read_to_string(&config_path).unwrap();
+        assert!(contents.contains("DisplayMode=1"));
+    }
 }
 
 #[derive(Clone)]

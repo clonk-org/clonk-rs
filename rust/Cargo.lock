@@ -1795,6 +1795,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lc-core",
  "lc-launcher",
  "lc-platform",
  "serde",
