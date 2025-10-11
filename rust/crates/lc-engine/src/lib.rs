@@ -3930,8 +3930,17 @@ impl Engine {
             return Ok(());
         }
 
-        recipients.sort_by_key(|id| id.as_u64());
-        recipients.dedup();
+        let mut seen = HashSet::new();
+        recipients.retain(|id| seen.insert(*id));
+        if recipients.len() > 1 {
+            let ordering: HashMap<_, _> = self
+                .objects
+                .iter()
+                .enumerate()
+                .map(|(index, object)| (object.id, index))
+                .collect();
+            recipients.sort_by_key(|id| ordering.get(id).copied().unwrap_or(usize::MAX));
+        }
         for object_id in recipients {
             self.apply_object_update(object_id, update.clone())?;
         }
@@ -8138,6 +8147,7 @@ fn value_to_liquid_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lc_script::Value;
     use rand::Rng;
     use rand_chacha::ChaCha8Rng;
     use std::collections::HashMap;
@@ -10873,6 +10883,89 @@ mod tests {
 
         assert_eq!(engine.object_snapshot(first).unwrap().energy, 42);
         assert_eq!(engine.object_snapshot(second).unwrap().energy, 42);
+    }
+
+    #[test]
+    fn apply_command_uses_engine_order_for_selection() {
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        global func OnIdleAbort(state, action) { return nil; }
+        global func OnWalkStart(state, action) { return nil; }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<(String, i32)>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, args| {
+                if name == "OnIdleAbort" || name == "OnWalkStart" {
+                    if let Some(Value::Proplist(state)) = args.get(0) {
+                        if let Some(Value::Int(id)) = state.get("id") {
+                            call_log.lock().unwrap().push((name.to_string(), *id));
+                        }
+                    }
+                }
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Crew", "Crew", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+        definition.set_crew_member(true);
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_abort_call("OnIdleAbort"),
+        );
+        actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default().with_start_call("OnWalkStart"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let first = engine
+            .spawn_object(
+                SpawnConfig::new("Crew")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_id(ObjectId::new(200)),
+            )
+            .expect("first spawn succeeds");
+        let second = engine
+            .spawn_object(
+                SpawnConfig::new("Crew")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_id(ObjectId::new(100)),
+            )
+            .expect("second spawn succeeds");
+
+        engine
+            .select_crew(1, vec![first, second])
+            .expect("selection succeeds");
+
+        engine
+            .apply_command(
+                1,
+                CrewCommandTarget::selection(),
+                ObjectUpdate::new().with_action("Walk"),
+            )
+            .expect("command applies");
+
+        let log = call_log.lock().unwrap().clone();
+        let expected = vec![
+            ("OnIdleAbort".to_string(), 200),
+            ("OnWalkStart".to_string(), 200),
+            ("OnIdleAbort".to_string(), 100),
+            ("OnWalkStart".to_string(), 100),
+        ];
+        assert_eq!(log, expected);
     }
 
     #[test]
