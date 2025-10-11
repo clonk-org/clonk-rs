@@ -24,6 +24,7 @@ pub struct GraphicsSystem {
     surface_height: u32,
     fallback_ground_height: i32,
     world_width: i32,
+    world_height: i32,
 }
 
 impl GraphicsSystem {
@@ -61,11 +62,21 @@ impl GraphicsSystem {
             surface_height,
             fallback_ground_height,
             world_width: surface_width as i32,
+            world_height: fallback_ground_height.max(surface_height as i32).max(0),
         }
     }
 
     pub fn set_world_width(&mut self, world_width: i32) {
         self.world_width = world_width.max(self.surface_width as i32);
+    }
+
+    pub fn set_world_height(&mut self, world_height: i32) {
+        self.world_height = world_height.max(self.surface_height as i32);
+    }
+
+    pub fn set_world_dimensions(&mut self, world_width: i32, world_height: i32) {
+        self.set_world_width(world_width);
+        self.set_world_height(world_height);
     }
 
     pub fn surface(&self) -> &Surface {
@@ -87,6 +98,7 @@ impl GraphicsSystem {
     }
 
     pub fn render_frame(&mut self, snapshot: &SimulationSnapshot, focus: &ObjectSnapshot) {
+        self.update_world_dimensions(snapshot.landscape.as_ref());
         self.update_viewport(focus);
 
         let environment = &snapshot.environment;
@@ -109,15 +121,36 @@ impl GraphicsSystem {
 
     fn update_viewport(&mut self, focus: &ObjectSnapshot) {
         let half_width = (self.surface_width / 2) as i32;
-        let mut desired = focus.position.x - half_width;
-        if desired < 0 {
-            desired = 0;
+        let half_height = (self.surface_height / 2) as i32;
+
+        let max_offset_x = (self.world_width - self.surface_width as i32).max(0);
+        let max_offset_y = (self.world_height - self.surface_height as i32).max(0);
+
+        let desired_x = (focus.position.x - half_width).clamp(0, max_offset_x);
+        let desired_y = (focus.position.y - half_height).clamp(0, max_offset_y);
+
+        self.viewport_x = desired_x;
+        self.viewport_y = desired_y;
+    }
+
+    fn update_world_dimensions(&mut self, landscape: Option<&Landscape>) {
+        if let Some(landscape) = landscape {
+            let width = landscape.width() as i32;
+            if width > 0 {
+                self.world_width = width.max(self.surface_width as i32);
+            }
+
+            let mut max_surface_height = landscape
+                .surface()
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(self.fallback_ground_height);
+            if max_surface_height < self.fallback_ground_height {
+                max_surface_height = self.fallback_ground_height;
+            }
+            self.world_height = max_surface_height.max(self.surface_height as i32);
         }
-        let max_offset = (self.world_width - self.surface_width as i32).max(0);
-        if desired > max_offset {
-            desired = max_offset;
-        }
-        self.viewport_x = desired;
     }
 
     fn draw_precipitation(&mut self, precipitation: i32, frame: u64) {
@@ -222,6 +255,11 @@ impl GraphicsSystem {
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    pub fn viewport(&self) -> (i32, i32) {
+        (self.viewport_x, self.viewport_y)
     }
 
     fn surface_height_at(&self, landscape: Option<&Landscape>, x: i32) -> Option<i32> {
@@ -387,5 +425,37 @@ mod tests {
             .expect("overlay updates");
         graphics.render_frame(&snapshot, focus);
         // if gauge update panicked the test would fail; no additional assertion needed here
+    }
+
+    #[test]
+    fn viewport_tracks_focus_vertically() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(100, 260);
+        snapshot.landscape = Some(Landscape::flat(256, 280));
+        let mut graphics = GraphicsSystem::new(320, 180, 150, "Test Scenario");
+
+        graphics.render_frame(&snapshot, &snapshot.objects[0]);
+
+        let (_, viewport_y) = graphics.viewport();
+        assert!(viewport_y > 0);
+    }
+
+    #[test]
+    fn viewport_clamps_to_world_height() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(100, 30);
+        snapshot.landscape = Some(Landscape::flat(256, 200));
+        let mut graphics = GraphicsSystem::new(320, 180, 150, "Test Scenario");
+        graphics.render_frame(&snapshot, &snapshot.objects[0]);
+        let (_, top_view) = graphics.viewport();
+        assert_eq!(top_view, 0);
+
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(100, 360);
+        snapshot.landscape = Some(Landscape::flat(256, 360));
+        let mut graphics = GraphicsSystem::new(320, 180, 150, "Test Scenario");
+        graphics.render_frame(&snapshot, &snapshot.objects[0]);
+        let (_, bottom_view) = graphics.viewport();
+        assert_eq!(bottom_view, 360 - 180);
     }
 }

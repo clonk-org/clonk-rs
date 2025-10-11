@@ -29,14 +29,16 @@
   - Localization: `lc-launcher` loads language packs from `System.c4g` and the Rust UI uses them for all visible labels, prompts, and status messages.
 
 2. **Runtime Authority**
-   - Expand `lc-engine` to drive scheduler ticks, object creation/destruction, particles, landscape, weather, pathfinding, and save/load without C++ intervention.
-   - Mirror every AUL call/effect hook into Rust; maintain exhaustive replay fixtures for ordering and edge-case validation.
-   - **Gate:** headless Rust loop reproduces the deterministic regression pack byte-for-byte against C++ recordings.
+  - Status: `lc-engine` drives the deterministic tick loop, object lifecycle, particles, landscape physics, and replay IO in Rust (`lc-engine/tests` keep regression fixtures honest).
+  - Expand `lc-engine` to drive scheduler ticks, object creation/destruction, particles, landscape, weather, pathfinding, and save/load without C++ intervention.
+  - Mirror every AUL call/effect hook into Rust; maintain exhaustive replay fixtures for ordering and edge-case validation.
+  - **Gate:** headless Rust loop reproduces the deterministic regression pack byte-for-byte against C++ recordings.
 
 3. **Frontend & IO**
-   - Implement rendering (software or wgpu/winit) to match C4 graphics, HUD, GUI widgets, and text output; unify font pipelines.
-   - Port the full input stack and GUI/dialog system (startup, lobbies, editor, in-game menus); connect audio backends for music/effects parity.
-   - **Gate:** Rust frontend renders the Startup Menu and in-game HUD, handles live input/audio, and no longer depends on C++ surfaces.
+  - Progress: `lc-frontend` renders the HUD overlay and now keeps the camera locked to the focus object on both axes; next up is input plumbing and replacing remaining SDL/GDI surfaces.
+  - Implement rendering (software or wgpu/winit) to match C4 graphics, HUD, GUI widgets, and text output; unify font pipelines.
+  - Port the full input stack and GUI/dialog system (startup, lobbies, editor, in-game menus); connect audio backends for music/effects parity.
+  - **Gate:** Rust frontend renders the Startup Menu and in-game HUD, handles live input/audio, and no longer depends on C++ surfaces.
 
 4. **Networking & Multiplayer**
    - Rebuild the `C4Network2*` stack in Rust (`lc-network`) covering lobby, synchronization, voting, desync recovery, net logging, and NAT traversal.
