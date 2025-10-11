@@ -13,7 +13,7 @@
 - Rust launcher now loads `Language*.txt` packs and renders every `lc-launcher-ui` string via the shared localization tables.
 
 ## Parity Gaps
-- **Boot & Platform:** configuration migration, patcher/updater, localization, logging/crash handling, launcher integration.
+- **Boot & Platform:** patcher/updater, localization, logging/crash handling, launcher integration; configuration migration now handled by `lc-game` (copies legacy configs and honours `LC_CONFIG_FILE`).
 - **Assets & Resources:** group parsing, definition loading, scenario discovery, dynamic downloads, string tables, shader/media pipelines.
 - **Runtime Authority:** crew lifecycle, scheduler, particles, pathfinding, weather, save/load, deterministic recordings owned by Rust. Bridge action parameters (`SetBridgeActionData`) now processed by `lc-engine`.
 - **Script Surface:** full AUL coverage, proplist semantics, callbacks/effects ordering, devmode hooks, debugger/console.

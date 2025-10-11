@@ -506,6 +506,46 @@ fn candidate_binaries(install_root: &Path) -> Vec<PathBuf> {
 }
 
 fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> {
+    if let Some(override_path) = config_override_path() {
+        if override_path.is_dir() {
+            bail!(
+                "LC_CONFIG_FILE points to a directory: {}",
+                override_path.display()
+            );
+        }
+        if let Some(parent) = override_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let existed = override_path.exists();
+        if !existed {
+            File::create(&override_path).with_context(|| {
+                format!(
+                    "failed to create config override at {}",
+                    override_path.display()
+                )
+            })?;
+            logger
+                .log_line(&format!(
+                    "initialised LC_CONFIG_FILE override at {}",
+                    override_path.display()
+                ))
+                .context("failed to log config override initialisation")?;
+        }
+        logger
+            .log_line(&format!(
+                "honouring LC_CONFIG_FILE override at {}",
+                override_path.display()
+            ))
+            .context("failed to log config override usage")?;
+        apply_headless_display_mode_override(&override_path, logger)
+            .context("failed to apply headless display mode override")?;
+        return Ok(override_path);
+    }
+
     let config_path = paths.config_file();
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)
@@ -546,6 +586,12 @@ fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> 
         .context("failed to apply headless display mode override")?;
 
     Ok(config_path)
+}
+
+fn config_override_path() -> Option<PathBuf> {
+    env::var_os("LC_CONFIG_FILE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn legacy_config_candidates() -> Vec<PathBuf> {
@@ -1370,12 +1416,24 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use std::env;
-    use std::fs;
-    use std::io::Read;
+    use std::fs::{self, File};
+    use std::io::{LineWriter, Read};
     use std::path::Path;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
     use zip::ZipArchive;
+
+    fn test_logger(dir: &TempDir) -> LauncherLogger {
+        let log_path = dir.path().join("test.log");
+        let file = File::create(&log_path).unwrap();
+        LauncherLogger {
+            inner: Arc::new(LauncherLoggerInner {
+                writer: Mutex::new(LineWriter::new(file)),
+                path: log_path,
+            }),
+        }
+    }
 
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -1561,6 +1619,82 @@ mod tests {
 
         // A second run should succeed even when the targets already point at the source.
         assert!(ensure_runtime_assets(&paths, &binary_path, &logger).is_ok());
+    }
+
+    #[test]
+    fn prepare_config_honours_override_path() {
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"system payload").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let override_dir = TempDir::new().unwrap();
+        let override_path = override_dir.path().join("custom.cfg");
+        let log_dir = TempDir::new().unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+            ("LC_CONFIG_FILE", Some(override_path.as_path())),
+            ("LC_LEGACY_CONFIG_FILE", None),
+            ("LC_GAME_DISABLE_HEADLESS_GUARD", Some(Path::new("1"))),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        let logger = test_logger(&log_dir);
+
+        let config_path =
+            prepare_config(&paths, &logger).expect("config preparation should succeed");
+
+        assert_eq!(config_path, override_path);
+        assert!(config_path.exists(), "override config file should exist");
+        assert!(
+            fs::metadata(&config_path).unwrap().is_file(),
+            "override config path should resolve to a file"
+        );
+    }
+
+    #[test]
+    fn prepare_config_migrates_from_legacy_env_path() {
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"system payload").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let legacy_dir = TempDir::new().unwrap();
+        let legacy_path = legacy_dir.path().join("Legacy.cfg");
+        fs::write(&legacy_path, b"[Game]\nFullscreen=1\n").unwrap();
+        let log_dir = TempDir::new().unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+            ("LC_LEGACY_CONFIG_FILE", Some(legacy_path.as_path())),
+            ("LC_CONFIG_FILE", None),
+            ("LC_GAME_DISABLE_HEADLESS_GUARD", Some(Path::new("1"))),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        let logger = test_logger(&log_dir);
+
+        let config_path =
+            prepare_config(&paths, &logger).expect("config preparation should succeed");
+
+        assert_eq!(config_path, paths.config_file());
+        assert!(
+            config_path.exists(),
+            "default config path should be materialised"
+        );
+        let migrated = fs::read(&config_path).expect("migrated config should be readable");
+        let original = fs::read(&legacy_path).expect("legacy config should be readable");
+        assert_eq!(
+            migrated, original,
+            "launcher should copy contents from LC_LEGACY_CONFIG_FILE"
+        );
     }
 
     #[test]
