@@ -4,12 +4,15 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
+#[cfg(test)]
+use crate::LiquidSegment;
 use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, CommandDirection,
-    DefinitionId, Direction, EnvironmentSettings, FloatVector2, Landscape, LiquidSegment, ObjectId,
-    ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer,
-    ParticleScope, PhysicsSettings, QueuedCommand, SpawnConfig, Vector2, CNAT_BOTTOM, CNAT_CENTER,
-    CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
+    DefinitionId, Direction, EnvironmentSettings, FloatVector2, Landscape, ObjectId, ObjectStatus,
+    ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope,
+    PhysicsSettings, QueuedCommand, SpawnConfig, TransferZoneCommand, TransferZoneRect,
+    TransferZoneState, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT,
+    CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -217,6 +220,7 @@ pub(crate) struct HostWorldContext {
     order: Rc<Vec<ObjectId>>,
     landscape: Option<Rc<Landscape>>,
     definitions: Rc<HashMap<DefinitionId, i32>>,
+    transfer_zones: Rc<Vec<TransferZoneState>>,
     next_object_id: u64,
 }
 
@@ -227,6 +231,7 @@ impl Default for HostWorldContext {
             order: Rc::new(Vec::new()),
             landscape: None,
             definitions: Rc::new(HashMap::new()),
+            transfer_zones: Rc::new(Vec::new()),
             next_object_id: 1,
         }
     }
@@ -238,13 +243,14 @@ impl HostWorldContext {
     where
         I: IntoIterator<Item = HostWorldObject>,
     {
-        Self::with_landscape(objects, None, HashMap::new(), 1)
+        Self::with_landscape(objects, None, HashMap::new(), Vec::new(), 1)
     }
 
     pub(crate) fn with_landscape<I>(
         objects: I,
         landscape: Option<Landscape>,
         definitions: HashMap<DefinitionId, i32>,
+        transfer_zones: Vec<TransferZoneState>,
         next_object_id: u64,
     ) -> Self
     where
@@ -263,6 +269,7 @@ impl HostWorldContext {
             order: Rc::new(order),
             landscape: landscape.map(Rc::new),
             definitions: Rc::new(definitions),
+            transfer_zones: Rc::new(transfer_zones),
             next_object_id,
         }
     }
@@ -277,6 +284,10 @@ impl HostWorldContext {
 
     pub(crate) fn landscape_ref(&self) -> Option<&Landscape> {
         self.landscape.as_deref()
+    }
+
+    pub(crate) fn transfer_zones(&self) -> &[TransferZoneState] {
+        self.transfer_zones.as_ref()
     }
 
     pub(crate) fn next_object_id(&self) -> u64 {
@@ -801,6 +812,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetVertexContact", get_vertex_contact);
     script.register_host_function("GetContact", get_contact);
     script.register_host_function("PathFree", path_free);
+    script.register_host_function("SetTransferZone", set_transfer_zone);
     script.register_host_function("GBackSolid", g_back_solid);
     script.register_host_function("GBackSemiSolid", g_back_semi_solid);
     script.register_host_function("GBackLiquid", g_back_liquid);
@@ -1242,6 +1254,7 @@ pub(crate) struct EffectContextOutcome {
     pub physics: Option<PhysicsDelta>,
     pub spawns: Vec<SpawnConfig>,
     pub particles: Vec<ParticleCommand>,
+    pub transfer_zones: Vec<TransferZoneCommand>,
     pub next_object_id: u64,
 }
 
@@ -1255,6 +1268,7 @@ impl EffectContextOutcome {
         environment: Option<EnvironmentDelta>,
         physics: Option<PhysicsDelta>,
         spawns: Vec<SpawnConfig>,
+        transfer_zones: Vec<TransferZoneCommand>,
         next_object_id: u64,
     ) -> Self {
         Self {
@@ -1267,6 +1281,7 @@ impl EffectContextOutcome {
             physics,
             spawns,
             particles: Vec::new(),
+            transfer_zones,
             next_object_id,
         }
     }
@@ -1282,6 +1297,7 @@ impl EffectContextOutcome {
             physics: None,
             spawns: Vec::new(),
             particles: Vec::new(),
+            transfer_zones: Vec::new(),
             next_object_id,
         }
     }
@@ -3239,6 +3255,70 @@ fn path_free(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn set_transfer_zone(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 4 || args.len() > 5 {
+        return Err(RuntimeError::new(
+            "SetTransferZone expects 4 or 5 arguments: x, y, width, height, [object]",
+        ));
+    }
+
+    let x = value_to_i32(&args[0], "SetTransferZone", "x")?;
+    let y = value_to_i32(&args[1], "SetTransferZone", "y")?;
+    let width = value_to_i32(&args[2], "SetTransferZone", "width")?;
+    let height = value_to_i32(&args[3], "SetTransferZone", "height")?;
+    let explicit_object = if args.len() == 5 {
+        Some(parse_object_reference_argument(
+            &args[4],
+            "SetTransferZone",
+            "object",
+        )?)
+    } else {
+        None
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("SetTransferZone requires an active engine context")
+        })?;
+
+        let owner = match explicit_object.flatten() {
+            Some(id) => id,
+            None => context
+                .object_context()
+                .map(|ctx| ctx.id())
+                .ok_or_else(|| {
+                    RuntimeError::new(
+                        "SetTransferZone requires an object argument or active object context",
+                    )
+                })?,
+        };
+
+        let world_object = context.get_world_object(owner).ok_or_else(|| {
+            RuntimeError::new(format!(
+                "SetTransferZone: object {} not found in current engine context",
+                owner
+            ))
+        })?;
+
+        if width <= 0 || height <= 0 {
+            context.register_transfer_zone_command(TransferZoneCommand::clear(owner));
+            return Ok(Value::Bool(true));
+        }
+
+        let abs_x = world_object.position.x.saturating_add(x);
+        let abs_y = world_object.position.y.saturating_add(y);
+        let rect = TransferZoneRect {
+            x: abs_x,
+            y: abs_y,
+            width,
+            height,
+        };
+        context.register_transfer_zone_command(TransferZoneCommand::set(owner, rect));
+        Ok(Value::Bool(true))
+    })
+}
+
 #[derive(Clone, Copy)]
 enum LandscapeQuery {
     Solid,
@@ -5115,6 +5195,7 @@ struct EffectHostContext {
     pending_objects: HashMap<ObjectId, HostWorldObject>,
     pending_order: Vec<ObjectId>,
     pending_particles: Vec<ParticleCommand>,
+    transfer_zone_commands: Vec<TransferZoneCommand>,
     next_object_id: u64,
 }
 
@@ -5180,6 +5261,7 @@ impl EffectHostContext {
             pending_objects: HashMap::new(),
             pending_order: Vec::new(),
             pending_particles: Vec::new(),
+            transfer_zone_commands: Vec::new(),
             next_object_id,
         }
     }
@@ -5219,6 +5301,10 @@ impl EffectHostContext {
 
     fn register_particle(&mut self, command: ParticleCommand) {
         self.pending_particles.push(command);
+    }
+
+    fn register_transfer_zone_command(&mut self, command: TransferZoneCommand) {
+        self.transfer_zone_commands.push(command);
     }
 
     fn get_world_object(&self, id: ObjectId) -> Option<HostWorldObject> {
@@ -5290,6 +5376,7 @@ impl EffectHostContext {
             None,
             None,
             self.pending_spawns,
+            self.transfer_zone_commands,
             self.next_object_id,
         );
         outcome.particles = self.pending_particles;
@@ -5917,6 +6004,7 @@ mod tests {
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
+            Vec::new(),
             1,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
@@ -5933,6 +6021,7 @@ mod tests {
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
+            Vec::new(),
             1,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
@@ -5950,6 +6039,7 @@ mod tests {
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
+            Vec::new(),
             8,
         );
         let object_context = HostObjectContext::new(
@@ -5985,6 +6075,7 @@ mod tests {
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
+            Vec::new(),
             1,
         );
         let (solid, _) = with_effect_context(None, &[], world.clone(), 1, || {
@@ -6008,6 +6099,7 @@ mod tests {
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
+            Vec::new(),
             1,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
@@ -6025,6 +6117,7 @@ mod tests {
             Vec::<HostWorldObject>::new(),
             Some(landscape),
             HashMap::new(),
+            Vec::new(),
             1,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
@@ -6032,6 +6125,86 @@ mod tests {
         });
         let value = result.expect("GBackLiquid succeeds");
         assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn set_transfer_zone_registers_command_for_active_object() {
+        let args = [Value::Int(2), Value::Int(3), Value::Int(5), Value::Int(7)];
+        let world = HostWorldContext::with_landscape(
+            vec![HostWorldObject::new(
+                ObjectId::new(1),
+                "ZoneTester",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            )],
+            None,
+            HashMap::new(),
+            Vec::new(),
+            1,
+        );
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || set_transfer_zone(&args));
+        assert_eq!(result.expect("SetTransferZone succeeds"), Value::Bool(true));
+        assert_eq!(outcome.transfer_zones.len(), 1);
+        match &outcome.transfer_zones[0] {
+            TransferZoneCommand::Set { owner, rect } => {
+                assert_eq!(*owner, ObjectId::new(1));
+                assert_eq!(rect.x, 2);
+                assert_eq!(rect.y, 3);
+                assert_eq!(rect.width, 5);
+                assert_eq!(rect.height, 7);
+            }
+            other => panic!("expected set command, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn set_transfer_zone_with_zero_size_clears_existing() {
+        let world = HostWorldContext::with_landscape(
+            vec![HostWorldObject::new(
+                ObjectId::new(1),
+                "ZoneTester",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            )],
+            None,
+            HashMap::new(),
+            Vec::new(),
+            1,
+        );
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            set_transfer_zone(&[Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(10)])
+        });
+        assert_eq!(result.expect("SetTransferZone succeeds"), Value::Bool(true));
+        assert_eq!(outcome.transfer_zones.len(), 1);
+        match outcome.transfer_zones.first() {
+            Some(TransferZoneCommand::Clear { owner }) => {
+                assert_eq!(*owner, ObjectId::new(1));
+            }
+            other => panic!("expected clear command, got {:?}", other),
+        }
     }
 
     #[test]
@@ -7192,8 +7365,13 @@ mod tests {
     fn get_vertex_contact_uses_landscape_sampling() {
         let vertices = [ObjectVertex::new(0, 0).with_cnat(CNAT_CENTER | CNAT_BOTTOM)];
         let landscape = Landscape::flat(8, 0);
-        let world =
-            HostWorldContext::with_landscape(Vec::new(), Some(landscape), HashMap::new(), 1);
+        let world = HostWorldContext::with_landscape(
+            Vec::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            1,
+        );
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
@@ -7231,8 +7409,13 @@ mod tests {
             ObjectVertex::new(0, -5).with_cnat(CNAT_TOP),
         ];
         let landscape = Landscape::flat(4, 0);
-        let world =
-            HostWorldContext::with_landscape(Vec::new(), Some(landscape), HashMap::new(), 1);
+        let world = HostWorldContext::with_landscape(
+            Vec::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            1,
+        );
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
@@ -7672,8 +7855,13 @@ mod tests {
     #[test]
     fn set_position_clamps_coordinates_when_requested() {
         let landscape = Landscape::flat(4, 6);
-        let world =
-            HostWorldContext::with_landscape(Vec::new(), Some(landscape), HashMap::new(), 1);
+        let world = HostWorldContext::with_landscape(
+            Vec::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            1,
+        );
         let args = [
             Value::Int(10),
             Value::Int(20),

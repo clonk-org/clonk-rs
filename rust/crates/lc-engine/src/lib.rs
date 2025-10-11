@@ -8,6 +8,7 @@ mod input;
 mod landscape;
 mod record;
 pub mod scenario;
+mod transfer;
 
 pub use action::{
     ActionLibrary, ActionProcedure, ActionSpec, ActionState, ActionUpdate, ActionUpdateResult,
@@ -38,6 +39,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
+use transfer::{TransferZoneCommand, TransferZoneRect, TransferZoneState, TransferZoneTable};
 
 pub type DefinitionId = String;
 
@@ -2278,6 +2280,8 @@ pub struct SimulationSnapshot {
     pub network_packets: Vec<NetworkPacketSnapshot>,
     #[serde(default)]
     pub definition_categories: HashMap<DefinitionId, i32>,
+    #[serde(default)]
+    pub transfer_zones: Vec<TransferZoneState>,
 }
 
 impl SimulationSnapshot {
@@ -2315,6 +2319,8 @@ pub struct EngineState {
     pub known_crew_owners: Vec<i32>,
     #[serde(default)]
     pub eliminated_crew_owners: Vec<i32>,
+    #[serde(default)]
+    pub transfer_zones: Vec<TransferZoneState>,
     pub rng: ChaCha8Rng,
 }
 
@@ -2393,6 +2399,7 @@ impl EngineState {
             global_effects: snapshot.global_effects.clone(),
             known_crew_owners,
             eliminated_crew_owners,
+            transfer_zones: snapshot.transfer_zones.clone(),
             rng: snapshot.rng.clone(),
         }
     }
@@ -2585,6 +2592,7 @@ impl Definition {
             physics: physics_from_host,
             spawns: host_spawns,
             particles: host_particles,
+            transfer_zones: host_transfer_zones,
             next_object_id,
         } = host_effects;
 
@@ -2615,6 +2623,9 @@ impl Definition {
         }
         if !host_particles.is_empty() {
             batch.particles.extend(host_particles);
+        }
+        if !host_transfer_zones.is_empty() {
+            batch.transfer_zones.extend(host_transfer_zones);
         }
         if !environment_delta.is_empty() {
             batch.environment = Some(environment_delta);
@@ -2703,6 +2714,7 @@ impl Definition {
             physics: physics_from_host,
             spawns: host_spawns,
             particles: host_particles,
+            transfer_zones: host_transfer_zones,
             next_object_id,
         } = host_effects;
 
@@ -2733,6 +2745,9 @@ impl Definition {
         }
         if !host_particles.is_empty() {
             batch.particles.extend(host_particles);
+        }
+        if !host_transfer_zones.is_empty() {
+            batch.transfer_zones.extend(host_transfer_zones);
         }
         if !environment_delta.is_empty() {
             batch.environment = Some(environment_delta);
@@ -3176,6 +3191,7 @@ struct CommandBatch {
     environment: Option<EnvironmentDelta>,
     physics: Option<PhysicsDelta>,
     particles: Vec<ParticleCommand>,
+    transfer_zones: Vec<TransferZoneCommand>,
 }
 
 #[derive(Debug, Default)]
@@ -3185,6 +3201,7 @@ struct ScenarioBatch {
     environment: Option<EnvironmentDelta>,
     physics: Option<PhysicsDelta>,
     particles: Vec<ParticleCommand>,
+    transfer_zones: Vec<TransferZoneCommand>,
 }
 
 pub struct Engine {
@@ -3203,6 +3220,7 @@ pub struct Engine {
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
     known_crew_owners: HashSet<i32>,
     eliminated_crew_owners: HashSet<i32>,
+    transfer_zones: TransferZoneTable,
 }
 
 fn clamp_to_limit(value: i32, limit: i32) -> i32 {
@@ -3521,6 +3539,7 @@ impl Engine {
             crew_roles: HashMap::new(),
             known_crew_owners: HashSet::new(),
             eliminated_crew_owners: HashSet::new(),
+            transfer_zones: TransferZoneTable::default(),
         };
         engine.environment.refresh_runtime_fields();
         engine
@@ -3570,6 +3589,7 @@ impl Engine {
             .iter()
             .map(|(id, definition)| (id.clone(), definition.category()))
             .collect();
+        let transfer_zones = self.transfer_zones.states();
         HostWorldContext::with_landscape(
             self.objects.iter().map(|object| {
                 let procedure = self
@@ -3604,6 +3624,7 @@ impl Engine {
             }),
             landscape,
             definition_categories,
+            transfer_zones,
             self.next_object_id,
         )
     }
@@ -3643,6 +3664,7 @@ impl Engine {
             environment,
             physics,
             particles,
+            transfer_zones,
         } = batch;
 
         if let Some(delta) = environment {
@@ -3655,6 +3677,9 @@ impl Engine {
             self.apply_global_effect_commands(&global_effects);
         }
         self.apply_particle_commands(particles);
+        if !transfer_zones.is_empty() {
+            self.apply_transfer_zone_commands(transfer_zones)?;
+        }
         let mut created = Vec::with_capacity(spawns.len());
         for spawn in spawns {
             let id = self.spawn_object(spawn)?;
@@ -4156,6 +4181,7 @@ impl Engine {
                 environment,
                 physics,
                 particles,
+                transfer_zones,
             } = command;
 
             if let Some(update) = environment {
@@ -4200,6 +4226,9 @@ impl Engine {
             }
 
             self.apply_particle_commands(particles);
+            if !transfer_zones.is_empty() {
+                self.apply_transfer_zone_commands(transfer_zones)?;
+            }
 
             if !global_effects.is_empty() {
                 self.apply_global_effect_commands(&global_effects);
@@ -4257,6 +4286,8 @@ impl Engine {
 
         self.detach_destroyed_objects()?;
         self.objects.retain(|object| !object.destroyed);
+        let alive: HashSet<_> = self.objects.iter().map(|object| object.id).collect();
+        self.transfer_zones.retain_existing(&alive);
         self.prune_selection();
         self.process_spawn_queue(spawn_requests)?;
         self.refresh_elimination_state();
@@ -4547,6 +4578,7 @@ impl Engine {
             physics,
             spawns,
             particles,
+            transfer_zones,
             next_object_id,
         } = outcome;
 
@@ -4562,6 +4594,9 @@ impl Engine {
             self.process_spawn_queue(spawns)?;
         }
         self.apply_particle_commands(particles);
+        if !transfer_zones.is_empty() {
+            self.apply_transfer_zone_commands(transfer_zones)?;
+        }
 
         let mut effect_events = Vec::new();
         let mut container_changes = Vec::new();
@@ -4773,6 +4808,7 @@ impl Engine {
             controls: Vec::new(),
             network_packets: Vec::new(),
             definition_categories,
+            transfer_zones: self.transfer_zones.states(),
         }
     }
 
@@ -4828,6 +4864,7 @@ impl Engine {
             global_effects: self.global_effects.clone(),
             known_crew_owners,
             eliminated_crew_owners,
+            transfer_zones: self.transfer_zones.states(),
             rng: self.rng.clone(),
         }
     }
@@ -4858,6 +4895,7 @@ impl Engine {
             .cloned()
             .map(ActiveParticle::from_snapshot)
             .collect();
+        self.transfer_zones = TransferZoneTable::from_states(&state.transfer_zones);
         self.crew_selection = state
             .crew_selection
             .iter()
@@ -6291,6 +6329,35 @@ impl Engine {
         }
     }
 
+    fn apply_transfer_zone_commands(
+        &mut self,
+        commands: Vec<TransferZoneCommand>,
+    ) -> Result<(), EngineError> {
+        for command in commands {
+            match command {
+                TransferZoneCommand::Set { owner, rect } => {
+                    self.set_transfer_zone(owner, rect)?;
+                }
+                TransferZoneCommand::Clear { owner } => {
+                    self.transfer_zones.clear(owner);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn set_transfer_zone(
+        &mut self,
+        owner: ObjectId,
+        rect: TransferZoneRect,
+    ) -> Result<(), EngineError> {
+        if !self.objects.iter().any(|object| object.id == owner) {
+            return Err(EngineError::UnknownObject(owner));
+        }
+        self.transfer_zones.set(owner, rect);
+        Ok(())
+    }
+
     fn tick_particles(&mut self) {
         if self.particles.is_empty() {
             return;
@@ -6423,6 +6490,7 @@ impl Engine {
                     environment,
                     physics,
                     particles,
+                    transfer_zones,
                 },
                 new_rng,
                 next_object_id,
@@ -6468,6 +6536,9 @@ impl Engine {
             let mut applied = object.apply_effect_commands(&effects);
             effect_events.append(&mut applied);
             self.apply_particle_commands(particles);
+            if !transfer_zones.is_empty() {
+                self.apply_transfer_zone_commands(transfer_zones)?;
+            }
             if !global_effects.is_empty() {
                 self.apply_global_effect_commands(&global_effects);
             }
@@ -6753,6 +6824,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         }),
         snapshot.landscape.clone(),
         snapshot.definition_categories.clone(),
+        snapshot.transfer_zones.clone(),
         next_object_id,
     )
 }
@@ -11025,6 +11097,52 @@ mod tests {
 
         assert!(!restored.is_owner_eliminated(1));
         assert!(restored.eliminated_owners().is_empty());
+    }
+
+    #[test]
+    fn capture_state_preserves_transfer_zones() {
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(build_definition())
+            .expect("definition registers");
+        let object_id = engine
+            .spawn_object(SpawnConfig::new("Test"))
+            .expect("spawn succeeds");
+
+        engine
+            .set_transfer_zone(
+                object_id,
+                TransferZoneRect {
+                    x: 12,
+                    y: -3,
+                    width: 8,
+                    height: 10,
+                },
+            )
+            .expect("set transfer zone succeeds");
+
+        let state = engine.capture_state();
+        assert_eq!(state.transfer_zones.len(), 1);
+        let zone = &state.transfer_zones[0];
+        assert_eq!(zone.owner, object_id);
+        assert_eq!(zone.x, 12);
+        assert_eq!(zone.y, -3);
+        assert_eq!(zone.width, 8);
+        assert_eq!(zone.height, 10);
+
+        let mut restored = Engine::with_seed(3);
+        restored
+            .register_definition(build_definition())
+            .expect("definition registers");
+        restored.restore_state(&state).expect("restore succeeds");
+        let snapshot = restored.snapshot();
+        assert_eq!(snapshot.transfer_zones.len(), 1);
+        let restored_zone = &snapshot.transfer_zones[0];
+        assert_eq!(restored_zone.owner, object_id);
+        assert_eq!(restored_zone.x, 12);
+        assert_eq!(restored_zone.y, -3);
+        assert_eq!(restored_zone.width, 8);
+        assert_eq!(restored_zone.height, 10);
     }
 
     #[test]
