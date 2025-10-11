@@ -29,7 +29,7 @@
   - Localization: `lc-launcher` loads language packs from `System.c4g` and the Rust UI uses them for all visible labels, prompts, and status messages.
 
 2. **Runtime Authority**
-  - Status: `lc-engine` drives the deterministic tick loop, object lifecycle, particles, landscape physics, and replay IO in Rust (`lc-engine/tests` keep regression fixtures honest).
+  - Status: `lc-engine` drives the deterministic tick loop, object lifecycle, particles, landscape physics, and replay IO in Rust (`lc-engine/tests` keep regression fixtures honest). Landscape batches now cover per-column liquid placement/clearing so scripted fluid edits run entirely on the Rust side.
   - Expand `lc-engine` to drive scheduler ticks, object creation/destruction, particles, landscape, weather, pathfinding, and save/load without C++ intervention.
   - Mirror every AUL call/effect hook into Rust; maintain exhaustive replay fixtures for ordering and edge-case validation.
   - **Gate:** headless Rust loop reproduces the deterministic regression pack byte-for-byte against C++ recordings.

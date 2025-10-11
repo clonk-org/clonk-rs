@@ -33,7 +33,18 @@ pub struct Landscape {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LandscapeCommand {
-    LowerRange { start: i32, end: i32, height: i32 },
+    LowerRange {
+        start: i32,
+        end: i32,
+        height: i32,
+    },
+    SetLiquidColumn {
+        column: i32,
+        segments: Vec<LiquidSegment>,
+    },
+    ClearLiquidColumn {
+        column: i32,
+    },
 }
 
 impl Landscape {
@@ -238,6 +249,19 @@ impl LandscapeCommand {
         match *self {
             LandscapeCommand::LowerRange { start, end, height } => {
                 landscape.lower_range(start, end, height);
+            }
+            LandscapeCommand::SetLiquidColumn {
+                column,
+                ref segments,
+            } => {
+                if column >= 0 {
+                    landscape.set_liquid_column(column as u32, segments.clone());
+                }
+            }
+            LandscapeCommand::ClearLiquidColumn { column } => {
+                if column >= 0 {
+                    landscape.clear_liquid_column(column as u32);
+                }
             }
         }
     }
@@ -459,5 +483,28 @@ mod tests {
             column.segments(),
             &[LiquidSegment::new(2, 4), LiquidSegment::new(7, 8)]
         );
+    }
+
+    #[test]
+    fn landscape_command_set_liquid_column_applies_segments() {
+        let mut landscape = Landscape::flat(5, 12);
+        let command = LandscapeCommand::SetLiquidColumn {
+            column: 2,
+            segments: vec![LiquidSegment::new(3, 5), LiquidSegment::new(7, 9)],
+        };
+        command.apply(&mut landscape);
+        let column = &landscape.liquids()[2];
+        assert_eq!(
+            column.segments(),
+            &[LiquidSegment::new(3, 5), LiquidSegment::new(7, 9)]
+        );
+    }
+
+    #[test]
+    fn landscape_command_clear_liquid_column_removes_segments() {
+        let mut landscape = Landscape::flat(5, 12);
+        landscape.set_liquid_column(3, vec![LiquidSegment::new(4, 6)]);
+        LandscapeCommand::ClearLiquidColumn { column: 3 }.apply(&mut landscape);
+        assert!(landscape.liquids()[3].segments().is_empty());
     }
 }

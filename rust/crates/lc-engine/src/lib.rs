@@ -7816,6 +7816,57 @@ fn value_to_landscape_commands(
 
                 commands.push(LandscapeCommand::LowerRange { start, end, height });
             }
+            "set_liquid" => {
+                let column_value = match map.remove("column").or_else(|| map.remove("x")) {
+                    Some(value) => value,
+                    None => {
+                        return Err(EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: "landscape set_liquid entry missing `column`".into(),
+                        })
+                    }
+                };
+
+                let column = value_to_int(definition, function, column_value)?;
+
+                let segments_value = map.remove("segments").unwrap_or(Value::Nil);
+                let segments = value_to_liquid_segments(definition, function, segments_value)?;
+
+                if let Some((key, _)) = map.into_iter().next() {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: definition.to_string(),
+                        function,
+                        detail: format!("unexpected key `{}` in landscape set_liquid entry", key),
+                    });
+                }
+
+                commands.push(LandscapeCommand::SetLiquidColumn { column, segments });
+            }
+            "clear_liquid" => {
+                let column_value = match map.remove("column").or_else(|| map.remove("x")) {
+                    Some(value) => value,
+                    None => {
+                        return Err(EngineError::InvalidScriptOutput {
+                            definition: definition.to_string(),
+                            function,
+                            detail: "landscape clear_liquid entry missing `column`".into(),
+                        })
+                    }
+                };
+
+                let column = value_to_int(definition, function, column_value)?;
+
+                if let Some((key, _)) = map.into_iter().next() {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: definition.to_string(),
+                        function,
+                        detail: format!("unexpected key `{}` in landscape clear_liquid entry", key),
+                    });
+                }
+
+                commands.push(LandscapeCommand::ClearLiquidColumn { column });
+            }
             other => {
                 return Err(EngineError::InvalidScriptOutput {
                     definition: definition.to_string(),
@@ -7827,6 +7878,77 @@ fn value_to_landscape_commands(
     }
 
     Ok(commands)
+}
+
+fn value_to_liquid_segments(
+    definition: &str,
+    function: &'static str,
+    value: Value,
+) -> Result<Vec<LiquidSegment>, EngineError> {
+    let entries = match value {
+        Value::Array(values) => values,
+        Value::Nil => return Ok(Vec::new()),
+        other => {
+            return Err(EngineError::InvalidScriptOutput {
+                definition: definition.to_string(),
+                function,
+                detail: format!(
+                    "landscape segments must be array or nil, got {}",
+                    other.type_name()
+                ),
+            })
+        }
+    };
+
+    let mut segments = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let mut segment_map = match entry {
+            Value::Proplist(map) => map,
+            other => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function,
+                    detail: format!(
+                        "landscape segment must be proplist, got {}",
+                        other.type_name()
+                    ),
+                })
+            }
+        };
+
+        let top_value =
+            segment_map
+                .remove("top")
+                .ok_or_else(|| EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function,
+                    detail: "landscape segment missing `top`".into(),
+                })?;
+
+        let bottom_value =
+            segment_map
+                .remove("bottom")
+                .ok_or_else(|| EngineError::InvalidScriptOutput {
+                    definition: definition.to_string(),
+                    function,
+                    detail: "landscape segment missing `bottom`".into(),
+                })?;
+
+        let top = value_to_int(definition, function, top_value)?;
+        let bottom = value_to_int(definition, function, bottom_value)?;
+
+        if let Some((key, _)) = segment_map.into_iter().next() {
+            return Err(EngineError::InvalidScriptOutput {
+                definition: definition.to_string(),
+                function,
+                detail: format!("unexpected key `{}` in landscape segment entry", key),
+            });
+        }
+
+        segments.push(LiquidSegment::new(top, bottom));
+    }
+
+    Ok(segments)
 }
 
 #[cfg(test)]
@@ -11550,6 +11672,73 @@ mod tests {
             .to_vec();
         assert_eq!(&surface[4..7], &[18, 18, 18]);
         assert_eq!(surface[7], 10);
+    }
+
+    #[test]
+    fn queued_commands_set_and_clear_liquid_columns() {
+        let script = r#"
+        global func Step(state, frame, random) {
+            if (frame == 1) {
+                return {
+                    commands = [
+                        {
+                            landscape = [
+                                { op = "set_liquid", column = 3, segments = [ { top = 5, bottom = 8 } ] }
+                            ]
+                        }
+                    ]
+                };
+            }
+            if (frame == 2) {
+                return {
+                    commands = [
+                        {
+                            landscape = [
+                                { op = "clear_liquid", column = 3 }
+                            ]
+                        }
+                    ]
+                };
+            }
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Diver", "Diver", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_landscape(Landscape::flat(16, 12));
+
+        let diver_id = engine
+            .spawn_object(SpawnConfig::new("Diver"))
+            .expect("spawn succeeds");
+
+        assert_eq!(engine.frame(), 0);
+
+        let _ = engine.tick().expect("first tick succeeds");
+        assert!(engine.landscape().expect("landscape present").liquids()[3]
+            .segments()
+            .is_empty());
+
+        let _ = engine.tick().expect("second tick succeeds");
+        assert_eq!(
+            engine.landscape().expect("landscape present").liquids()[3].segments(),
+            &[LiquidSegment::new(5, 8)]
+        );
+
+        let _ = engine.tick().expect("third tick succeeds");
+        assert!(engine.landscape().expect("landscape present").liquids()[3]
+            .segments()
+            .is_empty());
+
+        // Ensure object persistence unaffected by landscape edits
+        assert!(engine.object_snapshot(diver_id).is_some());
     }
 
     fn simple_definition(id: &str) -> Definition {
