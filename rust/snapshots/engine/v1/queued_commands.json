@@ -1,0 +1,2012 @@
+[
+  {
+    "frame": 1,
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
+    "objects": [
+      {
+        "id": 1,
+        "definition_id": "Commander",
+        "position": {
+          "x": 3,
+          "y": -1
+        },
+        "velocity": {
+          "x": 1,
+          "y": -1
+        },
+        "energy": 64,
+        "damage": 0,
+        "action": {
+          "name": "Idle",
+          "phase": 1,
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
+        },
+        "direction": 0,
+        "command_direction": 0,
+        "action_procedure": null,
+        "effects": [],
+        "vertices": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": -1,
+        "category": 1,
+        "crew_member": false,
+        "alive": true
+      }
+    ],
+    "environment": {
+      "settings": {
+        "wind": 0,
+        "wind_variation": 0,
+        "wind_period": 0,
+        "temperature": 0,
+        "climate": 0,
+        "temperature_variation": 0,
+        "temperature_period": 0,
+        "temperature_phase": 0,
+        "time_of_day": 0,
+        "time_speed": 0,
+        "precipitation": 0,
+        "sky_color": null
+      },
+      "wind_force": 0,
+      "ambient_temperature": 0,
+      "precipitation": 0,
+      "sky_color": null
+    },
+    "global_effects": [],
+    "particles": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": [],
+    "landscape": {
+      "width": 48,
+      "surface": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "liquids": [
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        }
+      ]
+    },
+    "rng": {
+      "seed": [
+        126,
+        137,
+        55,
+        106,
+        194,
+        103,
+        233,
+        199,
+        44,
+        48,
+        211,
+        61,
+        129,
+        152,
+        175,
+        98,
+        145,
+        170,
+        92,
+        178,
+        13,
+        21,
+        59,
+        213,
+        24,
+        15,
+        147,
+        215,
+        4,
+        209,
+        47,
+        122
+      ],
+      "stream": 0,
+      "word_pos": 2
+    },
+    "surfaces": [],
+    "hud": {
+      "players": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Commander": 1,
+      "Helper": 1
+    }
+  },
+  {
+    "frame": 2,
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
+    "objects": [
+      {
+        "id": 1,
+        "definition_id": "Commander",
+        "position": {
+          "x": 6,
+          "y": -3
+        },
+        "velocity": {
+          "x": 3,
+          "y": -2
+        },
+        "energy": 58,
+        "damage": 0,
+        "action": {
+          "name": "Idle",
+          "phase": 2,
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
+        },
+        "direction": 0,
+        "command_direction": 0,
+        "action_procedure": null,
+        "effects": [],
+        "vertices": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": -1,
+        "category": 1,
+        "crew_member": false,
+        "alive": true
+      },
+      {
+        "id": 2,
+        "definition_id": "Helper",
+        "position": {
+          "x": 6,
+          "y": 0
+        },
+        "velocity": {
+          "x": 0,
+          "y": -1
+        },
+        "energy": 24,
+        "damage": 0,
+        "action": {
+          "name": "Idle",
+          "phase": 0,
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
+        },
+        "direction": 0,
+        "command_direction": 0,
+        "action_procedure": null,
+        "effects": [],
+        "vertices": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": 1,
+        "category": 1,
+        "crew_member": false,
+        "alive": true
+      }
+    ],
+    "environment": {
+      "settings": {
+        "wind": 0,
+        "wind_variation": 0,
+        "wind_period": 0,
+        "temperature": 0,
+        "climate": 0,
+        "temperature_variation": 0,
+        "temperature_period": 0,
+        "temperature_phase": 0,
+        "time_of_day": 0,
+        "time_speed": 0,
+        "precipitation": 0,
+        "sky_color": null
+      },
+      "wind_force": 0,
+      "ambient_temperature": 0,
+      "precipitation": 0,
+      "sky_color": null
+    },
+    "global_effects": [],
+    "particles": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": [],
+    "landscape": {
+      "width": 48,
+      "surface": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "liquids": [
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        }
+      ]
+    },
+    "rng": {
+      "seed": [
+        126,
+        137,
+        55,
+        106,
+        194,
+        103,
+        233,
+        199,
+        44,
+        48,
+        211,
+        61,
+        129,
+        152,
+        175,
+        98,
+        145,
+        170,
+        92,
+        178,
+        13,
+        21,
+        59,
+        213,
+        24,
+        15,
+        147,
+        215,
+        4,
+        209,
+        47,
+        122
+      ],
+      "stream": 0,
+      "word_pos": 4
+    },
+    "surfaces": [],
+    "hud": {
+      "players": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Commander": 1,
+      "Helper": 1
+    }
+  },
+  {
+    "frame": 3,
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
+    "objects": [
+      {
+        "id": 1,
+        "definition_id": "Commander",
+        "position": {
+          "x": 9,
+          "y": -4
+        },
+        "velocity": {
+          "x": 3,
+          "y": -1
+        },
+        "energy": 58,
+        "damage": 0,
+        "action": {
+          "name": "Idle",
+          "phase": 3,
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
+        },
+        "direction": 0,
+        "command_direction": 0,
+        "action_procedure": null,
+        "effects": [],
+        "vertices": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": -1,
+        "category": 1,
+        "crew_member": false,
+        "alive": true
+      },
+      {
+        "id": 2,
+        "definition_id": "Helper",
+        "position": {
+          "x": 6,
+          "y": 0
+        },
+        "velocity": {
+          "x": 0,
+          "y": 0
+        },
+        "energy": 24,
+        "damage": 0,
+        "action": {
+          "name": "Idle",
+          "phase": 1,
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
+        },
+        "direction": 0,
+        "command_direction": 0,
+        "action_procedure": null,
+        "effects": [],
+        "vertices": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": 1,
+        "category": 1,
+        "crew_member": false,
+        "alive": true
+      }
+    ],
+    "environment": {
+      "settings": {
+        "wind": 0,
+        "wind_variation": 0,
+        "wind_period": 0,
+        "temperature": 0,
+        "climate": 0,
+        "temperature_variation": 0,
+        "temperature_period": 0,
+        "temperature_phase": 0,
+        "time_of_day": 0,
+        "time_speed": 0,
+        "precipitation": 0,
+        "sky_color": null
+      },
+      "wind_force": 0,
+      "ambient_temperature": 0,
+      "precipitation": 0,
+      "sky_color": null
+    },
+    "global_effects": [],
+    "particles": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": [],
+    "landscape": {
+      "width": 48,
+      "surface": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "liquids": [
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        }
+      ]
+    },
+    "rng": {
+      "seed": [
+        126,
+        137,
+        55,
+        106,
+        194,
+        103,
+        233,
+        199,
+        44,
+        48,
+        211,
+        61,
+        129,
+        152,
+        175,
+        98,
+        145,
+        170,
+        92,
+        178,
+        13,
+        21,
+        59,
+        213,
+        24,
+        15,
+        147,
+        215,
+        4,
+        209,
+        47,
+        122
+      ],
+      "stream": 0,
+      "word_pos": 6
+    },
+    "surfaces": [],
+    "hud": {
+      "players": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Helper": 1,
+      "Commander": 1
+    }
+  },
+  {
+    "frame": 4,
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
+    "objects": [
+      {
+        "id": 1,
+        "definition_id": "Commander",
+        "position": {
+          "x": 12,
+          "y": -4
+        },
+        "velocity": {
+          "x": 3,
+          "y": 0
+        },
+        "energy": 58,
+        "damage": 0,
+        "action": {
+          "name": "Idle",
+          "phase": 4,
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
+        },
+        "direction": 0,
+        "command_direction": 0,
+        "action_procedure": null,
+        "effects": [],
+        "vertices": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": -1,
+        "category": 1,
+        "crew_member": false,
+        "alive": true
+      },
+      {
+        "id": 2,
+        "definition_id": "Helper",
+        "position": {
+          "x": 6,
+          "y": 1
+        },
+        "velocity": {
+          "x": 0,
+          "y": 1
+        },
+        "energy": 24,
+        "damage": 0,
+        "action": {
+          "name": "Idle",
+          "phase": 2,
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
+        },
+        "direction": 0,
+        "command_direction": 0,
+        "action_procedure": null,
+        "effects": [],
+        "vertices": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": 1,
+        "category": 1,
+        "crew_member": false,
+        "alive": true
+      }
+    ],
+    "environment": {
+      "settings": {
+        "wind": 0,
+        "wind_variation": 0,
+        "wind_period": 0,
+        "temperature": 0,
+        "climate": 0,
+        "temperature_variation": 0,
+        "temperature_period": 0,
+        "temperature_phase": 0,
+        "time_of_day": 0,
+        "time_speed": 0,
+        "precipitation": 0,
+        "sky_color": null
+      },
+      "wind_force": 0,
+      "ambient_temperature": 0,
+      "precipitation": 0,
+      "sky_color": null
+    },
+    "global_effects": [],
+    "particles": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": [],
+    "landscape": {
+      "width": 48,
+      "surface": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "liquids": [
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        }
+      ]
+    },
+    "rng": {
+      "seed": [
+        126,
+        137,
+        55,
+        106,
+        194,
+        103,
+        233,
+        199,
+        44,
+        48,
+        211,
+        61,
+        129,
+        152,
+        175,
+        98,
+        145,
+        170,
+        92,
+        178,
+        13,
+        21,
+        59,
+        213,
+        24,
+        15,
+        147,
+        215,
+        4,
+        209,
+        47,
+        122
+      ],
+      "stream": 0,
+      "word_pos": 8
+    },
+    "surfaces": [],
+    "hud": {
+      "players": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Helper": 1,
+      "Commander": 1
+    }
+  },
+  {
+    "frame": 5,
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
+    "objects": [
+      {
+        "id": 2,
+        "definition_id": "Helper",
+        "position": {
+          "x": 6,
+          "y": 3
+        },
+        "velocity": {
+          "x": 0,
+          "y": 2
+        },
+        "energy": 24,
+        "damage": 0,
+        "action": {
+          "name": "Idle",
+          "phase": 3,
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
+        },
+        "direction": 0,
+        "command_direction": 0,
+        "action_procedure": null,
+        "effects": [],
+        "vertices": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": 1,
+        "category": 1,
+        "crew_member": false,
+        "alive": true
+      }
+    ],
+    "environment": {
+      "settings": {
+        "wind": 0,
+        "wind_variation": 0,
+        "wind_period": 0,
+        "temperature": 0,
+        "climate": 0,
+        "temperature_variation": 0,
+        "temperature_period": 0,
+        "temperature_phase": 0,
+        "time_of_day": 0,
+        "time_speed": 0,
+        "precipitation": 0,
+        "sky_color": null
+      },
+      "wind_force": 0,
+      "ambient_temperature": 0,
+      "precipitation": 0,
+      "sky_color": null
+    },
+    "global_effects": [],
+    "particles": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": [],
+    "landscape": {
+      "width": 48,
+      "surface": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "liquids": [
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        }
+      ]
+    },
+    "rng": {
+      "seed": [
+        126,
+        137,
+        55,
+        106,
+        194,
+        103,
+        233,
+        199,
+        44,
+        48,
+        211,
+        61,
+        129,
+        152,
+        175,
+        98,
+        145,
+        170,
+        92,
+        178,
+        13,
+        21,
+        59,
+        213,
+        24,
+        15,
+        147,
+        215,
+        4,
+        209,
+        47,
+        122
+      ],
+      "stream": 0,
+      "word_pos": 9
+    },
+    "surfaces": [],
+    "hud": {
+      "players": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Helper": 1,
+      "Commander": 1
+    }
+  },
+  {
+    "frame": 6,
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
+    "objects": [
+      {
+        "id": 2,
+        "definition_id": "Helper",
+        "position": {
+          "x": 6,
+          "y": 6
+        },
+        "velocity": {
+          "x": 0,
+          "y": 3
+        },
+        "energy": 24,
+        "damage": 0,
+        "action": {
+          "name": "Idle",
+          "phase": 4,
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
+        },
+        "direction": 0,
+        "command_direction": 0,
+        "action_procedure": null,
+        "effects": [],
+        "vertices": [],
+        "container": null,
+        "contents": [],
+        "status": "normal",
+        "owner": 1,
+        "category": 1,
+        "crew_member": false,
+        "alive": true
+      }
+    ],
+    "environment": {
+      "settings": {
+        "wind": 0,
+        "wind_variation": 0,
+        "wind_period": 0,
+        "temperature": 0,
+        "climate": 0,
+        "temperature_variation": 0,
+        "temperature_period": 0,
+        "temperature_phase": 0,
+        "time_of_day": 0,
+        "time_speed": 0,
+        "precipitation": 0,
+        "sky_color": null
+      },
+      "wind_force": 0,
+      "ambient_temperature": 0,
+      "precipitation": 0,
+      "sky_color": null
+    },
+    "global_effects": [],
+    "particles": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": [],
+    "landscape": {
+      "width": 48,
+      "surface": [
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6
+      ],
+      "liquids": [
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        }
+      ]
+    },
+    "rng": {
+      "seed": [
+        126,
+        137,
+        55,
+        106,
+        194,
+        103,
+        233,
+        199,
+        44,
+        48,
+        211,
+        61,
+        129,
+        152,
+        175,
+        98,
+        145,
+        170,
+        92,
+        178,
+        13,
+        21,
+        59,
+        213,
+        24,
+        15,
+        147,
+        215,
+        4,
+        209,
+        47,
+        122
+      ],
+      "stream": 0,
+      "word_pos": 10
+    },
+    "surfaces": [],
+    "hud": {
+      "players": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Helper": 1,
+      "Commander": 1
+    }
+  }
+]
