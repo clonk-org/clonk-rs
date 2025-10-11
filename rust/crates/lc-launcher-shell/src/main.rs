@@ -556,8 +556,13 @@ impl LauncherApp {
         let new_preference = self.report_search.persisted_preferences();
         let existing = self.preferences.report_search().cloned();
         if existing != new_preference {
-            self.preferences.set_report_search(new_preference);
+            self.preferences.set_report_search(new_preference.clone());
             self.persist_preferences();
+            if let Err(err) = self.persist_report_search_summary(new_preference) {
+                let _ = self.logger.log_line(&format!(
+                    "failed to persist report search state into launcher summary: {err}"
+                ));
+            }
         }
     }
 
@@ -917,6 +922,7 @@ impl LauncherApp {
             state.support_bundle_path.as_deref(),
             Some(snapshot.clone()),
             bulk_summary.clone(),
+            self.preferences.report_search().cloned(),
         )
         .context("failed to persist provider automation snapshot")?;
         if let Some(summary) = bulk_summary.as_ref() {
@@ -942,6 +948,33 @@ impl LauncherApp {
                 .logger
                 .log_line(&format!("failed to persist launcher preferences: {err}"));
         }
+    }
+
+    fn persist_report_search_summary(
+        &self,
+        preference: Option<ReportSearchPreferences>,
+    ) -> Result<()> {
+        let Some(state) = self.ui.state().cloned() else {
+            return Ok(());
+        };
+        let telemetry = UpdateTelemetrySummary::from_serializable(
+            &state.summary.update_telemetry,
+            &state.logs_dir,
+        );
+        write_launcher_summary(
+            &self.paths,
+            &self.logger,
+            &state.launcher_log_path,
+            &state.runtime_log_paths,
+            &state.crash_report_paths,
+            &telemetry,
+            state.support_bundle_path.as_deref(),
+            Some(state.summary.provider_automation.clone()),
+            state.summary.provider_bulk_retarget.clone(),
+            preference,
+        )
+        .context("failed to update launcher summary with report search state")?;
+        Ok(())
     }
 
     fn restore_report_search_from_preferences(&mut self) -> Result<()> {

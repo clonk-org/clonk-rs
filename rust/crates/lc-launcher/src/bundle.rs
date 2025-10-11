@@ -173,6 +173,7 @@ pub fn regenerate_support_bundle(
         Some(&bundle),
         Some(record.summary.provider_automation.clone()),
         record.summary.provider_bulk_retarget.clone(),
+        record.summary.report_search.clone(),
     )?;
 
     append_support_bundle_report(paths, &bundle, &telemetry)?;

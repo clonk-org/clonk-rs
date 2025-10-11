@@ -168,6 +168,7 @@ mod tests {
             Some(&bundle_path),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -223,6 +224,7 @@ mod tests {
             &[runtime_log],
             &[crash_log],
             &telemetry,
+            None,
             None,
             None,
             None,
@@ -355,6 +357,7 @@ mod tests {
             Some(&bundle_path),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -431,6 +434,7 @@ mod tests {
             &telemetry,
             None,
             Some(snapshot),
+            None,
             None,
         )
         .unwrap();
@@ -510,6 +514,7 @@ mod tests {
             None,
             Some(snapshot),
             None,
+            None,
         )
         .unwrap();
 
@@ -580,6 +585,7 @@ mod tests {
             None,
             None,
             Some(summary),
+            None,
         )
         .unwrap();
 
@@ -646,6 +652,7 @@ mod tests {
             None,
             None,
             Some(summary),
+            None,
         )
         .unwrap();
 
@@ -657,5 +664,51 @@ mod tests {
             Some("2024-06-05T08:15:00Z"),
             "history cleared marker should be persisted"
         );
+    }
+
+    #[test]
+    fn write_launcher_summary_records_report_search_preferences() {
+        let install_dir = TempDir::new().unwrap();
+        prepare_install_root(install_dir.path());
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+
+        let logger = TestLogger::new(paths.logs_dir().join("lc-launcher.log"));
+        logger.log_line("report search summary test").unwrap();
+
+        let runtime_log = paths.logs_dir().join("Clonk-search.log");
+        fs::write(&runtime_log, "runtime").unwrap();
+
+        let telemetry = UpdateTelemetrySummary::default();
+        let search = ReportSearchPreferences {
+            query: "error".into(),
+            highlight: ReportSearchHighlightPreference::Error,
+            active_line: Some(41),
+        };
+
+        write_launcher_summary(
+            &paths,
+            &logger,
+            logger.path(),
+            &[runtime_log],
+            &[],
+            &telemetry,
+            None,
+            None,
+            None,
+            Some(search.clone()),
+        )
+        .unwrap();
+
+        let summary_record = load_launcher_summary(&paths)
+            .unwrap()
+            .expect("launcher summary should exist");
+        assert_eq!(summary_record.summary.report_search, Some(search));
     }
 }

@@ -156,6 +156,7 @@ fn run() -> Result<()> {
         support_bundle.as_deref(),
         None,
         None,
+        None,
     );
     if let Err(err) = &summary_result {
         logger
@@ -1257,6 +1258,7 @@ mod tests {
             Some(&bundle_path),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1378,6 +1380,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1495,6 +1498,7 @@ mod tests {
             None,
             Some(ProviderAutomationSnapshot::default()),
             Some(bulk_summary),
+            None,
         )
         .unwrap();
 
@@ -1560,6 +1564,7 @@ mod tests {
             None,
             Some(automation),
             Some(bulk_summary),
+            None,
         )
         .unwrap();
 

@@ -1,5 +1,6 @@
 use crate::log::LauncherLog;
 use crate::paths::{ensure_logs_dir, launcher_summary_path, relative_to_logs};
+use crate::preferences::ReportSearchPreferences;
 use crate::provider::{
     ProviderAutomationState, ProviderDiagnostics, ProviderOverrideSource, ProviderPathProvenance,
     ProviderPathStatus, ProviderStatus,
@@ -25,6 +26,8 @@ pub struct LauncherSummary {
     pub provider_automation: ProviderAutomationSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_bulk_retarget: Option<ProviderBulkRetargetSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_search: Option<ReportSearchPreferences>,
 }
 
 pub struct LauncherSummaryRecord {
@@ -168,6 +171,7 @@ pub fn write_launcher_summary(
     support_bundle: Option<&Path>,
     provider_snapshot: Option<ProviderAutomationSnapshot>,
     bulk_retarget: Option<ProviderBulkRetargetSummary>,
+    report_search: Option<ReportSearchPreferences>,
 ) -> Result<PathBuf> {
     if !launcher_log_path.exists() {
         return Err(anyhow!(
@@ -193,6 +197,7 @@ pub fn write_launcher_summary(
         update_telemetry: telemetry_summary.to_serializable(&logs_dir),
         provider_automation: provider_snapshot.unwrap_or_default(),
         provider_bulk_retarget: bulk_retarget.filter(|summary| !summary.is_empty()),
+        report_search,
     };
 
     let summary_path = launcher_summary_path(&logs_dir);
