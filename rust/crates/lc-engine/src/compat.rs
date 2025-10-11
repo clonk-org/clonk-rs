@@ -828,6 +828,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetYDir", get_y_dir);
     script.register_host_function("FindObject", find_object);
     script.register_host_function("FindObjects", find_objects);
+    script.register_host_function("ObjectCount", object_count);
     script.register_host_function("GetX", get_x);
     script.register_host_function("GetY", get_y);
     script.register_host_function("SetPosition", set_position);
@@ -3534,6 +3535,23 @@ fn find_objects(args: &[Value]) -> Result<Value, RuntimeError> {
             .map(object_reference_value)
             .collect::<Vec<_>>();
         Ok(Value::Array(values))
+    })
+}
+
+fn object_count(args: &[Value]) -> Result<Value, RuntimeError> {
+    let params = FindObjectParams::parse(args)?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Int(0)),
+        };
+        let matches_len = if params.is_closest_query() {
+            collect_closest_matches(context, &params).len()
+        } else {
+            collect_linear_matches(context, &params).len()
+        };
+        Ok(Value::Int(truncate_to_i32(matches_len as u64)))
     })
 }
 
@@ -9074,6 +9092,106 @@ mod tests {
             with_effect_context(None, &[], world, 1, || find_object(&args_with_next));
         let second_value = second_result.expect("FindObject closest with next succeeds");
         assert_eq!(second_value, object_reference_value(ObjectId::new(21)));
+    }
+
+    #[test]
+    fn object_count_returns_number_of_matches() {
+        let world = HostWorldContext::from_objects(vec![
+            HostWorldObject::new(
+                ObjectId::new(30),
+                "Dummy",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(0, 0),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+            HostWorldObject::new(
+                ObjectId::new(31),
+                "Dummy",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(10, 0),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+        ]);
+        let args = [Value::String("Dummy".into())];
+        let (result, _) = with_effect_context(None, &[], world, 1, || object_count(&args));
+        let value = result.expect("ObjectCount succeeds");
+        assert_eq!(value, Value::Int(2));
+    }
+
+    #[test]
+    fn object_count_honours_owner_filter() {
+        let world = HostWorldContext::from_objects(vec![
+            HostWorldObject::new(
+                ObjectId::new(40),
+                "Dummy",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                1,
+                100,
+                Vector2::new(0, 0),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+            HostWorldObject::new(
+                ObjectId::new(41),
+                "Dummy",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                2,
+                100,
+                Vector2::new(5, 0),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+        ]);
+        let args = [
+            Value::String("Dummy".into()),
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Int(2),
+        ];
+        let (result, _) = with_effect_context(None, &[], world, 1, || object_count(&args));
+        let value = result.expect("ObjectCount owner succeeds");
+        assert_eq!(value, Value::Int(1));
     }
 
     #[test]
