@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
+arboard = "3.3"
 lc-launcher = { path = "../lc-launcher" }
 lc-launcher-ui = { path = "../lc-launcher-ui" }
 lc-gui = { path = "../lc-gui" }

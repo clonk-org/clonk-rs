@@ -10,6 +10,9 @@ use lc_launcher::{
     ProviderStatus, SupportArtifact,
 };
 
+const REPORT_PREVIEW_VISIBLE_LINES: usize = 28;
+const REPORT_PREVIEW_SCROLL_STEP: usize = 12;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     Share,
@@ -36,6 +39,9 @@ pub enum LauncherShellMessage {
     ClearProviderOverride { role: ProviderKind, index: usize },
     RetargetAllProviders,
     RestoreAllProviderDefaults,
+    CopyReportPreview,
+    ExportReportPreview,
+    ScrollReportPreview { delta: isize },
 }
 
 #[derive(Debug)]
@@ -96,6 +102,7 @@ pub struct LauncherShellUi {
     state: Option<LauncherShellState>,
     feedback: Option<ActionFeedback>,
     providers: ProviderDiagnostics,
+    report_scroll_offset: usize,
 }
 
 impl LauncherShellUi {
@@ -106,6 +113,7 @@ impl LauncherShellUi {
             state: None,
             feedback: None,
             providers: ProviderDiagnostics::default(),
+            report_scroll_offset: 0,
         };
         ui.set_state(state)?;
         Ok(ui)
@@ -113,6 +121,7 @@ impl LauncherShellUi {
 
     pub fn set_state(&mut self, state: Option<LauncherShellState>) -> GuiResult<()> {
         self.state = state;
+        self.report_scroll_offset = 0;
         self.rebuild()
     }
 
@@ -163,6 +172,29 @@ impl LauncherShellUi {
         self.layout.retarget_all_button
     }
 
+    pub fn report_copy_button(&self) -> Option<WidgetId> {
+        self.layout.report_copy_button
+    }
+
+    pub fn report_export_button(&self) -> Option<WidgetId> {
+        self.layout.report_export_button
+    }
+
+    pub fn report_scroll_up_button(&self) -> Option<WidgetId> {
+        self.layout.report_scroll_up_button
+    }
+
+    pub fn report_scroll_down_button(&self) -> Option<WidgetId> {
+        self.layout.report_scroll_down_button
+    }
+
+    pub fn report_line_range_text(&self) -> Option<&str> {
+        self.layout
+            .report_line_range
+            .as_ref()
+            .map(|text| text.as_str())
+    }
+
     pub fn state(&self) -> Option<&LauncherShellState> {
         self.state.as_ref()
     }
@@ -171,10 +203,43 @@ impl LauncherShellUi {
         self.feedback.as_ref()
     }
 
+    pub fn scroll_report_preview(&mut self, delta: isize) -> GuiResult<()> {
+        let total_lines = self
+            .state
+            .as_ref()
+            .map(|state| state.support_bundle_report.len())
+            .unwrap_or(0);
+        if total_lines <= REPORT_PREVIEW_VISIBLE_LINES {
+            self.report_scroll_offset = 0;
+        } else {
+            let visible = REPORT_PREVIEW_VISIBLE_LINES.min(total_lines);
+            let max_offset = total_lines - visible;
+            let capped_max = max_offset.min(isize::MAX as usize) as isize;
+            let capped_current = self
+                .report_scroll_offset
+                .min(max_offset)
+                .min(isize::MAX as usize) as isize;
+            let mut next = capped_current + delta;
+            if next < 0 {
+                next = 0;
+            } else if next > capped_max {
+                next = capped_max;
+            }
+            self.report_scroll_offset = next as usize;
+        }
+        self.rebuild()
+    }
+
     fn rebuild(&mut self) -> GuiResult<()> {
+        self.clamp_report_scroll_offset();
         let borrowed_state = self.state.as_ref();
         let feedback = self.feedback.as_ref();
-        let (gui, layout) = build_gui(borrowed_state, feedback, &self.providers)?;
+        let (gui, layout) = build_gui(
+            borrowed_state,
+            feedback,
+            &self.providers,
+            self.report_scroll_offset,
+        )?;
         self.gui = gui;
         self.layout = layout;
         Ok(())
@@ -199,6 +264,23 @@ impl LauncherShellUi {
             messages,
         }
     }
+
+    fn clamp_report_scroll_offset(&mut self) {
+        let total_lines = self
+            .state
+            .as_ref()
+            .map(|state| state.support_bundle_report.len())
+            .unwrap_or(0);
+        if total_lines == 0 {
+            self.report_scroll_offset = 0;
+            return;
+        }
+        let visible = REPORT_PREVIEW_VISIBLE_LINES.min(total_lines);
+        let max_offset = total_lines.saturating_sub(visible);
+        if self.report_scroll_offset > max_offset {
+            self.report_scroll_offset = max_offset;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -211,6 +293,11 @@ struct LauncherShellLayout {
     upload_button: Option<WidgetId>,
     restore_defaults_button: Option<WidgetId>,
     retarget_all_button: Option<WidgetId>,
+    report_copy_button: Option<WidgetId>,
+    report_export_button: Option<WidgetId>,
+    report_scroll_up_button: Option<WidgetId>,
+    report_scroll_down_button: Option<WidgetId>,
+    report_line_range: Option<String>,
 }
 
 enum WidgetAction {
@@ -223,6 +310,9 @@ enum WidgetAction {
     ClearProviderOverride { role: ProviderKind, index: usize },
     RetargetAllProviders,
     RestoreAllProviderDefaults,
+    CopyReportPreview,
+    ExportReportPreview,
+    ScrollReportPreview { delta: isize },
 }
 
 impl WidgetAction {
@@ -269,6 +359,11 @@ impl WidgetAction {
             WidgetAction::RestoreAllProviderDefaults => {
                 Some(LauncherShellMessage::RestoreAllProviderDefaults)
             }
+            WidgetAction::CopyReportPreview => Some(LauncherShellMessage::CopyReportPreview),
+            WidgetAction::ExportReportPreview => Some(LauncherShellMessage::ExportReportPreview),
+            WidgetAction::ScrollReportPreview { delta } => {
+                Some(LauncherShellMessage::ScrollReportPreview { delta: *delta })
+            }
         }
     }
 }
@@ -277,6 +372,7 @@ fn build_gui(
     state: Option<&LauncherShellState>,
     feedback: Option<&ActionFeedback>,
     providers: &ProviderDiagnostics,
+    report_scroll_offset: usize,
 ) -> GuiResult<(Gui, LauncherShellLayout)> {
     let mut gui = Gui::new();
     let mut layout = LauncherShellLayout::default();
@@ -404,8 +500,72 @@ fn build_gui(
                     "Report preview will appear here after diagnostics are generated.",
                 );
             } else {
-                for line in &state.support_bundle_report {
+                let controls = gui.add_row(report_section, false);
+                let copy_button = gui.add_button(controls, "Copy report");
+                layout.report_copy_button = Some(copy_button);
+                layout
+                    .action_map
+                    .insert(copy_button, WidgetAction::CopyReportPreview);
+
+                let export_button = gui.add_button(controls, "Save report…");
+                layout.report_export_button = Some(export_button);
+                layout
+                    .action_map
+                    .insert(export_button, WidgetAction::ExportReportPreview);
+
+                let scroll_up = gui.add_button(controls, "Scroll up");
+                layout.report_scroll_up_button = Some(scroll_up);
+                layout.action_map.insert(
+                    scroll_up,
+                    WidgetAction::ScrollReportPreview {
+                        delta: -(REPORT_PREVIEW_SCROLL_STEP as isize),
+                    },
+                );
+
+                let scroll_down = gui.add_button(controls, "Scroll down");
+                layout.report_scroll_down_button = Some(scroll_down);
+                layout.action_map.insert(
+                    scroll_down,
+                    WidgetAction::ScrollReportPreview {
+                        delta: REPORT_PREVIEW_SCROLL_STEP as isize,
+                    },
+                );
+
+                let total_lines = state.support_bundle_report.len();
+                let visible = REPORT_PREVIEW_VISIBLE_LINES.min(total_lines);
+                let max_offset = total_lines.saturating_sub(visible);
+                let offset = report_scroll_offset.min(max_offset);
+
+                if offset == 0 {
+                    gui.set_button_enabled(scroll_up, false)?;
+                }
+                if offset >= max_offset {
+                    gui.set_button_enabled(scroll_down, false)?;
+                }
+
+                let range_label = format!(
+                    "Showing lines {}-{} of {}",
+                    offset + 1,
+                    (offset + visible).min(total_lines),
+                    total_lines
+                );
+                gui.add_label(controls, range_label.clone());
+                layout.report_line_range = Some(range_label);
+
+                let end = (offset + visible).min(total_lines);
+                for line in &state.support_bundle_report[offset..end] {
                     gui.add_label(report_section, line.clone());
+                }
+                if end < total_lines {
+                    let remaining = total_lines - end;
+                    let suffix = if remaining == 1 { "" } else { "s" };
+                    gui.add_label(
+                        report_section,
+                        format!(
+                            "… {} additional line{} hidden. Use scroll controls to view remaining content.",
+                            remaining, suffix
+                        ),
+                    );
                 }
             }
 
@@ -885,6 +1045,92 @@ mod tests {
         assert!(upload_response.messages.iter().any(
             |msg| matches!(msg, LauncherShellMessage::UploadSupportArtifacts { artifacts }
                 if artifacts.iter().any(|artifact| artifact.path == summary_path))
+        ));
+
+        let report_copy = ui.report_copy_button().expect("report copy button");
+        let report_copy_response = click_button(&mut ui, report_copy);
+        assert!(matches!(
+            report_copy_response.messages.as_slice(),
+            [LauncherShellMessage::CopyReportPreview]
+        ));
+
+        let report_export = ui.report_export_button().expect("report export button");
+        let report_export_response = click_button(&mut ui, report_export);
+        assert!(matches!(
+            report_export_response.messages.as_slice(),
+            [LauncherShellMessage::ExportReportPreview]
+        ));
+
+        if let Some(scroll_up) = ui.report_scroll_up_button() {
+            let scroll_up_response = click_button(&mut ui, scroll_up);
+            assert!(
+                scroll_up_response.messages.is_empty(),
+                "scroll up should be disabled when the report fits without scrolling"
+            );
+        }
+    }
+
+    #[test]
+    fn report_preview_scrolling_updates_layout() {
+        let temp = TempDir::new().unwrap();
+        let mut state = sample_state(temp.path());
+        state.support_bundle_report = (1..=50).map(|idx| format!("Line {idx:02}")).collect();
+        let mut ui = LauncherShellUi::new(Some(state)).expect("ui");
+        ui.layout(Size::new(960.0, 1280.0));
+
+        let initial_range = ui.report_line_range_text().expect("initial range label");
+        assert_eq!(
+            initial_range,
+            format!(
+                "Showing lines 1-{} of 50",
+                REPORT_PREVIEW_VISIBLE_LINES.min(50)
+            )
+        );
+
+        let scroll_down = ui.report_scroll_down_button().expect("scroll down button");
+        let scroll_down_response = click_button(&mut ui, scroll_down);
+        let delta = match scroll_down_response.messages.as_slice() {
+            [LauncherShellMessage::ScrollReportPreview { delta }] => *delta,
+            other => panic!("unexpected scroll messages: {other:?}"),
+        };
+        ui.scroll_report_preview(delta).expect("scroll preview");
+        ui.layout(Size::new(960.0, 1280.0));
+
+        let after_range = ui
+            .report_line_range_text()
+            .expect("range label after scroll")
+            .to_string();
+        let expected_offset = delta.max(0) as usize;
+        let expected_start = expected_offset + 1;
+        let expected_end = (expected_offset + REPORT_PREVIEW_VISIBLE_LINES).min(50);
+        assert_eq!(
+            after_range,
+            format!("Showing lines {}-{} of 50", expected_start, expected_end)
+        );
+
+        let commands = ui.render();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { text, .. } if text.contains("Line 13")
+            )),
+            "expected Line 13 to be visible after scrolling"
+        );
+        assert!(
+            commands.iter().all(|command| !matches!(
+                command,
+                DrawCommand::Text { text, .. } if text.contains("Line 01")
+            )),
+            "expected the first line to be hidden after scrolling"
+        );
+
+        let scroll_up = ui
+            .report_scroll_up_button()
+            .expect("scroll up button after scrolling");
+        let scroll_up_response = click_button(&mut ui, scroll_up);
+        assert!(matches!(
+            scroll_up_response.messages.as_slice(),
+            [LauncherShellMessage::ScrollReportPreview { delta }] if *delta < 0
         ));
     }
 

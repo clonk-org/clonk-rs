@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{anyhow, Context, Result};
+use arboard::Clipboard;
 use lc_graphics::{Color, PixelFormat, Surface};
 use lc_gui::{DrawCommand, GuiEvent, KeyCode, Point as GuiPoint, Rect as GuiRect, Size as GuiSize};
 use lc_launcher::{
@@ -546,6 +547,15 @@ impl LauncherApp {
                     }
                 }
             }
+            LauncherShellMessage::CopyReportPreview => {
+                self.handle_copy_report_preview()?;
+            }
+            LauncherShellMessage::ExportReportPreview => {
+                self.handle_export_report_preview()?;
+            }
+            LauncherShellMessage::ScrollReportPreview { delta } => {
+                self.handle_scroll_report_preview(delta)?;
+            }
             LauncherShellMessage::RevealPath { path, label } => {
                 self.logger
                     .log_line(&format!("revealing {label} at {}", path.display()))?;
@@ -678,6 +688,145 @@ impl LauncherApp {
             }
         }
         Ok(())
+    }
+
+    fn handle_copy_report_preview(&mut self) -> Result<()> {
+        self.logger
+            .log_line("report preview copy requested via launcher UI")
+            .context("failed to log report preview copy request")?;
+
+        let (report_text, line_count) = match self.report_preview_text() {
+            Some(value) => value,
+            None => {
+                self.set_feedback(ActionFeedback::info(
+                    "No report preview is available yet. Launch the game to generate diagnostics.",
+                ))?;
+                return Ok(());
+            }
+        };
+
+        match Clipboard::new() {
+            Ok(mut clipboard) => match clipboard.set_text(report_text) {
+                Ok(()) => {
+                    self.logger
+                        .log_line(&format!(
+                            "report preview copied to clipboard ({} lines)",
+                            line_count
+                        ))
+                        .context("failed to log report preview copy success")?;
+                    self.set_feedback(ActionFeedback::success(
+                        "Report preview copied to the clipboard.",
+                    ))?;
+                }
+                Err(err) => {
+                    self.logger
+                        .log_line(&format!("failed to copy report preview: {err}"))
+                        .context("failed to log report preview copy failure")?;
+                    self.set_feedback(ActionFeedback::error(format!(
+                        "Failed to copy the report preview: {err}"
+                    )))?;
+                }
+            },
+            Err(err) => {
+                self.logger
+                    .log_line(&format!("failed to access clipboard: {err}"))
+                    .context("failed to log clipboard initialisation failure")?;
+                self.set_feedback(ActionFeedback::error(format!(
+                    "Failed to access the clipboard: {err}"
+                )))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_export_report_preview(&mut self) -> Result<()> {
+        self.logger
+            .log_line("report preview export requested via launcher UI")
+            .context("failed to log report preview export request")?;
+
+        let (report_text, line_count) = match self.report_preview_text() {
+            Some(value) => value,
+            None => {
+                self.set_feedback(ActionFeedback::info(
+                    "No report preview is available yet. Launch the game to generate diagnostics.",
+                ))?;
+                return Ok(());
+            }
+        };
+
+        let mut dialog = FileDialog::new()
+            .set_title("Save support bundle report")
+            .add_filter("Text files", &["txt"])
+            .set_file_name(&format!(
+                "support-bundle-report-{}.txt",
+                timestamp_for_filename()
+            ));
+        dialog = self.configure_dialog_directory(dialog, None, Some(self.paths.logs_dir()));
+
+        match dialog.save_file() {
+            Some(path) => {
+                let mut file_text = report_text;
+                if !file_text.ends_with('\n') {
+                    file_text.push('\n');
+                }
+                match fs::write(&path, file_text) {
+                    Ok(()) => {
+                        self.logger
+                            .log_line(&format!(
+                                "report preview exported to {} ({} lines)",
+                                path.display(),
+                                line_count
+                            ))
+                            .context("failed to log report preview export success")?;
+                        self.set_feedback(ActionFeedback::success(format!(
+                            "Report preview saved to {}",
+                            path.display()
+                        )))?;
+                    }
+                    Err(err) => {
+                        self.logger
+                            .log_line(&format!(
+                                "failed to write report preview export to {}: {err}",
+                                path.display()
+                            ))
+                            .context("failed to log report preview export failure")?;
+                        self.set_feedback(ActionFeedback::error(format!(
+                            "Failed to save the report preview: {err}"
+                        )))?;
+                    }
+                }
+            }
+            None => {
+                self.logger
+                    .log_line("report preview export cancelled by user")
+                    .context("failed to log report preview export cancellation")?;
+                self.set_feedback(ActionFeedback::info(
+                    "Export cancelled. No files were written.",
+                ))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_scroll_report_preview(&mut self, delta: isize) -> Result<()> {
+        self.ui
+            .scroll_report_preview(delta)
+            .map_err(|err| anyhow!(err))
+            .context("failed to update report preview scroll state")
+    }
+
+    fn report_preview_text(&self) -> Option<(String, usize)> {
+        self.ui.state().and_then(|state| {
+            if state.support_bundle_report.is_empty() {
+                None
+            } else {
+                Some((
+                    state.support_bundle_report.join("\n"),
+                    state.support_bundle_report.len(),
+                ))
+            }
+        })
     }
 
     fn handle_restage_provider(&mut self, kind: ProviderKind, index: usize) -> Result<()> {
