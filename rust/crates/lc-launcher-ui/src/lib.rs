@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use lc_graphics::Color;
 use lc_gui::{
     DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, GuiResult, Rect, Size, WidgetId,
 };
@@ -42,6 +43,11 @@ pub enum LauncherShellMessage {
     CopyReportPreview,
     ExportReportPreview,
     ScrollReportPreview { delta: isize },
+    FocusReportSearch,
+    ClearReportSearch,
+    NextReportSearchMatch,
+    PreviousReportSearchMatch,
+    SetReportSearchPreset { preset: ReportSearchPreset },
 }
 
 #[derive(Debug)]
@@ -96,6 +102,75 @@ impl ActionFeedbackKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportSearchHighlight {
+    Generic,
+    Error,
+    Warning,
+}
+
+impl ReportSearchHighlight {
+    pub fn label(self) -> &'static str {
+        match self {
+            ReportSearchHighlight::Generic => "text",
+            ReportSearchHighlight::Error => "errors",
+            ReportSearchHighlight::Warning => "warnings",
+        }
+    }
+
+    pub fn active_color(self) -> Color {
+        match self {
+            ReportSearchHighlight::Generic => Color::opaque(200, 232, 255),
+            ReportSearchHighlight::Error => Color::opaque(255, 152, 152),
+            ReportSearchHighlight::Warning => Color::opaque(255, 220, 160),
+        }
+    }
+
+    pub fn inactive_color(self) -> Color {
+        match self {
+            ReportSearchHighlight::Generic => Color::opaque(132, 188, 240),
+            ReportSearchHighlight::Error => Color::opaque(220, 92, 92),
+            ReportSearchHighlight::Warning => Color::opaque(236, 194, 104),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportSearchPreset {
+    Errors,
+    Warnings,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReportSearchState {
+    pub query: String,
+    pub matches: Vec<usize>,
+    pub active_index: Option<usize>,
+    pub highlight: ReportSearchHighlight,
+    pub editing: bool,
+}
+
+impl ReportSearchState {
+    pub fn active_line(&self) -> Option<usize> {
+        self.active_index
+            .and_then(|index| self.matches.get(index).copied())
+    }
+
+    pub fn is_match(&self, line_index: usize) -> bool {
+        self.matches.binary_search(&line_index).is_ok()
+    }
+
+    pub fn match_summary(&self) -> Option<(usize, usize)> {
+        let total = self.matches.len();
+        if total == 0 {
+            None
+        } else {
+            let current = self.active_index.map(|index| index + 1).unwrap_or(1);
+            Some((current, total))
+        }
+    }
+}
+
 pub struct LauncherShellUi {
     gui: Gui,
     layout: LauncherShellLayout,
@@ -103,6 +178,7 @@ pub struct LauncherShellUi {
     feedback: Option<ActionFeedback>,
     providers: ProviderDiagnostics,
     report_scroll_offset: usize,
+    report_search: Option<ReportSearchState>,
 }
 
 impl LauncherShellUi {
@@ -114,6 +190,7 @@ impl LauncherShellUi {
             feedback: None,
             providers: ProviderDiagnostics::default(),
             report_scroll_offset: 0,
+            report_search: None,
         };
         ui.set_state(state)?;
         Ok(ui)
@@ -122,6 +199,9 @@ impl LauncherShellUi {
     pub fn set_state(&mut self, state: Option<LauncherShellState>) -> GuiResult<()> {
         self.state = state;
         self.report_scroll_offset = 0;
+        if self.state.is_none() {
+            self.report_search = None;
+        }
         self.rebuild()
     }
 
@@ -230,6 +310,67 @@ impl LauncherShellUi {
         self.rebuild()
     }
 
+    pub fn set_report_search(&mut self, report_search: Option<ReportSearchState>) -> GuiResult<()> {
+        self.report_search = report_search;
+        self.rebuild()
+    }
+
+    pub fn ensure_report_line_visible(&mut self, line_index: usize) -> GuiResult<()> {
+        let total_lines = self
+            .state
+            .as_ref()
+            .map(|state| state.support_bundle_report.len())
+            .unwrap_or(0);
+        if total_lines == 0 || line_index >= total_lines {
+            return Ok(());
+        }
+        let visible = REPORT_PREVIEW_VISIBLE_LINES.min(total_lines);
+        if total_lines <= visible {
+            self.report_scroll_offset = 0;
+            return self.rebuild();
+        }
+        let max_offset = total_lines.saturating_sub(visible);
+        let current = self.report_scroll_offset.min(max_offset);
+        if line_index < current {
+            self.report_scroll_offset = line_index;
+        } else if line_index >= current + visible {
+            let new_offset = line_index + 1 - visible;
+            self.report_scroll_offset = new_offset.min(max_offset);
+        }
+        self.rebuild()
+    }
+
+    pub fn report_search_focus_button(&self) -> Option<WidgetId> {
+        self.layout.report_search_focus_button
+    }
+
+    pub fn report_search_clear_button(&self) -> Option<WidgetId> {
+        self.layout.report_search_clear_button
+    }
+
+    pub fn report_search_next_button(&self) -> Option<WidgetId> {
+        self.layout.report_search_next_button
+    }
+
+    pub fn report_search_previous_button(&self) -> Option<WidgetId> {
+        self.layout.report_search_previous_button
+    }
+
+    pub fn report_search_error_button(&self) -> Option<WidgetId> {
+        self.layout.report_search_error_button
+    }
+
+    pub fn report_search_warning_button(&self) -> Option<WidgetId> {
+        self.layout.report_search_warning_button
+    }
+
+    pub fn report_search_status_text(&self) -> Option<&str> {
+        self.layout
+            .report_search_status
+            .as_ref()
+            .map(|text| text.as_str())
+    }
+
     fn rebuild(&mut self) -> GuiResult<()> {
         self.clamp_report_scroll_offset();
         let borrowed_state = self.state.as_ref();
@@ -239,6 +380,7 @@ impl LauncherShellUi {
             feedback,
             &self.providers,
             self.report_scroll_offset,
+            self.report_search.as_ref(),
         )?;
         self.gui = gui;
         self.layout = layout;
@@ -298,6 +440,13 @@ struct LauncherShellLayout {
     report_scroll_up_button: Option<WidgetId>,
     report_scroll_down_button: Option<WidgetId>,
     report_line_range: Option<String>,
+    report_search_focus_button: Option<WidgetId>,
+    report_search_clear_button: Option<WidgetId>,
+    report_search_next_button: Option<WidgetId>,
+    report_search_previous_button: Option<WidgetId>,
+    report_search_error_button: Option<WidgetId>,
+    report_search_warning_button: Option<WidgetId>,
+    report_search_status: Option<String>,
 }
 
 enum WidgetAction {
@@ -313,6 +462,11 @@ enum WidgetAction {
     CopyReportPreview,
     ExportReportPreview,
     ScrollReportPreview { delta: isize },
+    FocusReportSearch,
+    ClearReportSearch,
+    NextReportSearchMatch,
+    PreviousReportSearchMatch,
+    SetReportSearchPreset { preset: ReportSearchPreset },
 }
 
 impl WidgetAction {
@@ -364,6 +518,17 @@ impl WidgetAction {
             WidgetAction::ScrollReportPreview { delta } => {
                 Some(LauncherShellMessage::ScrollReportPreview { delta: *delta })
             }
+            WidgetAction::FocusReportSearch => Some(LauncherShellMessage::FocusReportSearch),
+            WidgetAction::ClearReportSearch => Some(LauncherShellMessage::ClearReportSearch),
+            WidgetAction::NextReportSearchMatch => {
+                Some(LauncherShellMessage::NextReportSearchMatch)
+            }
+            WidgetAction::PreviousReportSearchMatch => {
+                Some(LauncherShellMessage::PreviousReportSearchMatch)
+            }
+            WidgetAction::SetReportSearchPreset { preset } => {
+                Some(LauncherShellMessage::SetReportSearchPreset { preset: *preset })
+            }
         }
     }
 }
@@ -373,6 +538,7 @@ fn build_gui(
     feedback: Option<&ActionFeedback>,
     providers: &ProviderDiagnostics,
     report_scroll_offset: usize,
+    report_search: Option<&ReportSearchState>,
 ) -> GuiResult<(Gui, LauncherShellLayout)> {
     let mut gui = Gui::new();
     let mut layout = LauncherShellLayout::default();
@@ -552,9 +718,132 @@ fn build_gui(
                 gui.add_label(controls, range_label.clone());
                 layout.report_line_range = Some(range_label);
 
+                let search_controls = gui.add_row(report_section, false);
+                let search_active = report_search.map(|search| search.editing).unwrap_or(false);
+                let search_button_label = if search_active {
+                    "Search text (typing…)"
+                } else {
+                    "Search text…"
+                };
+                let focus_button = gui.add_button(search_controls, search_button_label);
+                layout.report_search_focus_button = Some(focus_button);
+                layout
+                    .action_map
+                    .insert(focus_button, WidgetAction::FocusReportSearch);
+
+                let clear_button = gui.add_button(search_controls, "Clear search");
+                layout.report_search_clear_button = Some(clear_button);
+                layout
+                    .action_map
+                    .insert(clear_button, WidgetAction::ClearReportSearch);
+
+                let error_button = gui.add_button(search_controls, "Find errors");
+                layout.report_search_error_button = Some(error_button);
+                layout.action_map.insert(
+                    error_button,
+                    WidgetAction::SetReportSearchPreset {
+                        preset: ReportSearchPreset::Errors,
+                    },
+                );
+
+                let warning_button = gui.add_button(search_controls, "Find warnings");
+                layout.report_search_warning_button = Some(warning_button);
+                layout.action_map.insert(
+                    warning_button,
+                    WidgetAction::SetReportSearchPreset {
+                        preset: ReportSearchPreset::Warnings,
+                    },
+                );
+
+                let previous_button = gui.add_button(search_controls, "Previous match");
+                layout.report_search_previous_button = Some(previous_button);
+                layout
+                    .action_map
+                    .insert(previous_button, WidgetAction::PreviousReportSearchMatch);
+
+                let next_button = gui.add_button(search_controls, "Next match");
+                layout.report_search_next_button = Some(next_button);
+                layout
+                    .action_map
+                    .insert(next_button, WidgetAction::NextReportSearchMatch);
+
+                let mut search_status = String::from(
+                    "Search inactive. Use quick filters or start typing to jump to matches.",
+                );
+                let mut has_query = false;
+                let mut match_count = 0usize;
+                let mut editing = false;
+                if let Some(search) = report_search {
+                    has_query = !search.query.is_empty();
+                    editing = search.editing;
+                    match_count = search.matches.len();
+                    if has_query {
+                        if match_count == 0 {
+                            search_status = format!(
+                                "Search ({}): no matches for \"{}\".",
+                                search.highlight.label(),
+                                search.query
+                            );
+                        } else if let Some((current, total)) = search.match_summary() {
+                            if editing {
+                                search_status = format!(
+                                    "Search ({}): \"{}\" (match {} of {}) — Enter to finish, Esc to clear.",
+                                    search.highlight.label(),
+                                    search.query,
+                                    current,
+                                    total
+                                );
+                            } else {
+                                search_status = format!(
+                                    "Search ({}): \"{}\" (match {} of {}).",
+                                    search.highlight.label(),
+                                    search.query,
+                                    current,
+                                    total
+                                );
+                            }
+                        }
+                    } else if editing {
+                        search_status = String::from(
+                            "Search active. Type a term to filter the report. Enter finishes, Esc clears.",
+                        );
+                    }
+                }
+
+                if !has_query && !editing {
+                    gui.set_button_enabled(clear_button, false)?;
+                    gui.set_button_enabled(previous_button, false)?;
+                    gui.set_button_enabled(next_button, false)?;
+                } else {
+                    if !has_query {
+                        gui.set_button_enabled(previous_button, false)?;
+                        gui.set_button_enabled(next_button, false)?;
+                    } else if match_count == 0 {
+                        gui.set_button_enabled(previous_button, false)?;
+                        gui.set_button_enabled(next_button, false)?;
+                    }
+                }
+
+                gui.add_label(search_controls, search_status.clone());
+                layout.report_search_status = Some(search_status);
+
                 let end = (offset + visible).min(total_lines);
-                for line in &state.support_bundle_report[offset..end] {
-                    gui.add_label(report_section, line.clone());
+                for (relative_index, line) in
+                    state.support_bundle_report[offset..end].iter().enumerate()
+                {
+                    let absolute_index = offset + relative_index;
+                    let label = gui.add_label(report_section, line.clone());
+                    if let Some(search) = report_search {
+                        if let Some(active_line) = search.active_line() {
+                            if active_line == absolute_index {
+                                gui.set_label_color(label, search.highlight.active_color())?;
+                                continue;
+                            }
+                        }
+                        if search.is_match(absolute_index) {
+                            gui.set_label_color(label, search.highlight.inactive_color())?;
+                        }
+                    }
                 }
                 if end < total_lines {
                     let remaining = total_lines - end;
@@ -1061,6 +1350,51 @@ mod tests {
             [LauncherShellMessage::ExportReportPreview]
         ));
 
+        let search_focus = ui
+            .report_search_focus_button()
+            .expect("report search focus button");
+        let search_focus_response = click_button(&mut ui, search_focus);
+        assert!(matches!(
+            search_focus_response.messages.as_slice(),
+            [LauncherShellMessage::FocusReportSearch]
+        ));
+
+        let search_error = ui
+            .report_search_error_button()
+            .expect("report search error button");
+        let search_error_response = click_button(&mut ui, search_error);
+        assert!(matches!(
+            search_error_response.messages.as_slice(),
+            [LauncherShellMessage::SetReportSearchPreset { preset }]
+                if *preset == ReportSearchPreset::Errors
+        ));
+
+        let search_warning = ui
+            .report_search_warning_button()
+            .expect("report search warning button");
+        let search_warning_response = click_button(&mut ui, search_warning);
+        assert!(matches!(
+            search_warning_response.messages.as_slice(),
+            [LauncherShellMessage::SetReportSearchPreset { preset }]
+                if *preset == ReportSearchPreset::Warnings
+        ));
+
+        if let Some(search_clear) = ui.report_search_clear_button() {
+            let search_clear_response = click_button(&mut ui, search_clear);
+            assert!(
+                search_clear_response.messages.is_empty(),
+                "clear search should be disabled before a query is active"
+            );
+        }
+
+        if let Some(search_next) = ui.report_search_next_button() {
+            let search_next_response = click_button(&mut ui, search_next);
+            assert!(
+                search_next_response.messages.is_empty(),
+                "next match should be disabled before a query is active"
+            );
+        }
+
         if let Some(scroll_up) = ui.report_scroll_up_button() {
             let scroll_up_response = click_button(&mut ui, scroll_up);
             assert!(
@@ -1139,6 +1473,47 @@ mod tests {
         let pos = center(rect);
         ui.handle_event(GuiEvent::PointerDown { position: pos });
         ui.handle_event(GuiEvent::PointerUp { position: pos })
+    }
+
+    #[test]
+    fn report_search_highlights_matches() {
+        let temp = TempDir::new().unwrap();
+        let mut state = sample_state(temp.path());
+        state.support_bundle_report = vec![
+            "all systems nominal".into(),
+            "ERROR: subsystem offline".into(),
+            "Warning: connection unstable".into(),
+        ];
+        let mut ui = LauncherShellUi::new(Some(state)).expect("ui");
+        let search_state = ReportSearchState {
+            query: "error".into(),
+            matches: vec![1],
+            active_index: Some(0),
+            highlight: ReportSearchHighlight::Error,
+            editing: false,
+        };
+        ui.set_report_search(Some(search_state))
+            .expect("set report search state");
+        ui.layout(Size::new(960.0, 1280.0));
+
+        let commands = ui.render();
+        let active_color = ReportSearchHighlight::Error.active_color();
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                DrawCommand::Text { text, color, .. }
+                    if text.contains("ERROR: subsystem offline") && *color == active_color
+            )),
+            "expected the active error line to be rendered with highlight colour"
+        );
+
+        let status = ui
+            .report_search_status_text()
+            .expect("report search status label");
+        assert!(
+            status.contains("match 1 of 1"),
+            "search status should summarise current match position"
+        );
     }
 
     fn center(rect: Rect) -> Point {

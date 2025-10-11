@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 lc-launcher = { path = "../lc-launcher" }
 lc-gui = { path = "../lc-gui" }
+lc-graphics = { path = "../lc-graphics" }
 
 [dev-dependencies]
 tempfile = "3.10"

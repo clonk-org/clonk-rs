@@ -21,13 +21,16 @@ use lc_launcher::{
 };
 use lc_launcher_ui::{
     ActionFeedback, LauncherShellMessage, LauncherShellResponse, LauncherShellUi, ProviderKind,
+    ReportSearchHighlight, ReportSearchPreset, ReportSearchState,
 };
 use lc_platform::AppPaths;
 use pixels::{Pixels, SurfaceTexture};
 use rfd::FileDialog;
 use serde::Serialize;
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{ElementState, Event, MouseButton, TouchPhase, VirtualKeyCode, WindowEvent};
+use winit::event::{
+    ElementState, Event, KeyboardInput, MouseButton, TouchPhase, VirtualKeyCode, WindowEvent,
+};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
 
@@ -82,6 +85,212 @@ fn enforce_min_size(size: PhysicalSize<u32>) -> (u32, u32) {
     (width, height)
 }
 
+struct ReportSearchController {
+    query: String,
+    normalized_query: String,
+    highlight: ReportSearchHighlight,
+    matches: Vec<usize>,
+    active_index: Option<usize>,
+    editing: bool,
+}
+
+impl Default for ReportSearchController {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            normalized_query: String::new(),
+            highlight: ReportSearchHighlight::Generic,
+            matches: Vec::new(),
+            active_index: None,
+            editing: false,
+        }
+    }
+}
+
+impl ReportSearchController {
+    fn is_active(&self) -> bool {
+        !self.query.is_empty()
+    }
+
+    fn editing(&self) -> bool {
+        self.editing
+    }
+
+    fn set_editing(&mut self, editing: bool) {
+        self.editing = editing;
+    }
+
+    fn clear(&mut self) {
+        self.query.clear();
+        self.normalized_query.clear();
+        self.highlight = ReportSearchHighlight::Generic;
+        self.matches.clear();
+        self.active_index = None;
+        self.editing = false;
+    }
+
+    fn apply_preset(&mut self, preset: ReportSearchPreset, lines: &[String]) {
+        let (query, highlight) = match preset {
+            ReportSearchPreset::Errors => ("error", ReportSearchHighlight::Error),
+            ReportSearchPreset::Warnings => ("warning", ReportSearchHighlight::Warning),
+        };
+        self.query = query.into();
+        self.normalized_query = self.query.to_lowercase();
+        self.highlight = highlight;
+        self.recompute_after_query_change(lines);
+        self.editing = false;
+    }
+
+    fn append_char(&mut self, ch: char, lines: &[String]) {
+        self.query.push(ch);
+        self.normalized_query = self.query.to_lowercase();
+        self.highlight = ReportSearchHighlight::Generic;
+        self.recompute_after_query_change(lines);
+    }
+
+    fn backspace(&mut self, lines: &[String]) {
+        if self.query.pop().is_some() {
+            self.normalized_query = self.query.to_lowercase();
+        } else {
+            self.normalized_query.clear();
+        }
+        self.highlight = ReportSearchHighlight::Generic;
+        self.recompute_after_query_change(lines);
+    }
+
+    fn refresh_for_lines(&mut self, lines: &[String]) {
+        if !self.editing && !self.is_active() {
+            self.matches.clear();
+            self.active_index = None;
+            return;
+        }
+        self.recompute_matches(lines, RecomputeMode::Preserve);
+    }
+
+    fn recompute_after_query_change(&mut self, lines: &[String]) {
+        if !self.has_search_term() {
+            self.matches.clear();
+            self.active_index = None;
+            return;
+        }
+        self.recompute_matches(lines, RecomputeMode::Reset);
+    }
+
+    fn next(&mut self) -> Option<usize> {
+        if self.matches.is_empty() {
+            self.active_index = None;
+            return None;
+        }
+        let next_index = match self.active_index {
+            Some(index) => (index + 1) % self.matches.len(),
+            None => 0,
+        };
+        self.active_index = Some(next_index);
+        self.matches.get(next_index).copied()
+    }
+
+    fn previous(&mut self) -> Option<usize> {
+        if self.matches.is_empty() {
+            self.active_index = None;
+            return None;
+        }
+        let previous_index = match self.active_index {
+            Some(0) | None => self.matches.len().saturating_sub(1),
+            Some(index) => index - 1,
+        };
+        self.active_index = Some(previous_index);
+        self.matches.get(previous_index).copied()
+    }
+
+    fn active_line(&self) -> Option<usize> {
+        self.active_index
+            .and_then(|index| self.matches.get(index).copied())
+    }
+
+    fn match_count(&self) -> usize {
+        self.matches.len()
+    }
+
+    fn has_matches(&self) -> bool {
+        !self.matches.is_empty()
+    }
+
+    fn ui_state(&self) -> Option<ReportSearchState> {
+        if !self.editing && !self.is_active() {
+            None
+        } else {
+            Some(ReportSearchState {
+                query: self.query.clone(),
+                matches: self.matches.clone(),
+                active_index: self.active_index,
+                highlight: self.highlight,
+                editing: self.editing,
+            })
+        }
+    }
+
+    fn query(&self) -> &str {
+        &self.query
+    }
+
+    fn highlight(&self) -> ReportSearchHighlight {
+        self.highlight
+    }
+
+    fn has_search_term(&self) -> bool {
+        match self.highlight {
+            ReportSearchHighlight::Generic => !self.normalized_query.is_empty(),
+            ReportSearchHighlight::Error | ReportSearchHighlight::Warning => true,
+        }
+    }
+
+    fn recompute_matches(&mut self, lines: &[String], mode: RecomputeMode) {
+        let previous_line = match mode {
+            RecomputeMode::Reset => None,
+            RecomputeMode::Preserve => self.active_line(),
+        };
+
+        self.matches.clear();
+        if !self.has_search_term() {
+            self.active_index = None;
+            return;
+        }
+
+        for (index, line) in lines.iter().enumerate() {
+            if self.matches_line(line) {
+                self.matches.push(index);
+            }
+        }
+
+        if self.matches.is_empty() {
+            self.active_index = None;
+        } else if let Some(previous_line) = previous_line {
+            self.active_index = self.matches.binary_search(&previous_line).ok().or(Some(0));
+        } else {
+            self.active_index = Some(0);
+        }
+    }
+
+    fn matches_line(&self, line: &str) -> bool {
+        if !self.has_search_term() {
+            return false;
+        }
+        let lower = line.to_lowercase();
+        match self.highlight {
+            ReportSearchHighlight::Generic => lower.contains(&self.normalized_query),
+            ReportSearchHighlight::Error => {
+                lower.contains("error") || lower.contains("failed") || lower.contains("fatal")
+            }
+            ReportSearchHighlight::Warning => lower.contains("warning") || lower.contains("warn"),
+        }
+    }
+}
+
+enum RecomputeMode {
+    Reset,
+    Preserve,
+}
+
 struct LauncherApp {
     paths: AppPaths,
     logger: ShellLogger,
@@ -90,6 +299,7 @@ struct LauncherApp {
     preferences: LauncherPreferences,
     providers: FirstPartyProviders,
     pointer_position: Option<GuiPoint>,
+    report_search: ReportSearchController,
 }
 
 impl LauncherApp {
@@ -131,6 +341,7 @@ impl LauncherApp {
             preferences,
             providers,
             pointer_position: None,
+            report_search: ReportSearchController::default(),
         };
         app.refresh_state()
             .context("failed to load launcher state")?;
@@ -175,12 +386,20 @@ impl LauncherApp {
                 }
             }
             WindowEvent::KeyboardInput { input, .. } => {
+                if self.handle_keyboard_input(&input)? {
+                    return Ok(());
+                }
                 if let Some(key) = input.virtual_keycode.and_then(map_key_code) {
                     let event = match input.state {
                         ElementState::Pressed => GuiEvent::KeyDown { key },
                         ElementState::Released => GuiEvent::KeyUp { key },
                     };
                     self.dispatch_gui_event(event)?;
+                }
+            }
+            WindowEvent::ReceivedCharacter(ch) => {
+                if self.handle_received_character(ch)? {
+                    return Ok(());
                 }
             }
             WindowEvent::Touch(touch) => {
@@ -217,7 +436,6 @@ impl LauncherApp {
             WindowEvent::ThemeChanged(_)
             | WindowEvent::ModifiersChanged(_)
             | WindowEvent::MouseWheel { .. }
-            | WindowEvent::ReceivedCharacter(_)
             | WindowEvent::Ime(_)
             | WindowEvent::TouchpadPressure { .. }
             | WindowEvent::AxisMotion { .. }
@@ -229,6 +447,205 @@ impl LauncherApp {
             | WindowEvent::Destroyed => {}
         }
         Ok(())
+    }
+
+    fn report_has_any_lines(&self) -> bool {
+        matches!(self.ui.state(), Some(state) if !state.support_bundle_report.is_empty())
+    }
+
+    fn sync_report_search_state(&mut self) -> Result<()> {
+        let state = self.report_search.ui_state();
+        self.ui
+            .set_report_search(state)
+            .map_err(|err| anyhow!(err))
+            .context("failed to update report search UI")
+    }
+
+    fn ensure_active_match_visible(&mut self) -> Result<()> {
+        if let Some(line) = self.report_search.active_line() {
+            self.ui
+                .ensure_report_line_visible(line)
+                .map_err(|err| anyhow!(err))
+                .context("failed to align report preview with search result")?;
+        }
+        Ok(())
+    }
+
+    fn append_report_search_character(&mut self, ch: char) -> Result<()> {
+        if !self.report_has_any_lines() {
+            return Ok(());
+        }
+        {
+            let Some(state) = self.ui.state() else {
+                return Ok(());
+            };
+            self.report_search
+                .append_char(ch, &state.support_bundle_report);
+        }
+        self.sync_report_search_state()?;
+        self.ensure_active_match_visible()
+    }
+
+    fn backspace_report_search(&mut self) -> Result<()> {
+        if !self.report_search.editing() {
+            return Ok(());
+        }
+        {
+            let Some(state) = self.ui.state() else {
+                return Ok(());
+            };
+            self.report_search.backspace(&state.support_bundle_report);
+        }
+        self.sync_report_search_state()?;
+        self.ensure_active_match_visible()
+    }
+
+    fn finish_report_search_editing(&mut self) -> Result<()> {
+        if !self.report_search.editing() {
+            return Ok(());
+        }
+        self.report_search.set_editing(false);
+        self.sync_report_search_state()
+    }
+
+    fn focus_report_search(&mut self) -> Result<()> {
+        if !self.report_has_any_lines() {
+            self.set_feedback(ActionFeedback::info(
+                "Launch `lc-game` once to generate diagnostics before searching the support bundle report.",
+            ))?;
+            return Ok(());
+        }
+        self.logger
+            .log_line("report search focus requested via diagnostics UI")
+            .context("failed to log report search focus request")?;
+        self.report_search.set_editing(true);
+        self.sync_report_search_state()?;
+        self.set_feedback(ActionFeedback::info(
+            "Search activated. Type to filter the report, press Enter to accept, Esc to clear.",
+        ))?;
+        Ok(())
+    }
+
+    fn clear_report_search(&mut self) -> Result<()> {
+        if !self.report_search.editing() && !self.report_search.is_active() {
+            return Ok(());
+        }
+        self.logger
+            .log_line("report search cleared via diagnostics UI")
+            .context("failed to log report search clear action")?;
+        self.report_search.clear();
+        self.sync_report_search_state()?;
+        self.set_feedback(ActionFeedback::info("Search cleared."))?;
+        Ok(())
+    }
+
+    fn apply_report_search_preset(&mut self, preset: ReportSearchPreset) -> Result<()> {
+        if !self.report_has_any_lines() {
+            self.set_feedback(ActionFeedback::info(
+                "Launch `lc-game` once to generate diagnostics before searching the support bundle report.",
+            ))?;
+            return Ok(());
+        }
+        self.logger
+            .log_line(&format!(
+                "report search preset {:?} requested via diagnostics UI",
+                preset
+            ))
+            .context("failed to log report search preset request")?;
+        let match_count = {
+            let Some(state) = self.ui.state() else {
+                return Ok(());
+            };
+            self.report_search
+                .apply_preset(preset, &state.support_bundle_report);
+            self.report_search.match_count()
+        };
+        self.sync_report_search_state()?;
+        self.ensure_active_match_visible()?;
+        if match_count == 0 {
+            let label = match preset {
+                ReportSearchPreset::Errors => "errors or failures",
+                ReportSearchPreset::Warnings => "warnings",
+            };
+            self.set_feedback(ActionFeedback::info(format!(
+                "No {label} were detected in the report."
+            )))?;
+        } else {
+            let descriptor = match preset {
+                ReportSearchPreset::Errors => "error",
+                ReportSearchPreset::Warnings => "warning",
+            };
+            self.set_feedback(ActionFeedback::info(format!(
+                "Found {match_count} {descriptor} match{} in the report.",
+                if match_count == 1 { "" } else { "es" }
+            )))?;
+        }
+        Ok(())
+    }
+
+    fn next_report_search_match(&mut self) -> Result<()> {
+        if !self.report_search.has_matches() {
+            if self.report_search.is_active() {
+                let term = self.report_search.query();
+                if term.is_empty() {
+                    self.set_feedback(ActionFeedback::info(
+                        "No matches are available for the current search.",
+                    ))?;
+                } else {
+                    self.set_feedback(ActionFeedback::info(format!(
+                        "No matches found for \"{term}\"."
+                    )))?;
+                }
+            }
+            return Ok(());
+        }
+        self.logger
+            .log_line("report search next match requested via diagnostics UI")
+            .context("failed to log next search match request")?;
+        self.report_search.next();
+        self.sync_report_search_state()?;
+        self.ensure_active_match_visible()
+    }
+
+    fn previous_report_search_match(&mut self) -> Result<()> {
+        if !self.report_search.has_matches() {
+            if self.report_search.is_active() {
+                let term = self.report_search.query();
+                if term.is_empty() {
+                    self.set_feedback(ActionFeedback::info(
+                        "No matches are available for the current search.",
+                    ))?;
+                } else {
+                    self.set_feedback(ActionFeedback::info(format!(
+                        "No matches found for \"{term}\"."
+                    )))?;
+                }
+            }
+            return Ok(());
+        }
+        self.logger
+            .log_line("report search previous match requested via diagnostics UI")
+            .context("failed to log previous search match request")?;
+        self.report_search.previous();
+        self.sync_report_search_state()?;
+        self.ensure_active_match_visible()
+    }
+
+    fn refresh_report_search_for_state(&mut self) -> Result<()> {
+        if !self.report_search.editing() && !self.report_search.is_active() {
+            self.report_search.matches.clear();
+            self.report_search.active_index = None;
+            return self.sync_report_search_state();
+        }
+        if let Some(state) = self.ui.state() {
+            self.report_search
+                .refresh_for_lines(&state.support_bundle_report);
+            self.sync_report_search_state()?;
+            self.ensure_active_match_visible()
+        } else {
+            self.report_search.clear();
+            self.sync_report_search_state()
+        }
     }
 
     fn handle_resize(&mut self, size: PhysicalSize<u32>, pixels: &mut Pixels) -> Result<()> {
@@ -248,6 +665,68 @@ impl LauncherApp {
     fn dispatch_gui_event(&mut self, event: GuiEvent) -> Result<()> {
         let response = self.ui.handle_event(event);
         self.process_response(response)
+    }
+
+    fn handle_keyboard_input(&mut self, input: &KeyboardInput) -> Result<bool> {
+        if input.state != ElementState::Pressed {
+            return Ok(false);
+        }
+        let Some(key) = input.virtual_keycode else {
+            return Ok(false);
+        };
+        match key {
+            VirtualKeyCode::Escape => {
+                if self.report_search.editing() || self.report_search.is_active() {
+                    self.clear_report_search()?;
+                    return Ok(true);
+                }
+            }
+            VirtualKeyCode::Return => {
+                if self.report_search.editing() {
+                    self.finish_report_search_editing()?;
+                    return Ok(true);
+                }
+            }
+            VirtualKeyCode::Back => {
+                if self.report_search.editing() {
+                    self.backspace_report_search()?;
+                    return Ok(true);
+                }
+            }
+            VirtualKeyCode::Up => {
+                if self.report_search.has_matches() {
+                    self.previous_report_search_match()?;
+                    return Ok(true);
+                }
+            }
+            VirtualKeyCode::Down => {
+                if self.report_search.has_matches() {
+                    self.next_report_search_match()?;
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn handle_received_character(&mut self, ch: char) -> Result<bool> {
+        if !self.report_search.editing() {
+            return Ok(false);
+        }
+        if ch == '\u{8}' || ch == '\u{7f}' {
+            // Backspace/delete are handled via keyboard events.
+            return Ok(true);
+        }
+        if ch == '\r' || ch == '\n' {
+            self.finish_report_search_editing()?;
+            return Ok(true);
+        }
+        if ch.is_control() {
+            return Ok(true);
+        }
+        self.append_report_search_character(ch)?;
+        Ok(true)
     }
 
     fn process_response(&mut self, response: LauncherShellResponse) -> Result<()> {
@@ -412,6 +891,21 @@ impl LauncherApp {
 
     fn handle_message(&mut self, message: LauncherShellMessage) -> Result<()> {
         match message {
+            LauncherShellMessage::FocusReportSearch => {
+                self.focus_report_search()?;
+            }
+            LauncherShellMessage::ClearReportSearch => {
+                self.clear_report_search()?;
+            }
+            LauncherShellMessage::NextReportSearchMatch => {
+                self.next_report_search_match()?;
+            }
+            LauncherShellMessage::PreviousReportSearchMatch => {
+                self.previous_report_search_match()?;
+            }
+            LauncherShellMessage::SetReportSearchPreset { preset } => {
+                self.apply_report_search_preset(preset)?;
+            }
             LauncherShellMessage::RegenerateSupportBundle => {
                 let state = match self.ui.state().cloned() {
                     Some(state) => state,
@@ -1370,6 +1864,8 @@ impl LauncherApp {
                     .context("failed to reset launcher UI state")?;
             }
         }
+        self.refresh_report_search_for_state()
+            .context("failed to refresh report search state")?;
         self.update_provider_diagnostics()
             .context("failed to refresh provider diagnostics")?;
         Ok(())

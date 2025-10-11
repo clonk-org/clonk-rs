@@ -1854,6 +1854,7 @@ dependencies = [
 name = "lc-launcher-ui"
 version = "0.1.0"
 dependencies = [
+ "lc-graphics",
  "lc-gui",
  "lc-launcher",
  "tempfile",

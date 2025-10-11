@@ -511,6 +511,17 @@ impl Gui {
         }
     }
 
+    pub fn set_label_color(&mut self, id: WidgetId, color: Color) -> GuiResult<()> {
+        let node = self.widget_mut(id)?;
+        match &mut node.kind {
+            WidgetKind::Label(label) => {
+                label.color = color;
+                Ok(())
+            }
+            kind => Err(wrong_widget_type(id, "label", kind)),
+        }
+    }
+
     pub fn set_button_text(&mut self, id: WidgetId, text: impl Into<String>) -> GuiResult<()> {
         let node = self.widget_mut(id)?;
         match &mut node.kind {
