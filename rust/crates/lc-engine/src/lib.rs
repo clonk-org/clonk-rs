@@ -6,6 +6,7 @@ pub mod ffi;
 pub mod fixtures;
 mod input;
 mod landscape;
+mod math;
 mod pathfinder;
 mod record;
 pub mod scenario;

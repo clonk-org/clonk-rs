@@ -1,3 +1,4 @@
+use crate::math::integer_distance;
 use crate::{Landscape, ObjectId, TransferZoneState, Vector2};
 use std::cell::RefCell;
 
@@ -284,7 +285,7 @@ impl PathBuilder {
         if let Some(last) = self.waypoints.last() {
             self.length = self
                 .length
-                .saturating_add(distance(last.x, last.y, waypoint.x, waypoint.y));
+                .saturating_add(integer_distance(last.x, last.y, waypoint.x, waypoint.y));
         }
         self.waypoints.push(waypoint);
     }
@@ -641,13 +642,13 @@ impl<'a> PathFinderState<'a> {
             let mut from_x = x2;
             let mut from_y = y2;
             let direct = self.path_free(false, &mut from_x, &mut from_y, target_x, target_y);
-            let start_dist = distance(from_x, from_y, x2, y2);
+            let start_dist = integer_distance(from_x, from_y, x2, y2);
             let crawl_start = {
                 let ray = self.rays[index].borrow();
                 (ray.crawl_start_x, ray.crawl_start_y)
             };
-            let new_dist = distance(from_x, from_y, crawl_start.0, crawl_start.1);
-            let old_dist = distance(x2, y2, crawl_start.0, crawl_start.1);
+            let new_dist = integer_distance(from_x, from_y, crawl_start.0, crawl_start.1);
+            let old_dist = integer_distance(x2, y2, crawl_start.0, crawl_start.1);
             if direct.free || (start_dist > THRESHOLD && new_dist > old_dist) {
                 let depth = self.rays[index].borrow().depth + 1;
                 if !self.add_ray(
@@ -1095,23 +1096,6 @@ fn inside(value: i32, min_value: i32, max_value: i32) -> bool {
     value >= min_value && value <= max_value
 }
 
-fn distance(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
-    let dx = i64::from(x1) - i64::from(x2);
-    let dy = i64::from(y1) - i64::from(y2);
-    let d2 = dx * dx + dy * dy;
-    if d2 < 0 {
-        return -1;
-    }
-    let mut dist = (d2 as f64).sqrt() as i32;
-    if i64::from(dist) * i64::from(dist) < d2 {
-        dist += 1;
-    }
-    if i64::from(dist) * i64::from(dist) > d2 {
-        dist -= 1;
-    }
-    dist
-}
-
 fn turn_attach(attach: i32, direction: i32) -> i32 {
     let mut result = attach + direction;
     if result > CRAWL_LEFT {
@@ -1159,7 +1143,7 @@ mod tests {
         assert_eq!((first.x, first.y), (2, 5));
         let last = path.waypoints.last().expect("has target");
         assert_eq!((last.x, last.y), (20, 5));
-        assert_eq!(path.length, distance(2, 5, 20, 5));
+        assert_eq!(path.length, integer_distance(2, 5, 20, 5));
     }
 
     #[test]

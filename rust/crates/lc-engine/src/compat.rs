@@ -4,6 +4,7 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
+use crate::math::integer_distance;
 #[cfg(test)]
 use crate::LiquidSegment;
 use crate::{
@@ -829,6 +830,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("FindObject", find_object);
     script.register_host_function("FindObjects", find_objects);
     script.register_host_function("ObjectCount", object_count);
+    script.register_host_function("ObjectDistance", object_distance);
     script.register_host_function("GetX", get_x);
     script.register_host_function("GetY", get_y);
     script.register_host_function("SetPosition", set_position);
@@ -3900,6 +3902,67 @@ fn get_position_component(
 
         let position = object.effective_position();
         Ok(Value::Int(component.extract(position)))
+    })
+}
+
+fn object_distance(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(RuntimeError::new(
+            "ObjectDistance expects 1 or 2 arguments: other, object",
+        ));
+    }
+
+    let other_id = match parse_object_reference_argument(&args[0], "ObjectDistance", "other")? {
+        Some(id) => id,
+        None => return Ok(Value::Nil),
+    };
+
+    let mut reference_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(1) {
+        reference_id = parse_object_reference_argument(arg, "ObjectDistance", "object")?;
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let locate_position = |id: ObjectId| -> Option<Vector2> {
+            if let Some(object) = context.object_context() {
+                if object.id() == id {
+                    return Some(object.effective_position());
+                }
+            }
+            context.get_world_object(id).map(|object| object.position())
+        };
+
+        let anchor_position = if let Some(id) = reference_id {
+            locate_position(id)
+        } else {
+            context
+                .object_context()
+                .map(|object| object.effective_position())
+        };
+
+        let anchor_position = match anchor_position {
+            Some(position) => position,
+            None => return Ok(Value::Nil),
+        };
+
+        let other_position = match locate_position(other_id) {
+            Some(position) => position,
+            None => return Ok(Value::Nil),
+        };
+
+        let distance = integer_distance(
+            anchor_position.x,
+            anchor_position.y,
+            other_position.x,
+            other_position.y,
+        );
+        Ok(Value::Int(distance))
     })
 }
 
@@ -7763,6 +7826,157 @@ mod tests {
         let (result, _) =
             with_effect_context(None, &[], HostWorldContext::default(), 1, || get_y(&args));
         let value = result.expect("GetY handles missing target");
+        assert_eq!(value, Value::Nil);
+    }
+
+    #[test]
+    fn object_distance_defaults_to_context_object() {
+        let context_id = ObjectId::new(1);
+        let other_id = ObjectId::new(2);
+        let world = HostWorldContext::from_objects(vec![
+            HostWorldObject::new(
+                context_id,
+                "Clonk",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(10, 15),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+            HostWorldObject::new(
+                other_id,
+                "Dummy",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(25, 30),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+        ]);
+        let args = [object_reference_value(other_id)];
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                context_id,
+                None,
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::new(10, 15),
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+            )),
+            &[],
+            world,
+            3,
+            || object_distance(&args),
+        );
+        let value = result.expect("ObjectDistance succeeds");
+        assert_eq!(value, Value::Int(integer_distance(10, 15, 25, 30)));
+    }
+
+    #[test]
+    fn object_distance_accepts_explicit_anchor_without_host_object() {
+        let anchor_id = ObjectId::new(5);
+        let other_id = ObjectId::new(6);
+        let world = HostWorldContext::from_objects(vec![
+            HostWorldObject::new(
+                anchor_id,
+                "Anchor",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(-40, 12),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+            HostWorldObject::new(
+                other_id,
+                "Target",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(-10, -18),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+        ]);
+        let args = [
+            object_reference_value(other_id),
+            object_reference_value(anchor_id),
+        ];
+        let (result, _) = with_effect_context(None, &[], world, 10, || object_distance(&args));
+        let value = result.expect("ObjectDistance with explicit anchor succeeds");
+        assert_eq!(value, Value::Int(integer_distance(-40, 12, -10, -18)));
+    }
+
+    #[test]
+    fn object_distance_returns_nil_when_other_missing() {
+        let args = [object_reference_value(ObjectId::new(99))];
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(3),
+                None,
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::new(0, 0),
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+            )),
+            &[],
+            HostWorldContext::default(),
+            4,
+            || object_distance(&args),
+        );
+        let value = result.expect("ObjectDistance with missing other succeeds");
         assert_eq!(value, Value::Nil);
     }
 
