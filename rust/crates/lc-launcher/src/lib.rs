@@ -11,7 +11,10 @@ mod time;
 
 pub use bundle::{append_support_bundle_report, create_support_bundle, regenerate_support_bundle};
 pub use log::LauncherLog;
-pub use preferences::{load_launcher_preferences, save_launcher_preferences, LauncherPreferences};
+pub use preferences::{
+    load_launcher_preferences, save_launcher_preferences, LauncherPreferences,
+    ReportSearchHighlightPreference, ReportSearchPreferences,
+};
 pub use provider::{
     ProviderAutomationState, ProviderDiagnostics, ProviderOverrideSource, ProviderPathProvenance,
     ProviderPathStatus, ProviderStatus,

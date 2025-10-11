@@ -16,6 +16,8 @@ pub struct LauncherPreferences {
     pub last_upload_destination: Option<String>,
     #[serde(default)]
     provider_overrides: HashMap<String, String>,
+    #[serde(default)]
+    report_search: Option<ReportSearchPreferences>,
 }
 
 impl LauncherPreferences {
@@ -63,10 +65,34 @@ impl LauncherPreferences {
     pub fn clear_all_provider_overrides(&mut self) {
         self.provider_overrides.clear();
     }
+
+    pub fn report_search(&self) -> Option<&ReportSearchPreferences> {
+        self.report_search.as_ref()
+    }
+
+    pub fn set_report_search(&mut self, search: Option<ReportSearchPreferences>) {
+        self.report_search = search;
+    }
 }
 
 fn override_key(role: &str, name: &str) -> String {
     format!("{role}:{name}")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReportSearchPreferences {
+    pub query: String,
+    pub highlight: ReportSearchHighlightPreference,
+    #[serde(default)]
+    pub active_line: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportSearchHighlightPreference {
+    Generic,
+    Error,
+    Warning,
 }
 
 pub fn load_launcher_preferences(paths: &AppPaths) -> Result<LauncherPreferences> {
@@ -171,6 +197,11 @@ mod tests {
         updated.last_upload_destination = Some("/tmp/upload-target".into());
         updated.set_provider_override("share", "Support Share Drop", Path::new("/tmp/share"));
         updated.set_provider_override("upload", "Support Upload Drop", Path::new("/tmp/upload"));
+        updated.set_report_search(Some(ReportSearchPreferences {
+            query: "error".into(),
+            highlight: ReportSearchHighlightPreference::Error,
+            active_line: Some(42),
+        }));
 
         let written = save_launcher_preferences(&paths, &updated).expect("write prefs");
         assert!(written.ends_with(PREFERENCES_FILE));
@@ -198,6 +229,10 @@ mod tests {
         assert_eq!(
             reloaded.provider_override_path("upload", "Support Upload Drop"),
             Some(PathBuf::from("/tmp/upload"))
+        );
+        assert_eq!(
+            reloaded.report_search().cloned(),
+            updated.report_search().cloned()
         );
     }
 }

@@ -17,7 +17,8 @@ use lc_launcher::{
     ProviderAutomationRecord, ProviderAutomationSnapshot, ProviderAutomationState,
     ProviderBulkRetargetRecord, ProviderBulkRetargetSummary, ProviderDiagnostics,
     ProviderOverrideSource, ProviderOverrideSourceRecord, ProviderPathProvenance,
-    ProviderPathStatus, ProviderStatus, SupportArtifact, UpdateTelemetrySummary,
+    ProviderPathStatus, ProviderStatus, ReportSearchHighlightPreference, ReportSearchPreferences,
+    SupportArtifact, UpdateTelemetrySummary,
 };
 use lc_launcher_ui::{
     ActionFeedback, LauncherShellMessage, LauncherShellResponse, LauncherShellUi, ProviderKind,
@@ -104,6 +105,22 @@ impl Default for ReportSearchController {
             active_index: None,
             editing: false,
         }
+    }
+}
+
+fn highlight_to_preference(highlight: ReportSearchHighlight) -> ReportSearchHighlightPreference {
+    match highlight {
+        ReportSearchHighlight::Generic => ReportSearchHighlightPreference::Generic,
+        ReportSearchHighlight::Error => ReportSearchHighlightPreference::Error,
+        ReportSearchHighlight::Warning => ReportSearchHighlightPreference::Warning,
+    }
+}
+
+fn preference_to_highlight(preference: ReportSearchHighlightPreference) -> ReportSearchHighlight {
+    match preference {
+        ReportSearchHighlightPreference::Generic => ReportSearchHighlight::Generic,
+        ReportSearchHighlightPreference::Error => ReportSearchHighlight::Error,
+        ReportSearchHighlightPreference::Warning => ReportSearchHighlight::Warning,
     }
 }
 
@@ -215,6 +232,80 @@ impl ReportSearchController {
         !self.matches.is_empty()
     }
 
+    fn persisted_preferences(&self) -> Option<ReportSearchPreferences> {
+        if !self.has_search_term() {
+            return None;
+        }
+        Some(ReportSearchPreferences {
+            query: self.query.clone(),
+            highlight: highlight_to_preference(self.highlight),
+            active_line: self.active_line(),
+        })
+    }
+
+    fn restore_from_preferences(
+        &mut self,
+        preferences: &ReportSearchPreferences,
+        lines: &[String],
+    ) {
+        self.query = preferences.query.clone();
+        self.normalized_query = self.query.to_lowercase();
+        self.highlight = preference_to_highlight(preferences.highlight);
+        self.editing = false;
+        self.recompute_matches(lines, RecomputeMode::Reset);
+        if let Some(line) = preferences.active_line {
+            if let Ok(index) = self.matches.binary_search(&line) {
+                self.active_index = Some(index);
+            }
+        }
+    }
+
+    fn export_annotations(&self, lines: &[String]) -> Option<Vec<String>> {
+        if !self.has_search_term() {
+            return None;
+        }
+
+        let mut annotations = Vec::new();
+        annotations.push(String::new());
+        let label = self.highlight.label();
+        let query_display = if self.highlight == ReportSearchHighlight::Generic {
+            if self.query.is_empty() {
+                "<none>".into()
+            } else {
+                format!("\"{}\"", self.query)
+            }
+        } else {
+            format!("\"{}\"", self.query)
+        };
+
+        if self.matches.is_empty() {
+            annotations.push(format!(
+                "Search ({label}): {query_display} — no matches found."
+            ));
+            return Some(annotations);
+        }
+
+        annotations.push(format!(
+            "Search ({label}): {query_display} — {} match(es).",
+            self.matches.len()
+        ));
+        for (index, line_index) in self.matches.iter().enumerate() {
+            let line_number = *line_index + 1;
+            let prefix = if Some(index) == self.active_index {
+                "  *"
+            } else {
+                "   "
+            };
+            let line_text = lines
+                .get(*line_index)
+                .map(|line| line.as_str())
+                .unwrap_or("<line unavailable>");
+            annotations.push(format!("{prefix} Line {line_number}: {line_text}"));
+        }
+
+        Some(annotations)
+    }
+
     fn ui_state(&self) -> Option<ReportSearchState> {
         if !self.editing && !self.is_active() {
             None
@@ -231,10 +322,6 @@ impl ReportSearchController {
 
     fn query(&self) -> &str {
         &self.query
-    }
-
-    fn highlight(&self) -> ReportSearchHighlight {
-        self.highlight
     }
 
     fn has_search_term(&self) -> bool {
@@ -345,6 +432,8 @@ impl LauncherApp {
         };
         app.refresh_state()
             .context("failed to load launcher state")?;
+        app.restore_report_search_from_preferences()
+            .context("failed to restore report search context")?;
         Ok(app)
     }
 
@@ -458,7 +547,18 @@ impl LauncherApp {
         self.ui
             .set_report_search(state)
             .map_err(|err| anyhow!(err))
-            .context("failed to update report search UI")
+            .context("failed to update report search UI")?;
+        self.update_report_search_preferences();
+        Ok(())
+    }
+
+    fn update_report_search_preferences(&mut self) {
+        let new_preference = self.report_search.persisted_preferences();
+        let existing = self.preferences.report_search().cloned();
+        if existing != new_preference {
+            self.preferences.set_report_search(new_preference);
+            self.persist_preferences();
+        }
     }
 
     fn ensure_active_match_visible(&mut self) -> Result<()> {
@@ -842,6 +942,21 @@ impl LauncherApp {
                 .logger
                 .log_line(&format!("failed to persist launcher preferences: {err}"));
         }
+    }
+
+    fn restore_report_search_from_preferences(&mut self) -> Result<()> {
+        let Some(preference) = self.preferences.report_search().cloned() else {
+            return Ok(());
+        };
+        let lines = self
+            .ui
+            .state()
+            .map(|state| state.support_bundle_report.clone())
+            .unwrap_or_default();
+        self.report_search
+            .restore_from_preferences(&preference, &lines);
+        self.sync_report_search_state()?;
+        self.ensure_active_match_visible()
     }
 
     fn remember_bundle_destination(&mut self, path: &Path) {
@@ -1311,16 +1426,19 @@ impl LauncherApp {
     }
 
     fn report_preview_text(&self) -> Option<(String, usize)> {
-        self.ui.state().and_then(|state| {
-            if state.support_bundle_report.is_empty() {
-                None
-            } else {
-                Some((
-                    state.support_bundle_report.join("\n"),
-                    state.support_bundle_report.len(),
-                ))
-            }
-        })
+        let state = self.ui.state()?;
+        if state.support_bundle_report.is_empty() {
+            return None;
+        }
+        let mut export_lines = state.support_bundle_report.clone();
+        if let Some(annotations) = self
+            .report_search
+            .export_annotations(&state.support_bundle_report)
+        {
+            export_lines.extend(annotations);
+        }
+        let line_count = export_lines.len();
+        Some((export_lines.join("\n"), line_count))
     }
 
     fn handle_restage_provider(&mut self, kind: ProviderKind, index: usize) -> Result<()> {
