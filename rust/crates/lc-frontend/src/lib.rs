@@ -1,6 +1,6 @@
 mod input;
 
-use lc_engine::{Landscape, ObjectSnapshot, SimulationSnapshot};
+use lc_engine::{EnvironmentSettings, Landscape, ObjectSnapshot, SimulationSnapshot};
 use lc_graphics::{Color, Surface};
 use lc_gui::{
     DrawCommand, Gui, GuiResult, Point as GuiPoint, Rect as GuiRect, Size as GuiSize, WidgetId,
@@ -108,15 +108,21 @@ impl GraphicsSystem {
         self.update_viewport(focus);
 
         let environment = &snapshot.environment;
+        let lighting = Self::lighting_factor(environment.settings.time_of_day);
         let sky = environment
             .sky_color
             .map(|color| Color::opaque(color.r, color.g, color.b))
             .unwrap_or_else(|| Self::sky_color_for_temperature(environment.ambient_temperature));
+        let sky = Self::apply_lighting(sky, lighting);
 
         self.surface.fill(sky);
-        self.draw_precipitation(environment.precipitation, snapshot.frame);
-        self.draw_ground(environment.ambient_temperature, snapshot.landscape.as_ref());
-        self.draw_objects(&snapshot.objects);
+        self.draw_precipitation(environment.precipitation, snapshot.frame, lighting);
+        self.draw_ground(
+            environment.ambient_temperature,
+            snapshot.landscape.as_ref(),
+            lighting,
+        );
+        self.draw_objects(&snapshot.objects, lighting);
         self.draw_gui_overlay();
     }
 
@@ -159,7 +165,7 @@ impl GraphicsSystem {
         }
     }
 
-    fn draw_precipitation(&mut self, precipitation: i32, frame: u64) {
+    fn draw_precipitation(&mut self, precipitation: i32, frame: u64, lighting: f32) {
         if precipitation == 0 {
             return;
         }
@@ -176,7 +182,7 @@ impl GraphicsSystem {
                     if y < 0 {
                         continue;
                     }
-                    let color = Color::new(148, 176, 220, 160);
+                    let color = Color::new(148, 176, 220, 160).modulate(lighting);
                     let _ = self.surface.set_pixel(x, y as u32, color);
                 }
             }
@@ -192,14 +198,23 @@ impl GraphicsSystem {
                     Color::new(212, 180, 88, 200)
                 } else {
                     Color::new(176, 132, 64, 180)
-                };
+                }
+                .modulate(lighting);
                 let _ = self.surface.set_pixel(x, y, color);
             }
         }
     }
 
-    fn draw_ground(&mut self, ambient_temperature: i32, landscape: Option<&Landscape>) {
-        let ground_color = Self::ground_color_for_temperature(ambient_temperature);
+    fn draw_ground(
+        &mut self,
+        ambient_temperature: i32,
+        landscape: Option<&Landscape>,
+        lighting: f32,
+    ) {
+        let ground_color = Self::apply_lighting(
+            Self::ground_color_for_temperature(ambient_temperature),
+            lighting,
+        );
         for screen_x in 0..self.surface_width {
             let world_x = self.viewport_x + screen_x as i32;
             let ground_world = self.ground_height_at(landscape, world_x);
@@ -217,14 +232,14 @@ impl GraphicsSystem {
         }
     }
 
-    fn draw_objects(&mut self, objects: &[ObjectSnapshot]) {
+    fn draw_objects(&mut self, objects: &[ObjectSnapshot], lighting: f32) {
         for object in objects {
-            self.paint_object(object);
+            self.paint_object(object, lighting);
         }
     }
 
-    fn paint_object(&mut self, object: &ObjectSnapshot) {
-        let color = object_color(object);
+    fn paint_object(&mut self, object: &ObjectSnapshot, lighting: f32) {
+        let color = object_color(object).modulate(lighting);
         if object.vertices.len() >= 3 {
             let mut points = Vec::with_capacity(object.vertices.len());
             let mut min_x = i32::MAX;
@@ -296,6 +311,28 @@ impl GraphicsSystem {
 
     fn surface_height_at(&self, landscape: Option<&Landscape>, x: i32) -> Option<i32> {
         landscape.and_then(|landscape| landscape.surface_height(x))
+    }
+
+    fn lighting_factor(time_of_day: u16) -> f32 {
+        let cycle = EnvironmentSettings::TIME_CYCLE as f32;
+        if cycle <= 0.0 {
+            return 1.0;
+        }
+        let half_cycle = cycle / 2.0;
+        let time = (time_of_day as u32 % EnvironmentSettings::TIME_CYCLE as u32) as f32;
+        let mut distance = (time - half_cycle).abs();
+        if distance > half_cycle {
+            distance = cycle - distance;
+        }
+        let normalized = 1.0 - distance / half_cycle;
+        let normalized = normalized.clamp(0.0, 1.0);
+        let min = 0.35f32;
+        let max = 1.0f32;
+        min + normalized * (max - min)
+    }
+
+    fn apply_lighting(color: Color, lighting: f32) -> Color {
+        color.modulate(lighting)
     }
 
     fn sky_color_for_temperature(temperature: i32) -> Color {
@@ -486,7 +523,7 @@ fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lc_engine::{EnvironmentFrame, Landscape, ObjectId, ObjectVertex, Vector2};
+    use lc_engine::{EnvironmentFrame, Landscape, ObjectId, ObjectVertex, RgbColor, Vector2};
     use lc_graphics::PixelFormat;
     use rand::SeedableRng;
 
@@ -637,7 +674,8 @@ mod tests {
         let mut graphics = GraphicsSystem::new(80, 60, 60, "Polygon Scenario");
         graphics.render_frame(&snapshot, &snapshot.objects[0]);
 
-        let expected = object_color(&snapshot.objects[0]);
+        let lighting = GraphicsSystem::lighting_factor(snapshot.environment.settings.time_of_day);
+        let expected = GraphicsSystem::apply_lighting(object_color(&snapshot.objects[0]), lighting);
         let (viewport_x, viewport_y) = graphics.viewport();
         let screen_x = snapshot.objects[0].position.x - viewport_x;
         let screen_y = snapshot.objects[0].position.y - viewport_y;
@@ -647,5 +685,77 @@ mod tests {
             .surface()
             .get_pixel(screen_x as u32, screen_y as u32);
         assert_eq!(pixel, Some(expected));
+    }
+
+    #[test]
+    fn lighting_darkens_sky_at_night() {
+        let mut daytime = make_snapshot();
+        daytime.environment.sky_color = Some(RgbColor::new(160, 160, 160));
+        daytime.environment.settings.time_of_day = EnvironmentSettings::TIME_CYCLE / 2;
+
+        let focus = &daytime.objects[0];
+        let mut day_view = GraphicsSystem::new(120, 80, 60, "Day");
+        day_view.render_frame(&daytime, focus);
+        let day_pixel = day_view.surface().get_pixel(0, 0).unwrap();
+
+        let mut nighttime = daytime.clone();
+        nighttime.environment.settings.time_of_day = 0;
+        let mut night_view = GraphicsSystem::new(120, 80, 60, "Night");
+        night_view.render_frame(&nighttime, &nighttime.objects[0]);
+        let night_pixel = night_view.surface().get_pixel(0, 0).unwrap();
+
+        let base_color = Color::opaque(160, 160, 160);
+        let day_factor = GraphicsSystem::lighting_factor(daytime.environment.settings.time_of_day);
+        let night_factor =
+            GraphicsSystem::lighting_factor(nighttime.environment.settings.time_of_day);
+        let expected_day = GraphicsSystem::apply_lighting(base_color, day_factor);
+        let expected_night = GraphicsSystem::apply_lighting(base_color, night_factor);
+
+        assert_eq!(day_pixel, expected_day);
+        assert_eq!(night_pixel, expected_night);
+        assert_ne!(expected_day, expected_night);
+    }
+
+    #[test]
+    fn lighting_darkens_objects_at_night() {
+        let mut daytime = make_snapshot();
+        daytime.environment.settings.time_of_day = EnvironmentSettings::TIME_CYCLE / 2;
+        daytime.objects[0].position = Vector2::new(150, 140);
+
+        let mut day_view = GraphicsSystem::new(200, 150, 150, "Day Object");
+        day_view.render_frame(&daytime, &daytime.objects[0]);
+        let (day_viewport_x, day_viewport_y) = day_view.viewport();
+        let day_screen_x = (daytime.objects[0].position.x - day_viewport_x) as u32;
+        let day_screen_y = (daytime.objects[0].position.y - day_viewport_y) as u32;
+        let day_pixel = day_view
+            .surface()
+            .get_pixel(day_screen_x, day_screen_y)
+            .unwrap();
+
+        let mut nighttime = daytime.clone();
+        nighttime.environment.settings.time_of_day = 0;
+        let mut night_view = GraphicsSystem::new(200, 150, 150, "Night Object");
+        night_view.render_frame(&nighttime, &nighttime.objects[0]);
+        let (night_viewport_x, night_viewport_y) = night_view.viewport();
+        let night_screen_x = (nighttime.objects[0].position.x - night_viewport_x) as u32;
+        let night_screen_y = (nighttime.objects[0].position.y - night_viewport_y) as u32;
+        let night_pixel = night_view
+            .surface()
+            .get_pixel(night_screen_x, night_screen_y)
+            .unwrap();
+
+        let day_factor = GraphicsSystem::lighting_factor(daytime.environment.settings.time_of_day);
+        let night_factor =
+            GraphicsSystem::lighting_factor(nighttime.environment.settings.time_of_day);
+        assert!(night_factor < day_factor);
+        let ratio = if day_factor <= 0.0 {
+            0.0
+        } else {
+            night_factor / day_factor
+        };
+        let expected_night = GraphicsSystem::apply_lighting(day_pixel, ratio);
+
+        assert_eq!(night_pixel, expected_night);
+        assert_ne!(day_pixel, night_pixel);
     }
 }
