@@ -35,8 +35,8 @@
   - **Gate:** headless Rust loop reproduces the deterministic regression pack byte-for-byte against C++ recordings.
 
 3. **Frontend & IO**
-  - Progress: `lc-frontend` renders the HUD overlay, keeps the camera locked to the focus object, and now drives crew command input through the shared `PlayerInputState`; next up is replacing remaining SDL/GDI surfaces.
-  - Implement rendering (software or wgpu/winit) to match C4 graphics, HUD, GUI widgets, and text output; unify font pipelines.
+  - Progress: `lc-frontend` renders the HUD overlay, keeps the camera locked to the focus object, now drives crew command input through the shared `PlayerInputState`, and the software renderer plots object silhouettes from engine vertex data; next up is replacing remaining SDL/GDI surfaces.
+  - Implement rendering (software or wgpu/winit) to match C4 graphics, HUD, GUI widgets, and text output; unify font pipelines. Software overlay now respects engine vertex meshes; sprite atlas parity, lighting, and font layout still pending.
   - Port the full input stack and GUI/dialog system (startup, lobbies, editor, in-game menus); connect audio backends for music/effects parity.
   - **Gate:** Rust frontend renders the Startup Menu and in-game HUD, handles live input/audio, and no longer depends on C++ surfaces.
 

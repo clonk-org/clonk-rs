@@ -5,6 +5,8 @@ use lc_graphics::{Color, Surface};
 use lc_gui::{
     DrawCommand, Gui, GuiResult, Point as GuiPoint, Rect as GuiRect, Size as GuiSize, WidgetId,
 };
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 pub use input::InputDispatcher;
 
@@ -222,6 +224,33 @@ impl GraphicsSystem {
     }
 
     fn paint_object(&mut self, object: &ObjectSnapshot) {
+        let color = object_color(object);
+        if object.vertices.len() >= 3 {
+            let mut points = Vec::with_capacity(object.vertices.len());
+            let mut min_x = i32::MAX;
+            let mut max_x = i32::MIN;
+            let mut min_y = i32::MAX;
+            let mut max_y = i32::MIN;
+            for vertex in &object.vertices {
+                let x = object.position.x + vertex.x - self.viewport_x;
+                let y = object.position.y + vertex.y - self.viewport_y;
+                points.push((x, y));
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+
+            if max_x >= 0
+                && min_x < self.surface_width as i32
+                && max_y >= 0
+                && min_y < self.surface_height as i32
+                && fill_polygon(&mut self.surface, &points, color)
+            {
+                return;
+            }
+        }
+
         let screen_x = object.position.x - self.viewport_x;
         let screen_y = object.position.y - self.viewport_y;
         if screen_x < -10
@@ -231,12 +260,7 @@ impl GraphicsSystem {
         {
             return;
         }
-        let energy = object.energy.max(0).min(100) as u8;
-        let color = if energy > 50 {
-            Color::opaque(252, 196, 64)
-        } else {
-            Color::opaque(220, 72, 72)
-        };
+
         let size = 6i32;
         let rect = GuiRect::from_origin_size(
             GuiPoint::new(
@@ -306,6 +330,123 @@ impl GraphicsSystem {
     }
 }
 
+fn object_color(object: &ObjectSnapshot) -> Color {
+    let mut hasher = DefaultHasher::new();
+    object.definition_id.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    let channel = |shift: u32| -> u8 {
+        let component = ((hash >> shift) & 0x7F) as u8;
+        component.saturating_add(64)
+    };
+
+    let base_r = channel(0);
+    let base_g = channel(8);
+    let base_b = channel(16);
+    let low_tint = (200u8, 64u8, 64u8);
+    let energy = object.energy.clamp(0, 100) as f32 / 100.0;
+    let mix_channel = |base: u8, low: u8| -> u8 {
+        let value = (low as f32 * (1.0 - energy) + base as f32 * energy)
+            .round()
+            .clamp(0.0, 255.0);
+        value as u8
+    };
+
+    let mut r = mix_channel(base_r, low_tint.0);
+    let mut g = mix_channel(base_g, low_tint.1);
+    let mut b = mix_channel(base_b, low_tint.2);
+
+    if !object.alive || !object.status.is_active() {
+        let fade = 0.45f32;
+        r = (r as f32 * fade).round() as u8;
+        g = (g as f32 * fade).round() as u8;
+        b = (b as f32 * fade).round() as u8;
+    }
+
+    Color::opaque(r, g, b)
+}
+
+fn fill_polygon(surface: &mut Surface, points: &[(i32, i32)], color: Color) -> bool {
+    if points.len() < 3 {
+        return false;
+    }
+
+    let width = surface.width() as i32;
+    let height = surface.height() as i32;
+    if width <= 0 || height <= 0 {
+        return false;
+    }
+
+    let mut min_y = i32::MAX;
+    let mut max_y = i32::MIN;
+    for &(_, y) in points {
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+
+    if min_y > max_y || min_y >= height || max_y < 0 {
+        return false;
+    }
+
+    let start_y = min_y.max(0);
+    let end_y = max_y.min(height - 1);
+    if start_y > end_y {
+        return false;
+    }
+
+    let mut intersections = Vec::with_capacity(points.len());
+    let mut drawn = false;
+
+    for y in start_y..=end_y {
+        intersections.clear();
+        let y_f = y as f64;
+        for i in 0..points.len() {
+            let (x1, y1) = points[i];
+            let (x2, y2) = points[(i + 1) % points.len()];
+            let y1_f = y1 as f64;
+            let y2_f = y2 as f64;
+            if ((y1_f <= y_f) && (y2_f > y_f)) || ((y2_f <= y_f) && (y1_f > y_f)) {
+                let x1_f = x1 as f64;
+                let x2_f = x2 as f64;
+                let x = x1_f + (y_f - y1_f) * (x2_f - x1_f) / (y2_f - y1_f);
+                intersections.push(x);
+            }
+        }
+
+        if intersections.len() < 2 {
+            continue;
+        }
+
+        intersections.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let mut iter = intersections.iter();
+        while let Some(&start) = iter.next() {
+            if let Some(&end) = iter.next() {
+                let mut x_start = start.ceil() as i32;
+                let mut x_end = end.floor() as i32;
+                if x_end < x_start {
+                    continue;
+                }
+                if x_end < 0 || x_start >= width {
+                    continue;
+                }
+                if x_start < 0 {
+                    x_start = 0;
+                }
+                if x_end >= width {
+                    x_end = width - 1;
+                }
+                for x in x_start..=x_end {
+                    let _ = surface.set_pixel(x as u32, y as u32, color);
+                    drawn = true;
+                }
+            }
+        }
+    }
+
+    drawn
+}
+
 fn fill_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
     let x0 = rect.origin.x.floor() as i32;
     let y0 = rect.origin.y.floor() as i32;
@@ -357,7 +498,8 @@ fn draw_text(surface: &mut Surface, rect: &GuiRect, text: &str, color: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lc_engine::{EnvironmentFrame, Landscape, ObjectId, Vector2};
+    use lc_engine::{EnvironmentFrame, Landscape, ObjectId, ObjectVertex, Vector2};
+    use lc_graphics::PixelFormat;
     use rand::SeedableRng;
 
     fn make_snapshot() -> SimulationSnapshot {
@@ -461,5 +603,60 @@ mod tests {
         graphics.render_frame(&snapshot, &snapshot.objects[0]);
         let (_, bottom_view) = graphics.viewport();
         assert_eq!(bottom_view, 360 - 180);
+    }
+
+    #[test]
+    fn object_color_reflects_energy_level() {
+        let snapshot = make_snapshot();
+        let mut energized = snapshot.objects[0].clone();
+        energized.energy = 100;
+        let high = object_color(&energized);
+
+        let mut depleted = energized.clone();
+        depleted.energy = 0;
+        let low = object_color(&depleted);
+
+        assert_ne!(high, low);
+        let high_sum = u16::from(high.r) + u16::from(high.g) + u16::from(high.b);
+        let low_sum = u16::from(low.r) + u16::from(low.g) + u16::from(low.b);
+        assert!(high_sum > low_sum);
+    }
+
+    #[test]
+    fn fill_polygon_paints_triangle() {
+        let mut surface = Surface::new(32, 32, PixelFormat::Rgba8888);
+        let color = Color::opaque(48, 64, 96);
+        let triangle = [(4, 4), (24, 6), (10, 24)];
+
+        let painted = fill_polygon(&mut surface, &triangle, color);
+        assert!(painted);
+        assert_eq!(surface.get_pixel(12, 12), Some(color));
+    }
+
+    #[test]
+    fn render_frame_draws_object_vertices() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].vertices = vec![
+            ObjectVertex::new(-6, -6),
+            ObjectVertex::new(6, -6),
+            ObjectVertex::new(6, 6),
+            ObjectVertex::new(-6, 6),
+        ];
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+
+        let mut graphics = GraphicsSystem::new(80, 60, 60, "Polygon Scenario");
+        graphics.render_frame(&snapshot, &snapshot.objects[0]);
+
+        let expected = object_color(&snapshot.objects[0]);
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let screen_x = snapshot.objects[0].position.x - viewport_x;
+        let screen_y = snapshot.objects[0].position.y - viewport_y;
+        assert!(screen_x >= 0 && screen_x < graphics.surface().width() as i32);
+        assert!(screen_y >= 0 && screen_y < graphics.surface().height() as i32);
+        let pixel = graphics
+            .surface()
+            .get_pixel(screen_x as u32, screen_y as u32);
+        assert_eq!(pixel, Some(expected));
     }
 }
