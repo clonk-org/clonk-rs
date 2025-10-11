@@ -4,6 +4,8 @@ use std::fmt;
 const FNV_OFFSET_BASIS: u32 = 0x811C9DC5;
 const FNV_PRIME: u32 = 16777619;
 
+pub(crate) const FNV_OFFSET: u32 = FNV_OFFSET_BASIS;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SurfaceSnapshot {
     width: u32,
@@ -14,11 +16,7 @@ pub struct SurfaceSnapshot {
 impl SurfaceSnapshot {
     pub fn from_surface(surface: &Surface) -> Self {
         let checksum = checksum(surface.pixels());
-        Self {
-            width: surface.width(),
-            height: surface.height(),
-            checksum,
-        }
+        Self::from_parts(surface.width(), surface.height(), checksum)
     }
 
     pub fn width(&self) -> u32 {
@@ -37,6 +35,16 @@ impl SurfaceSnapshot {
 impl fmt::Display for SurfaceSnapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}x{}#{:08x}", self.width, self.height, self.checksum)
+    }
+}
+
+impl SurfaceSnapshot {
+    pub(crate) const fn from_parts(width: u32, height: u32, checksum: u32) -> Self {
+        Self {
+            width,
+            height,
+            checksum,
+        }
     }
 }
 
@@ -78,7 +86,10 @@ impl SnapshotHasher {
 }
 
 fn checksum(bytes: &[u8]) -> u32 {
-    let mut hash = FNV_OFFSET_BASIS;
+    checksum_update(FNV_OFFSET_BASIS, bytes)
+}
+
+pub(crate) fn checksum_update(mut hash: u32, bytes: &[u8]) -> u32 {
     for &byte in bytes {
         hash ^= byte as u32;
         hash = hash.wrapping_mul(FNV_PRIME);

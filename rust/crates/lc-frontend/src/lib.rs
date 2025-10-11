@@ -1,11 +1,17 @@
 mod input;
 
-use lc_engine::{EnvironmentSettings, Landscape, ObjectSnapshot, SimulationSnapshot};
-use lc_graphics::{Color, Surface};
+use lc_engine::{
+    EnvironmentSettings, Landscape, ObjectSnapshot, SimulationSnapshot,
+    SurfaceSnapshot as EngineSurfaceSnapshot,
+};
+use lc_graphics::{
+    Color, Rect as SurfaceRect, Surface, SurfaceSnapshot as GraphicsSurfaceSnapshot,
+};
 use lc_gui::{
     DrawCommand, Gui, GuiResult, Point as GuiPoint, Rect as GuiRect, Size as GuiSize, WidgetId,
 };
 use std::collections::hash_map::DefaultHasher;
+use std::convert::TryFrom;
 use std::hash::{Hash, Hasher};
 
 pub use input::InputDispatcher;
@@ -103,7 +109,11 @@ impl GraphicsSystem {
         Ok(())
     }
 
-    pub fn render_frame(&mut self, snapshot: &SimulationSnapshot, focus: &ObjectSnapshot) {
+    pub fn render_frame(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        focus: &ObjectSnapshot,
+    ) -> Vec<EngineSurfaceSnapshot> {
         self.update_world_dimensions(snapshot.landscape.as_ref());
         self.update_viewport(focus);
 
@@ -124,6 +134,8 @@ impl GraphicsSystem {
         );
         self.draw_objects(&snapshot.objects, lighting);
         self.draw_gui_overlay();
+
+        self.collect_sprite_atlas(snapshot, focus)
     }
 
     pub fn ground_height_at(&self, landscape: Option<&Landscape>, x: i32) -> i32 {
@@ -333,6 +345,147 @@ impl GraphicsSystem {
 
     fn apply_lighting(color: Color, lighting: f32) -> Color {
         color.modulate(lighting)
+    }
+
+    fn collect_sprite_atlas(
+        &self,
+        snapshot: &SimulationSnapshot,
+        focus: &ObjectSnapshot,
+    ) -> Vec<EngineSurfaceSnapshot> {
+        let mut atlas = Vec::with_capacity(
+            2 + snapshot
+                .objects
+                .len()
+                .saturating_add(snapshot.hud.players.len()),
+        );
+
+        let full_snapshot = self.surface.snapshot();
+        atlas.push(Self::make_engine_surface(
+            "back_buffer".to_string(),
+            full_snapshot,
+        ));
+
+        let player_label = if focus.owner < 0 {
+            "none".to_string()
+        } else {
+            focus.owner.to_string()
+        };
+        let viewport_label = format!("viewport#0:player={player_label}");
+        atlas.push(Self::make_engine_surface(viewport_label, full_snapshot));
+
+        let overlay_height =
+            (OVERLAY_HEIGHT.round() as i32).clamp(0, self.surface_height as i32) as u32;
+        if overlay_height > 0 {
+            if let Some(snapshot) = self.surface.snapshot_region(SurfaceRect::new(
+                0,
+                0,
+                self.surface_width,
+                overlay_height,
+            )) {
+                atlas.push(Self::make_engine_surface(
+                    "upper_board".to_string(),
+                    snapshot,
+                ));
+            }
+        }
+
+        for player in &snapshot.hud.players {
+            if player.eliminated {
+                continue;
+            }
+            if let Some(focus_object) = player.focus {
+                if let Some(object) = snapshot
+                    .objects
+                    .iter()
+                    .find(|object| object.id == focus_object)
+                {
+                    if let Some(rect) = self.object_screen_rect(object) {
+                        if let Some(snap) = self.surface.snapshot_region(rect) {
+                            let label =
+                                format!("focus#{}:player={}", object.id.as_u64(), player.owner);
+                            atlas.push(Self::make_engine_surface(label, snap));
+                        }
+                    }
+                }
+            }
+        }
+
+        for object in &snapshot.objects {
+            if let Some(rect) = self.object_screen_rect(object) {
+                if let Some(snap) = self.surface.snapshot_region(rect) {
+                    let label =
+                        format!("object#{}:def={}", object.id.as_u64(), object.definition_id);
+                    atlas.push(Self::make_engine_surface(label, snap));
+                }
+            }
+        }
+
+        atlas
+    }
+
+    fn make_engine_surface(
+        label: String,
+        snapshot: GraphicsSurfaceSnapshot,
+    ) -> EngineSurfaceSnapshot {
+        let width = i32::try_from(snapshot.width()).unwrap_or(i32::MAX);
+        let height = i32::try_from(snapshot.height()).unwrap_or(i32::MAX);
+        EngineSurfaceSnapshot {
+            label,
+            width,
+            height,
+            hash: u64::from(snapshot.checksum()),
+        }
+    }
+
+    fn object_screen_rect(&self, object: &ObjectSnapshot) -> Option<SurfaceRect> {
+        if !object.status.is_active() || !object.alive {
+            return None;
+        }
+
+        if object.vertices.is_empty() {
+            let screen_x = object.position.x - self.viewport_x;
+            let screen_y = object.position.y - self.viewport_y;
+            let size = 6;
+            let half = size / 2;
+            return Some(SurfaceRect::new(
+                screen_x - half,
+                screen_y - half,
+                size as u32,
+                size as u32,
+            ));
+        }
+
+        let mut min_x = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut min_y = i32::MAX;
+        let mut max_y = i32::MIN;
+        for vertex in &object.vertices {
+            let x = object.position.x + vertex.x - self.viewport_x;
+            let y = object.position.y + vertex.y - self.viewport_y;
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+
+        if min_x > max_x || min_y > max_y {
+            return None;
+        }
+
+        let padding = 2i64;
+        let left = (min_x as i64 - padding).clamp(i32::MIN as i64, i32::MAX as i64);
+        let top = (min_y as i64 - padding).clamp(i32::MIN as i64, i32::MAX as i64);
+        let right = (max_x as i64 + padding).clamp(i32::MIN as i64, i32::MAX as i64);
+        let bottom = (max_y as i64 + padding).clamp(i32::MIN as i64, i32::MAX as i64);
+
+        if right < left || bottom < top {
+            return None;
+        }
+
+        let width = (right - left + 1).max(1) as u32;
+        let height = (bottom - top + 1).max(1) as u32;
+
+        Some(SurfaceRect::new(left as i32, top as i32, width, height))
     }
 
     fn sky_color_for_temperature(temperature: i32) -> Color {
@@ -573,11 +726,12 @@ mod tests {
     #[test]
     fn graphics_system_draws_ground() {
         let snapshot = make_snapshot();
-        let focus = &snapshot.objects[0];
+        let focus = snapshot.objects[0].clone();
         let mut graphics = GraphicsSystem::new(320, 180, 150, "Test Scenario");
         graphics.set_world_width(256);
 
-        graphics.render_frame(&snapshot, focus);
+        let atlas = graphics.render_frame(&snapshot, &focus);
+        assert!(!atlas.is_empty());
 
         let ground = graphics.surface().get_pixel(0, 179).unwrap();
         assert_ne!(ground, Color::opaque(8, 12, 24));
@@ -586,7 +740,7 @@ mod tests {
     #[test]
     fn overlay_updates_clamp_energy() {
         let snapshot = make_snapshot();
-        let focus = &snapshot.objects[0];
+        let focus = snapshot.objects[0].clone();
         let mut graphics = GraphicsSystem::new(320, 180, 150, "Test Scenario");
         graphics
             .update_overlay(&GraphicsOverlay {
@@ -595,8 +749,31 @@ mod tests {
                 energy_fraction: 2.5,
             })
             .expect("overlay updates");
-        graphics.render_frame(&snapshot, focus);
+        graphics.render_frame(&snapshot, &focus);
         // if gauge update panicked the test would fail; no additional assertion needed here
+    }
+
+    #[test]
+    fn sprite_atlas_captures_back_buffer_and_object() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].vertices = vec![
+            ObjectVertex::new(-4, -4),
+            ObjectVertex::new(4, -4),
+            ObjectVertex::new(4, 4),
+            ObjectVertex::new(-4, 4),
+        ];
+        let focus = snapshot.objects[0].clone();
+        let mut graphics = GraphicsSystem::new(120, 80, 60, "Atlas Scenario");
+
+        let atlas = graphics.render_frame(&snapshot, &focus);
+
+        assert!(atlas.iter().any(|entry| entry.label == "back_buffer"));
+        let object_label = format!("object#{}:def={}", focus.id.as_u64(), focus.definition_id);
+        assert!(
+            atlas.iter().any(|entry| entry.label == object_label),
+            "expected atlas entry for {object_label}, got labels: {:?}",
+            atlas.iter().map(|entry| &entry.label).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -605,8 +782,8 @@ mod tests {
         snapshot.objects[0].position = Vector2::new(100, 260);
         snapshot.landscape = Some(Landscape::flat(256, 280));
         let mut graphics = GraphicsSystem::new(320, 180, 150, "Test Scenario");
-
-        graphics.render_frame(&snapshot, &snapshot.objects[0]);
+        let focus = snapshot.objects[0].clone();
+        graphics.render_frame(&snapshot, &focus);
 
         let (_, viewport_y) = graphics.viewport();
         assert!(viewport_y > 0);
@@ -618,7 +795,8 @@ mod tests {
         snapshot.objects[0].position = Vector2::new(100, 30);
         snapshot.landscape = Some(Landscape::flat(256, 200));
         let mut graphics = GraphicsSystem::new(320, 180, 150, "Test Scenario");
-        graphics.render_frame(&snapshot, &snapshot.objects[0]);
+        let focus = snapshot.objects[0].clone();
+        graphics.render_frame(&snapshot, &focus);
         let (_, top_view) = graphics.viewport();
         assert_eq!(top_view, 0);
 
@@ -626,7 +804,8 @@ mod tests {
         snapshot.objects[0].position = Vector2::new(100, 360);
         snapshot.landscape = Some(Landscape::flat(256, 360));
         let mut graphics = GraphicsSystem::new(320, 180, 150, "Test Scenario");
-        graphics.render_frame(&snapshot, &snapshot.objects[0]);
+        let focus = snapshot.objects[0].clone();
+        graphics.render_frame(&snapshot, &focus);
         let (_, bottom_view) = graphics.viewport();
         assert_eq!(bottom_view, 360 - 180);
     }
@@ -672,7 +851,8 @@ mod tests {
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
         let mut graphics = GraphicsSystem::new(80, 60, 60, "Polygon Scenario");
-        graphics.render_frame(&snapshot, &snapshot.objects[0]);
+        let focus = snapshot.objects[0].clone();
+        graphics.render_frame(&snapshot, &focus);
 
         let lighting = GraphicsSystem::lighting_factor(snapshot.environment.settings.time_of_day);
         let expected = GraphicsSystem::apply_lighting(object_color(&snapshot.objects[0]), lighting);
@@ -693,15 +873,16 @@ mod tests {
         daytime.environment.sky_color = Some(RgbColor::new(160, 160, 160));
         daytime.environment.settings.time_of_day = EnvironmentSettings::TIME_CYCLE / 2;
 
-        let focus = &daytime.objects[0];
+        let focus = daytime.objects[0].clone();
         let mut day_view = GraphicsSystem::new(120, 80, 60, "Day");
-        day_view.render_frame(&daytime, focus);
+        day_view.render_frame(&daytime, &focus);
         let day_pixel = day_view.surface().get_pixel(0, 0).unwrap();
 
         let mut nighttime = daytime.clone();
         nighttime.environment.settings.time_of_day = 0;
         let mut night_view = GraphicsSystem::new(120, 80, 60, "Night");
-        night_view.render_frame(&nighttime, &nighttime.objects[0]);
+        let night_focus = nighttime.objects[0].clone();
+        night_view.render_frame(&nighttime, &night_focus);
         let night_pixel = night_view.surface().get_pixel(0, 0).unwrap();
 
         let base_color = Color::opaque(160, 160, 160);
@@ -723,7 +904,8 @@ mod tests {
         daytime.objects[0].position = Vector2::new(150, 140);
 
         let mut day_view = GraphicsSystem::new(200, 150, 150, "Day Object");
-        day_view.render_frame(&daytime, &daytime.objects[0]);
+        let day_focus = daytime.objects[0].clone();
+        day_view.render_frame(&daytime, &day_focus);
         let (day_viewport_x, day_viewport_y) = day_view.viewport();
         let day_screen_x = (daytime.objects[0].position.x - day_viewport_x) as u32;
         let day_screen_y = (daytime.objects[0].position.y - day_viewport_y) as u32;
@@ -735,7 +917,8 @@ mod tests {
         let mut nighttime = daytime.clone();
         nighttime.environment.settings.time_of_day = 0;
         let mut night_view = GraphicsSystem::new(200, 150, 150, "Night Object");
-        night_view.render_frame(&nighttime, &nighttime.objects[0]);
+        let night_focus = nighttime.objects[0].clone();
+        night_view.render_frame(&nighttime, &night_focus);
         let (night_viewport_x, night_viewport_y) = night_view.viewport();
         let night_screen_x = (nighttime.objects[0].position.x - night_viewport_x) as u32;
         let night_screen_y = (nighttime.objects[0].position.y - night_viewport_y) as u32;

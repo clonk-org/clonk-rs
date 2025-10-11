@@ -36,7 +36,7 @@
 
 3. **Frontend & IO**
   - Progress: `lc-frontend` renders the HUD overlay, keeps the camera locked to the focus object, now drives crew command input through the shared `PlayerInputState`, the software renderer plots object silhouettes from engine vertex data, GUI text flows through the shared bitmap font pipeline, and the frame lighting curve is driven from `EnvironmentSettings::time_of_day` so sky, ground, and object shading now respond to day/night cycles; next up is replacing remaining SDL/GDI surfaces.
-  - Implement rendering (software or wgpu/winit) to match C4 graphics, HUD, GUI widgets, and text output; unify font pipelines. Software overlay now respects engine vertex meshes and Rust-side bitmap font layout; sprite atlas parity still pending.
+  - Implement rendering (software or wgpu/winit) to match C4 graphics, HUD, GUI widgets, and text output; unify font pipelines. Software overlay now respects engine vertex meshes and Rust-side bitmap font layout, and sprite atlas hashing now mirrors viewport/object captures for parity checks.
   - Port the full input stack and GUI/dialog system (startup, lobbies, editor, in-game menus); connect audio backends for music/effects parity.
   - **Gate:** Rust frontend renders the Startup Menu and in-game HUD, handles live input/audio, and no longer depends on C++ surfaces.
 

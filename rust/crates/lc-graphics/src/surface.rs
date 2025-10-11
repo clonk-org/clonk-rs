@@ -1,5 +1,5 @@
 use crate::color::Color;
-use crate::snapshot::SurfaceSnapshot;
+use crate::snapshot::{checksum_update, SurfaceSnapshot, FNV_OFFSET};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +148,26 @@ impl Surface {
 
     pub fn snapshot(&self) -> SurfaceSnapshot {
         SurfaceSnapshot::from_surface(self)
+    }
+
+    pub fn snapshot_region(&self, rect: Rect) -> Option<SurfaceSnapshot> {
+        let region = rect.intersection(self.bounds())?;
+        if region.width == 0 || region.height == 0 {
+            return None;
+        }
+        let bpp = self.format.bytes_per_pixel();
+        let mut hash = FNV_OFFSET;
+        for row in 0..region.height {
+            let y = (region.y + row as i32) as u32;
+            let offset = self.pixel_offset(region.x as u32, y);
+            let span = &self.data[offset..offset + region.width as usize * bpp];
+            hash = checksum_update(hash, span);
+        }
+        Some(SurfaceSnapshot::from_parts(
+            region.width,
+            region.height,
+            hash,
+        ))
     }
 
     pub fn bounds(&self) -> Rect {
@@ -365,5 +385,50 @@ mod tests {
             .unwrap();
 
         assert_eq!(dest.get_pixel(0, 0), src.get_pixel(2, 2));
+    }
+
+    #[test]
+    fn snapshot_region_matches_surface_blit() {
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        for y in 0..4 {
+            for x in 0..4 {
+                let value = (y * 4 + x) as u8;
+                surface
+                    .set_pixel(x, y, Color::new(value, value.saturating_mul(2), value, 255))
+                    .unwrap();
+            }
+        }
+
+        let region = Rect::new(1, 1, 2, 2);
+        let snapshot = surface.snapshot_region(region).expect("region snapshot");
+
+        let mut expected = Surface::new(2, 2, PixelFormat::Rgba8888);
+        expected
+            .blit_region(&surface, region, Point::new(0, 0))
+            .expect("copy succeeds");
+        let expected_snapshot = expected.snapshot();
+
+        assert_eq!(snapshot, expected_snapshot);
+    }
+
+    #[test]
+    fn snapshot_region_outside_returns_none() {
+        let surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        assert!(surface.snapshot_region(Rect::new(8, 8, 2, 2)).is_none());
+    }
+
+    #[test]
+    fn snapshot_region_partially_outside_clamps() {
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        surface.set_pixel(3, 3, Color::opaque(200, 10, 10)).unwrap();
+        let snapshot = surface
+            .snapshot_region(Rect::new(3, 3, 5, 5))
+            .expect("clamped snapshot");
+        assert_eq!(snapshot.width(), 1);
+        assert_eq!(snapshot.height(), 1);
+        assert_eq!(
+            snapshot,
+            surface.snapshot_region(Rect::new(3, 3, 1, 1)).unwrap()
+        );
     }
 }
