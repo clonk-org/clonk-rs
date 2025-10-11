@@ -4,6 +4,7 @@ mod control;
 mod effect;
 pub mod ffi;
 pub mod fixtures;
+mod input;
 mod landscape;
 mod record;
 pub mod scenario;
@@ -11,7 +12,9 @@ pub mod scenario;
 pub use action::{
     ActionLibrary, ActionProcedure, ActionSpec, ActionState, ActionUpdate, ActionUpdateResult,
 };
+pub use control::{ControlButton, ControlEvent};
 pub use effect::EffectState;
+pub use input::PlayerInputState;
 pub use landscape::{
     CollisionResolution, Landscape, LandscapeCommand, LandscapeError, LiquidColumn, LiquidSegment,
 };

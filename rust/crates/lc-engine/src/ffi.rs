@@ -1,14 +1,13 @@
 use crate::{
     control::{
-        interpret_player_control_command, parse_control_ini, ControlButton, ControlEvent,
-        ControlPacket, PlayerControlData,
+        interpret_player_control_command, parse_control_ini, ControlPacket, PlayerControlData,
     },
     ActionState, CommandDirection, CrewCommandTarget, CrewRole, CrewSelectionState, Direction,
     EffectState, Engine, EngineError, EngineState, EnvironmentFrame, FloatVector2,
     HudPlayerSnapshot, HudSnapshot, Landscape, NetworkPacketDirection, NetworkPacketSnapshot,
     ObjectId, ObjectSnapshot, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleLayer,
-    ParticleSnapshot, Playback, Recorder, Recording, Scenario, SimulationSnapshot, SurfaceSnapshot,
-    Vector2,
+    ParticleSnapshot, Playback, PlayerInputState, Recorder, Recording, Scenario,
+    SimulationSnapshot, SurfaceSnapshot, Vector2,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -246,7 +245,7 @@ pub struct RuntimeHandle {
     last_frame: u64,
     control_log_strings: BTreeMap<u64, Vec<String>>,
     control_packets: BTreeMap<u64, Vec<ControlPacket>>,
-    player_controls: HashMap<i32, PlayerControlState>,
+    player_controls: HashMap<i32, PlayerInputState>,
 }
 
 impl RecorderHandle {
@@ -260,90 +259,6 @@ impl RecorderHandle {
 impl PlaybackHandle {
     fn new(playback: Playback) -> Self {
         Self { playback }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PlayerControlState {
-    left: bool,
-    right: bool,
-    up: bool,
-    down: bool,
-    last_direction: CommandDirection,
-}
-
-impl Default for PlayerControlState {
-    fn default() -> Self {
-        Self {
-            left: false,
-            right: false,
-            up: false,
-            down: false,
-            last_direction: CommandDirection::Stop,
-        }
-    }
-}
-
-impl PlayerControlState {
-    fn press(&mut self, button: ControlButton) -> Option<CommandDirection> {
-        self.set_button(button, true)
-    }
-
-    fn release(&mut self, button: ControlButton) -> Option<CommandDirection> {
-        self.set_button(button, false)
-    }
-
-    fn clear(&mut self) -> Option<CommandDirection> {
-        self.left = false;
-        self.right = false;
-        self.up = false;
-        self.down = false;
-        self.update_direction(CommandDirection::Stop)
-    }
-
-    fn set_button(&mut self, button: ControlButton, state: bool) -> Option<CommandDirection> {
-        match button {
-            ControlButton::Left => self.left = state,
-            ControlButton::Right => self.right = state,
-            ControlButton::Up => self.up = state,
-            ControlButton::Down => self.down = state,
-        }
-        let direction = self.compute_direction();
-        self.update_direction(direction)
-    }
-
-    fn compute_direction(&self) -> CommandDirection {
-        let horizontal = match (self.left, self.right) {
-            (true, false) => -1,
-            (false, true) => 1,
-            _ => 0,
-        };
-        let vertical = match (self.up, self.down) {
-            (true, false) => -1,
-            (false, true) => 1,
-            _ => 0,
-        };
-        match (horizontal, vertical) {
-            (-1, -1) => CommandDirection::UpLeft,
-            (-1, 0) => CommandDirection::Left,
-            (-1, 1) => CommandDirection::DownLeft,
-            (0, -1) => CommandDirection::Up,
-            (0, 0) => CommandDirection::Stop,
-            (0, 1) => CommandDirection::Down,
-            (1, -1) => CommandDirection::UpRight,
-            (1, 0) => CommandDirection::Right,
-            (1, 1) => CommandDirection::DownRight,
-            _ => CommandDirection::Stop,
-        }
-    }
-
-    fn update_direction(&mut self, direction: CommandDirection) -> Option<CommandDirection> {
-        if direction != self.last_direction {
-            self.last_direction = direction;
-            Some(direction)
-        } else {
-            None
-        }
     }
 }
 
@@ -385,11 +300,7 @@ impl RuntimeHandle {
             None => return Ok(()),
         };
         let state = self.player_controls.entry(player).or_default();
-        let maybe_direction = match event {
-            ControlEvent::Press(button) => state.press(button),
-            ControlEvent::Release(button) => state.release(button),
-            ControlEvent::ClearPressed => state.clear(),
-        };
+        let maybe_direction = state.handle_event(event);
         if let Some(direction) = maybe_direction {
             self.set_player_command_direction(player, direction)
                 .map_err(|error| error.to_string())?;

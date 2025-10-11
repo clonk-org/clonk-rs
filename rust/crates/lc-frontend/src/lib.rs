@@ -1,8 +1,12 @@
+mod input;
+
 use lc_engine::{Landscape, ObjectSnapshot, SimulationSnapshot};
 use lc_graphics::{Color, Surface};
 use lc_gui::{
     DrawCommand, Gui, GuiResult, Point as GuiPoint, Rect as GuiRect, Size as GuiSize, WidgetId,
 };
+
+pub use input::InputDispatcher;
 
 const OVERLAY_HEIGHT: f32 = 120.0;
 
