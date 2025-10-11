@@ -9,4 +9,5 @@ lc-gui = { path = "../lc-gui" }
 lc-graphics = { path = "../lc-graphics" }
 
 [dev-dependencies]
+lc-platform = { path = "../lc-platform" }
 tempfile = "3.10"

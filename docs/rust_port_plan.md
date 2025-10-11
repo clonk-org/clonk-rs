@@ -10,6 +10,7 @@
 - `lc-app` demo harness retired; workspace packaging now targets the `lc-game` launcher that bridges into the shipping runtime.
 - `RustEngineBridge` mirrors frames when `USE_RUST_ENGINE_VALIDATION` is enabled, but the authoritative scheduler, effects, pathfinding, lobby, and UI stacks are still C++.
 - Build, packaging, and updater flows are CMake-first; Cargo outputs are never shipped to players or CI artifacts.
+- Rust launcher now loads `Language*.txt` packs and renders every `lc-launcher-ui` string via the shared localization tables.
 
 ## Parity Gaps
 - **Boot & Platform:** configuration migration, patcher/updater, localization, logging/crash handling, launcher integration.
@@ -25,6 +26,7 @@
 ## Porting Strategy
 1. **Platform Bootstrap**
   - Status: `lc-game` handles config migration, per-run logging, crash/telemetry harvesting, and support bundle generation before delegating to the shipping C++ runtime. We now materialise `System.c4g`/`Graphics.c4g` into the repo root, the macOS bundle root, and `clonk.app/Contents/MacOS` so `cargo run -p lc-game` no longer dies on missing system groups; the launcher reaches SDL initialisation and forces windowed mode on headless hosts to keep CI boots stable.
+  - Localization: `lc-launcher` loads language packs from `System.c4g` and the Rust UI uses them for all visible labels, prompts, and status messages.
 
 2. **Runtime Authority**
    - Expand `lc-engine` to drive scheduler ticks, object creation/destruction, particles, landscape, weather, pathfinding, and save/load without C++ intervention.

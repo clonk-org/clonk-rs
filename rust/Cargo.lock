@@ -1824,7 +1824,9 @@ name = "lc-launcher"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "lc-core",
  "lc-platform",
+ "lc-resources",
  "open",
  "serde",
  "serde_json",
@@ -1858,6 +1860,7 @@ dependencies = [
  "lc-graphics",
  "lc-gui",
  "lc-launcher",
+ "lc-platform",
  "tempfile",
 ]
 

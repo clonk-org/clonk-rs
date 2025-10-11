@@ -11,7 +11,7 @@ use lc_graphics::{Color, PixelFormat, Surface};
 use lc_gui::{DrawCommand, GuiEvent, KeyCode, Point as GuiPoint, Rect as GuiRect, Size as GuiSize};
 use lc_launcher::{
     copy_support_artifacts, copy_support_bundle, ensure_support_bundle, load_launcher_preferences,
-    load_shell_state, render_support_bundle_report, reveal_in_file_manager,
+    load_localization, load_shell_state, render_support_bundle_report, reveal_in_file_manager,
     save_launcher_preferences, support_artifacts, timestamp_for_filename, timestamp_for_log,
     write_launcher_summary, LauncherLog, LauncherPreferences, LauncherShellState,
     ProviderAutomationRecord, ProviderAutomationSnapshot, ProviderAutomationState,
@@ -267,7 +267,7 @@ impl ReportSearchController {
 
         let mut annotations = Vec::new();
         annotations.push(String::new());
-        let label = self.highlight.label();
+        let label = self.highlight.english_label();
         let query_display = if self.highlight == ReportSearchHighlight::Generic {
             if self.query.is_empty() {
                 "<none>".into()
@@ -408,7 +408,11 @@ impl LauncherApp {
             .log_line("launcher shell initialised")
             .context("failed to record launcher startup")?;
 
-        let ui = LauncherShellUi::new(None).map_err(|err| anyhow!(err))?;
+        let ui = LauncherShellUi::new(
+            None,
+            load_localization(&paths).context("failed to load launcher localization")?,
+        )
+        .map_err(|err| anyhow!(err))?;
         let preferences = match load_launcher_preferences(&paths) {
             Ok(preferences) => preferences,
             Err(err) => {

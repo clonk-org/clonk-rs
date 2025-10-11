@@ -1,4 +1,5 @@
 mod bundle;
+mod localization;
 mod log;
 mod paths;
 mod preferences;
@@ -10,6 +11,7 @@ mod telemetry;
 mod time;
 
 pub use bundle::{append_support_bundle_report, create_support_bundle, regenerate_support_bundle};
+pub use localization::{load_localization, Localization};
 pub use log::LauncherLog;
 pub use preferences::{
     load_launcher_preferences, save_launcher_preferences, LauncherPreferences,

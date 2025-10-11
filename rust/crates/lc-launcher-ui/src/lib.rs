@@ -6,9 +6,9 @@ use lc_gui::{
     DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, GuiResult, Rect, Size, WidgetId,
 };
 use lc_launcher::{
-    support_artifacts, LauncherShellState, ProviderAutomationState, ProviderBulkRetargetRecord,
-    ProviderBulkRetargetSummary, ProviderDiagnostics, ProviderOverrideSource, ProviderPathStatus,
-    ProviderStatus, SupportArtifact,
+    support_artifacts, LauncherShellState, Localization, ProviderAutomationState,
+    ProviderBulkRetargetRecord, ProviderBulkRetargetSummary, ProviderDiagnostics,
+    ProviderOverrideSource, ProviderPathStatus, ProviderStatus, SupportArtifact,
 };
 
 const REPORT_PREVIEW_VISIBLE_LINES: usize = 28;
@@ -93,7 +93,15 @@ pub enum ActionFeedbackKind {
 }
 
 impl ActionFeedbackKind {
-    fn label(self) -> &'static str {
+    fn label<'a>(self, localization: &'a Localization) -> &'a str {
+        match self {
+            ActionFeedbackKind::Info => localization.text("IDS_LAUNCHER_UI_FEEDBACK_INFO"),
+            ActionFeedbackKind::Success => localization.text("IDS_LAUNCHER_UI_FEEDBACK_SUCCESS"),
+            ActionFeedbackKind::Error => localization.text("IDS_LAUNCHER_UI_FEEDBACK_ERROR"),
+        }
+    }
+
+    pub fn english_label(self) -> &'static str {
         match self {
             ActionFeedbackKind::Info => "Info",
             ActionFeedbackKind::Success => "Success",
@@ -110,14 +118,6 @@ pub enum ReportSearchHighlight {
 }
 
 impl ReportSearchHighlight {
-    pub fn label(self) -> &'static str {
-        match self {
-            ReportSearchHighlight::Generic => "text",
-            ReportSearchHighlight::Error => "errors",
-            ReportSearchHighlight::Warning => "warnings",
-        }
-    }
-
     pub fn active_color(self) -> Color {
         match self {
             ReportSearchHighlight::Generic => Color::opaque(200, 232, 255),
@@ -131,6 +131,28 @@ impl ReportSearchHighlight {
             ReportSearchHighlight::Generic => Color::opaque(132, 188, 240),
             ReportSearchHighlight::Error => Color::opaque(220, 92, 92),
             ReportSearchHighlight::Warning => Color::opaque(236, 194, 104),
+        }
+    }
+
+    pub fn label<'a>(self, localization: &'a Localization) -> &'a str {
+        match self {
+            ReportSearchHighlight::Generic => {
+                localization.text("IDS_LAUNCHER_UI_SEARCH_HIGHLIGHT_GENERIC")
+            }
+            ReportSearchHighlight::Error => {
+                localization.text("IDS_LAUNCHER_UI_SEARCH_HIGHLIGHT_ERRORS")
+            }
+            ReportSearchHighlight::Warning => {
+                localization.text("IDS_LAUNCHER_UI_SEARCH_HIGHLIGHT_WARNINGS")
+            }
+        }
+    }
+
+    pub fn english_label(self) -> &'static str {
+        match self {
+            ReportSearchHighlight::Generic => "text",
+            ReportSearchHighlight::Error => "errors",
+            ReportSearchHighlight::Warning => "warnings",
         }
     }
 }
@@ -175,6 +197,7 @@ pub struct LauncherShellUi {
     gui: Gui,
     layout: LauncherShellLayout,
     state: Option<LauncherShellState>,
+    localization: Localization,
     feedback: Option<ActionFeedback>,
     providers: ProviderDiagnostics,
     report_scroll_offset: usize,
@@ -182,11 +205,12 @@ pub struct LauncherShellUi {
 }
 
 impl LauncherShellUi {
-    pub fn new(state: Option<LauncherShellState>) -> GuiResult<Self> {
+    pub fn new(state: Option<LauncherShellState>, localization: Localization) -> GuiResult<Self> {
         let mut ui = Self {
             gui: Gui::new(),
             layout: LauncherShellLayout::default(),
             state: None,
+            localization,
             feedback: None,
             providers: ProviderDiagnostics::default(),
             report_scroll_offset: 0,
@@ -381,6 +405,7 @@ impl LauncherShellUi {
             &self.providers,
             self.report_scroll_offset,
             self.report_search.as_ref(),
+            &self.localization,
         )?;
         self.gui = gui;
         self.layout = layout;
@@ -539,19 +564,17 @@ fn build_gui(
     providers: &ProviderDiagnostics,
     report_scroll_offset: usize,
     report_search: Option<&ReportSearchState>,
+    localization: &Localization,
 ) -> GuiResult<(Gui, LauncherShellLayout)> {
     let mut gui = Gui::new();
     let mut layout = LauncherShellLayout::default();
     let root = gui.root();
 
-    gui.add_label(root, "LegacyClonk Launcher Diagnostics");
-    gui.add_label(
-        root,
-        "Inspect support bundles, updater telemetry, and captured logs before sharing them with support.",
-    );
+    gui.add_label(root, localization.text("IDS_LAUNCHER_UI_TITLE"));
+    gui.add_label(root, localization.text("IDS_LAUNCHER_UI_DESCRIPTION"));
 
     if let Some(feedback) = feedback {
-        let message = format_feedback_label(feedback);
+        let message = format_feedback_label(feedback, localization);
         gui.add_label(root, message.clone());
         layout.feedback_message = Some(message);
     }
@@ -560,69 +583,104 @@ fn build_gui(
         None => {
             gui.add_label(
                 root,
-                "Launch `lc-game` once to generate diagnostics and enable support bundle tooling.",
+                localization.text("IDS_LAUNCHER_UI_PROMPT_LAUNCH_GAME"),
             );
-            let regenerate_button = gui.add_button(root, "Regenerate");
+            let regenerate_button =
+                gui.add_button(root, localization.text("IDS_LAUNCHER_UI_BUTTON_REGENERATE"));
             layout.regenerate_button = Some(regenerate_button);
             gui.set_button_enabled(regenerate_button, false)?;
         }
         Some(state) => {
+            let reveal_button_label = localization.text("IDS_LAUNCHER_UI_BUTTON_REVEAL");
+            let regenerate_button_label = localization.text("IDS_LAUNCHER_UI_BUTTON_REGENERATE");
+            let copy_button_label = localization.text("IDS_LAUNCHER_UI_BUTTON_COPY");
+            let upload_button_label = localization.text("IDS_LAUNCHER_UI_BUTTON_UPLOAD");
             layout.support_artifacts = support_artifacts(state);
 
             let overview = gui.add_column(root, true);
             gui.add_label(
                 overview,
-                format!("Generated at {}", state.summary.generated_at),
+                localization.format(
+                    "IDS_LAUNCHER_UI_GENERATED_AT",
+                    [("timestamp", state.summary.generated_at.as_str())],
+                ),
             );
+            let logs_dir_display = display_path(&state.logs_dir);
             gui.add_label(
                 overview,
-                format!("Logs directory: {}", display_path(&state.logs_dir)),
+                localization.format(
+                    "IDS_LAUNCHER_UI_LOGS_DIRECTORY",
+                    [("path", logs_dir_display.as_str())],
+                ),
             );
 
             let summary_row = gui.add_row(overview, false);
+            let summary_path_display = display_path(&state.summary_path);
             gui.add_label(
                 summary_row,
-                format!("Launcher summary: {}", display_path(&state.summary_path)),
+                localization.format(
+                    "IDS_LAUNCHER_UI_LAUNCHER_SUMMARY_PATH",
+                    [("path", summary_path_display.as_str())],
+                ),
             );
-            let summary_button = gui.add_button(summary_row, "Reveal");
+            let summary_button = gui.add_button(summary_row, reveal_button_label);
             layout.action_map.insert(
                 summary_button,
                 WidgetAction::Reveal {
                     path: state.summary_path.clone(),
-                    label: "Launcher summary".into(),
+                    label: localization
+                        .text("IDS_LAUNCHER_UI_LAUNCHER_SUMMARY_LABEL")
+                        .into(),
                 },
             );
 
             let launcher_row = gui.add_row(overview, false);
+            let launcher_log_display = display_path(&state.launcher_log_path);
             gui.add_label(
                 launcher_row,
-                format!("Launcher log: {}", display_path(&state.launcher_log_path)),
+                localization.format(
+                    "IDS_LAUNCHER_UI_LAUNCHER_LOG_PATH",
+                    [("path", launcher_log_display.as_str())],
+                ),
             );
-            let launcher_button = gui.add_button(launcher_row, "Reveal");
+            let launcher_button = gui.add_button(launcher_row, reveal_button_label);
             layout.action_map.insert(
                 launcher_button,
                 WidgetAction::Reveal {
                     path: state.launcher_log_path.clone(),
-                    label: "Launcher log".into(),
+                    label: localization
+                        .text("IDS_LAUNCHER_UI_LAUNCHER_LOG_LABEL")
+                        .into(),
                 },
             );
 
             let support_section = gui.add_column(root, true);
-            gui.add_label(support_section, "Support Bundle");
+            gui.add_label(
+                support_section,
+                localization.text("IDS_LAUNCHER_UI_SECTION_SUPPORT_BUNDLE"),
+            );
             let bundle_status = match &state.support_bundle_path {
-                Some(path) => format!("Bundle path: {}", display_path(path)),
-                None => "Bundle path: Not generated yet.".to_string(),
+                Some(path) => {
+                    let bundle_path = display_path(path);
+                    localization.format(
+                        "IDS_LAUNCHER_UI_BUNDLE_PATH",
+                        [("path", bundle_path.as_str())],
+                    )
+                }
+                None => localization
+                    .text("IDS_LAUNCHER_UI_BUNDLE_NOT_GENERATED")
+                    .to_string(),
             };
             gui.add_label(support_section, bundle_status);
 
             let button_row = gui.add_row(support_section, false);
-            let regenerate_button = gui.add_button(button_row, "Regenerate");
+            let regenerate_button = gui.add_button(button_row, regenerate_button_label);
             layout
                 .action_map
                 .insert(regenerate_button, WidgetAction::RegenerateBundle);
             layout.regenerate_button = Some(regenerate_button);
 
-            let copy_button = gui.add_button(button_row, "Copy…");
+            let copy_button = gui.add_button(button_row, copy_button_label);
             layout.copy_button = Some(copy_button);
             if let Some(bundle) = &state.support_bundle_path {
                 layout.action_map.insert(
@@ -635,20 +693,22 @@ fn build_gui(
                 gui.set_button_enabled(copy_button, false)?;
             }
 
-            let reveal_bundle_button = gui.add_button(button_row, "Reveal");
+            let reveal_bundle_button = gui.add_button(button_row, reveal_button_label);
             if let Some(bundle) = &state.support_bundle_path {
                 layout.action_map.insert(
                     reveal_bundle_button,
                     WidgetAction::Reveal {
                         path: bundle.clone(),
-                        label: "Support bundle".into(),
+                        label: localization
+                            .text("IDS_LAUNCHER_UI_SUPPORT_BUNDLE_LABEL")
+                            .into(),
                     },
                 );
             } else {
                 gui.set_button_enabled(reveal_bundle_button, false)?;
             }
 
-            let upload_button = gui.add_button(button_row, "Upload…");
+            let upload_button = gui.add_button(button_row, upload_button_label);
             layout.upload_button = Some(upload_button);
             if layout.support_artifacts.is_empty() {
                 gui.set_button_enabled(upload_button, false)?;
@@ -659,27 +719,39 @@ fn build_gui(
             }
 
             let report_section = gui.add_column(root, true);
-            gui.add_label(report_section, "Support Bundle Report Preview");
+            gui.add_label(
+                report_section,
+                localization.text("IDS_LAUNCHER_UI_SECTION_REPORT_PREVIEW"),
+            );
             if state.support_bundle_report.is_empty() {
                 gui.add_label(
                     report_section,
-                    "Report preview will appear here after diagnostics are generated.",
+                    localization.text("IDS_LAUNCHER_UI_REPORT_EMPTY"),
                 );
             } else {
                 let controls = gui.add_row(report_section, false);
-                let copy_button = gui.add_button(controls, "Copy report");
+                let copy_button = gui.add_button(
+                    controls,
+                    localization.text("IDS_LAUNCHER_UI_BUTTON_COPY_REPORT"),
+                );
                 layout.report_copy_button = Some(copy_button);
                 layout
                     .action_map
                     .insert(copy_button, WidgetAction::CopyReportPreview);
 
-                let export_button = gui.add_button(controls, "Save report…");
-                layout.report_export_button = Some(export_button);
+                let save_button = gui.add_button(
+                    controls,
+                    localization.text("IDS_LAUNCHER_UI_BUTTON_SAVE_REPORT"),
+                );
+                layout.report_export_button = Some(save_button);
                 layout
                     .action_map
-                    .insert(export_button, WidgetAction::ExportReportPreview);
+                    .insert(save_button, WidgetAction::ExportReportPreview);
 
-                let scroll_up = gui.add_button(controls, "Scroll up");
+                let scroll_up = gui.add_button(
+                    controls,
+                    localization.text("IDS_LAUNCHER_UI_BUTTON_SCROLL_UP"),
+                );
                 layout.report_scroll_up_button = Some(scroll_up);
                 layout.action_map.insert(
                     scroll_up,
@@ -688,7 +760,10 @@ fn build_gui(
                     },
                 );
 
-                let scroll_down = gui.add_button(controls, "Scroll down");
+                let scroll_down = gui.add_button(
+                    controls,
+                    localization.text("IDS_LAUNCHER_UI_BUTTON_SCROLL_DOWN"),
+                );
                 layout.report_scroll_down_button = Some(scroll_down);
                 layout.action_map.insert(
                     scroll_down,
@@ -709,35 +784,47 @@ fn build_gui(
                     gui.set_button_enabled(scroll_down, false)?;
                 }
 
-                let range_label = format!(
-                    "Showing lines {}-{} of {}",
-                    offset + 1,
-                    (offset + visible).min(total_lines),
-                    total_lines
+                let range_start = (offset + 1).to_string();
+                let range_end = ((offset + visible).min(total_lines)).to_string();
+                let total_label = total_lines.to_string();
+                let range_label = localization.format(
+                    "IDS_LAUNCHER_UI_REPORT_RANGE",
+                    [
+                        ("start", range_start.as_str()),
+                        ("end", range_end.as_str()),
+                        ("total", total_label.as_str()),
+                    ],
                 );
                 gui.add_label(controls, range_label.clone());
                 layout.report_line_range = Some(range_label);
 
                 let search_controls = gui.add_row(report_section, false);
                 let search_active = report_search.map(|search| search.editing).unwrap_or(false);
-                let search_button_label = if search_active {
-                    "Search text (typing…)"
+                let focus_label_key = if search_active {
+                    "IDS_LAUNCHER_UI_BUTTON_SEARCH_TYPING"
                 } else {
-                    "Search text…"
+                    "IDS_LAUNCHER_UI_BUTTON_SEARCH"
                 };
-                let focus_button = gui.add_button(search_controls, search_button_label);
+                let focus_button =
+                    gui.add_button(search_controls, localization.text(focus_label_key));
                 layout.report_search_focus_button = Some(focus_button);
                 layout
                     .action_map
                     .insert(focus_button, WidgetAction::FocusReportSearch);
 
-                let clear_button = gui.add_button(search_controls, "Clear search");
+                let clear_button = gui.add_button(
+                    search_controls,
+                    localization.text("IDS_LAUNCHER_UI_BUTTON_CLEAR_SEARCH"),
+                );
                 layout.report_search_clear_button = Some(clear_button);
                 layout
                     .action_map
                     .insert(clear_button, WidgetAction::ClearReportSearch);
 
-                let error_button = gui.add_button(search_controls, "Find errors");
+                let error_button = gui.add_button(
+                    search_controls,
+                    localization.text("IDS_LAUNCHER_UI_BUTTON_FIND_ERRORS"),
+                );
                 layout.report_search_error_button = Some(error_button);
                 layout.action_map.insert(
                     error_button,
@@ -746,7 +833,10 @@ fn build_gui(
                     },
                 );
 
-                let warning_button = gui.add_button(search_controls, "Find warnings");
+                let warning_button = gui.add_button(
+                    search_controls,
+                    localization.text("IDS_LAUNCHER_UI_BUTTON_FIND_WARNINGS"),
+                );
                 layout.report_search_warning_button = Some(warning_button);
                 layout.action_map.insert(
                     warning_button,
@@ -755,21 +845,27 @@ fn build_gui(
                     },
                 );
 
-                let previous_button = gui.add_button(search_controls, "Previous match");
+                let previous_button = gui.add_button(
+                    search_controls,
+                    localization.text("IDS_LAUNCHER_UI_BUTTON_PREVIOUS_MATCH"),
+                );
                 layout.report_search_previous_button = Some(previous_button);
                 layout
                     .action_map
                     .insert(previous_button, WidgetAction::PreviousReportSearchMatch);
 
-                let next_button = gui.add_button(search_controls, "Next match");
+                let next_button = gui.add_button(
+                    search_controls,
+                    localization.text("IDS_LAUNCHER_UI_BUTTON_NEXT_MATCH"),
+                );
                 layout.report_search_next_button = Some(next_button);
                 layout
                     .action_map
                     .insert(next_button, WidgetAction::NextReportSearchMatch);
 
-                let mut search_status = String::from(
-                    "Search inactive. Use quick filters or start typing to jump to matches.",
-                );
+                let mut search_status = localization
+                    .text("IDS_LAUNCHER_UI_SEARCH_INACTIVE")
+                    .to_string();
                 let mut has_query = false;
                 let mut match_count = 0usize;
                 let mut editing = false;
@@ -778,35 +874,38 @@ fn build_gui(
                     editing = search.editing;
                     match_count = search.matches.len();
                     if has_query {
+                        let highlight_label = search.highlight.label(localization);
                         if match_count == 0 {
-                            search_status = format!(
-                                "Search ({}): no matches for \"{}\".",
-                                search.highlight.label(),
-                                search.query
+                            search_status = localization.format(
+                                "IDS_LAUNCHER_UI_SEARCH_NO_MATCHES",
+                                [
+                                    ("highlight", highlight_label),
+                                    ("query", search.query.as_str()),
+                                ],
                             );
                         } else if let Some((current, total)) = search.match_summary() {
-                            if editing {
-                                search_status = format!(
-                                    "Search ({}): \"{}\" (match {} of {}) — Enter to finish, Esc to clear.",
-                                    search.highlight.label(),
-                                    search.query,
-                                    current,
-                                    total
-                                );
+                            let current_str = current.to_string();
+                            let total_str = total.to_string();
+                            let replacements = [
+                                ("highlight", highlight_label),
+                                ("query", search.query.as_str()),
+                                ("current", current_str.as_str()),
+                                ("total", total_str.as_str()),
+                            ];
+                            search_status = if editing {
+                                localization.format(
+                                    "IDS_LAUNCHER_UI_SEARCH_MATCH_STATUS_EDITING",
+                                    replacements,
+                                )
                             } else {
-                                search_status = format!(
-                                    "Search ({}): \"{}\" (match {} of {}).",
-                                    search.highlight.label(),
-                                    search.query,
-                                    current,
-                                    total
-                                );
-                            }
+                                localization
+                                    .format("IDS_LAUNCHER_UI_SEARCH_MATCH_STATUS", replacements)
+                            };
                         }
                     } else if editing {
-                        search_status = String::from(
-                            "Search active. Type a term to filter the report. Enter finishes, Esc clears.",
-                        );
+                        search_status = localization
+                            .text("IDS_LAUNCHER_UI_SEARCH_ACTIVE_EDITING")
+                            .to_string();
                     }
                 }
 
@@ -814,14 +913,9 @@ fn build_gui(
                     gui.set_button_enabled(clear_button, false)?;
                     gui.set_button_enabled(previous_button, false)?;
                     gui.set_button_enabled(next_button, false)?;
-                } else {
-                    if !has_query {
-                        gui.set_button_enabled(previous_button, false)?;
-                        gui.set_button_enabled(next_button, false)?;
-                    } else if match_count == 0 {
-                        gui.set_button_enabled(previous_button, false)?;
-                        gui.set_button_enabled(next_button, false)?;
-                    }
+                } else if !has_query || match_count == 0 {
+                    gui.set_button_enabled(previous_button, false)?;
+                    gui.set_button_enabled(next_button, false)?;
                 }
 
                 gui.add_label(search_controls, search_status.clone());
@@ -847,110 +941,163 @@ fn build_gui(
                 }
                 if end < total_lines {
                     let remaining = total_lines - end;
-                    let suffix = if remaining == 1 { "" } else { "s" };
+                    let remaining_str = remaining.to_string();
+                    let key = if remaining == 1 {
+                        "IDS_LAUNCHER_UI_REPORT_TRUNCATED_ONE"
+                    } else {
+                        "IDS_LAUNCHER_UI_REPORT_TRUNCATED_MANY"
+                    };
                     gui.add_label(
                         report_section,
-                        format!(
-                            "… {} additional line{} hidden. Use scroll controls to view remaining content.",
-                            remaining, suffix
-                        ),
+                        localization.format(key, [("count", remaining_str.as_str())]),
                     );
                 }
             }
 
             let artifacts_section = gui.add_column(root, true);
-            gui.add_label(artifacts_section, "Artifacts");
+            gui.add_label(
+                artifacts_section,
+                localization.text("IDS_LAUNCHER_UI_SECTION_ARTIFACTS"),
+            );
             if layout.support_artifacts.is_empty() {
-                gui.add_label(artifacts_section, "No artifacts are available yet.");
+                gui.add_label(
+                    artifacts_section,
+                    localization.text("IDS_LAUNCHER_UI_ARTIFACTS_EMPTY"),
+                );
             } else {
                 for artifact in &layout.support_artifacts {
                     let row = gui.add_row(artifacts_section, false);
+                    let role_label = localized_artifact_role(localization, artifact.role);
+                    let artifact_path = display_path(&artifact.path);
+                    let role_text = role_label.as_str();
+                    let path_text = artifact_path.as_str();
                     gui.add_label(
                         row,
-                        format!(
-                            "{}: {}",
-                            format_role(artifact.role),
-                            display_path(&artifact.path)
+                        localization.format(
+                            "IDS_LAUNCHER_UI_ARTIFACT_ENTRY",
+                            [("label", role_text), ("path", path_text)],
                         ),
                     );
-                    let button = gui.add_button(row, "Reveal");
+                    let button = gui.add_button(row, reveal_button_label);
                     layout.action_map.insert(
                         button,
                         WidgetAction::Reveal {
                             path: artifact.path.clone(),
-                            label: format!("{} path", format_role(artifact.role)),
+                            label: localization
+                                .format(
+                                    "IDS_LAUNCHER_UI_ARTIFACT_PATH_LABEL",
+                                    [("label", role_text)],
+                                )
+                                .into(),
                         },
                     );
                 }
             }
 
             let runtime_section = gui.add_column(root, true);
-            gui.add_label(runtime_section, "Runtime Logs");
+            gui.add_label(
+                runtime_section,
+                localization.text("IDS_LAUNCHER_UI_SECTION_RUNTIME_LOGS"),
+            );
             if state.runtime_log_paths.is_empty() {
-                gui.add_label(runtime_section, "No runtime logs were captured.");
+                gui.add_label(
+                    runtime_section,
+                    localization.text("IDS_LAUNCHER_UI_RUNTIME_LOGS_EMPTY"),
+                );
             } else {
                 for path in &state.runtime_log_paths {
                     let row = gui.add_row(runtime_section, false);
                     gui.add_label(row, display_path(path));
-                    let button = gui.add_button(row, "Reveal");
+                    let button = gui.add_button(row, reveal_button_label);
                     layout.action_map.insert(
                         button,
                         WidgetAction::Reveal {
                             path: path.clone(),
-                            label: "Runtime log".into(),
+                            label: localization
+                                .text("IDS_LAUNCHER_UI_RUNTIME_LOG_LABEL")
+                                .into(),
                         },
                     );
                 }
             }
 
             let crash_section = gui.add_column(root, true);
-            gui.add_label(crash_section, "Crash Reports");
+            gui.add_label(
+                crash_section,
+                localization.text("IDS_LAUNCHER_UI_SECTION_CRASH_REPORTS"),
+            );
             if state.crash_report_paths.is_empty() {
-                gui.add_label(crash_section, "No crash reports were recorded.");
+                gui.add_label(
+                    crash_section,
+                    localization.text("IDS_LAUNCHER_UI_CRASH_REPORTS_EMPTY"),
+                );
             } else {
                 for path in &state.crash_report_paths {
                     let row = gui.add_row(crash_section, false);
                     gui.add_label(row, display_path(path));
-                    let button = gui.add_button(row, "Reveal");
+                    let button = gui.add_button(row, reveal_button_label);
                     layout.action_map.insert(
                         button,
                         WidgetAction::Reveal {
                             path: path.clone(),
-                            label: "Crash report".into(),
+                            label: localization
+                                .text("IDS_LAUNCHER_UI_CRASH_REPORT_LABEL")
+                                .into(),
                         },
                     );
                 }
             }
 
             let telemetry_section = gui.add_column(root, true);
-            gui.add_label(telemetry_section, "Updater Telemetry");
+            gui.add_label(
+                telemetry_section,
+                localization.text("IDS_LAUNCHER_UI_SECTION_TELEMETRY"),
+            );
             if state.telemetry_success_logs.is_empty() && state.telemetry_failures.is_empty() {
                 gui.add_label(
                     telemetry_section,
-                    "No updater telemetry was detected in the captured logs.",
+                    localization.text("IDS_LAUNCHER_UI_TELEMETRY_EMPTY"),
                 );
             } else {
                 for path in &state.telemetry_success_logs {
                     let row = gui.add_row(telemetry_section, false);
-                    gui.add_label(row, format!("Success recorded in {}", display_path(path)));
-                    let button = gui.add_button(row, "Reveal");
+                    let success_path = display_path(path);
+                    gui.add_label(
+                        row,
+                        localization.format(
+                            "IDS_LAUNCHER_UI_TELEMETRY_SUCCESS_ENTRY",
+                            [("path", success_path.as_str())],
+                        ),
+                    );
+                    let button = gui.add_button(row, reveal_button_label);
                     layout.action_map.insert(
                         button,
                         WidgetAction::Reveal {
                             path: path.clone(),
-                            label: "Telemetry success".into(),
+                            label: localization
+                                .text("IDS_LAUNCHER_UI_TELEMETRY_SUCCESS_LABEL")
+                                .into(),
                         },
                     );
                 }
                 for failure in &state.telemetry_failures {
                     let row = gui.add_row(telemetry_section, false);
-                    gui.add_label(row, format!("Failure: {}", failure.message));
-                    let button = gui.add_button(row, "Reveal log");
+                    gui.add_label(
+                        row,
+                        localization.format(
+                            "IDS_LAUNCHER_UI_TELEMETRY_FAILURE_ENTRY",
+                            [("message", failure.message.as_str())],
+                        ),
+                    );
+                    let button =
+                        gui.add_button(row, localization.text("IDS_LAUNCHER_UI_BUTTON_REVEAL_LOG"));
                     layout.action_map.insert(
                         button,
                         WidgetAction::Reveal {
                             path: failure.log_path.clone(),
-                            label: "Telemetry failure log".into(),
+                            label: localization
+                                .text("IDS_LAUNCHER_UI_TELEMETRY_FAILURE_LABEL")
+                                .into(),
                         },
                     );
                 }
@@ -958,7 +1105,7 @@ fn build_gui(
         }
     }
 
-    add_provider_section(&mut gui, &mut layout, root, providers, state);
+    add_provider_section(&mut gui, &mut layout, root, providers, state, localization);
 
     Ok((gui, layout))
 }
@@ -969,9 +1116,13 @@ fn add_provider_section(
     root: WidgetId,
     providers: &ProviderDiagnostics,
     state: Option<&LauncherShellState>,
+    localization: &Localization,
 ) {
     let section = gui.add_column(root, true);
-    gui.add_label(section, "First-Party Providers");
+    gui.add_label(
+        section,
+        localization.text("IDS_LAUNCHER_UI_SECTION_PROVIDERS"),
+    );
     let (logs_dir, bulk_summary) = match state {
         Some(state) => (
             Some(state.logs_dir.as_path()),
@@ -980,24 +1131,30 @@ fn add_provider_section(
         None => (None, None),
     };
     if providers.share.is_empty() && providers.upload.is_empty() {
-        gui.add_label(
-            section,
-            "No first-party providers are configured. Configure LC_FIRST_PARTY_* variables to enable automated submissions.",
-        );
+        gui.add_label(section, localization.text("IDS_LAUNCHER_UI_PROVIDERS_NONE"));
         if let Some(summary) = bulk_summary {
-            add_bulk_retarget_summary(gui, section, summary, logs_dir);
+            add_bulk_retarget_summary(gui, section, summary, logs_dir, localization);
         }
         return;
     }
 
     let bulk_row = gui.add_row(section, false);
-    gui.add_label(bulk_row, "Bulk actions:");
-    let restore_button = gui.add_button(bulk_row, "Restore defaults");
+    gui.add_label(
+        bulk_row,
+        localization.text("IDS_LAUNCHER_UI_PROVIDERS_BULK_ACTIONS"),
+    );
+    let restore_button = gui.add_button(
+        bulk_row,
+        localization.text("IDS_LAUNCHER_UI_BUTTON_RESTORE_DEFAULTS"),
+    );
     layout
         .action_map
         .insert(restore_button, WidgetAction::RestoreAllProviderDefaults);
     layout.restore_defaults_button = Some(restore_button);
-    let retarget_button = gui.add_button(bulk_row, "Retarget all…");
+    let retarget_button = gui.add_button(
+        bulk_row,
+        localization.text("IDS_LAUNCHER_UI_BUTTON_RETARGET_ALL"),
+    );
     layout
         .action_map
         .insert(retarget_button, WidgetAction::RetargetAllProviders);
@@ -1005,30 +1162,38 @@ fn add_provider_section(
 
     if !providers.share.is_empty() {
         let share_section = gui.add_column(section, true);
-        gui.add_label(share_section, "Share Targets");
+        gui.add_label(
+            share_section,
+            localization.text("IDS_LAUNCHER_UI_SECTION_SHARE_TARGETS"),
+        );
         render_provider_list(
             gui,
             layout,
             share_section,
             &providers.share,
             ProviderKind::Share,
+            localization,
         );
     }
 
     if !providers.upload.is_empty() {
         let upload_section = gui.add_column(section, true);
-        gui.add_label(upload_section, "Upload Targets");
+        gui.add_label(
+            upload_section,
+            localization.text("IDS_LAUNCHER_UI_SECTION_UPLOAD_TARGETS"),
+        );
         render_provider_list(
             gui,
             layout,
             upload_section,
             &providers.upload,
             ProviderKind::Upload,
+            localization,
         );
     }
 
     if let Some(summary) = bulk_summary {
-        add_bulk_retarget_summary(gui, section, summary, logs_dir);
+        add_bulk_retarget_summary(gui, section, summary, logs_dir, localization);
     }
 }
 
@@ -1038,9 +1203,10 @@ fn render_provider_list(
     parent: WidgetId,
     providers: &[ProviderStatus],
     role: ProviderKind,
+    localization: &Localization,
 ) {
     for (index, provider) in providers.iter().enumerate() {
-        render_provider_entry(gui, layout, parent, provider, role, index);
+        render_provider_entry(gui, layout, parent, provider, role, index, localization);
     }
 }
 
@@ -1051,40 +1217,65 @@ fn render_provider_entry(
     provider: &ProviderStatus,
     role: ProviderKind,
     index: usize,
+    localization: &Localization,
 ) {
     let entry = gui.add_column(parent, true);
+    let provider_path = display_path(&provider.path);
     gui.add_label(
         entry,
-        format!("{}: {}", provider.name, display_path(&provider.path)),
-    );
-    gui.add_label(
-        entry,
-        format!(
-            "Path status: {}; Automation: {}",
-            format_path_status(&provider.path_status),
-            format_automation_state(&provider.automation)
+        localization.format(
+            "IDS_LAUNCHER_UI_PROVIDER_ENTRY",
+            [
+                ("name", provider.name.as_str()),
+                ("path", provider_path.as_str()),
+            ],
         ),
     );
+    let path_status = format_path_status(&provider.path_status, localization);
+    let automation_status = format_automation_state(&provider.automation, localization);
     gui.add_label(
         entry,
-        format!(
-            "Default path: {}",
-            display_path(provider.path_provenance.default_path())
+        localization.format(
+            "IDS_LAUNCHER_UI_PROVIDER_STATUS",
+            [
+                ("path_status", path_status.as_str()),
+                ("automation", automation_status.as_str()),
+            ],
+        ),
+    );
+    let default_path = display_path(provider.path_provenance.default_path());
+    gui.add_label(
+        entry,
+        localization.format(
+            "IDS_LAUNCHER_UI_PROVIDER_DEFAULT_PATH",
+            [("path", default_path.as_str())],
         ),
     );
 
     let overrides = provider.path_provenance.overrides();
     if overrides.is_empty() {
-        gui.add_label(entry, "Override history: none recorded.");
+        gui.add_label(
+            entry,
+            localization.text("IDS_LAUNCHER_UI_PROVIDER_OVERRIDE_NONE"),
+        );
     } else {
-        gui.add_label(entry, "Override history:");
+        gui.add_label(
+            entry,
+            localization.text("IDS_LAUNCHER_UI_PROVIDER_OVERRIDE_HEADER"),
+        );
         for override_entry in overrides {
+            let path = display_path(override_entry.path());
             gui.add_label(
                 entry,
-                format!(
-                    "  - {} -> {}",
-                    format_override_source(override_entry.source()),
-                    display_path(override_entry.path())
+                localization.format(
+                    "IDS_LAUNCHER_UI_PROVIDER_OVERRIDE_ENTRY",
+                    [
+                        (
+                            "source",
+                            format_override_source(override_entry.source(), localization).as_str(),
+                        ),
+                        ("path", path.as_str()),
+                    ],
                 ),
             );
         }
@@ -1094,13 +1285,16 @@ fn render_provider_entry(
     let path_is_default = provider.path == provider.path_provenance.default_path();
     if has_preference_override || !path_is_default {
         let controls = gui.add_row(entry, false);
-        gui.add_label(controls, "Override controls:");
-        let label = if path_is_default {
-            "Clear saved overrides"
+        gui.add_label(
+            controls,
+            localization.text("IDS_LAUNCHER_UI_PROVIDER_OVERRIDE_CONTROLS"),
+        );
+        let label_key = if path_is_default {
+            "IDS_LAUNCHER_UI_BUTTON_CLEAR_OVERRIDES"
         } else {
-            "Restore default path"
+            "IDS_LAUNCHER_UI_BUTTON_RESTORE_DEFAULT_PATH"
         };
-        let button = gui.add_button(controls, label);
+        let button = gui.add_button(controls, localization.text(label_key));
         layout
             .action_map
             .insert(button, WidgetAction::ClearProviderOverride { role, index });
@@ -1108,12 +1302,18 @@ fn render_provider_entry(
 
     if matches!(provider.automation, ProviderAutomationState::Stale { .. }) {
         let actions = gui.add_row(entry, false);
-        gui.add_label(actions, "Actions:");
-        let restage = gui.add_button(actions, "Restage");
+        gui.add_label(
+            actions,
+            localization.text("IDS_LAUNCHER_UI_PROVIDER_ACTIONS"),
+        );
+        let restage = gui.add_button(actions, localization.text("IDS_LAUNCHER_UI_BUTTON_RESTAGE"));
         layout
             .action_map
             .insert(restage, WidgetAction::RestageProvider { role, index });
-        let retarget = gui.add_button(actions, "Retarget…");
+        let retarget = gui.add_button(
+            actions,
+            localization.text("IDS_LAUNCHER_UI_BUTTON_RETARGET"),
+        );
         layout
             .action_map
             .insert(retarget, WidgetAction::RetargetProvider { role, index });
@@ -1124,44 +1324,81 @@ fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-fn format_feedback_label(feedback: &ActionFeedback) -> String {
-    format!("[{}] {}", feedback.kind.label(), feedback.message)
+fn format_feedback_label(feedback: &ActionFeedback, localization: &Localization) -> String {
+    let label = feedback.kind.label(localization);
+    localization.format(
+        "IDS_LAUNCHER_UI_FEEDBACK_FORMAT",
+        [("label", label), ("message", feedback.message.as_str())],
+    )
 }
 
-fn format_role(role: &str) -> String {
-    role.split_whitespace()
-        .map(capitalize_word)
-        .collect::<Vec<_>>()
-        .join(" ")
+fn localized_artifact_role(localization: &Localization, role: &str) -> String {
+    match role {
+        "support bundle" => localization
+            .text("IDS_LAUNCHER_UI_ARTIFACT_ROLE_SUPPORT_BUNDLE")
+            .to_string(),
+        "launcher summary" => localization
+            .text("IDS_LAUNCHER_UI_ARTIFACT_ROLE_LAUNCHER_SUMMARY")
+            .to_string(),
+        other => other
+            .split_whitespace()
+            .map(capitalize_word)
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
 }
 
-fn format_path_status(status: &ProviderPathStatus) -> String {
+fn format_path_status(status: &ProviderPathStatus, localization: &Localization) -> String {
     match status {
-        ProviderPathStatus::Ready => "Ready".into(),
-        ProviderPathStatus::Missing => "Missing".into(),
-        ProviderPathStatus::NotDirectory => "Not a directory".into(),
-        ProviderPathStatus::Inaccessible(message) => {
-            format!("Inaccessible ({message})")
-        }
+        ProviderPathStatus::Ready => localization
+            .text("IDS_LAUNCHER_UI_PATH_STATUS_READY")
+            .to_string(),
+        ProviderPathStatus::Missing => localization
+            .text("IDS_LAUNCHER_UI_PATH_STATUS_MISSING")
+            .to_string(),
+        ProviderPathStatus::NotDirectory => localization
+            .text("IDS_LAUNCHER_UI_PATH_STATUS_NOT_DIRECTORY")
+            .to_string(),
+        ProviderPathStatus::Inaccessible(message) => localization.format(
+            "IDS_LAUNCHER_UI_PATH_STATUS_INACCESSIBLE",
+            [("message", message.as_str())],
+        ),
     }
 }
 
-fn format_automation_state(state: &ProviderAutomationState) -> String {
+fn format_automation_state(state: &ProviderAutomationState, localization: &Localization) -> String {
     match state {
-        ProviderAutomationState::Idle => "Idle".into(),
-        ProviderAutomationState::Submitted { detail } => format!("Submitted ({detail})"),
-        ProviderAutomationState::Stale { reason } => format!("Stale ({reason})"),
-        ProviderAutomationState::Skipped { reason } => format!("Skipped ({reason})"),
-        ProviderAutomationState::Failed { error } => format!("Failed ({error})"),
+        ProviderAutomationState::Idle => localization
+            .text("IDS_LAUNCHER_UI_AUTOMATION_IDLE")
+            .to_string(),
+        ProviderAutomationState::Submitted { detail } => localization.format(
+            "IDS_LAUNCHER_UI_AUTOMATION_SUBMITTED",
+            [("detail", detail.as_str())],
+        ),
+        ProviderAutomationState::Stale { reason } => localization.format(
+            "IDS_LAUNCHER_UI_AUTOMATION_STALE",
+            [("reason", reason.as_str())],
+        ),
+        ProviderAutomationState::Skipped { reason } => localization.format(
+            "IDS_LAUNCHER_UI_AUTOMATION_SKIPPED",
+            [("reason", reason.as_str())],
+        ),
+        ProviderAutomationState::Failed { error } => localization.format(
+            "IDS_LAUNCHER_UI_AUTOMATION_FAILED",
+            [("error", error.as_str())],
+        ),
     }
 }
 
-fn format_override_source(source: &ProviderOverrideSource) -> String {
+fn format_override_source(source: &ProviderOverrideSource, localization: &Localization) -> String {
     match source {
-        ProviderOverrideSource::Preference => "Launcher preference".into(),
-        ProviderOverrideSource::Retargeted { applied_at } => {
-            format!("Retargeted at {applied_at}")
-        }
+        ProviderOverrideSource::Preference => localization
+            .text("IDS_LAUNCHER_UI_OVERRIDE_SOURCE_PREFERENCE")
+            .to_string(),
+        ProviderOverrideSource::Retargeted { applied_at } => localization.format(
+            "IDS_LAUNCHER_UI_OVERRIDE_SOURCE_RETARGETED",
+            [("timestamp", applied_at.as_str())],
+        ),
     }
 }
 
@@ -1183,22 +1420,44 @@ fn add_bulk_retarget_summary(
     section: WidgetId,
     summary: &ProviderBulkRetargetSummary,
     logs_dir: Option<&Path>,
+    localization: &Localization,
 ) {
     let has_records = !summary.share.is_empty() || !summary.upload.is_empty();
     if !has_records && summary.history_cleared_at.is_none() {
         return;
     }
     if has_records {
-        gui.add_label(section, "Bulk retarget history:");
-        add_bulk_retarget_records(gui, section, "  Share targets:", &summary.share, logs_dir);
-        add_bulk_retarget_records(gui, section, "  Upload targets:", &summary.upload, logs_dir);
+        gui.add_label(
+            section,
+            localization.text("IDS_LAUNCHER_UI_BULK_HISTORY_HEADER"),
+        );
+        add_bulk_retarget_records(
+            gui,
+            section,
+            localization.text("IDS_LAUNCHER_UI_BULK_SHARE_HEADER"),
+            &summary.share,
+            logs_dir,
+            localization,
+        );
+        add_bulk_retarget_records(
+            gui,
+            section,
+            localization.text("IDS_LAUNCHER_UI_BULK_UPLOAD_HEADER"),
+            &summary.upload,
+            logs_dir,
+            localization,
+        );
     }
     if let Some(cleared_at) = &summary.history_cleared_at {
         let message = if has_records {
-            format!("Bulk retarget history last cleared at {cleared_at}.")
+            localization.format(
+                "IDS_LAUNCHER_UI_BULK_HISTORY_CLEARED_WITH_RECORDS",
+                [("timestamp", cleared_at.as_str())],
+            )
         } else {
-            format!(
-                "Bulk retarget history was cleared at {cleared_at}. No retarget records remain while providers use default staging paths."
+            localization.format(
+                "IDS_LAUNCHER_UI_BULK_HISTORY_CLEARED_NO_RECORDS",
+                [("timestamp", cleared_at.as_str())],
             )
         };
         gui.add_label(section, message);
@@ -1211,6 +1470,7 @@ fn add_bulk_retarget_records(
     label: &str,
     records: &[ProviderBulkRetargetRecord],
     logs_dir: Option<&Path>,
+    localization: &Localization,
 ) {
     if records.is_empty() {
         return;
@@ -1218,14 +1478,19 @@ fn add_bulk_retarget_records(
     gui.add_label(section, label.to_string());
     for record in records {
         let base_path = resolve_logs_entry(logs_dir, &record.base_path);
+        let path_str = display_path(&base_path);
+        let changed_str = record.changed.to_string();
+        let total_str = record.total.to_string();
         gui.add_label(
             section,
-            format!(
-                "    - {} (last retargeted at {}, changed {} of {} targets)",
-                display_path(&base_path),
-                record.retargeted_at,
-                record.changed,
-                record.total
+            localization.format(
+                "IDS_LAUNCHER_UI_BULK_RECORD_ENTRY",
+                [
+                    ("path", path_str.as_str()),
+                    ("timestamp", record.retargeted_at.as_str()),
+                    ("changed", changed_str.as_str()),
+                    ("total", total_str.as_str()),
+                ],
             ),
         );
     }
@@ -1245,16 +1510,26 @@ mod tests {
     use super::*;
     use lc_gui::{GuiEvent, Point};
     use lc_launcher::{
-        LauncherSummary, LauncherTelemetryFailure, ProviderAutomationSnapshot,
+        load_localization, LauncherSummary, LauncherTelemetryFailure, ProviderAutomationSnapshot,
         ProviderAutomationState, ProviderBulkRetargetRecord, ProviderBulkRetargetSummary,
         ProviderDiagnostics, ProviderOverrideSource, ProviderPathProvenance, ProviderPathStatus,
         ProviderStatus, SerializableTelemetryFailure, SerializableTelemetrySummary,
     };
+    use lc_platform::AppPaths;
     use tempfile::TempDir;
+
+    fn test_localization() -> Localization {
+        let paths = AppPaths::discover().expect("app paths");
+        load_localization(&paths).expect("localization")
+    }
+
+    fn build_ui(state: Option<LauncherShellState>) -> LauncherShellUi {
+        LauncherShellUi::new(state, test_localization()).expect("ui")
+    }
 
     #[test]
     fn buttons_are_disabled_before_summary_exists() {
-        let mut ui = LauncherShellUi::new(None).expect("ui");
+        let mut ui = build_ui(None);
         ui.layout(Size::new(640.0, 480.0));
 
         let regenerate = ui.regenerate_button().expect("regenerate button");
@@ -1277,7 +1552,7 @@ mod tests {
         let bundle_path = state.support_bundle_path.clone().expect("bundle");
         let summary_path = state.summary_path.clone();
 
-        let mut ui = LauncherShellUi::new(Some(state.clone())).expect("ui");
+        let mut ui = build_ui(Some(state.clone()));
         let share_path = temp.path().join("support-share");
         let mut diagnostics = ProviderDiagnostics::default();
         diagnostics.share.push(ProviderStatus {
@@ -1409,7 +1684,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut state = sample_state(temp.path());
         state.support_bundle_report = (1..=50).map(|idx| format!("Line {idx:02}")).collect();
-        let mut ui = LauncherShellUi::new(Some(state)).expect("ui");
+        let mut ui = build_ui(Some(state));
         ui.layout(Size::new(960.0, 1280.0));
 
         let initial_range = ui.report_line_range_text().expect("initial range label");
@@ -1484,7 +1759,7 @@ mod tests {
             "ERROR: subsystem offline".into(),
             "Warning: connection unstable".into(),
         ];
-        let mut ui = LauncherShellUi::new(Some(state)).expect("ui");
+        let mut ui = build_ui(Some(state));
         let search_state = ReportSearchState {
             query: "error".into(),
             matches: vec![1],
@@ -1576,7 +1851,7 @@ mod tests {
     fn action_feedback_survives_state_refresh() {
         let temp = TempDir::new().unwrap();
         let state = sample_state(temp.path());
-        let mut ui = LauncherShellUi::new(Some(state.clone())).expect("ui");
+        let mut ui = build_ui(Some(state.clone()));
 
         ui.set_action_feedback(Some(ActionFeedback::success("Copied bundle")))
             .expect("set feedback");
@@ -1614,7 +1889,7 @@ mod tests {
             path_provenance: ProviderPathProvenance::new(temp.path().join("support-share")),
         });
 
-        let mut ui = LauncherShellUi::new(None).expect("ui");
+        let mut ui = build_ui(None);
         ui.set_providers(diagnostics).expect("set providers");
         ui.layout(Size::new(640.0, 480.0));
         let commands = ui.render();
@@ -1672,7 +1947,7 @@ mod tests {
             path_provenance: provenance,
         });
 
-        let mut ui = LauncherShellUi::new(None).expect("ui");
+        let mut ui = build_ui(None);
         ui.set_providers(diagnostics).expect("set providers");
         ui.layout(Size::new(640.0, 480.0));
         let commands = ui.render();
@@ -1713,7 +1988,7 @@ mod tests {
         });
         state.summary.provider_bulk_retarget = Some(summary);
 
-        let mut ui = LauncherShellUi::new(Some(state)).expect("ui");
+        let mut ui = build_ui(Some(state));
         ui.layout(Size::new(640.0, 480.0));
         let commands = ui.render();
 
@@ -1750,7 +2025,7 @@ mod tests {
         summary.history_cleared_at = Some("2024-06-05T18:30:00Z".into());
         state.summary.provider_bulk_retarget = Some(summary);
 
-        let mut ui = LauncherShellUi::new(Some(state)).expect("ui");
+        let mut ui = build_ui(Some(state));
         ui.layout(Size::new(640.0, 480.0));
         let commands = ui.render();
 
@@ -1776,7 +2051,7 @@ mod tests {
             path_provenance: ProviderPathProvenance::new(PathBuf::from("/tmp/support-share")),
         });
 
-        let mut ui = LauncherShellUi::new(None).expect("ui");
+        let mut ui = build_ui(None);
         ui.set_providers(diagnostics).expect("set providers");
         ui.layout(Size::new(640.0, 480.0));
 
@@ -1823,7 +2098,7 @@ mod tests {
             path_provenance: provenance,
         });
 
-        let mut ui = LauncherShellUi::new(None).expect("ui");
+        let mut ui = build_ui(None);
         ui.set_providers(diagnostics).expect("set providers");
         ui.layout(Size::new(640.0, 480.0));
 
