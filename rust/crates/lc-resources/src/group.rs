@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use thiserror::Error;
@@ -37,8 +38,15 @@ enum GroupKind {
 }
 
 #[derive(Debug, Clone)]
+enum PackedSource {
+    File(PathBuf),
+    Memory(Arc<Vec<u8>>),
+}
+
+#[derive(Debug, Clone)]
 struct PackedGroup {
     path: PathBuf,
+    source: PackedSource,
     header: PackedHeader,
     entries: Vec<PackedEntry>,
     index: HashMap<PathBuf, usize>,
@@ -106,14 +114,20 @@ impl Group {
                 let full_path = root.join(relative.as_ref());
                 Ok(fs::read(full_path)?)
             }
-            GroupKind::Packed(packed) => packed.read_file(relative.as_ref()),
+            GroupKind::Packed(packed) => {
+                let relative = normalize_path(relative.as_ref());
+                packed.read_file(&relative)
+            }
         }
     }
 
     pub fn exists<P: AsRef<Path>>(&self, relative: P) -> bool {
         match &self.kind {
             GroupKind::Directory(root) => root.join(relative.as_ref()).exists(),
-            GroupKind::Packed(packed) => packed.index.contains_key(relative.as_ref()),
+            GroupKind::Packed(packed) => {
+                let relative = normalize_path(relative.as_ref());
+                packed.index.contains_key(&relative)
+            }
         }
     }
 
@@ -123,27 +137,69 @@ impl Group {
             _ => None,
         }
     }
+
+    pub fn is_directory(&self) -> bool {
+        matches!(self.kind, GroupKind::Directory(_))
+    }
+
+    pub fn open_child<P: AsRef<Path>>(&self, relative: P) -> Result<Self, GroupError> {
+        let relative = normalize_path(relative.as_ref());
+        match &self.kind {
+            GroupKind::Directory(root) => Self::open(root.join(&relative)),
+            GroupKind::Packed(packed) => packed.open_child(&relative),
+        }
+    }
+
+    fn from_packed_bytes(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
+        let packed = PackedGroup::from_memory(path, data)?;
+        Ok(Self {
+            kind: GroupKind::Packed(packed),
+        })
+    }
 }
 
 impl PackedGroup {
     fn open(path: &Path) -> Result<Self, GroupError> {
-        let mut file = File::open(path)?;
-        let mut header_bytes = [0u8; GROUP_HEADER_SIZE];
-        file.read_exact(&mut header_bytes)?;
-        mem_unscramble(&mut header_bytes);
+        Self::from_source(path.to_path_buf(), PackedSource::File(path.to_path_buf()))
+    }
 
+    fn from_memory(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
+        Self::from_source(path, PackedSource::Memory(Arc::new(data)))
+    }
+
+    fn from_source(path: PathBuf, source: PackedSource) -> Result<Self, GroupError> {
+        match source {
+            PackedSource::File(file_path) => {
+                let mut file = File::open(&file_path)?;
+                Self::parse_from_reader(path, PackedSource::File(file_path), &mut file)
+            }
+            PackedSource::Memory(data) => {
+                let data_clone = Arc::clone(&data);
+                let mut cursor = Cursor::new(data_clone.as_slice());
+                Self::parse_from_reader(path, PackedSource::Memory(data), &mut cursor)
+            }
+        }
+    }
+
+    fn parse_from_reader<R: Read + Seek>(
+        path: PathBuf,
+        source: PackedSource,
+        reader: &mut R,
+    ) -> Result<Self, GroupError> {
+        let mut header_bytes = [0u8; GROUP_HEADER_SIZE];
+        reader.read_exact(&mut header_bytes)?;
+        mem_unscramble(&mut header_bytes);
         let header = parse_header(&header_bytes)?;
 
         let mut entries = Vec::with_capacity(header.entry_count);
         for _ in 0..header.entry_count {
             let mut entry_bytes = [0u8; GROUP_ENTRY_SIZE];
-            file.read_exact(&mut entry_bytes)?;
+            reader.read_exact(&mut entry_bytes)?;
             let entry = parse_entry(&entry_bytes)?;
             entries.push(entry);
         }
 
-        let data_offset =
-            GROUP_HEADER_SIZE as u64 + (header.entry_count as u64) * (GROUP_ENTRY_SIZE as u64);
+        let data_offset = reader.seek(SeekFrom::Current(0))?;
         let index = entries
             .iter()
             .enumerate()
@@ -151,7 +207,8 @@ impl PackedGroup {
             .collect();
 
         Ok(Self {
-            path: path.to_path_buf(),
+            path,
+            source,
             header: header.header,
             entries,
             index,
@@ -172,12 +229,67 @@ impl PackedGroup {
                 relative.display()
             )));
         }
+        self.read_entry_bytes(entry)
+    }
 
-        let mut file = File::open(&self.path)?;
-        file.seek(SeekFrom::Start(self.data_offset + entry.offset))?;
-        let mut buffer = vec![0u8; entry.size as usize];
-        file.read_exact(&mut buffer)?;
-        Ok(buffer)
+    fn read_entry_bytes(&self, entry: &PackedEntry) -> Result<Vec<u8>, GroupError> {
+        if entry.size > usize::MAX as u64 {
+            return Err(GroupError::InvalidGroup(format!(
+                "entry '{}' exceeds platform limits",
+                entry.relative_path.display()
+            )));
+        }
+        match &self.source {
+            PackedSource::File(path) => {
+                let mut file = File::open(path)?;
+                file.seek(SeekFrom::Start(
+                    self.data_offset.checked_add(entry.offset).ok_or_else(|| {
+                        GroupError::InvalidGroup(format!(
+                            "entry '{}' has invalid offset",
+                            entry.relative_path.display()
+                        ))
+                    })?,
+                ))?;
+                let mut buffer = vec![0u8; entry.size as usize];
+                file.read_exact(&mut buffer)?;
+                Ok(buffer)
+            }
+            PackedSource::Memory(data) => {
+                let start = self.data_offset.checked_add(entry.offset).ok_or_else(|| {
+                    GroupError::InvalidGroup(format!(
+                        "entry '{}' has invalid offset",
+                        entry.relative_path.display()
+                    ))
+                })?;
+                let end = start.checked_add(entry.size).ok_or_else(|| {
+                    GroupError::InvalidGroup(format!(
+                        "entry '{}' has invalid size",
+                        entry.relative_path.display()
+                    ))
+                })?;
+                let data_len = data.len() as u64;
+                if end > data_len {
+                    return Err(GroupError::InvalidGroup(format!(
+                        "entry '{}' exceeds group bounds",
+                        entry.relative_path.display()
+                    )));
+                }
+                let start = start as usize;
+                let end = end as usize;
+                Ok(data[start..end].to_vec())
+            }
+        }
+    }
+
+    fn open_child(&self, relative: &Path) -> Result<Group, GroupError> {
+        let entry_index = self
+            .index
+            .get(relative)
+            .copied()
+            .ok_or_else(|| GroupError::EntryNotFound(relative.to_path_buf()))?;
+        let entry = &self.entries[entry_index];
+        let data = self.read_entry_bytes(entry)?;
+        Group::from_packed_bytes(self.path.join(relative), data)
     }
 }
 

@@ -14,7 +14,7 @@
 
 ## Parity Gaps
 - **Boot & Platform:** patcher/updater, localization, logging/crash handling, launcher integration; configuration migration now handled by `lc-game` (copies legacy configs and honours `LC_CONFIG_FILE`).
-- **Assets & Resources:** group parsing, definition loading, scenario discovery, dynamic downloads, string tables, shader/media pipelines.
+- **Assets & Resources:** group parsing, definition loading, scenario discovery (Rust `lc-resources::scenario` now inventories `.c4s/.c4f` packs and open directories), dynamic downloads, string tables, shader/media pipelines.
 - **Runtime Authority:** crew lifecycle, scheduler, particles, pathfinding, weather, save/load, deterministic recordings owned by Rust. Bridge action parameters (`SetBridgeActionData`) now processed by `lc-engine`.
 - **Script Surface:** full AUL coverage, proplist semantics, callbacks/effects ordering, devmode hooks, debugger/console.
 - **Frontend & UI:** renderer, HUD, menus, cutscenes, text layout, input (mouse/keyboard/gamepad/touch), accessibility, editor dialogs.
