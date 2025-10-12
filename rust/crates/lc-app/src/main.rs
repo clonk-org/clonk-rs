@@ -10,7 +10,7 @@ use lc_engine::{
 };
 use lc_frontend::{
     GraphicsOverlay, GraphicsSystem, GuiPoint, InputDispatcher, KeyCode, ScenarioEntry,
-    ScenarioKind, ScenarioSummary, StartupMenu, StartupMenuAction,
+    ScenarioKind, StartupMenu, StartupMenuAction,
 };
 use lc_graphics::Color;
 use lc_platform::AppPaths;
@@ -29,6 +29,8 @@ const PLAYER_OWNER: i32 = 1;
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_666); // ~60 FPS
 const DEFAULT_SCENARIO_LABEL: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
+const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
+const BACK_ENTRY_TITLE: &str = "← Back";
 
 fn main() -> Result<()> {
     let event_loop = EventLoop::new();
@@ -180,6 +182,7 @@ struct GameApp {
     scenario_label: String,
     fallback_ground: i32,
     mode: AppMode,
+    scenario_catalog: HashMap<String, FrontendScenario>,
     active_scenario: Option<FrontendScenario>,
 }
 
@@ -191,7 +194,98 @@ enum AppMode {
 struct MenuState {
     menu: StartupMenu,
     pointer_position: Option<GuiPoint>,
+    stack: Vec<MenuLayer>,
+}
+
+#[derive(Clone, Debug)]
+struct MenuLayer {
+    title: String,
     entries: Vec<FrontendScenario>,
+}
+
+impl MenuLayer {
+    fn new(title: impl Into<String>, entries: Vec<FrontendScenario>) -> Self {
+        Self {
+            title: title.into(),
+            entries,
+        }
+    }
+}
+
+impl MenuState {
+    fn new(menu: StartupMenu, entries: Vec<FrontendScenario>) -> Self {
+        Self {
+            menu,
+            pointer_position: None,
+            stack: vec![MenuLayer::new("Scenarios", entries)],
+        }
+    }
+
+    fn pointer_position(&self) -> Option<GuiPoint> {
+        self.pointer_position
+    }
+
+    fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
+        self.pointer_position = position;
+    }
+
+    fn current_entries(&self) -> &[FrontendScenario] {
+        self.stack
+            .last()
+            .map(|layer| layer.entries.as_slice())
+            .unwrap_or_default()
+    }
+
+    fn menu(&mut self) -> &mut StartupMenu {
+        &mut self.menu
+    }
+
+    fn enter_folder(&mut self, identifier: &str) {
+        let Some(folder) = self
+            .current_entries()
+            .iter()
+            .find(|entry| {
+                entry.identifier == identifier && matches!(entry.kind, ScenarioKind::Folder)
+            })
+            .cloned()
+        else {
+            return;
+        };
+
+        self.stack
+            .push(MenuLayer::new(folder.title.clone(), folder.children));
+        self.pointer_position = None;
+        self.refresh_menu_entries();
+    }
+
+    fn leave_folder(&mut self) {
+        if self.stack.len() <= 1 {
+            return;
+        }
+        self.stack.pop();
+        self.pointer_position = None;
+        self.refresh_menu_entries();
+    }
+
+    fn refresh_menu_entries(&mut self) {
+        let include_back = self.stack.len() > 1;
+        let entries = build_menu_entries(self.current_entries(), include_back);
+        if let Err(err) = self.menu.set_entries(entries) {
+            eprintln!("failed to update startup menu entries: {err}");
+        }
+    }
+
+    fn label_path(&self) -> String {
+        if self.stack.len() <= 1 {
+            return DEFAULT_SCENARIO_LABEL.to_string();
+        }
+        self.stack
+            .iter()
+            .skip(1)
+            .map(|layer| layer.title.clone())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -203,6 +297,7 @@ struct FrontendScenario {
     is_editable: bool,
     is_playable: bool,
     path: Option<PathBuf>,
+    children: Vec<FrontendScenario>,
 }
 
 impl FrontendScenario {
@@ -217,16 +312,38 @@ impl FrontendScenario {
         }
     }
 
-    fn from_resource(entry: &resource_scenario::ScenarioEntry) -> Self {
-        Self {
-            identifier: entry.identifier.clone(),
-            title: entry.title.clone(),
-            description: entry.description.clone(),
-            kind: ScenarioKind::Scenario,
+    fn from_resource(
+        entry: resource_scenario::ScenarioEntry,
+        seen: &mut HashSet<String>,
+    ) -> Option<Self> {
+        let identifier = entry.identifier.clone();
+        let kind = match entry.kind {
+            resource_scenario::ScenarioEntryKind::Scenario => ScenarioKind::Scenario,
+            resource_scenario::ScenarioEntryKind::Folder => ScenarioKind::Folder,
+            resource_scenario::ScenarioEntryKind::Editor => ScenarioKind::Editor,
+        };
+
+        let mut children = Vec::new();
+        for child in entry.children {
+            if let Some(converted) = FrontendScenario::from_resource(child, seen) {
+                children.push(converted);
+            }
+        }
+
+        if matches!(kind, ScenarioKind::Scenario) && !seen.insert(identifier.clone()) {
+            return None;
+        }
+
+        Some(Self {
+            identifier,
+            title: entry.title,
+            description: entry.description,
+            kind,
             is_editable: entry.is_editable,
             is_playable: entry.is_playable,
-            path: Some(entry.path.clone()),
-        }
+            path: Some(entry.path),
+            children,
+        })
     }
 
     fn fallback() -> Self {
@@ -238,6 +355,7 @@ impl FrontendScenario {
             is_editable: true,
             is_playable: true,
             path: None,
+            children: Vec::new(),
         }
     }
 }
@@ -252,13 +370,13 @@ impl GameApp {
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
 
         let scenarios = load_frontend_scenarios();
-        let menu_entries = scenarios
-            .iter()
-            .map(FrontendScenario::to_ui_entry)
-            .collect::<Vec<_>>();
+        let menu_entries = build_menu_entries(&scenarios, false);
         let mut menu = StartupMenu::new(menu_entries)
             .map_err(|err| anyhow!("failed to create startup menu: {err}"))?;
         menu.resize(width as f32, height as f32);
+
+        let scenario_catalog = build_scenario_catalog(&scenarios);
+        let menu_state = MenuState::new(menu, scenarios);
 
         Ok(Self {
             engine,
@@ -272,11 +390,8 @@ impl GameApp {
             energy_fraction: 0.0,
             scenario_label,
             fallback_ground: DEFAULT_GROUND_HEIGHT,
-            mode: AppMode::Menu(MenuState {
-                menu,
-                pointer_position: None,
-                entries: scenarios,
-            }),
+            mode: AppMode::Menu(menu_state),
+            scenario_catalog,
             active_scenario: None,
         })
     }
@@ -288,8 +403,8 @@ impl GameApp {
         self.graphics = graphics;
 
         if let AppMode::Menu(state) = &mut self.mode {
-            state.menu.resize(width as f32, height as f32);
-            state.pointer_position = None;
+            state.menu().resize(width as f32, height as f32);
+            state.set_pointer_position(None);
         }
         Ok(())
     }
@@ -299,10 +414,10 @@ impl GameApp {
             if let Some(gui_key) = map_key_code(key) {
                 match state {
                     ElementState::Pressed => {
-                        self.handle_menu_input(|menu| menu.menu.handle_key_down(gui_key))?
+                        self.handle_menu_input(|menu| menu.menu().handle_key_down(gui_key))?
                     }
                     ElementState::Released => {
-                        self.handle_menu_input(|menu| menu.menu.handle_key_up(gui_key))?
+                        self.handle_menu_input(|menu| menu.menu().handle_key_up(gui_key))?
                     }
                 }
             }
@@ -360,23 +475,23 @@ impl GameApp {
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
         let point = gui_point_from_position(position);
         self.handle_menu_input(|state| {
-            state.pointer_position = Some(point);
-            state.menu.handle_pointer_move(point)
+            state.set_pointer_position(Some(point));
+            state.menu().handle_pointer_move(point)
         })
     }
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         let position = match &self.mode {
-            AppMode::Menu(state) => state.pointer_position,
+            AppMode::Menu(state) => state.pointer_position(),
             _ => None,
         };
         if let Some(point) = position {
             match button_state {
                 ElementState::Pressed => {
-                    self.handle_menu_input(|state| state.menu.handle_pointer_down(point))?
+                    self.handle_menu_input(|state| state.menu().handle_pointer_down(point))?
                 }
                 ElementState::Released => {
-                    self.handle_menu_input(|state| state.menu.handle_pointer_up(point))?
+                    self.handle_menu_input(|state| state.menu().handle_pointer_up(point))?
                 }
             }
         }
@@ -386,17 +501,17 @@ impl GameApp {
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
         match phase {
             TouchPhase::Started => self.handle_menu_input(|state| {
-                state.pointer_position = Some(position);
-                state.menu.handle_pointer_down(position)
+                state.set_pointer_position(Some(position));
+                state.menu().handle_pointer_down(position)
             }),
             TouchPhase::Moved => self.handle_menu_input(|state| {
-                state.pointer_position = Some(position);
-                state.menu.handle_pointer_move(position)
+                state.set_pointer_position(Some(position));
+                state.menu().handle_pointer_move(position)
             }),
             TouchPhase::Ended => {
                 let result = self.handle_menu_input(|state| {
-                    state.pointer_position = Some(position);
-                    state.menu.handle_pointer_up(position)
+                    state.set_pointer_position(Some(position));
+                    state.menu().handle_pointer_up(position)
                 });
                 self.pointer_left();
                 result
@@ -410,7 +525,7 @@ impl GameApp {
 
     fn pointer_left(&mut self) {
         if let AppMode::Menu(state) = &mut self.mode {
-            state.pointer_position = None;
+            state.set_pointer_position(None);
         }
     }
 
@@ -418,19 +533,85 @@ impl GameApp {
     where
         F: FnOnce(&mut MenuState) -> Vec<StartupMenuAction>,
     {
-        let start_entry = {
+        let (start_identifier, updated_label) = {
             if let AppMode::Menu(state) = &mut self.mode {
                 let actions = handler(state);
-                extract_start_action(state, actions)
+                GameApp::process_menu_actions(state, actions)
             } else {
-                None
+                (None, None)
             }
         };
 
-        if let Some(entry) = start_entry {
-            self.start_scenario(entry)?;
+        if let Some(label) = updated_label {
+            self.scenario_label = label;
+        }
+
+        if let Some(identifier) = start_identifier {
+            if let Some(scenario) = self.scenario_catalog.get(&identifier).cloned() {
+                self.start_scenario(scenario)?;
+            } else {
+                eprintln!("Selected scenario `{identifier}` is not available in Rust catalog");
+            }
         }
         Ok(())
+    }
+
+    fn process_menu_actions(
+        state: &mut MenuState,
+        actions: Vec<StartupMenuAction>,
+    ) -> (Option<String>, Option<String>) {
+        let mut start_identifier: Option<String> = None;
+        let mut updated_label: Option<String> = None;
+
+        for action in actions {
+            match action {
+                StartupMenuAction::SelectionChanged(_) => {}
+                StartupMenuAction::StartScenario(summary) => {
+                    start_identifier = Some(summary.identifier);
+                }
+                StartupMenuAction::OpenEntry(summary) => {
+                    if summary.identifier == BACK_ENTRY_IDENTIFIER {
+                        state.leave_folder();
+                        updated_label = Some(state.label_path());
+                        continue;
+                    }
+
+                    let entry_kind = state
+                        .current_entries()
+                        .iter()
+                        .find(|entry| entry.identifier == summary.identifier)
+                        .map(|entry| entry.kind);
+
+                    match entry_kind {
+                        Some(ScenarioKind::Folder) => {
+                            state.enter_folder(&summary.identifier);
+                            updated_label = Some(state.label_path());
+                        }
+                        Some(ScenarioKind::Scenario) => {
+                            start_identifier = Some(summary.identifier);
+                        }
+                        Some(ScenarioKind::Editor) => {
+                            eprintln!(
+                                "Editing entries is not yet implemented for Rust menu items: {}",
+                                summary.identifier
+                            );
+                        }
+                        None => {
+                            state.enter_folder(&summary.identifier);
+                            updated_label = Some(state.label_path());
+                        }
+                    }
+                }
+                StartupMenuAction::EditEntry(summary) => {
+                    eprintln!(
+                        "Editing entries is not yet implemented for Rust menu items: {}",
+                        summary.identifier
+                    );
+                }
+            }
+        }
+
+        (start_identifier, updated_label)
     }
 
     fn update(&mut self) -> Result<(), EngineError> {
@@ -657,37 +838,6 @@ impl GameApp {
     }
 }
 
-fn extract_start_action(
-    state: &MenuState,
-    actions: Vec<StartupMenuAction>,
-) -> Option<FrontendScenario> {
-    for action in actions {
-        match action {
-            StartupMenuAction::StartScenario(summary) => {
-                if let Some(entry) = state
-                    .entries
-                    .iter()
-                    .find(|entry| entry.identifier == summary.identifier && entry.is_playable)
-                {
-                    return Some(entry.clone());
-                }
-            }
-            StartupMenuAction::OpenEntry(ScenarioSummary { identifier, .. }) => {
-                eprintln!(
-                    "Opening folders is not yet implemented for Rust menu items: {identifier}"
-                );
-            }
-            StartupMenuAction::EditEntry(ScenarioSummary { identifier, .. }) => {
-                eprintln!(
-                    "Editing entries is not yet implemented for Rust menu items: {identifier}"
-                );
-            }
-            StartupMenuAction::SelectionChanged(_) => {}
-        }
-    }
-    None
-}
-
 fn render_menu_frame(graphics: &mut GraphicsSystem, menu: &mut StartupMenu, frame: &mut [u8]) {
     {
         let surface = graphics.surface_mut();
@@ -773,9 +923,46 @@ fn gui_point_from_position(position: PhysicalPosition<f64>) -> GuiPoint {
     GuiPoint::new(position.x as f32, position.y as f32)
 }
 
-fn load_frontend_scenarios() -> Vec<FrontendScenario> {
-    let mut scenarios = Vec::new();
+fn build_menu_entries(entries: &[FrontendScenario], include_back: bool) -> Vec<ScenarioEntry> {
+    let mut result = Vec::new();
+    if include_back {
+        result.push(ScenarioEntry {
+            identifier: BACK_ENTRY_IDENTIFIER.to_string(),
+            title: BACK_ENTRY_TITLE.to_string(),
+            description: Some("Return to the previous folder.".to_string()),
+            kind: ScenarioKind::Folder,
+            is_editable: false,
+            is_playable: false,
+        });
+    }
+    result.extend(entries.iter().map(FrontendScenario::to_ui_entry));
+    result
+}
 
+fn build_scenario_catalog(entries: &[FrontendScenario]) -> HashMap<String, FrontendScenario> {
+    let mut catalog = HashMap::new();
+    for entry in entries {
+        insert_scenario_recursive(entry, &mut catalog);
+    }
+    if catalog.is_empty() {
+        catalog.insert("rust_sandbox".to_string(), FrontendScenario::fallback());
+    }
+    catalog
+}
+
+fn insert_scenario_recursive(
+    entry: &FrontendScenario,
+    catalog: &mut HashMap<String, FrontendScenario>,
+) {
+    catalog
+        .entry(entry.identifier.clone())
+        .or_insert_with(|| entry.clone());
+    for child in &entry.children {
+        insert_scenario_recursive(child, catalog);
+    }
+}
+
+fn load_frontend_scenarios() -> Vec<FrontendScenario> {
     if let Ok(paths) = AppPaths::discover() {
         let roots = scenario_roots(&paths);
         let existing_roots: Vec<_> = roots.into_iter().filter(|path| path.exists()).collect();
@@ -783,7 +970,16 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
             match resource_scenario::discover_many(existing_roots.iter()) {
                 Ok(entries) => {
                     let mut seen = HashSet::new();
-                    collect_scenarios(&entries, &mut seen, &mut scenarios);
+                    let mut scenarios = Vec::new();
+                    for entry in entries {
+                        if let Some(converted) = FrontendScenario::from_resource(entry, &mut seen) {
+                            scenarios.push(converted);
+                        }
+                    }
+                    if !scenarios.is_empty() {
+                        scenarios.sort_by(|a, b| a.title.cmp(&b.title));
+                        return scenarios;
+                    }
                 }
                 Err(err) => {
                     eprintln!("failed to discover scenarios from install roots: {err}");
@@ -794,12 +990,7 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
         eprintln!("App paths discovery failed; falling back to built-in sandbox scenario");
     }
 
-    if scenarios.is_empty() {
-        scenarios.push(FrontendScenario::fallback());
-    } else {
-        scenarios.sort_by(|a, b| a.title.cmp(&b.title));
-    }
-    scenarios
+    vec![FrontendScenario::fallback()]
 }
 
 fn scenario_roots(paths: &AppPaths) -> Vec<PathBuf> {
@@ -815,24 +1006,71 @@ fn scenario_roots(paths: &AppPaths) -> Vec<PathBuf> {
     roots
 }
 
-fn collect_scenarios(
-    entries: &[resource_scenario::ScenarioEntry],
-    seen: &mut HashSet<String>,
-    out: &mut Vec<FrontendScenario>,
-) {
-    for entry in entries {
-        if matches!(entry.kind, resource_scenario::ScenarioEntryKind::Scenario)
-            && seen.insert(entry.identifier.clone())
-        {
-            out.push(FrontendScenario::from_resource(entry));
-        }
-        collect_scenarios(&entry.children, seen, out);
-    }
-}
-
 fn walker_script() -> &'static str {
     r#"
 global func Initialize(state, random) { return nil; }
 global func Step(state, frame, random) { return nil; }
 "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_scenarios() -> Vec<FrontendScenario> {
+        let child = FrontendScenario {
+            identifier: "scenario_alpha".to_string(),
+            title: "Alpha".to_string(),
+            description: None,
+            kind: ScenarioKind::Scenario,
+            is_editable: true,
+            is_playable: true,
+            path: None,
+            children: Vec::new(),
+        };
+
+        let folder = FrontendScenario {
+            identifier: "folder_missions".to_string(),
+            title: "Missions".to_string(),
+            description: Some("Mission pack".to_string()),
+            kind: ScenarioKind::Folder,
+            is_editable: false,
+            is_playable: false,
+            path: None,
+            children: vec![child],
+        };
+
+        vec![folder]
+    }
+
+    #[test]
+    fn menu_state_navigates_folders() {
+        let scenarios = sample_scenarios();
+        let entries = build_menu_entries(&scenarios, false);
+        let menu = StartupMenu::new(entries).expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+
+        assert_eq!(state.current_entries().len(), 1);
+        let root_entries = build_menu_entries(state.current_entries(), false);
+        assert_eq!(root_entries.len(), 1);
+        assert_eq!(root_entries[0].identifier, "folder_missions");
+        assert_eq!(state.label_path(), DEFAULT_SCENARIO_LABEL.to_string());
+
+        state.enter_folder("folder_missions");
+        assert_eq!(state.current_entries().len(), 1);
+        assert_eq!(state.stack.len(), 2);
+        let folder_entries = build_menu_entries(state.current_entries(), state.stack.len() > 1);
+        assert_eq!(folder_entries.len(), 2);
+        assert_eq!(folder_entries[0].identifier, BACK_ENTRY_IDENTIFIER);
+        assert_eq!(folder_entries[1].identifier, "scenario_alpha");
+        assert_eq!(state.label_path(), "Missions".to_string());
+
+        state.leave_folder();
+        assert_eq!(state.current_entries().len(), 1);
+        assert_eq!(state.stack.len(), 1);
+        let root_again = build_menu_entries(state.current_entries(), false);
+        assert_eq!(root_again.len(), 1);
+        assert_eq!(root_again[0].identifier, "folder_missions");
+        assert_eq!(state.label_path(), DEFAULT_SCENARIO_LABEL.to_string());
+    }
 }
