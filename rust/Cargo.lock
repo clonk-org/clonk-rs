@@ -1821,6 +1821,8 @@ dependencies = [
  "lc-platform",
  "lc-resources",
  "pixels",
+ "serde",
+ "serde_json",
  "winit",
 ]
 

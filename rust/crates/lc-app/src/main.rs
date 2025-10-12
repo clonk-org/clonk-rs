@@ -2,26 +2,29 @@ mod gamepad;
 
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
 use lc_audio::{AudioError, AudioSystem, MusicHandle};
 use lc_engine::{
     ActionSpec, ActionState, ControlButton, ControlEvent, Definition, Engine, EngineError,
-    EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectSnapshot, Scenario,
-    SimulationSnapshot, SpawnConfig, Vector2,
+    EngineState, EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectSnapshot,
+    Scenario, SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_frontend::{
     GraphicsOverlay, GraphicsSystem, GuiPoint, InputDispatcher, KeyCode, ScenarioEntry,
     ScenarioKind, StartupMenu, StartupMenuAction,
 };
 use lc_graphics::Color;
-use lc_platform::AppPaths;
+use lc_platform::{AppPaths, PathsError};
 use lc_resources::{scenario as resource_scenario, Group};
 use pixels::{Pixels, SurfaceTexture};
+use serde::{Deserialize, Serialize};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{
     ElementState, Event, KeyboardInput, MouseButton, TouchPhase, VirtualKeyCode, WindowEvent,
@@ -38,6 +41,9 @@ const DEFAULT_GROUND_HEIGHT: i32 = 360;
 const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
 const BACK_ENTRY_TITLE: &str = "← Back";
 const AUDIO_CHANNELS: usize = 32;
+const SAVE_DIR_NAME: &str = "Savegames";
+const QUICK_SAVE_FILE: &str = "quicksave.lcsave";
+const SAVE_FILE_VERSION: u32 = 1;
 
 fn main() -> Result<()> {
     let event_loop = EventLoop::new();
@@ -226,6 +232,7 @@ struct GameApp {
     scenario_catalog: HashMap<String, FrontendScenario>,
     active_scenario: Option<FrontendScenario>,
     audio: Option<AudioContext>,
+    last_save_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -403,6 +410,99 @@ impl FrontendScenario {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedScenarioInfo {
+    identifier: String,
+    title: String,
+    description: Option<String>,
+    path: Option<PathBuf>,
+    is_editable: bool,
+    is_playable: bool,
+    label: String,
+    fallback_ground: i32,
+    sandbox: bool,
+}
+
+impl SavedScenarioInfo {
+    fn from_frontend(frontend: &FrontendScenario, label: &str, fallback_ground: i32) -> Self {
+        Self {
+            identifier: frontend.identifier.clone(),
+            title: frontend.title.clone(),
+            description: frontend.description.clone(),
+            path: frontend.path.clone(),
+            is_editable: frontend.is_editable,
+            is_playable: frontend.is_playable,
+            label: label.to_string(),
+            fallback_ground,
+            sandbox: frontend.path.is_none(),
+        }
+    }
+
+    fn to_frontend(&self) -> FrontendScenario {
+        FrontendScenario {
+            identifier: self.identifier.clone(),
+            title: self.title.clone(),
+            description: self.description.clone(),
+            kind: ScenarioKind::Scenario,
+            is_editable: self.is_editable,
+            is_playable: self.is_playable,
+            path: self.path.clone(),
+            children: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedGameFile {
+    version: u32,
+    saved_at_seconds: u64,
+    scenario: SavedScenarioInfo,
+    focus_id: Option<ObjectId>,
+    engine_state: EngineState,
+}
+
+fn cached_app_paths() -> std::result::Result<&'static AppPaths, PathsError> {
+    static CACHE: OnceLock<std::result::Result<AppPaths, PathsError>> = OnceLock::new();
+    match CACHE.get_or_init(|| AppPaths::discover()) {
+        Ok(paths) => Ok(paths),
+        Err(err) => Err(err.clone()),
+    }
+}
+
+fn resolve_save_directory() -> PathBuf {
+    match cached_app_paths() {
+        Ok(paths) => paths.user_data_dir().join(SAVE_DIR_NAME),
+        Err(_) => PathBuf::from(SAVE_DIR_NAME),
+    }
+}
+
+fn ensure_save_directory() -> Result<PathBuf> {
+    let dir = resolve_save_directory();
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create save directory at {}", dir.display()))?;
+    Ok(dir)
+}
+
+fn default_quick_save_path() -> PathBuf {
+    resolve_save_directory().join(QUICK_SAVE_FILE)
+}
+
+fn existing_quick_save_path() -> Option<PathBuf> {
+    let path = default_quick_save_path();
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 impl GameApp {
     fn new(width: u32, height: u32) -> Result<Self> {
         let engine = Engine::new();
@@ -428,7 +528,7 @@ impl GameApp {
             }
         };
 
-        Ok(Self {
+        let mut app = Self {
             engine,
             graphics,
             input: InputDispatcher::new(),
@@ -446,7 +546,12 @@ impl GameApp {
             scenario_catalog,
             active_scenario: None,
             audio,
-        })
+            last_save_path: None,
+        };
+        if let Some(existing) = existing_quick_save_path() {
+            app.last_save_path = Some(existing);
+        }
+        Ok(app)
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
@@ -463,6 +568,24 @@ impl GameApp {
     }
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
+        if state == ElementState::Pressed {
+            match key {
+                VirtualKeyCode::F5 => {
+                    if let Err(err) = self.quick_save() {
+                        eprintln!("quick save failed: {err:?}");
+                    }
+                    return Ok(());
+                }
+                VirtualKeyCode::F9 => {
+                    if let Err(err) = self.quick_load() {
+                        eprintln!("quick load failed: {err:?}");
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         if self.mode == AppMode::Menu {
             if let Some(gui_key) = map_key_code(key) {
                 match state {
@@ -946,23 +1069,7 @@ impl GameApp {
         self.engine = Engine::new();
         self.input = InputDispatcher::new();
 
-        let mut definition = Definition::from_script("Walker", "Rust Walker", walker_script())?;
-        let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("Walk"),
-        );
-        definition.configure_actions(Some("Walk".to_string()), actions);
-        definition.set_crew_member(true);
-        let profile = MovementProfile::default()
-            .with_walk_speed(8)
-            .with_walk_acceleration(2);
-        definition.set_movement_profile(profile);
-        self.engine.register_definition(definition)?;
-
-        self.engine.set_environment(EnvironmentSettings::default());
-        self.engine
-            .set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
+        configure_sandbox_engine(&mut self.engine)?;
 
         let spawn = SpawnConfig::new("Walker")
             .with_owner(PLAYER_OWNER)
@@ -982,23 +1089,153 @@ impl GameApp {
         Ok(())
     }
 
+    fn quick_save(&mut self) -> Result<()> {
+        if self.mode != AppMode::Running {
+            anyhow::bail!("cannot quick save while not running a scenario");
+        }
+
+        let scenario = self
+            .active_scenario
+            .clone()
+            .unwrap_or_else(FrontendScenario::fallback);
+        let engine_state = self.engine.capture_state();
+        let saved = SavedGameFile {
+            version: SAVE_FILE_VERSION,
+            saved_at_seconds: current_unix_timestamp(),
+            scenario: SavedScenarioInfo::from_frontend(
+                &scenario,
+                &self.scenario_label,
+                self.fallback_ground,
+            ),
+            focus_id: self.focus_id,
+            engine_state,
+        };
+
+        let dir = ensure_save_directory()?;
+        let path = dir.join(QUICK_SAVE_FILE);
+        let mut file = File::create(&path)
+            .with_context(|| format!("failed to create quick save at {}", path.display()))?;
+        serde_json::to_writer_pretty(&mut file, &saved)
+            .context("failed to serialize quick save data")?;
+        file.flush().context("failed to flush quick save data")?;
+        self.last_save_path = Some(path.clone());
+        self.status_text = format!("Saved {}", saved.scenario.title);
+        Ok(())
+    }
+
+    fn quick_load(&mut self) -> Result<()> {
+        let candidate = self
+            .last_save_path
+            .clone()
+            .unwrap_or_else(default_quick_save_path);
+        let path = if candidate.exists() {
+            candidate
+        } else {
+            let fallback = default_quick_save_path();
+            if fallback.exists() {
+                fallback
+            } else if fallback == candidate {
+                anyhow::bail!("no quick save found at {}", candidate.display());
+            } else {
+                anyhow::bail!(
+                    "no quick save found (checked {} and {})",
+                    candidate.display(),
+                    fallback.display()
+                );
+            }
+        };
+
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read quick save from {}", path.display()))?;
+        let save: SavedGameFile =
+            serde_json::from_str(&contents).context("failed to parse quick save data")?;
+        if save.version != SAVE_FILE_VERSION {
+            anyhow::bail!(
+                "unsupported quick save version {} (expected {})",
+                save.version,
+                SAVE_FILE_VERSION
+            );
+        }
+        self.apply_loaded_game(save)?;
+        self.last_save_path = Some(path.clone());
+        Ok(())
+    }
+
+    fn apply_loaded_game(&mut self, save: SavedGameFile) -> Result<()> {
+        let scenario_info = save.scenario.clone();
+        let frontend = scenario_info.to_frontend();
+
+        self.engine = Engine::new();
+        self.input = InputDispatcher::new();
+
+        if scenario_info.sandbox {
+            configure_sandbox_engine(&mut self.engine)
+                .context("failed to prepare sandbox engine for saved game")?;
+        } else {
+            let path = frontend.path.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "saved scenario `{}` does not include a playable path",
+                    scenario_info.title
+                )
+            })?;
+            let scenario_data = Scenario::load_from_path(path).with_context(|| {
+                format!(
+                    "failed to reload scenario `{}` from {}",
+                    scenario_info.title,
+                    path.display()
+                )
+            })?;
+            scenario_data.apply(&mut self.engine).with_context(|| {
+                format!(
+                    "failed to apply scenario `{}` from {}",
+                    scenario_info.title,
+                    path.display()
+                )
+            })?;
+        }
+
+        self.configure_running_state(scenario_info.label.clone(), scenario_info.fallback_ground);
+        self.active_scenario = Some(frontend.clone());
+
+        if scenario_info.sandbox {
+            self.play_sandbox_audio();
+        } else if let Some(path) = frontend.path.as_ref() {
+            self.play_scenario_audio(path);
+        }
+
+        self.engine
+            .restore_state(&save.engine_state)
+            .context("failed to restore saved engine state")?;
+
+        self.snapshot = self.engine.snapshot();
+        self.focus_id = save.focus_id;
+        if self
+            .focus_id
+            .and_then(|id| self.snapshot.object(id))
+            .is_none()
+        {
+            self.focus_id = None;
+        }
+        self.refresh_focus();
+
+        self.scenario_catalog
+            .insert(frontend.identifier.clone(), frontend.clone());
+
+        self.status_text = format!("Loaded {}", scenario_info.title);
+        Ok(())
+    }
+
     fn play_scenario_audio(&mut self, path: &Path) {
         if let Some(audio) = self.audio.as_mut() {
             match load_scenario_music_bytes(path) {
                 Ok(Some(bytes)) => {
                     if let Err(err) = audio.play_music(bytes.as_slice(), true) {
-                        eprintln!(
-                            "failed to start music for {}: {err}",
-                            path.display()
-                        );
+                        eprintln!("failed to start music for {}: {err}", path.display());
                         audio.stop_music();
                     }
                 }
                 Ok(None) => audio.stop_music(),
-                Err(err) => eprintln!(
-                    "failed to load music from {}: {err}",
-                    path.display()
-                ),
+                Err(err) => eprintln!("failed to load music from {}: {err}", path.display()),
             }
         }
     }
@@ -1183,6 +1420,25 @@ fn insert_scenario_recursive(
     }
 }
 
+fn configure_sandbox_engine(engine: &mut Engine) -> Result<(), EngineError> {
+    let mut definition = Definition::from_script("Walker", "Rust Walker", walker_script())?;
+    let mut actions = HashMap::new();
+    actions.insert(
+        "Walk".to_string(),
+        ActionSpec::default().with_procedure("Walk"),
+    );
+    definition.configure_actions(Some("Walk".to_string()), actions);
+    definition.set_crew_member(true);
+    let profile = MovementProfile::default()
+        .with_walk_speed(8)
+        .with_walk_acceleration(2);
+    definition.set_movement_profile(profile);
+    engine.register_definition(definition)?;
+    engine.set_environment(EnvironmentSettings::default());
+    engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
+    Ok(())
+}
+
 fn load_frontend_scenarios() -> Vec<FrontendScenario> {
     if let Ok(paths) = AppPaths::discover() {
         let roots = scenario_roots(&paths);
@@ -1300,7 +1556,8 @@ fn is_audio_path(path: &Path) -> bool {
 
 fn sandbox_music_bytes() -> &'static [u8] {
     static DATA: OnceLock<Vec<u8>> = OnceLock::new();
-    DATA.get_or_init(|| generate_sine_wave_wav(220.0, 1.5)).as_slice()
+    DATA.get_or_init(|| generate_sine_wave_wav(220.0, 1.5))
+        .as_slice()
 }
 
 fn generate_sine_wave_wav(frequency_hz: f32, duration_seconds: f32) -> Vec<u8> {
@@ -1377,6 +1634,32 @@ mod tests {
         };
 
         vec![folder]
+    }
+
+    #[test]
+    fn saved_scenario_round_trips_basic_metadata() {
+        let original = FrontendScenario {
+            identifier: "test".into(),
+            title: "Test Scenario".into(),
+            description: Some("desc".into()),
+            kind: ScenarioKind::Scenario,
+            is_editable: true,
+            is_playable: true,
+            path: Some(PathBuf::from("/tmp/test.c4s")),
+            children: Vec::new(),
+        };
+        let info = SavedScenarioInfo::from_frontend(&original, "Label", 123);
+        assert_eq!(info.identifier, original.identifier);
+        assert_eq!(info.title, original.title);
+        assert_eq!(info.path, original.path);
+        assert_eq!(info.label, "Label");
+        assert_eq!(info.fallback_ground, 123);
+        let restored = info.to_frontend();
+        assert_eq!(restored.identifier, original.identifier);
+        assert_eq!(restored.title, original.title);
+        assert_eq!(restored.path, original.path);
+        assert!(restored.children.is_empty());
+        assert_eq!(restored.kind, ScenarioKind::Scenario);
     }
 
     #[test]
