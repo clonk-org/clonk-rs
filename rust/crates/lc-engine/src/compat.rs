@@ -9,16 +9,17 @@ use crate::ocf;
 #[cfg(test)]
 use crate::LiquidSegment;
 use crate::{
-    encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, CommandDirection,
-    DefinitionId, Direction, EnvironmentSettings, FloatVector2, Landscape, ObjectId, ObjectStatus,
-    ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope,
-    PathFinder, PhysicsSettings, QueuedCommand, SpawnConfig, TransferZoneCommand, TransferZoneRect,
-    TransferZoneState, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT,
-    CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
+    encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, AudioCommand,
+    CommandDirection, DefinitionId, Direction, EnvironmentSettings, FloatVector2, Landscape,
+    ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig,
+    ParticleLayer, ParticleScope, PathFinder, PhysicsSettings, QueuedCommand, SpawnConfig,
+    TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2, CNAT_BOTTOM, CNAT_CENTER,
+    CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
+use std::mem;
 
 thread_local! {
     static HOST_CONTEXT: RefCell<Option<EffectHostContext>> = const { RefCell::new(None) };
@@ -29,6 +30,7 @@ thread_local! {
     static PHYSICS_CONTEXT: RefCell<Option<Rc<PhysicsContext>>> = const {
         RefCell::new(None)
     };
+    static AUDIO_CONTEXT: RefCell<Option<AudioRegistry>> = const { RefCell::new(None) };
 }
 
 const OWNER_ANY: i32 = -2;
@@ -887,6 +889,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetTemperature", get_temperature);
     script.register_host_function("SetClimate", set_climate);
     script.register_host_function("GetClimate", get_climate);
+    script.register_host_function("Sound", sound);
+    script.register_host_function("SoundLevel", sound_level);
 }
 
 pub(crate) fn enter_random_context(rng: ChaCha8Rng) -> RandomContextGuard {
@@ -1282,6 +1286,9 @@ pub(crate) fn with_effect_context<F, T, E>(
 where
     F: FnOnce() -> Result<T, E>,
 {
+    let audio_state = AUDIO_CONTEXT
+        .with(|cell| cell.borrow_mut().take())
+        .unwrap_or_else(AudioRegistry::new);
     HOST_CONTEXT.with(|cell| {
         assert!(
             cell.borrow().is_none(),
@@ -1292,13 +1299,18 @@ where
             global_effects.to_vec(),
             world,
             next_object_id,
+            audio_state,
         ));
         let result = func();
-        let context = cell
+        let mut context = cell
             .borrow_mut()
             .take()
             .expect("effect context must be present");
-        (result, context.into_commands())
+        let mut outcome = context.into_commands();
+        AUDIO_CONTEXT.with(|cell| {
+            *cell.borrow_mut() = Some(outcome.audio.state.clone());
+        });
+        (result, outcome)
     })
 }
 
@@ -1314,6 +1326,7 @@ pub(crate) struct EffectContextOutcome {
     pub spawns: Vec<SpawnConfig>,
     pub particles: Vec<ParticleCommand>,
     pub transfer_zones: Vec<TransferZoneCommand>,
+    pub audio: AudioOutcome,
     pub next_object_id: u64,
 }
 
@@ -1328,6 +1341,7 @@ impl EffectContextOutcome {
         physics: Option<PhysicsDelta>,
         spawns: Vec<SpawnConfig>,
         transfer_zones: Vec<TransferZoneCommand>,
+        audio: AudioOutcome,
         next_object_id: u64,
     ) -> Self {
         Self {
@@ -1341,11 +1355,12 @@ impl EffectContextOutcome {
             spawns,
             particles: Vec::new(),
             transfer_zones,
+            audio,
             next_object_id,
         }
     }
 
-    pub(crate) fn empty(next_object_id: u64) -> Self {
+    pub(crate) fn empty(next_object_id: u64, audio: AudioRegistry) -> Self {
         Self {
             object: Vec::new(),
             global: Vec::new(),
@@ -1357,6 +1372,10 @@ impl EffectContextOutcome {
             spawns: Vec::new(),
             particles: Vec::new(),
             transfer_zones: Vec::new(),
+            audio: AudioOutcome {
+                state: audio,
+                events: Vec::new(),
+            },
             next_object_id,
         }
     }
@@ -1920,6 +1939,211 @@ fn random(args: &[Value]) -> Result<Value, RuntimeError> {
         let upper = range as u32;
         let value = rng.gen_range(0..upper) as i32;
         Ok(Value::Int(value))
+    })
+}
+
+fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new("Sound expects at least 1 argument: name"));
+    }
+
+    let name = match &args[0] {
+        Value::String(value) if !value.is_empty() => value.clone(),
+        Value::Nil => return Ok(Value::Bool(true)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Sound: expected string for name, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let mut index = 1;
+    let global = if let Some(arg) = args.get(index) {
+        let flag = value_to_bool(arg, "Sound", "global")?;
+        index += 1;
+        flag
+    } else {
+        false
+    };
+
+    let object_value = if let Some(arg) = args.get(index) {
+        index += 1;
+        Some(arg)
+    } else {
+        None
+    };
+
+    let level = if let Some(arg) = args.get(index) {
+        index += 1;
+        match arg {
+            Value::Int(value) => *value,
+            Value::Nil => 0,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "Sound: expected int for level, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    } else {
+        0
+    };
+
+    if let Some(Value::Int(_)) | Some(Value::Nil) = args.get(index) {
+        index += 1;
+    } else if let Some(other) = args.get(index) {
+        return Err(RuntimeError::new(format!(
+            "Sound: expected int or nil for at_player, got {}",
+            other.type_name()
+        )));
+    }
+
+    let loop_flag = if let Some(arg) = args.get(index) {
+        index += 1;
+        match arg {
+            Value::Int(value) => *value,
+            Value::Nil => 0,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "Sound: expected int for loop, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    } else {
+        0
+    };
+
+    let multiple = if let Some(arg) = args.get(index) {
+        let flag = value_to_bool(arg, "Sound", "multiple")?;
+        index += 1;
+        flag
+    } else {
+        false
+    };
+
+    let custom_falloff = if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Int(value) if *value > 0 => Some(*value),
+            Value::Int(_) | Value::Nil => None,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "Sound: expected int for custom_falloff, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    } else {
+        None
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = match borrow.as_mut() {
+            Some(context) => context,
+            None => return Ok(Value::Bool(true)),
+        };
+
+        let mut target_id = if let Some(value) = object_value {
+            parse_object_reference_argument(value, "Sound", "object")?
+        } else {
+            None
+        };
+
+        if global {
+            target_id = None;
+        } else if target_id.is_none() {
+            target_id = context.object_context().map(|object| object.id());
+        }
+
+        if loop_flag < 0 {
+            context.audio_mut().stop_sound(&name, target_id);
+            return Ok(Value::Bool(true));
+        }
+
+        if level < 0 {
+            return Ok(Value::Bool(true));
+        }
+
+        let mut volume = level;
+        if volume == 0 || volume > 100 {
+            volume = 100;
+        }
+        let volume = volume.clamp(0, 100) as u8;
+        let looped = loop_flag > 0;
+        let custom_falloff = custom_falloff.filter(|value| *value > 0);
+
+        let audio = context.audio_mut();
+        if looped && !multiple && audio.is_looping(&name, target_id) {
+            return Ok(Value::Bool(true));
+        }
+
+        audio.play_sound(&name, target_id, volume, looped, multiple, custom_falloff);
+        Ok(Value::Bool(true))
+    })
+}
+
+fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 2 {
+        return Err(RuntimeError::new(
+            "SoundLevel expects at least 2 arguments: name and level",
+        ));
+    }
+
+    let name = match &args[0] {
+        Value::String(value) if !value.is_empty() => value.clone(),
+        Value::Nil => return Ok(Value::Bool(true)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SoundLevel: expected string for name, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let level = match &args[1] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SoundLevel: expected int for level, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let object_arg = args.get(2);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = match borrow.as_mut() {
+            Some(context) => context,
+            None => return Ok(Value::Bool(true)),
+        };
+
+        let mut target_id = if let Some(value) = object_arg {
+            parse_object_reference_argument(value, "SoundLevel", "object")?
+        } else {
+            None
+        };
+
+        if target_id.is_none() {
+            target_id = context.object_context().map(|object| object.id());
+        }
+
+        let audio = context.audio_mut();
+        if level <= 0 {
+            audio.stop_sound(&name, target_id);
+            return Ok(Value::Bool(true));
+        }
+
+        let volume = level.clamp(0, 100) as u8;
+        let existed = audio.set_volume(&name, target_id, volume, None);
+        if !existed {
+            audio.play_sound(&name, target_id, volume, true, false, None);
+        }
+        Ok(Value::Bool(true))
     })
 }
 
@@ -5424,6 +5648,189 @@ fn parse_timer_from_int(value: i32) -> Result<i32, RuntimeError> {
     }
 }
 
+pub(crate) fn enter_audio_context(audio: AudioRegistry) -> AudioContextGuard {
+    AUDIO_CONTEXT.with(|cell| {
+        assert!(
+            cell.borrow().is_none(),
+            "nested audio contexts are not supported"
+        );
+        *cell.borrow_mut() = Some(audio);
+    });
+    AudioContextGuard { consumed: false }
+}
+
+pub(crate) struct AudioContextGuard {
+    consumed: bool,
+}
+
+impl AudioContextGuard {
+    pub fn finish(mut self) -> AudioRegistry {
+        self.consumed = true;
+        AUDIO_CONTEXT
+            .with(|cell| cell.borrow_mut().take())
+            .unwrap_or_else(AudioRegistry::new)
+    }
+}
+
+impl Drop for AudioContextGuard {
+    fn drop(&mut self) {
+        if !self.consumed {
+            let _ = AUDIO_CONTEXT.with(|cell| cell.borrow_mut().take());
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AudioInstanceKey {
+    name: String,
+    target: Option<ObjectId>,
+}
+
+#[derive(Debug, Clone)]
+struct AudioInstance {
+    volume: u8,
+    custom_falloff: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AudioRegistry {
+    looping: HashMap<AudioInstanceKey, AudioInstance>,
+    events: Vec<AudioCommand>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AudioOutcome {
+    pub state: AudioRegistry,
+    pub events: Vec<AudioCommand>,
+}
+
+impl AudioRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_looping(&self, name: &str, target: Option<ObjectId>) -> bool {
+        let key = AudioInstanceKey {
+            name: normalize_sound_name(name),
+            target,
+        };
+        self.looping.contains_key(&key)
+    }
+
+    pub fn play_sound(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        volume: u8,
+        looped: bool,
+        multiple: bool,
+        custom_falloff: Option<i32>,
+    ) {
+        if looped && !multiple {
+            let key = AudioInstanceKey {
+                name: normalize_sound_name(name),
+                target,
+            };
+            if self.looping.contains_key(&key) {
+                return;
+            }
+            self.looping.insert(
+                key,
+                AudioInstance {
+                    volume,
+                    custom_falloff,
+                },
+            );
+        } else if looped {
+            let key = AudioInstanceKey {
+                name: normalize_sound_name(name),
+                target,
+            };
+            self.looping.insert(
+                key,
+                AudioInstance {
+                    volume,
+                    custom_falloff,
+                },
+            );
+        }
+
+        self.events.push(AudioCommand::PlaySound {
+            name: name.to_string(),
+            target,
+            volume,
+            looped,
+            custom_falloff,
+        });
+    }
+
+    pub fn stop_sound(&mut self, name: &str, target: Option<ObjectId>) {
+        let key = AudioInstanceKey {
+            name: normalize_sound_name(name),
+            target,
+        };
+        self.looping.remove(&key);
+        self.events.push(AudioCommand::StopSound {
+            name: name.to_string(),
+            target,
+        });
+    }
+
+    pub fn set_volume(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        volume: u8,
+        custom_falloff: Option<i32>,
+    ) -> bool {
+        let key = AudioInstanceKey {
+            name: normalize_sound_name(name),
+            target,
+        };
+        let existed = if let Some(instance) = self.looping.get_mut(&key) {
+            if let Some(falloff) = custom_falloff {
+                instance.custom_falloff = Some(falloff);
+            }
+            instance.volume = volume;
+            true
+        } else {
+            self.looping.insert(
+                key,
+                AudioInstance {
+                    volume,
+                    custom_falloff,
+                },
+            );
+            false
+        };
+        if existed {
+            self.events.push(AudioCommand::SetSoundVolume {
+                name: name.to_string(),
+                target,
+                volume,
+            });
+        }
+        existed
+    }
+
+    pub fn take_events(&mut self) -> Vec<AudioCommand> {
+        mem::take(&mut self.events)
+    }
+}
+
+impl Default for AudioOutcome {
+    fn default() -> Self {
+        Self {
+            state: AudioRegistry::new(),
+            events: Vec::new(),
+        }
+    }
+}
+
+fn normalize_sound_name(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
 struct EffectHostContext {
     object: Option<ObjectScopeContext>,
     global: Option<EffectScopeContext>,
@@ -5433,6 +5840,7 @@ struct EffectHostContext {
     pending_order: Vec<ObjectId>,
     pending_particles: Vec<ParticleCommand>,
     transfer_zone_commands: Vec<TransferZoneCommand>,
+    audio: AudioRegistry,
     next_object_id: u64,
 }
 
@@ -5442,6 +5850,7 @@ impl EffectHostContext {
         global_effects: Vec<EffectState>,
         world: HostWorldContext,
         next_object_id: u64,
+        audio: AudioRegistry,
     ) -> Self {
         let object = object.map(|ctx| {
             let HostObjectContext {
@@ -5504,6 +5913,7 @@ impl EffectHostContext {
             pending_order: Vec::new(),
             pending_particles: Vec::new(),
             transfer_zone_commands: Vec::new(),
+            audio,
             next_object_id,
         }
     }
@@ -5590,7 +6000,15 @@ impl EffectHostContext {
         self.object.as_ref()
     }
 
-    fn into_commands(self) -> EffectContextOutcome {
+    fn audio_mut(&mut self) -> &mut AudioRegistry {
+        &mut self.audio
+    }
+
+    fn audio(&self) -> &AudioRegistry {
+        &self.audio
+    }
+
+    fn into_commands(mut self) -> EffectContextOutcome {
         let (object_effects, object_update, object_commands, destroy) = match self.object {
             Some(object) => {
                 let update = if object.pending_update.is_empty() {
@@ -5613,6 +6031,7 @@ impl EffectHostContext {
             .map(EffectScopeContext::into_commands)
             .unwrap_or_default();
 
+        let audio_events = self.audio.take_events();
         let mut outcome = EffectContextOutcome::new(
             object_effects,
             global,
@@ -5623,6 +6042,10 @@ impl EffectHostContext {
             None,
             self.pending_spawns,
             self.transfer_zone_commands,
+            AudioOutcome {
+                state: self.audio,
+                events: audio_events,
+            },
             self.next_object_id,
         );
         outcome.particles = self.pending_particles;

@@ -1,8 +1,9 @@
 mod gamepad;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::f32::consts::PI;
 use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -10,11 +11,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
-use lc_audio::{AudioError, AudioSystem, MusicHandle};
+use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_engine::{
-    ActionSpec, ActionState, ControlButton, ControlEvent, Definition, Engine, EngineError,
-    EngineState, EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectSnapshot,
-    Scenario, SimulationSnapshot, SpawnConfig, Vector2,
+    ActionSpec, ActionState, AudioCommand, ControlButton, ControlEvent, Definition, Engine,
+    EngineError, EngineState, EnvironmentSettings, Landscape, MovementProfile, ObjectId,
+    ObjectSnapshot, Scenario, SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_frontend::{
     CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, InputDispatcher, KeyCode,
@@ -190,6 +191,8 @@ fn enforce_min_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
 struct AudioContext {
     system: AudioSystem,
     current_music: Option<MusicHandle>,
+    loaded_sounds: HashMap<String, SoundHandle>,
+    active_channels: HashMap<SoundInstanceKey, ChannelInfo>,
 }
 
 impl AudioContext {
@@ -197,6 +200,8 @@ impl AudioContext {
         Ok(Self {
             system: AudioSystem::new(AUDIO_CHANNELS)?,
             current_music: None,
+            loaded_sounds: HashMap::new(),
+            active_channels: HashMap::new(),
         })
     }
 
@@ -212,6 +217,173 @@ impl AudioContext {
         self.system.halt_music();
         self.current_music.take();
     }
+
+    fn process_audio(&mut self, snapshot: &SimulationSnapshot, focus: Option<&ObjectSnapshot>) {
+        let events = &snapshot.audio;
+        if !events.is_empty() {
+            self.handle_events(events, snapshot, focus);
+        }
+        self.update_channels(snapshot, focus);
+    }
+
+    fn reset_sfx(&mut self) {
+        for info in self.active_channels.values() {
+            self.system.halt_channel(info.channel);
+        }
+        self.active_channels.clear();
+    }
+
+    fn handle_events(
+        &mut self,
+        events: &[AudioCommand],
+        snapshot: &SimulationSnapshot,
+        focus: Option<&ObjectSnapshot>,
+    ) {
+        for event in events {
+            match event {
+                AudioCommand::PlaySound {
+                    name,
+                    target,
+                    volume,
+                    looped,
+                    custom_falloff,
+                } => {
+                    if let Err(err) = self.start_sound(
+                        name,
+                        *target,
+                        *volume,
+                        *looped,
+                        *custom_falloff,
+                        snapshot,
+                        focus,
+                    ) {
+                        eprintln!("failed to play sound {name}: {err}");
+                    }
+                }
+                AudioCommand::StopSound { name, target } => {
+                    self.stop_sound(name, *target);
+                }
+                AudioCommand::SetSoundVolume {
+                    name,
+                    target,
+                    volume,
+                } => {
+                    self.update_sound_volume(name, *target, *volume, snapshot, focus);
+                }
+            }
+        }
+    }
+
+    fn start_sound(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        volume: u8,
+        looped: bool,
+        custom_falloff: Option<i32>,
+        snapshot: &SimulationSnapshot,
+        focus: Option<&ObjectSnapshot>,
+    ) -> Result<(), AudioError> {
+        let key = SoundInstanceKey::new(name, target);
+        let handle = self.ensure_sound(name)?;
+        let channel = self.system.play_sound(&handle, looped)?;
+        let info = ChannelInfo {
+            channel,
+            looped,
+            target,
+            volume,
+            custom_falloff,
+        };
+        let (mix_volume, pan) = compute_mix_values(&info, snapshot, focus);
+        self.system
+            .channel_set_volume_and_pan(channel, mix_volume, pan);
+        self.active_channels.insert(key, info);
+        Ok(())
+    }
+
+    fn stop_sound(&mut self, name: &str, target: Option<ObjectId>) {
+        let key = SoundInstanceKey::new(name, target);
+        if let Some(info) = self.active_channels.remove(&key) {
+            self.system.halt_channel(info.channel);
+        }
+    }
+
+    fn update_sound_volume(
+        &mut self,
+        name: &str,
+        target: Option<ObjectId>,
+        volume: u8,
+        snapshot: &SimulationSnapshot,
+        focus: Option<&ObjectSnapshot>,
+    ) {
+        let key = SoundInstanceKey::new(name, target);
+        if let Some(info) = self.active_channels.get_mut(&key) {
+            info.volume = volume;
+            let channel = info.channel;
+            let (mix_volume, pan) = compute_mix_values(info, snapshot, focus);
+            drop(info);
+            self.system
+                .channel_set_volume_and_pan(channel, mix_volume, pan);
+        }
+    }
+
+    fn update_channels(&mut self, snapshot: &SimulationSnapshot, focus: Option<&ObjectSnapshot>) {
+        let mut finished = Vec::new();
+        let mut updates: Vec<(ChannelId, f32, f32)> = Vec::new();
+        for (key, info) in self.active_channels.iter_mut() {
+            if !info.looped && !self.system.channel_is_playing(info.channel) {
+                finished.push(key.clone());
+                continue;
+            }
+            let (mix_volume, pan) = compute_mix_values(info, snapshot, focus);
+            updates.push((info.channel, mix_volume, pan));
+        }
+        for (channel, volume, pan) in updates {
+            self.system.channel_set_volume_and_pan(channel, volume, pan);
+        }
+        for key in finished {
+            if let Some(info) = self.active_channels.remove(&key) {
+                self.system.halt_channel(info.channel);
+            }
+        }
+    }
+
+    fn ensure_sound(&mut self, name: &str) -> Result<SoundHandle, AudioError> {
+        let key = name.to_ascii_lowercase();
+        if !self.loaded_sounds.contains_key(&key) {
+            let bytes = generate_tone_wav(&key);
+            let handle = self.system.load_sound(bytes.as_slice())?;
+            self.loaded_sounds.insert(key.clone(), handle);
+        }
+        self.loaded_sounds
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| AudioError::Stream("sound handle missing".into()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SoundInstanceKey {
+    name: String,
+    target: Option<ObjectId>,
+}
+
+impl SoundInstanceKey {
+    fn new(name: &str, target: Option<ObjectId>) -> Self {
+        Self {
+            name: name.to_ascii_lowercase(),
+            target,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ChannelInfo {
+    channel: ChannelId,
+    looped: bool,
+    target: Option<ObjectId>,
+    volume: u8,
+    custom_falloff: Option<i32>,
 }
 
 struct GameApp {
@@ -890,8 +1062,15 @@ impl GameApp {
         if matches!(self.mode, AppMode::Running) {
             self.snapshot = self.engine.tick()?;
             self.refresh_focus();
+            self.update_audio();
         }
         Ok(())
+    }
+
+    fn update_audio(&mut self) {
+        if let Some(audio) = self.audio.as_mut() {
+            audio.process_audio(&self.snapshot, self.focus_snapshot.as_ref());
+        }
     }
 
     fn refresh_focus(&mut self) {
@@ -982,6 +1161,7 @@ impl GameApp {
         self.active_scenario = None;
         if let Some(audio) = self.audio.as_mut() {
             audio.stop_music();
+            audio.reset_sfx();
         }
 
         self.fallback_ground = DEFAULT_GROUND_HEIGHT;
@@ -1035,6 +1215,9 @@ impl GameApp {
 
         self.engine = Engine::new();
         self.input = InputDispatcher::new();
+        if let Some(audio) = self.audio.as_mut() {
+            audio.reset_sfx();
+        }
 
         if let Err(err) = scenario_data.apply(&mut self.engine) {
             eprintln!(
@@ -1070,6 +1253,9 @@ impl GameApp {
 
         self.engine = Engine::new();
         self.input = InputDispatcher::new();
+        if let Some(audio) = self.audio.as_mut() {
+            audio.reset_sfx();
+        }
 
         configure_sandbox_engine(&mut self.engine)?;
 
@@ -1590,6 +1776,42 @@ fn sandbox_music_bytes() -> &'static [u8] {
         .as_slice()
 }
 
+const DEFAULT_FALLOFF_DISTANCE: i32 = 400;
+
+fn compute_mix_values(
+    info: &ChannelInfo,
+    snapshot: &SimulationSnapshot,
+    focus: Option<&ObjectSnapshot>,
+) -> (f32, f32) {
+    let base_volume = (info.volume as f32 / 100.0).clamp(0.0, 1.0);
+    let listener = focus.map(|obj| obj.position).unwrap_or(Vector2::new(0, 0));
+    let source = info
+        .target
+        .and_then(|id| snapshot.object(id))
+        .map(|obj| obj.position)
+        .unwrap_or(listener);
+
+    let dx = (source.x - listener.x) as f32;
+    let dy = (source.y - listener.y) as f32;
+    let distance = (dx * dx + dy * dy).sqrt();
+    let falloff = info
+        .custom_falloff
+        .unwrap_or(DEFAULT_FALLOFF_DISTANCE)
+        .max(1) as f32;
+    let proximity = (1.0 - distance / falloff).clamp(0.0, 1.0);
+    let volume = base_volume * proximity;
+    let pan = (dx / falloff).clamp(-1.0, 1.0);
+    (volume, pan)
+}
+
+fn generate_tone_wav(name: &str) -> Vec<u8> {
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    let hash = hasher.finish();
+    let freq = 220.0 + (hash % 660) as f32;
+    generate_sine_wave_wav(freq, 0.35)
+}
+
 fn generate_sine_wave_wav(frequency_hz: f32, duration_seconds: f32) -> Vec<u8> {
     let safe_duration = duration_seconds.max(0.1);
     let sample_rate = 44_100u32;
@@ -1749,6 +1971,7 @@ mod tests {
             network_packets: Vec::new(),
             definition_categories: HashMap::new(),
             transfer_zones: Vec::new(),
+            audio: Vec::new(),
         };
 
         let overlay = collect_player_overlays(&snapshot, Some(focus));

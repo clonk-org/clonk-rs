@@ -18,7 +18,7 @@
    - [ ] Promote Rust UI/input/audio to production fidelity
      - [x] Save/load parity via quick-save `.lcsave` snapshots in user data.
      - [x] HUD overlays, menu integration, and scripted metadata polish.
-     - [ ] SFX mixer wiring and scripted audio hooks.
+     - [x] SFX mixer wiring and scripted audio hooks.
 2. Launcher parity: retire the C++ delegation for updates/support bundles and keep all prelaunch flows in Rust.
 3. Automated parity harness: record canonical scenarios from the C++ build, replay them through Rust headlessly, and gate CI on the comparison.
 

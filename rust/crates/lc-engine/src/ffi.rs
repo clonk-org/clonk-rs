@@ -963,6 +963,7 @@ unsafe fn make_snapshot(
         network_packets: network_snapshots,
         definition_categories: HashMap::new(),
         transfer_zones: Vec::new(),
+        audio: Vec::new(),
     })
 }
 

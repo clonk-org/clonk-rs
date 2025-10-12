@@ -27,8 +27,9 @@ pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
 
 use compat::{
-    enter_environment_context, enter_physics_context, enter_random_context, DefinitionMetadata,
-    EffectContextOutcome, EnvironmentDelta, HostWorldContext, HostWorldObject, PhysicsDelta,
+    enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
+    AudioRegistry, DefinitionMetadata, EffectContextOutcome, EnvironmentDelta, HostWorldContext,
+    HostWorldObject, PhysicsDelta,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use ocf::NORMAL as OCF_NORMAL;
@@ -2287,6 +2288,8 @@ pub struct SimulationSnapshot {
     pub definition_categories: HashMap<DefinitionId, i32>,
     #[serde(default)]
     pub transfer_zones: Vec<TransferZoneState>,
+    #[serde(default)]
+    pub audio: Vec<AudioCommand>,
 }
 
 impl SimulationSnapshot {
@@ -2556,9 +2559,10 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
-    ) -> Result<(CommandBatch, ChaCha8Rng, u64), EngineError> {
+        audio: AudioRegistry,
+    ) -> Result<(CommandBatch, AudioRegistry, ChaCha8Rng, u64), EngineError> {
         if !self.has_initialize {
-            return Ok((CommandBatch::default(), rng, world.next_object_id()));
+            return Ok((CommandBatch::default(), audio, rng, world.next_object_id()));
         }
         let args = [
             build_state_value(&self.id, object_id, state, &self.action_library),
@@ -2568,6 +2572,7 @@ impl Definition {
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
+        let audio_guard = enter_audio_context(audio);
         let (result, host_effects) = compat::with_effect_context(
             Some(
                 compat::HostObjectContext::with_category(
@@ -2621,8 +2626,10 @@ impl Definition {
             spawns: host_spawns,
             particles: host_particles,
             transfer_zones: host_transfer_zones,
+            audio: host_audio,
             next_object_id,
         } = host_effects;
+        batch.audio.extend(host_audio.events);
 
         if let Some(delta) = physics_from_host {
             merge_physics_delta(&mut physics_delta, &delta);
@@ -2661,7 +2668,8 @@ impl Definition {
         if !physics_delta.is_empty() {
             batch.physics = Some(physics_delta);
         }
-        Ok((batch, rng, next_object_id))
+        let audio_state = audio_guard.finish();
+        Ok((batch, audio_state, rng, next_object_id))
     }
 
     fn call_step(
@@ -2675,9 +2683,10 @@ impl Definition {
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
         world: HostWorldContext,
-    ) -> Result<(CommandBatch, ChaCha8Rng, u64), EngineError> {
+        audio: AudioRegistry,
+    ) -> Result<(CommandBatch, AudioRegistry, ChaCha8Rng, u64), EngineError> {
         if !self.has_step {
-            return Ok((CommandBatch::default(), rng, world.next_object_id()));
+            return Ok((CommandBatch::default(), audio, rng, world.next_object_id()));
         }
         let frame_value = if frame > i32::MAX as u64 {
             i32::MAX
@@ -2693,6 +2702,7 @@ impl Definition {
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
+        let audio_guard = enter_audio_context(audio);
         let (result, host_effects) = compat::with_effect_context(
             Some(
                 compat::HostObjectContext::with_category(
@@ -2746,8 +2756,10 @@ impl Definition {
             spawns: host_spawns,
             particles: host_particles,
             transfer_zones: host_transfer_zones,
+            audio: host_audio,
             next_object_id,
         } = host_effects;
+        batch.audio.extend(host_audio.events);
 
         if let Some(delta) = environment_from_host {
             merge_environment_delta(&mut environment_delta, &delta);
@@ -2786,7 +2798,8 @@ impl Definition {
         if !physics_delta.is_empty() {
             batch.physics = Some(physics_delta);
         }
-        Ok((batch, rng, next_object_id))
+        let audio_state = audio_guard.finish();
+        Ok((batch, audio_state, rng, next_object_id))
     }
 
     fn call_action_callback(
@@ -2802,7 +2815,8 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
-    ) -> Result<(compat::EffectContextOutcome, ChaCha8Rng), EngineError> {
+        audio: AudioRegistry,
+    ) -> Result<(compat::EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
         if !self.script.has_function(function) {
             return Err(EngineError::InvalidScriptOutput {
                 definition: self.id.clone(),
@@ -2819,6 +2833,7 @@ impl Definition {
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
+        let audio_guard = enter_audio_context(audio);
         let (result, host_effects) = compat::with_effect_context(
             Some(
                 compat::HostObjectContext::with_category(
@@ -2881,7 +2896,8 @@ impl Definition {
             host_effects.physics = Some(physics_delta);
         }
 
-        Ok((host_effects, rng))
+        let audio_state = audio_guard.finish();
+        Ok((host_effects, audio_state, rng))
     }
 
     fn call_effect_start(
@@ -2895,7 +2911,8 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
-    ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
+        audio: AudioRegistry,
+    ) -> Result<(EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
             state,
             object_id,
@@ -2909,6 +2926,7 @@ impl Definition {
             environment,
             frame,
             world,
+            audio,
         )
     }
 
@@ -2923,7 +2941,8 @@ impl Definition {
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
         world: HostWorldContext,
-    ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
+        audio: AudioRegistry,
+    ) -> Result<(EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
             state,
             object_id,
@@ -2937,6 +2956,7 @@ impl Definition {
             environment,
             frame,
             world,
+            audio,
         )
     }
 
@@ -2952,7 +2972,8 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
-    ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
+        audio: AudioRegistry,
+    ) -> Result<(EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
             state,
             object_id,
@@ -2966,6 +2987,7 @@ impl Definition {
             environment,
             frame,
             world,
+            audio,
         )
     }
 
@@ -2983,10 +3005,15 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
-    ) -> Result<(EffectContextOutcome, ChaCha8Rng), EngineError> {
+        audio: AudioRegistry,
+    ) -> Result<(EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
         let next_object_id = world.next_object_id();
         if !self.script.has_effect_callback(&effect.name, event) {
-            return Ok((EffectContextOutcome::empty(next_object_id), rng));
+            return Ok((
+                EffectContextOutcome::empty(next_object_id, audio.clone()),
+                audio,
+                rng,
+            ));
         }
 
         let mut args = Vec::with_capacity(2 + extras.len());
@@ -3002,6 +3029,7 @@ impl Definition {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
+        let audio_guard = enter_audio_context(audio);
         let (result, mut commands) = compat::with_effect_context(
             Some(
                 compat::HostObjectContext::with_category(
@@ -3042,6 +3070,7 @@ impl Definition {
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
+        let audio_state = audio_guard.finish();
 
         result
             .map(|_| {
@@ -3051,7 +3080,7 @@ impl Definition {
                 if !physics_delta.is_empty() {
                     commands.physics = Some(physics_delta);
                 }
-                (commands, rng)
+                (commands, audio_state, rng)
             })
             .map_err(|source| EngineError::Script {
                 definition: format!("{}::{}", self.id, effect.name),
@@ -3098,9 +3127,10 @@ impl ScenarioScript {
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
-    ) -> Result<(ScenarioBatch, ChaCha8Rng), EngineError> {
+        audio: AudioRegistry,
+    ) -> Result<(ScenarioBatch, AudioRegistry, ChaCha8Rng), EngineError> {
         if !self.has_initialize {
-            return Ok((ScenarioBatch::default(), rng));
+            return Ok((ScenarioBatch::default(), audio, rng));
         }
         self.call(
             "Initialize",
@@ -3111,6 +3141,7 @@ impl ScenarioScript {
             global_effects,
             physics,
             environment,
+            audio,
         )
     }
 
@@ -3123,9 +3154,10 @@ impl ScenarioScript {
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
-    ) -> Result<(ScenarioBatch, ChaCha8Rng), EngineError> {
+        audio: AudioRegistry,
+    ) -> Result<(ScenarioBatch, AudioRegistry, ChaCha8Rng), EngineError> {
         if !self.has_step {
-            return Ok((ScenarioBatch::default(), rng));
+            return Ok((ScenarioBatch::default(), audio, rng));
         }
         self.call(
             "Step",
@@ -3136,6 +3168,7 @@ impl ScenarioScript {
             global_effects,
             physics,
             environment,
+            audio,
         )
     }
 
@@ -3149,7 +3182,8 @@ impl ScenarioScript {
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
-    ) -> Result<(ScenarioBatch, ChaCha8Rng), EngineError> {
+        audio: AudioRegistry,
+    ) -> Result<(ScenarioBatch, AudioRegistry, ChaCha8Rng), EngineError> {
         let state_value = build_scenario_state_value(snapshot);
         let env_frame = frame.unwrap_or(snapshot.frame);
         let mut args = Vec::new();
@@ -3169,6 +3203,7 @@ impl ScenarioScript {
         let guard = enter_random_context(rng);
         let world = host_world_context_from_snapshot(snapshot);
         let next_object_id = world.next_object_id();
+        let audio_guard = enter_audio_context(audio);
         let (result, host_effects) =
             compat::with_effect_context(None, global_effects, world, next_object_id, || {
                 self.script.call(function, &args)
@@ -3213,8 +3248,33 @@ impl ScenarioScript {
         if !host_effects.particles.is_empty() {
             batch.particles.extend(host_effects.particles);
         }
-        Ok((batch, rng))
+        if !host_effects.audio.events.is_empty() {
+            batch.audio.extend(host_effects.audio.events);
+        }
+        let audio_state = audio_guard.finish();
+        Ok((batch, audio_state, rng))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioCommand {
+    PlaySound {
+        name: String,
+        target: Option<ObjectId>,
+        volume: u8,
+        looped: bool,
+        #[serde(default)]
+        custom_falloff: Option<i32>,
+    },
+    StopSound {
+        name: String,
+        target: Option<ObjectId>,
+    },
+    SetSoundVolume {
+        name: String,
+        target: Option<ObjectId>,
+        volume: u8,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -3229,6 +3289,7 @@ struct CommandBatch {
     physics: Option<PhysicsDelta>,
     particles: Vec<ParticleCommand>,
     transfer_zones: Vec<TransferZoneCommand>,
+    audio: Vec<AudioCommand>,
 }
 
 #[derive(Debug, Default)]
@@ -3239,6 +3300,7 @@ struct ScenarioBatch {
     physics: Option<PhysicsDelta>,
     particles: Vec<ParticleCommand>,
     transfer_zones: Vec<TransferZoneCommand>,
+    audio: Vec<AudioCommand>,
 }
 
 pub struct Engine {
@@ -3258,6 +3320,8 @@ pub struct Engine {
     known_crew_owners: HashSet<i32>,
     eliminated_crew_owners: HashSet<i32>,
     transfer_zones: TransferZoneTable,
+    audio_registry: AudioRegistry,
+    pending_audio: Vec<AudioCommand>,
 }
 
 fn clamp_to_limit(value: i32, limit: i32) -> i32 {
@@ -3577,6 +3641,8 @@ impl Engine {
             known_crew_owners: HashSet::new(),
             eliminated_crew_owners: HashSet::new(),
             transfer_zones: TransferZoneTable::default(),
+            audio_registry: AudioRegistry::new(),
+            pending_audio: Vec::new(),
         };
         engine.environment.refresh_runtime_fields();
         engine
@@ -3715,15 +3781,17 @@ impl Engine {
         let snapshot = self.snapshot();
         let random = self.next_random_i32();
         let rng_state = self.rng.clone();
-        let (batch, new_rng) = script.initialize(
+        let (batch, audio_state, new_rng) = script.initialize(
             &snapshot,
             rng_state,
             random,
             &self.global_effects,
             self.physics,
             self.environment,
+            self.audio_registry.clone(),
         )?;
         self.rng = new_rng;
+        self.audio_registry = audio_state;
         let created = self.apply_scenario_batch(batch)?;
         self.scenario_script = Some(script);
         Ok(created)
@@ -3737,6 +3805,7 @@ impl Engine {
             physics,
             particles,
             transfer_zones,
+            audio,
         } = batch;
 
         if let Some(delta) = environment {
@@ -3751,6 +3820,9 @@ impl Engine {
         self.apply_particle_commands(particles);
         if !transfer_zones.is_empty() {
             self.apply_transfer_zone_commands(transfer_zones)?;
+        }
+        if !audio.is_empty() {
+            self.pending_audio.extend(audio);
         }
         let mut created = Vec::with_capacity(spawns.len());
         for spawn in spawns {
@@ -4033,7 +4105,7 @@ impl Engine {
             let rng_state = self.rng.clone();
             let environment = self.environment;
             let global_effects = self.global_effects.clone();
-            let (batch, new_rng) = {
+            let (batch, audio_state, new_rng) = {
                 let script = self
                     .scenario_script
                     .as_mut()
@@ -4046,9 +4118,11 @@ impl Engine {
                     &global_effects,
                     self.physics,
                     environment,
+                    self.audio_registry.clone(),
                 )?
             };
             self.rng = new_rng;
+            self.audio_registry = audio_state;
             self.apply_scenario_batch(batch)?;
         }
         let mut spawn_requests = Vec::new();
@@ -4101,7 +4175,14 @@ impl Engine {
                 let global_view = self.global_effects.clone();
                 let rng_state = self.rng.clone();
                 let world = self.host_world_context();
-                let (global_cmds, emitted_particles, physics_delta, new_rng) = {
+                let (
+                    global_cmds,
+                    emitted_particles,
+                    physics_delta,
+                    audio_events,
+                    audio_state,
+                    new_rng,
+                ) = {
                     let definition = self
                         .definitions
                         .get(&definition_id)
@@ -4118,9 +4199,14 @@ impl Engine {
                         self.physics,
                         self.frame,
                         world.clone(),
+                        self.audio_registry.clone(),
                     )?
                 };
                 self.rng = new_rng;
+                self.audio_registry = audio_state;
+                if !audio_events.is_empty() {
+                    self.pending_audio.extend(audio_events);
+                }
                 if !physics_delta.is_empty() {
                     self.apply_physics_delta(physics_delta);
                 }
@@ -4152,7 +4238,14 @@ impl Engine {
                 let global_view = self.global_effects.clone();
                 let rng_state = self.rng.clone();
                 let world = self.host_world_context();
-                let (global_cmds, emitted_particles, physics_delta, new_rng) = {
+                let (
+                    global_cmds,
+                    emitted_particles,
+                    physics_delta,
+                    audio_events,
+                    audio_state,
+                    new_rng,
+                ) = {
                     let definition = self
                         .definitions
                         .get(&definition_id)
@@ -4169,9 +4262,14 @@ impl Engine {
                         self.physics,
                         self.frame,
                         world.clone(),
+                        self.audio_registry.clone(),
                     )?
                 };
                 self.rng = new_rng;
+                self.audio_registry = audio_state;
+                if !audio_events.is_empty() {
+                    self.pending_audio.extend(audio_events);
+                }
                 if !physics_delta.is_empty() {
                     self.apply_physics_delta(physics_delta);
                 }
@@ -4232,7 +4330,7 @@ impl Engine {
             let random = self.next_random_i32();
 
             let rng_state = self.rng.clone();
-            let (command, new_rng, next_object_id) = {
+            let (command, audio_state, new_rng, next_object_id) = {
                 let definition = self
                     .definitions
                     .get(&definition_id)
@@ -4247,10 +4345,12 @@ impl Engine {
                     self.physics,
                     self.environment,
                     self.host_world_context(),
+                    self.audio_registry.clone(),
                 )?
             };
             self.rng = new_rng;
             self.next_object_id = next_object_id;
+            self.audio_registry = audio_state;
 
             let CommandBatch {
                 delta,
@@ -4263,6 +4363,7 @@ impl Engine {
                 physics,
                 particles,
                 transfer_zones,
+                audio,
             } = command;
 
             if let Some(update) = environment {
@@ -4301,6 +4402,9 @@ impl Engine {
                     container_change,
                 )
             };
+            if !audio.is_empty() {
+                self.pending_audio.extend(audio);
+            }
             self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
             if let Some((previous_container, new_container)) = container_change {
                 self.apply_container_change(object_id, previous_container, new_container)?;
@@ -4318,7 +4422,7 @@ impl Engine {
             if !effect_events.is_empty() {
                 let previous_container = self.objects[idx].state.container;
                 let world = self.host_world_context();
-                let (global_cmds, emitted_particles, physics_delta) = {
+                let (global_cmds, emitted_particles, physics_delta, audio_events) = {
                     let definition = self
                         .definitions
                         .get(&definition_id)
@@ -4326,22 +4430,33 @@ impl Engine {
                     let global_view = self.global_effects.clone();
                     let rng_state = self.rng.clone();
                     let object = &mut self.objects[idx];
-                    let (global_cmds, emitted_particles, physics_delta, new_rng) =
-                        Self::run_effect_events_for_object(
-                            definition,
-                            rng_state,
-                            object_id,
-                            object,
-                            effect_events,
-                            global_view,
-                            &mut self.environment,
-                            self.physics,
-                            self.frame,
-                            world.clone(),
-                        )?;
+                    let (
+                        global_cmds,
+                        emitted_particles,
+                        physics_delta,
+                        audio_events,
+                        audio_state,
+                        new_rng,
+                    ) = Self::run_effect_events_for_object(
+                        definition,
+                        rng_state,
+                        object_id,
+                        object,
+                        effect_events,
+                        global_view,
+                        &mut self.environment,
+                        self.physics,
+                        self.frame,
+                        world.clone(),
+                        self.audio_registry.clone(),
+                    )?;
                     self.rng = new_rng;
-                    (global_cmds, emitted_particles, physics_delta)
+                    self.audio_registry = audio_state;
+                    (global_cmds, emitted_particles, physics_delta, audio_events)
                 };
+                if !audio_events.is_empty() {
+                    self.pending_audio.extend(audio_events);
+                }
                 if !physics_delta.is_empty() {
                     self.apply_physics_delta(physics_delta);
                 }
@@ -4372,7 +4487,9 @@ impl Engine {
         self.prune_selection();
         self.process_spawn_queue(spawn_requests)?;
         self.refresh_elimination_state();
-        Ok(self.snapshot())
+        let mut snapshot = self.snapshot();
+        snapshot.audio = self.pending_audio.drain(..).collect();
+        Ok(snapshot)
     }
 
     pub fn object_snapshot(&self, id: ObjectId) -> Option<ObjectSnapshot> {
@@ -4617,7 +4734,7 @@ impl Engine {
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
-        let (outcome, new_rng) = definition.call_action_callback(
+        let (outcome, audio_state, new_rng) = definition.call_action_callback(
             function,
             kind,
             &state_snapshot,
@@ -4629,8 +4746,10 @@ impl Engine {
             self.environment,
             self.frame,
             world,
+            self.audio_registry.clone(),
         )?;
         self.rng = new_rng;
+        self.audio_registry = audio_state;
 
         self.apply_action_callback_outcome(
             index,
@@ -4660,6 +4779,7 @@ impl Engine {
             spawns,
             particles,
             transfer_zones,
+            audio: outcome_audio,
             next_object_id,
         } = outcome;
 
@@ -4677,6 +4797,10 @@ impl Engine {
         self.apply_particle_commands(particles);
         if !transfer_zones.is_empty() {
             self.apply_transfer_zone_commands(transfer_zones)?;
+        }
+
+        if !outcome_audio.events.is_empty() {
+            self.pending_audio.extend(outcome_audio.events);
         }
 
         let mut effect_events = Vec::new();
@@ -4747,7 +4871,7 @@ impl Engine {
             let rng_state = self.rng.clone();
             let world = self.host_world_context();
             let object = &mut self.objects[index];
-            let (global_cmds, emitted_particles, physics_delta, new_rng) =
+            let (global_cmds, emitted_particles, physics_delta, audio_events, audio_state, new_rng) =
                 Self::run_effect_events_for_object(
                     definition,
                     rng_state,
@@ -4759,8 +4883,13 @@ impl Engine {
                     self.physics,
                     self.frame,
                     world.clone(),
+                    self.audio_registry.clone(),
                 )?;
             self.rng = new_rng;
+            self.audio_registry = audio_state;
+            if !audio_events.is_empty() {
+                self.pending_audio.extend(audio_events);
+            }
             if !physics_delta.is_empty() {
                 self.apply_physics_delta(physics_delta);
             }
@@ -4890,6 +5019,7 @@ impl Engine {
             network_packets: Vec::new(),
             definition_categories,
             transfer_zones: self.transfer_zones.states(),
+            audio: Vec::new(),
         }
     }
 
@@ -5071,17 +5201,27 @@ impl Engine {
         physics: PhysicsSettings,
         frame: u64,
         world: HostWorldContext,
+        audio: AudioRegistry,
     ) -> Result<
         (
             Vec<EffectCommand>,
             Vec<ParticleCommand>,
             PhysicsDelta,
+            Vec<AudioCommand>,
+            AudioRegistry,
             ChaCha8Rng,
         ),
         EngineError,
     > {
         if events.is_empty() {
-            return Ok((Vec::new(), Vec::new(), PhysicsDelta::default(), rng));
+            return Ok((
+                Vec::new(),
+                Vec::new(),
+                PhysicsDelta::default(),
+                Vec::new(),
+                audio,
+                rng,
+            ));
         }
 
         let mut queue: VecDeque<EffectEvent> = VecDeque::from(events);
@@ -5091,10 +5231,12 @@ impl Engine {
         let mut current_physics = physics;
         let mut accumulated_physics = PhysicsDelta::default();
         let mut pending_particles = Vec::new();
+        let mut pending_audio = Vec::new();
+        let mut current_audio = audio;
 
         while let Some(event) = queue.pop_front() {
             let snapshot_for_call = state_snapshot.clone();
-            let (outcome, new_rng) = match event.kind {
+            let (outcome, audio_state, new_rng) = match event.kind {
                 EffectEventKind::Started => definition.call_effect_start(
                     &snapshot_for_call,
                     object_id,
@@ -5105,6 +5247,7 @@ impl Engine {
                     current_environment,
                     frame,
                     world.clone(),
+                    current_audio,
                 )?,
                 EffectEventKind::Timer => definition.call_effect_timer(
                     &snapshot_for_call,
@@ -5116,6 +5259,7 @@ impl Engine {
                     current_physics,
                     current_environment,
                     world.clone(),
+                    current_audio,
                 )?,
                 EffectEventKind::Stopped(reason) => definition.call_effect_stop(
                     &snapshot_for_call,
@@ -5128,9 +5272,11 @@ impl Engine {
                     current_environment,
                     frame,
                     world.clone(),
+                    current_audio,
                 )?,
             };
             rng = new_rng;
+            current_audio = audio_state;
 
             let compat::EffectContextOutcome {
                 object: object_effect_commands,
@@ -5141,6 +5287,7 @@ impl Engine {
                 environment: environment_update,
                 physics: physics_update,
                 particles: mut emitted_particles,
+                audio: outcome_audio,
                 ..
             } = outcome;
 
@@ -5191,11 +5338,22 @@ impl Engine {
             if !emitted_particles.is_empty() {
                 pending_particles.append(&mut emitted_particles);
             }
+
+            if !outcome_audio.events.is_empty() {
+                pending_audio.extend(outcome_audio.events);
+            }
         }
 
         *environment = current_environment;
 
-        Ok((global_commands, pending_particles, accumulated_physics, rng))
+        Ok((
+            global_commands,
+            pending_particles,
+            accumulated_physics,
+            pending_audio,
+            current_audio,
+            rng,
+        ))
     }
 
     fn apply_physics_delta(&mut self, delta: PhysicsDelta) {
@@ -6572,7 +6730,9 @@ impl Engine {
                     physics,
                     particles,
                     transfer_zones,
+                    audio,
                 },
+                audio_state,
                 new_rng,
                 next_object_id,
             ) = {
@@ -6590,10 +6750,12 @@ impl Engine {
                     self.environment,
                     self.frame,
                     self.host_world_context(),
+                    self.audio_registry.clone(),
                 )?
             };
             self.rng = new_rng;
             self.next_object_id = next_object_id;
+            self.audio_registry = audio_state;
             if let Some(update) = environment {
                 update.apply(&mut self.environment);
             }
@@ -6628,6 +6790,9 @@ impl Engine {
                 object.enqueue_commands(commands);
             }
             additional_spawns = spawns;
+            if !audio.is_empty() {
+                self.pending_audio.extend(audio);
+            }
         }
 
         if !effect_events.is_empty() {
@@ -6639,7 +6804,7 @@ impl Engine {
             let previous_container = object.state.container;
             let rng_state = self.rng.clone();
             let world = self.host_world_context();
-            let (global_cmds, emitted_particles, physics_delta, new_rng) =
+            let (global_cmds, emitted_particles, physics_delta, audio_events, audio_state, new_rng) =
                 Self::run_effect_events_for_object(
                     definition,
                     rng_state,
@@ -6651,8 +6816,13 @@ impl Engine {
                     self.physics,
                     self.frame,
                     world,
+                    self.audio_registry.clone(),
                 )?;
             self.rng = new_rng;
+            self.audio_registry = audio_state;
+            if !audio_events.is_empty() {
+                self.pending_audio.extend(audio_events);
+            }
             if !physics_delta.is_empty() {
                 self.apply_physics_delta(physics_delta);
             }

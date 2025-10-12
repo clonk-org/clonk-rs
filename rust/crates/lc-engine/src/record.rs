@@ -368,6 +368,7 @@ mod tests {
             network_packets: Vec::new(),
             definition_categories: HashMap::new(),
             transfer_zones: Vec::new(),
+            audio: Vec::new(),
         }
     }
 
