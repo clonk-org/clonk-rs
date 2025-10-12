@@ -1,8 +1,11 @@
+mod gamepad;
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
 use lc_engine::{
     ActionSpec, ActionState, ControlButton, ControlEvent, Definition, Engine, EngineError,
     EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectSnapshot, Scenario,
@@ -65,6 +68,11 @@ fn main() -> Result<()> {
                 }
             }
             Event::MainEventsCleared => {
+                if let Err(err) = app.process_gamepad_events() {
+                    eprintln!("gamepad input failed: {err:?}");
+                    control_flow.set_exit();
+                    return;
+                }
                 if last_frame.elapsed() >= FRAME_INTERVAL {
                     if let Err(err) = app.update() {
                         eprintln!("tick failed: {err:?}");
@@ -173,6 +181,7 @@ struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
     input: InputDispatcher,
+    gamepads: GamepadManager,
     snapshot: SimulationSnapshot,
     focus_id: Option<ObjectId>,
     focus_snapshot: Option<lc_engine::ObjectSnapshot>,
@@ -382,6 +391,7 @@ impl GameApp {
             engine,
             graphics,
             input: InputDispatcher::new(),
+            gamepads: GamepadManager::new(),
             snapshot,
             focus_id: None,
             focus_snapshot: None,
@@ -465,9 +475,99 @@ impl GameApp {
         };
 
         if let Some(event) = event {
-            let _ = self
-                .input
-                .handle_event(&mut self.engine, PLAYER_OWNER, event)?;
+            self.dispatch_control_event(event)?;
+        }
+        Ok(())
+    }
+
+    fn dispatch_control_event(&mut self, event: ControlEvent) -> Result<(), EngineError> {
+        let _ = self
+            .input
+            .handle_event(&mut self.engine, PLAYER_OWNER, event)?;
+        Ok(())
+    }
+
+    fn process_gamepad_events(&mut self) -> Result<(), EngineError> {
+        let events = self.gamepads.poll();
+        for event in events {
+            self.handle_gamepad_event(event)?;
+        }
+        Ok(())
+    }
+
+    fn handle_gamepad_event(&mut self, event: GamepadEvent) -> Result<(), EngineError> {
+        match event {
+            GamepadEvent::Direction { button, state } => {
+                self.handle_gamepad_direction(button, state)?;
+            }
+            GamepadEvent::Action { action, state } => {
+                self.handle_gamepad_action(action, state)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_gamepad_direction(
+        &mut self,
+        button: ControlButton,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
+        match self.mode {
+            AppMode::Menu(_) => {
+                if let Some(key) = menu_key_from_control_button(button) {
+                    match state {
+                        ElementState::Pressed => {
+                            self.handle_menu_input(|menu| menu.menu().handle_key_down(key))?
+                        }
+                        ElementState::Released => {
+                            self.handle_menu_input(|menu| menu.menu().handle_key_up(key))?
+                        }
+                    }
+                }
+            }
+            AppMode::Running => {
+                let event = match state {
+                    ElementState::Pressed => ControlEvent::Press(button),
+                    ElementState::Released => ControlEvent::Release(button),
+                };
+                self.dispatch_control_event(event)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_gamepad_action(
+        &mut self,
+        action: GamepadActionType,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
+        match action {
+            GamepadActionType::Select => match self.mode {
+                AppMode::Menu(_) => match state {
+                    ElementState::Pressed => {
+                        self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?
+                    }
+                    ElementState::Released => {
+                        self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?
+                    }
+                },
+                AppMode::Running => {
+                    if state == ElementState::Pressed {
+                        self.dispatch_control_event(ControlEvent::ClearPressed)?;
+                    }
+                }
+            },
+            GamepadActionType::Back => {
+                if matches!(self.mode, AppMode::Menu(_)) {
+                    match state {
+                        ElementState::Pressed => self.handle_menu_input(|menu| {
+                            menu.menu().handle_key_down(KeyCode::Escape)
+                        })?,
+                        ElementState::Released => self
+                            .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Escape))?,
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -916,6 +1016,15 @@ fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
         VirtualKeyCode::Left => Some(KeyCode::Left),
         VirtualKeyCode::Right => Some(KeyCode::Right),
         _ => None,
+    }
+}
+
+fn menu_key_from_control_button(button: ControlButton) -> Option<KeyCode> {
+    match button {
+        ControlButton::Left => Some(KeyCode::Left),
+        ControlButton::Right => Some(KeyCode::Right),
+        ControlButton::Up => Some(KeyCode::Up),
+        ControlButton::Down => Some(KeyCode::Down),
     }
 }
 
