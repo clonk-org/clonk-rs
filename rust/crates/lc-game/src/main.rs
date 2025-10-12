@@ -5,6 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, LineWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::SystemTime;
@@ -36,12 +37,12 @@ const CRASH_ARTIFACT_MARKER: &str = "-crash-";
 #[derive(Debug, Parser)]
 #[command(
     name = "lc-game",
-    about = "LegacyClonk Rust launcher that forwards to the C++ runtime",
+    about = "LegacyClonk Rust launcher that runs the Rust runtime",
     version,
     author
 )]
 struct Cli {
-    /// Override the detected LegacyClonk binary location
+    /// Override the detected LegacyClonk Rust runtime binary location
     #[arg(long = "binary", value_name = "PATH")]
     binary: Option<PathBuf>,
 
@@ -116,7 +117,7 @@ fn run() -> Result<()> {
     let binary =
         resolve_runtime_binary(binary.as_deref(), paths.install_root()).with_context(|| {
             format!(
-                "unable to locate LegacyClonk binary under {}",
+                "unable to locate Rust runtime binary under {}",
                 paths.install_root().display()
             )
         })?;
@@ -410,7 +411,7 @@ fn resolve_runtime_binary(override_path: Option<&Path>, install_root: &Path) -> 
     }
 
     bail!(
-        "could not locate the LegacyClonk runtime under {} (set --binary or LC_GAME_BINARY)",
+        "could not locate the Rust runtime binary under {} (set --binary or LC_GAME_BINARY)",
         install_root.display()
     );
 }
@@ -438,6 +439,8 @@ fn launch_runtime(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
+    let runtime_output = RuntimeOutputCollector::new();
+
     logger
         .log_line(&format!(
             "launching {} (forwarding {} args)",
@@ -450,14 +453,22 @@ fn launch_runtime(
         .spawn()
         .with_context(|| format!("failed to launch {}", binary.display()))?;
 
-    let stdout_thread = child
-        .stdout
-        .take()
-        .map(|stdout| spawn_forwarding_thread(stdout, logger.clone(), StreamKind::Stdout));
-    let stderr_thread = child
-        .stderr
-        .take()
-        .map(|stderr| spawn_forwarding_thread(stderr, logger.clone(), StreamKind::Stderr));
+    let stdout_thread = child.stdout.take().map(|stdout| {
+        spawn_forwarding_thread(
+            stdout,
+            logger.clone(),
+            Some(runtime_output.clone()),
+            StreamKind::Stdout,
+        )
+    });
+    let stderr_thread = child.stderr.take().map(|stderr| {
+        spawn_forwarding_thread(
+            stderr,
+            logger.clone(),
+            Some(runtime_output.clone()),
+            StreamKind::Stderr,
+        )
+    });
 
     let status = child
         .wait()
@@ -474,6 +485,10 @@ fn launch_runtime(
             .map_err(|err| anyhow!("stderr forwarding thread panicked: {:?}", err))??
     }
 
+    runtime_output
+        .persist(paths.install_root(), logger)
+        .context("failed to persist captured runtime output")?;
+
     let exit_summary = describe_exit_status(&status);
     logger
         .log_line(&format!(
@@ -486,23 +501,80 @@ fn launch_runtime(
 }
 
 fn candidate_binaries(install_root: &Path) -> Vec<PathBuf> {
-    const CANDIDATES: &[&str] = &[
-        "clonk",
-        "clonk.exe",
-        "build/clonk",
-        "build/clonk.exe",
-        "build/Debug/clonk",
-        "build/Debug/clonk.exe",
-        "build/Release/clonk",
-        "build/Release/clonk.exe",
-        "build/clonk.app/Contents/MacOS/clonk",
-        "build/Debug/clonk.app/Contents/MacOS/clonk",
-        "build/Release/clonk.app/Contents/MacOS/clonk",
+    const RUST_RUNTIME_CANDIDATES: &[&str] = &[
+        "lc-app",
+        "lc-app.exe",
+        "bin/lc-app",
+        "bin/lc-app.exe",
+        "lc-app.app/Contents/MacOS/lc-app",
+        "bin/lc-app.app/Contents/MacOS/lc-app",
+        "build/lc-app",
+        "build/lc-app.exe",
+        "build/Debug/lc-app",
+        "build/Debug/lc-app.exe",
+        "build/Release/lc-app",
+        "build/Release/lc-app.exe",
+        "build/lc-app.app/Contents/MacOS/lc-app",
+        "build/Debug/lc-app.app/Contents/MacOS/lc-app",
+        "build/Release/lc-app.app/Contents/MacOS/lc-app",
+        "rust/target/debug/lc-app",
+        "rust/target/debug/lc-app.exe",
+        "rust/target/release/lc-app",
+        "rust/target/release/lc-app.exe",
+        "rust_port/target/debug/lc-app",
+        "rust_port/target/debug/lc-app.exe",
+        "rust_port/target/release/lc-app",
+        "rust_port/target/release/lc-app.exe",
     ];
-    CANDIDATES
-        .iter()
-        .map(|rel| install_root.join(rel))
-        .collect()
+
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+
+    if let Ok(current_exe) = env::current_exe() {
+        for path in sibling_runtime_candidates(&current_exe) {
+            if seen.insert(path.clone()) {
+                candidates.push(path);
+            }
+        }
+    }
+
+    for relative in RUST_RUNTIME_CANDIDATES {
+        let candidate = install_root.join(relative);
+        if seen.insert(candidate.clone()) {
+            candidates.push(candidate);
+        }
+    }
+
+    candidates
+}
+
+fn sibling_runtime_candidates(exe: &Path) -> Vec<PathBuf> {
+    let mut results = Vec::new();
+    if let Some(dir) = exe.parent() {
+        results.push(dir.join("lc-app"));
+        results.push(dir.join("lc-app.exe"));
+        results.push(
+            dir.join("lc-app.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("lc-app"),
+        );
+    }
+    if let Some(bundle_dir) = exe
+        .parent()
+        .and_then(|dir| dir.parent())
+        .and_then(|contents| contents.parent())
+    {
+        // Handles lc-game inside a .app bundle by looking for a sibling lc-app bundle.
+        results.push(
+            bundle_dir
+                .join("lc-app.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("lc-app"),
+        );
+    }
+    results
 }
 
 fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> {
@@ -952,6 +1024,95 @@ impl LauncherLog for LauncherLogger {
     }
 }
 
+#[derive(Clone)]
+struct RuntimeOutputCollector {
+    inner: Arc<RuntimeOutputCollectorInner>,
+}
+
+struct RuntimeOutputCollectorInner {
+    lines: Mutex<Vec<RuntimeLine>>,
+    order: AtomicUsize,
+}
+
+struct RuntimeLine {
+    order: usize,
+    kind: StreamKind,
+    text: String,
+}
+
+impl RuntimeOutputCollector {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(RuntimeOutputCollectorInner {
+                lines: Mutex::new(Vec::new()),
+                order: AtomicUsize::new(0),
+            }),
+        }
+    }
+
+    fn record(&self, kind: StreamKind, text: &str) -> Result<()> {
+        let trimmed = text.trim_end_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let order = self.inner.order.fetch_add(1, Ordering::SeqCst);
+        let mut guard = self
+            .inner
+            .lines
+            .lock()
+            .map_err(|_| anyhow!("runtime output buffer mutex poisoned"))?;
+        guard.push(RuntimeLine {
+            order,
+            kind,
+            text: trimmed.to_string(),
+        });
+        Ok(())
+    }
+
+    fn persist(&self, install_root: &Path, logger: &LauncherLogger) -> Result<Option<PathBuf>> {
+        let mut guard = self
+            .inner
+            .lines
+            .lock()
+            .map_err(|_| anyhow!("runtime output buffer mutex poisoned"))?;
+
+        if guard.is_empty() {
+            return Ok(None);
+        }
+
+        guard.sort_by_key(|line| line.order);
+
+        let filename = format!("Clonk-rust-{}.log", timestamp_for_filename());
+        let path = install_root.join(&filename);
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("failed to create runtime log {}", path.display()))?;
+        let mut writer = LineWriter::new(file);
+
+        for line in guard.iter() {
+            writeln!(writer, "[{}] {}", line.kind.display_label(), line.text)?;
+        }
+
+        writer
+            .flush()
+            .with_context(|| format!("failed to flush runtime log {}", path.display()))?;
+
+        logger
+            .log_line(&format!(
+                "captured runtime output in {} ({} lines)",
+                path.display(),
+                guard.len()
+            ))
+            .context("failed to log runtime output capture summary")?;
+
+        guard.clear();
+
+        Ok(Some(path))
+    }
+}
+
 #[derive(Clone, Copy)]
 enum StreamKind {
     Stdout,
@@ -980,9 +1141,19 @@ impl StreamKind {
     }
 }
 
+impl StreamKind {
+    fn display_label(self) -> &'static str {
+        match self {
+            StreamKind::Stdout => "STDOUT",
+            StreamKind::Stderr => "STDERR",
+        }
+    }
+}
+
 fn spawn_forwarding_thread<R>(
     reader: R,
     logger: LauncherLogger,
+    collector: Option<RuntimeOutputCollector>,
     kind: StreamKind,
 ) -> thread::JoinHandle<Result<()>>
 where
@@ -999,6 +1170,11 @@ where
             }
             let text = String::from_utf8_lossy(&buffer);
             kind.print(&text);
+            if let Some(ref collector) = collector {
+                collector
+                    .record(kind, &text)
+                    .context("failed to buffer runtime output")?;
+            }
             logger
                 .log_stream(kind, &text)
                 .context("failed to log runtime output")?;
@@ -1550,10 +1726,10 @@ mod tests {
         let binary_path = install_dir
             .path()
             .join("build")
-            .join("clonk.app")
+            .join("lc-app.app")
             .join("Contents")
             .join("MacOS")
-            .join("clonk");
+            .join("lc-app");
         fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
         fs::write(&binary_path, b"stub").unwrap();
 
@@ -1640,7 +1816,7 @@ mod tests {
         fs::write(planet_dir.join("System.c4g"), b"system payload").unwrap();
         fs::write(planet_dir.join("Graphics.c4g"), b"graphics payload").unwrap();
 
-        let binary_path = install_dir.path().join("clonk.exe");
+        let binary_path = install_dir.path().join("lc-app.exe");
         fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
         fs::write(&binary_path, b"stub").unwrap();
 
@@ -1770,11 +1946,11 @@ mod tests {
         let app_dir = temp
             .path()
             .join("build")
-            .join("clonk.app")
+            .join("lc-app.app")
             .join("Contents")
             .join("MacOS");
         fs::create_dir_all(&app_dir).unwrap();
-        let binary = app_dir.join("clonk");
+        let binary = app_dir.join("lc-app");
         fs::write(&binary, b"stub").unwrap();
         let resolved =
             resolve_runtime_binary(None, temp.path()).expect("should locate bundle binary");
@@ -1784,7 +1960,7 @@ mod tests {
     #[test]
     fn respects_override_argument() {
         let temp = TempDir::new().unwrap();
-        let override_bin = temp.path().join("custom").join("clonk");
+        let override_bin = temp.path().join("custom").join("lc-app");
         fs::create_dir_all(override_bin.parent().unwrap()).unwrap();
         fs::write(&override_bin, b"stub").unwrap();
         let result = resolve_runtime_binary(Some(&override_bin), temp.path()).unwrap();
