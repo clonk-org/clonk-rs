@@ -18,11 +18,18 @@ struct EngineSnapshotScenario {
     generator: ScenarioGenerator,
 }
 
-const ENGINE_SNAPSHOT_SCENARIOS: &[EngineSnapshotScenario] = &[EngineSnapshotScenario {
-    name: "basic_movement",
-    frames: 6,
-    generator: fixtures::basic_movement_recording,
-}];
+const ENGINE_SNAPSHOT_SCENARIOS: &[EngineSnapshotScenario] = &[
+    EngineSnapshotScenario {
+        name: "basic_movement",
+        frames: 6,
+        generator: fixtures::basic_movement_recording,
+    },
+    EngineSnapshotScenario {
+        name: "queued_commands",
+        frames: 6,
+        generator: fixtures::queued_command_recording,
+    },
+];
 
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
