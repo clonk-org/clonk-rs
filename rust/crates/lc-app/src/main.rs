@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -193,6 +193,8 @@ struct AudioContext {
     current_music: Option<MusicHandle>,
     loaded_sounds: HashMap<String, SoundHandle>,
     active_channels: HashMap<SoundInstanceKey, ChannelInfo>,
+    resolver: SoundResolver,
+    missing_sounds: HashSet<String>,
 }
 
 impl AudioContext {
@@ -202,6 +204,8 @@ impl AudioContext {
             current_music: None,
             loaded_sounds: HashMap::new(),
             active_channels: HashMap::new(),
+            resolver: SoundResolver::new(),
+            missing_sounds: HashSet::new(),
         })
     }
 
@@ -231,6 +235,13 @@ impl AudioContext {
             self.system.halt_channel(info.channel);
         }
         self.active_channels.clear();
+    }
+
+    fn configure_scenario(&mut self, path: Option<&Path>) {
+        if self.resolver.configure_scenario(path) {
+            self.loaded_sounds.clear();
+            self.missing_sounds.clear();
+        }
     }
 
     fn handle_events(
@@ -349,16 +360,49 @@ impl AudioContext {
     }
 
     fn ensure_sound(&mut self, name: &str) -> Result<SoundHandle, AudioError> {
-        let key = name.to_ascii_lowercase();
-        if !self.loaded_sounds.contains_key(&key) {
-            let bytes = generate_tone_wav(&key);
-            let handle = self.system.load_sound(bytes.as_slice())?;
-            self.loaded_sounds.insert(key.clone(), handle);
+        let request_key = name.to_ascii_lowercase();
+        if let Some(resolved) = self.resolver.resolve_entry(name) {
+            let cache_key = resolved.cache_key();
+            if let Some(handle) = self.loaded_sounds.get(&cache_key) {
+                return Ok(handle.clone());
+            }
+            match resolved.load_audio() {
+                Ok(bytes) => {
+                    let handle = self.system.load_sound(bytes.as_slice())?;
+                    self.loaded_sounds.insert(cache_key.clone(), handle.clone());
+                    return Ok(handle);
+                }
+                Err(err) => {
+                    if self
+                        .missing_sounds
+                        .insert(format!("asset::{}", resolved.cache_marker()))
+                    {
+                        eprintln!(
+                            "failed to load sound asset `{}` from {}: {err}",
+                            name,
+                            resolved.describe()
+                        );
+                    }
+                }
+            }
         }
+
+        let fallback_cache_key = format!("__fallback::{}", request_key);
+        if let Some(handle) = self.loaded_sounds.get(&fallback_cache_key) {
+            return Ok(handle.clone());
+        }
+
+        let bytes = generate_tone_wav(name);
+        let handle = self.system.load_sound(bytes.as_slice())?;
         self.loaded_sounds
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| AudioError::Stream("sound handle missing".into()))
+            .insert(fallback_cache_key.clone(), handle.clone());
+        if self
+            .missing_sounds
+            .insert(format!("request::{request_key}"))
+        {
+            eprintln!("missing sound asset `{}`; using synthetic fallback", name);
+        }
+        Ok(handle)
     }
 }
 
@@ -384,6 +428,395 @@ struct ChannelInfo {
     target: Option<ObjectId>,
     volume: u8,
     custom_falloff: Option<i32>,
+}
+
+struct SoundResolver {
+    global: Vec<SoundLibrary>,
+    scenario: Vec<SoundLibrary>,
+    scenario_root: Option<PathBuf>,
+}
+
+impl SoundResolver {
+    fn new() -> Self {
+        let global = discover_global_sound_libraries();
+        Self {
+            global,
+            scenario: Vec::new(),
+            scenario_root: None,
+        }
+    }
+
+    fn configure_scenario(&mut self, path: Option<&Path>) -> bool {
+        let new_root = path.map(|p| p.to_path_buf());
+        if self
+            .scenario_root
+            .as_ref()
+            .map(|existing| existing.as_path())
+            == new_root.as_ref().map(|p| p.as_path())
+        {
+            return false;
+        }
+
+        self.scenario = match new_root.as_ref() {
+            Some(root) => collect_sound_libraries_for_path(root),
+            None => Vec::new(),
+        };
+        self.scenario_root = new_root;
+        true
+    }
+
+    fn resolve_entry(&self, name: &str) -> Option<ResolvedSound<'_>> {
+        let terms = SoundSearchTerms::new(name);
+        for library in self.scenario.iter().chain(self.global.iter()) {
+            if let Some(index) = library.find_entry(&terms) {
+                return Some(ResolvedSound {
+                    library,
+                    entry_index: index,
+                });
+            }
+        }
+        None
+    }
+}
+
+struct SoundLibrary {
+    label: String,
+    cache_prefix: String,
+    source: Arc<Group>,
+    entries: Vec<SoundEntry>,
+    by_file_name: HashMap<String, Vec<usize>>,
+}
+
+impl SoundLibrary {
+    fn new(label: String, source: Arc<Group>) -> Self {
+        let cache_prefix = source.root().to_string_lossy().to_ascii_lowercase();
+        Self {
+            label,
+            cache_prefix,
+            source,
+            entries: Vec::new(),
+            by_file_name: HashMap::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn add_entry(&mut self, relative_path: PathBuf) {
+        let file_name = relative_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| relative_path.to_string_lossy().to_string());
+        let file_key = file_name.to_ascii_lowercase();
+        let entry = SoundEntry {
+            relative_path,
+            file_name: file_key.clone(),
+            extension_rank: extension_rank(
+                Path::new(&file_name)
+                    .extension()
+                    .and_then(|ext| ext.to_str()),
+            ),
+        };
+        let index = self.entries.len();
+        self.entries.push(entry);
+        self.by_file_name.entry(file_key).or_default().push(index);
+    }
+
+    fn find_entry(&self, terms: &SoundSearchTerms) -> Option<usize> {
+        if let Some(pattern) = &terms.wildcard_pattern {
+            return self.find_wildcard(pattern);
+        }
+        for file_name in &terms.search_names {
+            if let Some(indices) = self.by_file_name.get(file_name) {
+                return Some(self.pick_best_index(indices));
+            }
+        }
+        None
+    }
+
+    fn find_wildcard(&self, pattern: &str) -> Option<usize> {
+        let mut matches = Vec::new();
+        for (index, entry) in self.entries.iter().enumerate() {
+            if matches_question_pattern(pattern, &entry.file_name) {
+                matches.push(index);
+            }
+        }
+        match matches.len() {
+            0 => None,
+            1 => matches.first().copied(),
+            _ => Some(self.pick_best_index(&matches)),
+        }
+    }
+
+    fn pick_best_index(&self, indices: &[usize]) -> usize {
+        let mut best = *indices.first().unwrap();
+        let mut best_rank = self.entries[best].extension_rank;
+        for &index in indices.iter().skip(1) {
+            let rank = self.entries[index].extension_rank;
+            if rank < best_rank || (rank == best_rank && index > best) {
+                best = index;
+                best_rank = rank;
+            }
+        }
+        best
+    }
+
+    fn cache_key(&self, index: usize) -> String {
+        format!(
+            "{}::{}",
+            self.cache_prefix,
+            self.entries[index]
+                .relative_path
+                .to_string_lossy()
+                .to_ascii_lowercase()
+        )
+    }
+
+    fn cache_marker(&self, index: usize) -> String {
+        self.cache_key(index)
+    }
+
+    fn describe_entry(&self, index: usize) -> String {
+        format!(
+            "{}::{}",
+            self.label,
+            self.entries[index].relative_path.display()
+        )
+    }
+
+    fn read_bytes(&self, index: usize) -> Result<Vec<u8>, lc_resources::GroupError> {
+        self.source.read_file(&self.entries[index].relative_path)
+    }
+}
+
+struct SoundEntry {
+    relative_path: PathBuf,
+    file_name: String,
+    extension_rank: usize,
+}
+
+struct ResolvedSound<'a> {
+    library: &'a SoundLibrary,
+    entry_index: usize,
+}
+
+impl<'a> ResolvedSound<'a> {
+    fn cache_key(&self) -> String {
+        self.library.cache_key(self.entry_index)
+    }
+
+    fn cache_marker(&self) -> String {
+        self.library.cache_marker(self.entry_index)
+    }
+
+    fn describe(&self) -> String {
+        self.library.describe_entry(self.entry_index)
+    }
+
+    fn load_audio(&self) -> Result<Vec<u8>, lc_resources::GroupError> {
+        self.library.read_bytes(self.entry_index)
+    }
+}
+
+struct SoundSearchTerms {
+    wildcard_pattern: Option<String>,
+    search_names: Vec<String>,
+}
+
+impl SoundSearchTerms {
+    fn new(name: &str) -> Self {
+        let trimmed = name.trim();
+        let (stem_lower, has_extension) = split_stem_and_extension(trimmed);
+        let mut prepared = trimmed.to_string();
+        if !has_extension {
+            prepared.push_str(".wav");
+        }
+        let normalized = prepared.replace('*', "?");
+        let has_wildcards = normalized.contains('?');
+        let normalized_lower = normalized.to_ascii_lowercase();
+
+        let wildcard_pattern = if has_wildcards {
+            Some(normalized_lower.clone())
+        } else {
+            None
+        };
+
+        let mut search_names = Vec::new();
+        if !has_wildcards {
+            search_names.push(normalized_lower.clone());
+            if !has_extension {
+                for ext in ["ogg", "mp3"] {
+                    let candidate = format!("{}.{}", stem_lower, ext);
+                    if candidate != normalized_lower {
+                        search_names.push(candidate);
+                    }
+                }
+            }
+        }
+
+        Self {
+            wildcard_pattern,
+            search_names,
+        }
+    }
+}
+
+fn split_stem_and_extension(name: &str) -> (String, bool) {
+    if let Some(pos) = name.rfind('.') {
+        let stem = &name[..pos];
+        let ext = &name[pos + 1..];
+        if !stem.is_empty() && !ext.is_empty() && !ext.contains('*') && !ext.contains('?') {
+            return (stem.to_ascii_lowercase(), true);
+        }
+    }
+    (name.to_ascii_lowercase(), false)
+}
+
+fn discover_global_sound_libraries() -> Vec<SoundLibrary> {
+    let mut libraries = Vec::new();
+    match AppPaths::discover() {
+        Ok(paths) => {
+            let mut seen = HashSet::new();
+            for root in [
+                paths.install_root().to_path_buf(),
+                paths.planet_dir().to_path_buf(),
+                paths.user_data_dir().to_path_buf(),
+            ] {
+                for candidate in find_sound_group_candidates(&root) {
+                    let key = candidate.to_string_lossy().to_ascii_lowercase();
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    let mut libs = collect_sound_libraries_for_path(&candidate);
+                    libraries.append(&mut libs);
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("sound asset discovery skipped: {err}");
+        }
+    }
+    libraries
+}
+
+fn collect_sound_libraries_for_path(path: &Path) -> Vec<SoundLibrary> {
+    let group = match Group::open(path) {
+        Ok(group) => group,
+        Err(err) => {
+            eprintln!("failed to open sound group {}: {err}", path.display());
+            return Vec::new();
+        }
+    };
+    let label = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+    collect_sound_libraries_from_group(&group, label)
+}
+
+fn collect_sound_libraries_from_group(group: &Group, label: String) -> Vec<SoundLibrary> {
+    let mut libs = Vec::new();
+    if let Err(err) = collect_sound_libraries_recursive(group, label.as_str(), &mut libs) {
+        eprintln!(
+            "failed to inspect sound entries in {}: {err}",
+            group.root().display()
+        );
+    }
+    libs
+}
+
+fn collect_sound_libraries_recursive(
+    group: &Group,
+    label: &str,
+    libs: &mut Vec<SoundLibrary>,
+) -> Result<(), lc_resources::GroupError> {
+    let source = Arc::new(group.clone());
+    let mut library = SoundLibrary::new(label.to_string(), source);
+    for entry in group.entries()? {
+        if entry.is_directory {
+            let child = group.open_child(&entry.relative_path)?;
+            let child_label = if label.is_empty() {
+                entry.relative_path.to_string_lossy().into_owned()
+            } else {
+                format!("{}/{}", label, entry.relative_path.display())
+            };
+            collect_sound_libraries_recursive(&child, &child_label, libs)?;
+        } else if is_audio_path(&entry.relative_path) {
+            library.add_entry(entry.relative_path.clone());
+        }
+    }
+    if !library.is_empty() {
+        libs.push(library);
+    }
+    Ok(())
+}
+
+fn find_sound_group_candidates(root: &Path) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    for name in [
+        "Sound.c4g",
+        "sound.c4g",
+        "Sound.ocg",
+        "sound.ocg",
+        "Sound.c4d",
+        "sound.c4d",
+    ] {
+        let candidate = root.join(name);
+        if candidate.exists() {
+            result.push(candidate);
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name_lower = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if is_probable_sound_container(&path, &name_lower) {
+                result.push(path);
+            }
+        }
+    }
+
+    result
+}
+
+fn is_probable_sound_container(path: &Path, name_lower: &str) -> bool {
+    if !name_lower.starts_with("sound") {
+        return false;
+    }
+    if path.is_dir() {
+        return true;
+    }
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) => {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "c4g" | "ocg" | "c4d" | "c4s"
+            )
+        }
+        None => false,
+    }
+}
+
+fn matches_question_pattern(pattern: &str, candidate: &str) -> bool {
+    if pattern.len() != candidate.len() {
+        return false;
+    }
+    pattern
+        .chars()
+        .zip(candidate.chars())
+        .all(|(p, c)| p == '?' || p == c)
+}
+
+fn extension_rank(ext: Option<&str>) -> usize {
+    match ext.map(|value| value.to_ascii_lowercase()) {
+        Some(ref ext) if ext == "wav" => 0,
+        Some(ref ext) if ext == "ogg" => 1,
+        Some(ref ext) if ext == "mp3" => 2,
+        _ => 3,
+    }
 }
 
 struct GameApp {
@@ -1162,6 +1595,7 @@ impl GameApp {
         if let Some(audio) = self.audio.as_mut() {
             audio.stop_music();
             audio.reset_sfx();
+            audio.configure_scenario(None);
         }
 
         self.fallback_ground = DEFAULT_GROUND_HEIGHT;
@@ -1216,6 +1650,7 @@ impl GameApp {
         self.engine = Engine::new();
         self.input = InputDispatcher::new();
         if let Some(audio) = self.audio.as_mut() {
+            audio.configure_scenario(Some(path));
             audio.reset_sfx();
         }
 
@@ -1254,6 +1689,7 @@ impl GameApp {
         self.engine = Engine::new();
         self.input = InputDispatcher::new();
         if let Some(audio) = self.audio.as_mut() {
+            audio.configure_scenario(None);
             audio.reset_sfx();
         }
 
@@ -1415,6 +1851,7 @@ impl GameApp {
 
     fn play_scenario_audio(&mut self, path: &Path) {
         if let Some(audio) = self.audio.as_mut() {
+            audio.configure_scenario(Some(path));
             match load_scenario_music_bytes(path) {
                 Ok(Some(bytes)) => {
                     if let Err(err) = audio.play_music(bytes.as_slice(), true) {
@@ -1430,6 +1867,7 @@ impl GameApp {
 
     fn play_sandbox_audio(&mut self) {
         if let Some(audio) = self.audio.as_mut() {
+            audio.configure_scenario(None);
             if let Err(err) = audio.play_music(sandbox_music_bytes(), true) {
                 eprintln!("failed to start sandbox music: {err}");
                 audio.stop_music();
