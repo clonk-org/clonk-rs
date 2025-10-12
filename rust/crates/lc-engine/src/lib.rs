@@ -6,6 +6,7 @@ pub mod ffi;
 pub mod fixtures;
 mod input;
 mod landscape;
+pub mod ocf;
 mod math;
 mod pathfinder;
 mod record;
@@ -27,8 +28,9 @@ pub use scenario::{Scenario, ScenarioError};
 
 use compat::{
     enter_environment_context, enter_physics_context, enter_random_context, EffectContextOutcome,
-    EnvironmentDelta, HostWorldContext, HostWorldObject, PhysicsDelta,
+    EnvironmentDelta, HostWorldContext, HostWorldObject, PhysicsDelta, DefinitionMetadata,
 };
+use ocf::NORMAL as OCF_NORMAL;
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -2418,6 +2420,7 @@ pub struct Definition {
     crew_member: bool,
     movement: MovementProfile,
     category: i32,
+    ocf_base: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2468,6 +2471,7 @@ impl Definition {
             crew_member: false,
             movement: MovementProfile::default(),
             category: DEFAULT_CATEGORY,
+            ocf_base: OCF_NORMAL,
         })
     }
 
@@ -2523,6 +2527,24 @@ impl Definition {
         self.category = normalize_category(category, DEFAULT_CATEGORY);
     }
 
+    pub fn ocf_base(&self) -> u32 {
+        self.ocf_base
+    }
+
+    pub fn set_ocf_base(&mut self, ocf: u32) {
+        self.ocf_base = ocf | OCF_NORMAL;
+    }
+
+    pub fn compute_ocf(&self, state: &ObjectState) -> u32 {
+        crate::ocf::compute(
+            self.ocf_base,
+            self.crew_member,
+            state.alive,
+            state.status,
+            state.container.is_some(),
+        )
+    }
+
     fn call_initialize(
         &self,
         state: &ObjectState,
@@ -2568,8 +2590,11 @@ impl Definition {
                     state.action.target2,
                     &state.vertices,
                     state.category,
+                    self.ocf_base,
+                    self.crew_member,
                 )
-                .with_alive(state.alive),
+                .with_alive(state.alive)
+                .with_ocf(self.compute_ocf(state)),
             ),
             global_effects,
             world,
@@ -2690,8 +2715,11 @@ impl Definition {
                     state.action.target2,
                     &state.vertices,
                     state.category,
+                    self.ocf_base,
+                    self.crew_member,
                 )
-                .with_alive(state.alive),
+                .with_alive(state.alive)
+                .with_ocf(self.compute_ocf(state)),
             ),
             global_effects,
             world,
@@ -2813,8 +2841,11 @@ impl Definition {
                     state.action.target2,
                     &state.vertices,
                     state.category,
+                    self.ocf_base,
+                    self.crew_member,
                 )
-                .with_alive(state.alive),
+                .with_alive(state.alive)
+                .with_ocf(self.compute_ocf(state)),
             ),
             global_effects,
             world,
@@ -2993,8 +3024,11 @@ impl Definition {
                     state.action.target2,
                     &state.vertices,
                     state.category,
+                    self.ocf_base,
+                    self.crew_member,
                 )
-                .with_alive(state.alive),
+                .with_alive(state.alive)
+                .with_ocf(self.compute_ocf(state)),
             ),
             global_effects,
             world,
@@ -3602,23 +3636,42 @@ impl Engine {
 
     fn host_world_context(&self) -> HostWorldContext {
         let landscape = self.landscape.clone();
-        let definition_categories: HashMap<DefinitionId, i32> = self
+        let definition_metadata: HashMap<DefinitionId, DefinitionMetadata> = self
             .definitions
             .iter()
-            .map(|(id, definition)| (id.clone(), definition.category()))
+            .map(|(id, definition)| {
+                (
+                    id.clone(),
+                    DefinitionMetadata {
+                        category: definition.category(),
+                        ocf_base: definition.ocf_base(),
+                        crew_member: definition.is_crew(),
+                    },
+                )
+            })
             .collect();
         let transfer_zones = self.transfer_zones.states();
         HostWorldContext::with_landscape(
             self.objects.iter().map(|object| {
-                let procedure = self
-                    .definitions
-                    .get(&object.definition_id)
+                let definition = self.definitions.get(&object.definition_id);
+                let procedure = definition
                     .and_then(|definition| {
                         definition
                             .action_library()
                             .procedure_name_for_action(&object.state.action.name)
                     })
                     .map(|name| name.to_string());
+                let ocf = definition
+                    .map(|definition| definition.compute_ocf(&object.state))
+                    .unwrap_or_else(|| {
+                        crate::ocf::compute(
+                            OCF_NORMAL,
+                            false,
+                            object.state.alive,
+                            object.state.status,
+                            object.state.container.is_some(),
+                        )
+                    });
                 HostWorldObject::with_category(
                     object.id,
                     object.definition_id.clone(),
@@ -3639,9 +3692,10 @@ impl Engine {
                     object.state.container,
                 )
                 .with_alive(object.state.alive)
+                .with_ocf(ocf)
             }),
             landscape,
-            definition_categories,
+            definition_metadata,
             transfer_zones,
             self.next_object_id,
         )
@@ -6827,6 +6881,20 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         .max()
         .unwrap_or(0)
         .saturating_add(1);
+    let definition_metadata: HashMap<DefinitionId, DefinitionMetadata> = snapshot
+        .definition_categories
+        .iter()
+        .map(|(id, category)| {
+            (
+                id.clone(),
+                DefinitionMetadata {
+                    category: *category,
+                    ocf_base: OCF_NORMAL,
+                    crew_member: false,
+                },
+            )
+        })
+        .collect();
     HostWorldContext::with_landscape(
         snapshot.objects.iter().map(|object| {
             HostWorldObject::with_category(
@@ -6850,7 +6918,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
             )
         }),
         snapshot.landscape.clone(),
-        snapshot.definition_categories.clone(),
+        definition_metadata,
         snapshot.transfer_zones.clone(),
         next_object_id,
     )

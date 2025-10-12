@@ -15,6 +15,7 @@ use crate::{
     TransferZoneState, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT,
     CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
 };
+use crate::ocf;
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
@@ -49,6 +50,7 @@ pub(crate) struct HostWorldObject {
     pub category: i32,
     pub energy: i32,
     pub damage: i32,
+    pub ocf: u32,
     pub position: Vector2,
     #[allow(dead_code)]
     pub velocity: Vector2,
@@ -57,6 +59,13 @@ pub(crate) struct HostWorldObject {
     pub action_data: i32,
     pub action_ticks: u32,
     container: Option<ObjectId>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DefinitionMetadata {
+    pub category: i32,
+    pub ocf_base: u32,
+    pub crew_member: bool,
 }
 
 impl HostWorldObject {
@@ -131,6 +140,7 @@ impl HostWorldObject {
             category,
             energy,
             damage,
+            ocf: ocf::NORMAL,
             position,
             velocity,
             vertices,
@@ -145,6 +155,11 @@ impl HostWorldObject {
         self
     }
 
+    pub(crate) fn with_ocf(mut self, ocf: u32) -> Self {
+        self.ocf = ocf;
+        self
+    }
+
     pub fn alive(&self) -> bool {
         self.alive
     }
@@ -155,6 +170,10 @@ impl HostWorldObject {
 
     pub fn status(&self) -> ObjectStatus {
         self.status
+    }
+
+    pub fn ocf(&self) -> u32 {
+        self.ocf
     }
 
     pub fn action_target(&self, index: usize) -> Option<ObjectId> {
@@ -220,7 +239,7 @@ pub(crate) struct HostWorldContext {
     objects: Rc<HashMap<ObjectId, HostWorldObject>>,
     order: Rc<Vec<ObjectId>>,
     landscape: Option<Rc<Landscape>>,
-    definitions: Rc<HashMap<DefinitionId, i32>>,
+    definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
     transfer_zones: Rc<Vec<TransferZoneState>>,
     next_object_id: u64,
 }
@@ -250,7 +269,7 @@ impl HostWorldContext {
     pub(crate) fn with_landscape<I>(
         objects: I,
         landscape: Option<Landscape>,
-        definitions: HashMap<DefinitionId, i32>,
+        definitions: HashMap<DefinitionId, DefinitionMetadata>,
         transfer_zones: Vec<TransferZoneState>,
         next_object_id: u64,
     ) -> Self
@@ -296,7 +315,11 @@ impl HostWorldContext {
     }
 
     pub(crate) fn definition_category(&self, id: &str) -> Option<i32> {
-        self.definitions.get(id).copied()
+        self.definitions.get(id).map(|meta| meta.category)
+    }
+
+    pub(crate) fn definition_metadata(&self, id: &str) -> Option<&DefinitionMetadata> {
+        self.definitions.get(id)
     }
 }
 
@@ -409,7 +432,7 @@ fn parse_optional_u32(
     function: &str,
     parameter: &str,
 ) -> Result<Option<u32>, RuntimeError> {
-    Ok(parse_optional_i32(value, function, parameter)?.map(|raw| raw.max(0) as u32))
+    Ok(parse_optional_i32(value, function, parameter)?.map(|raw| raw as u32))
 }
 
 fn parse_optional_string(
@@ -522,7 +545,7 @@ struct FindObjectParams {
     y: i32,
     width: i32,
     height: i32,
-    _ocf: u32,
+    ocf_mask: u32,
     action: Option<String>,
     treat_idle: bool,
     action_target: Option<ObjectId>,
@@ -545,7 +568,7 @@ impl FindObjectParams {
         let y = parse_optional_i32(args.get(2), "FindObject", "y")?.unwrap_or(0);
         let width = parse_optional_i32(args.get(3), "FindObject", "width")?.unwrap_or(0);
         let height = parse_optional_i32(args.get(4), "FindObject", "height")?.unwrap_or(0);
-        let ocf = parse_optional_u32(args.get(5), "FindObject", "ocf")?.unwrap_or(u32::MAX);
+        let ocf_mask = parse_optional_u32(args.get(5), "FindObject", "ocf")?.unwrap_or(u32::MAX);
         let action = parse_optional_string(args.get(6), "FindObject", "action")?;
         let treat_idle = matches!(action.as_deref(), Some("Idle") | Some("ActIdle"));
         let action_target = parse_object_reference_argument(
@@ -572,7 +595,7 @@ impl FindObjectParams {
             y,
             width,
             height,
-            _ocf: ocf,
+            ocf_mask,
             action,
             treat_idle,
             action_target,
@@ -606,6 +629,10 @@ impl FindObjectParams {
             if object.definition_id() != definition {
                 return false;
             }
+        }
+
+        if self.ocf_mask != ocf::ALL && object.ocf() & self.ocf_mask == 0 {
+            return false;
         }
 
         match self.container {
@@ -846,6 +873,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetOwner", get_owner);
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
+    script.register_host_function("GetOCF", get_ocf);
     script.register_host_function("RemoveObject", remove_object);
     script.register_host_function("GetEnergy", get_energy);
     script.register_host_function("DoEnergy", do_energy);
@@ -887,6 +915,9 @@ pub(crate) struct HostObjectContext<'a> {
     pub alive: bool,
     pub owner: i32,
     pub category: i32,
+    pub ocf: u32,
+    pub ocf_base: u32,
+    pub crew_member: bool,
     pub position: Vector2,
     pub velocity: Vector2,
     pub effects: &'a [EffectState],
@@ -942,6 +973,8 @@ impl<'a> HostObjectContext<'a> {
             action_target2,
             vertices,
             DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
         )
     }
 
@@ -965,6 +998,8 @@ impl<'a> HostObjectContext<'a> {
         action_target2: Option<ObjectId>,
         vertices: &'a [ObjectVertex],
         category: i32,
+        ocf_base: u32,
+        crew_member: bool,
     ) -> Self {
         Self {
             id,
@@ -975,6 +1010,9 @@ impl<'a> HostObjectContext<'a> {
             alive: true,
             owner,
             category,
+            ocf: ocf::NORMAL,
+            ocf_base,
+            crew_member,
             position,
             velocity,
             effects,
@@ -993,6 +1031,23 @@ impl<'a> HostObjectContext<'a> {
     pub fn with_alive(mut self, alive: bool) -> Self {
         self.alive = alive;
         self
+    }
+
+    pub fn with_ocf(mut self, ocf: u32) -> Self {
+        self.ocf = ocf;
+        self
+    }
+
+    pub fn ocf(&self) -> u32 {
+        self.ocf
+    }
+
+    pub fn ocf_base(&self) -> u32 {
+        self.ocf_base
+    }
+
+    pub fn is_crew_member(&self) -> bool {
+        self.crew_member
     }
 }
 
@@ -4368,9 +4423,17 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_mut()
             .ok_or_else(|| RuntimeError::new("CreateObject requires an active engine context"))?;
 
-        let definition_category = context
-            .definition_category(&definition)
-            .unwrap_or(DEFAULT_CATEGORY);
+        let metadata = context
+            .definition_metadata(&definition)
+            .cloned()
+            .unwrap_or_else(|| DefinitionMetadata {
+                category: context
+                    .definition_category(&definition)
+                    .unwrap_or(DEFAULT_CATEGORY),
+                ocf_base: ocf::NORMAL,
+                crew_member: false,
+            });
+        let definition_category = metadata.category;
 
         let base_position = context
             .object_context()
@@ -4395,6 +4458,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .with_category(definition_category)
             .with_id(id);
 
+        let preview_ocf = ocf::compute(metadata.ocf_base, metadata.crew_member, true, ObjectStatus::Normal, false);
         let preview = HostWorldObject::with_category(
             id,
             definition,
@@ -4413,7 +4477,8 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             0,
             0,
             None,
-        );
+        )
+        .with_ocf(preview_ocf);
 
         context.register_spawn(spawn, preview);
         Ok(object_reference_value(id))
@@ -4647,6 +4712,46 @@ fn contained(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         Ok(to_value(object.container()))
+    })
+}
+
+fn get_ocf(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetOCF expects at most 1 argument: target",
+        ));
+    }
+
+    let target_value = args.get(0).unwrap_or(&Value::Nil);
+    let target_id = parse_object_reference_argument(target_value, "GetOCF", "target")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let ocf_value = |mask: u32| Value::Int(mask as i32);
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if object.id() == target {
+                    return Ok(ocf_value(object.ocf()));
+                }
+            }
+            if let Some(other) = context.get_world_object(target) {
+                return Ok(ocf_value(other.ocf()));
+            }
+            return Ok(Value::Nil);
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        Ok(ocf_value(object.ocf()))
     })
 }
 
@@ -5354,6 +5459,9 @@ impl EffectHostContext {
                 action_target2,
                 vertices,
                 category,
+                ocf: _,
+                ocf_base,
+                crew_member,
             } = ctx;
             ObjectScopeContext::new(
                 id,
@@ -5376,6 +5484,8 @@ impl EffectHostContext {
                 action_target,
                 action_target2,
                 vertices.to_vec(),
+                ocf_base,
+                crew_member,
             )
         });
         let global = Some(EffectScopeContext::new(global_effects));
@@ -5449,6 +5559,10 @@ impl EffectHostContext {
 
     fn definition_category(&self, id: &str) -> Option<i32> {
         self.world.definition_category(id)
+    }
+
+    fn definition_metadata(&self, id: &str) -> Option<&DefinitionMetadata> {
+        self.world.definition_metadata(id)
     }
 
     fn landscape_ref(&self) -> Option<&Landscape> {
@@ -5655,6 +5769,8 @@ struct ObjectScopeContext {
     max_energy: i32,
     current_owner: i32,
     current_category: i32,
+    ocf_base: u32,
+    crew_member: bool,
     current_direction: Direction,
     current_command_direction: CommandDirection,
     current_position: Vector2,
@@ -5684,6 +5800,8 @@ impl ObjectScopeContext {
         action_target: Option<ObjectId>,
         action_target2: Option<ObjectId>,
         vertices: Vec<ObjectVertex>,
+        ocf_base: u32,
+        crew_member: bool,
     ) -> Self {
         let blocks_other_actions = action_library.blocks_other_actions(&action_name);
         let max_energy = energy.max(DEFAULT_MAX_ENERGY);
@@ -5709,6 +5827,8 @@ impl ObjectScopeContext {
             max_energy,
             current_owner: owner,
             current_category: category,
+            ocf_base,
+            crew_member,
             current_direction: direction,
             current_command_direction: command_direction,
             current_position: position,
@@ -5758,6 +5878,13 @@ impl ObjectScopeContext {
         let normalized = crate::normalize_category(category, self.current_category);
         self.current_category = normalized;
         self.pending_update.category = Some(normalized);
+    }
+
+    fn ocf(&self) -> u32 {
+        let alive = self.alive();
+        let status = self.status();
+        let is_contained = self.container().is_some();
+        ocf::compute(self.ocf_base, self.crew_member, alive, status, is_contained)
     }
 
     fn container(&self) -> Option<ObjectId> {
@@ -6036,6 +6163,7 @@ impl ObjectScopeContext {
 mod tests {
     use super::*;
     use crate::ActionSpec;
+    use crate::ocf;
     use proptest::prelude::*;
     use rand::{Rng, SeedableRng};
     use std::collections::HashMap;
@@ -9306,6 +9434,129 @@ mod tests {
             with_effect_context(None, &[], world, 1, || find_object(&args_with_next));
         let second_value = second_result.expect("FindObject closest with next succeeds");
         assert_eq!(second_value, object_reference_value(ObjectId::new(21)));
+    }
+
+    #[test]
+    fn find_object_respects_ocf_filter() {
+        let matching_id = ObjectId::new(51);
+        let world = HostWorldContext::from_objects(vec![
+            HostWorldObject::new(
+                matching_id,
+                "Dummy",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(0, 0),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            )
+            .with_ocf(ocf::AVAILABLE | ocf::ALIVE),
+            HostWorldObject::new(
+                ObjectId::new(52),
+                "Dummy",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::new(5, 0),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+        ]);
+        let args = [
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Int(ocf::AVAILABLE as i32),
+        ];
+        let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
+        let value = result.expect("FindObject succeeds");
+        let map = match value {
+            Value::Proplist(map) => map,
+            other => panic!("expected object reference, got {other:?}"),
+        };
+        let id_value = map.get("id").expect("object reference contains id");
+        let Value::Int(id) = id_value else {
+            panic!("expected integer id, got {id_value:?}");
+        };
+        assert_eq!(*id, matching_id.as_u64() as i32);
+    }
+
+    #[test]
+    fn get_ocf_returns_object_mask() {
+        let ocf_mask = ocf::AVAILABLE | ocf::ALIVE;
+        let object_id = ObjectId::new(1);
+        let world = HostWorldContext::from_objects(vec![
+            HostWorldObject::new(
+                object_id,
+                "Dummy",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            )
+            .with_ocf(ocf_mask),
+        ]);
+
+        let object_context = HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            100,
+            0,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+        )
+        .with_alive(true)
+        .with_ocf(ocf_mask);
+
+        let (result, _) = with_effect_context(Some(object_context), &[], world, 2, || get_ocf(&[]));
+        let value = result.expect("GetOCF succeeds");
+        let Value::Int(raw) = value else {
+            panic!("expected integer mask, got {value:?}");
+        };
+        let mask = raw as u32;
+        assert_eq!(mask & ocf_mask, ocf_mask);
+        assert_ne!(mask & ocf::NORMAL, 0);
+        assert_ne!(mask & ocf::NOT_CONTAINED, 0);
     }
 
     #[test]
