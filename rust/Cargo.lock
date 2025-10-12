@@ -1752,6 +1752,8 @@ dependencies = [
  "lc-engine",
  "lc-frontend",
  "lc-graphics",
+ "lc-platform",
+ "lc-resources",
  "pixels",
  "winit",
 ]

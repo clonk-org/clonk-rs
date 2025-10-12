@@ -1,16 +1,25 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use lc_engine::{
     ActionSpec, ActionState, ControlButton, ControlEvent, Definition, Engine, EngineError,
     EnvironmentSettings, Landscape, MovementProfile, ObjectId, SimulationSnapshot, SpawnConfig,
     Vector2,
 };
-use lc_frontend::{GraphicsOverlay, GraphicsSystem, InputDispatcher};
+use lc_frontend::{
+    GraphicsOverlay, GraphicsSystem, GuiPoint, InputDispatcher, KeyCode, ScenarioEntry,
+    ScenarioKind, ScenarioSummary, StartupMenu, StartupMenuAction,
+};
+use lc_graphics::Color;
+use lc_platform::AppPaths;
+use lc_resources::scenario as resource_scenario;
 use pixels::{Pixels, SurfaceTexture};
-use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::event::{
+    ElementState, Event, KeyboardInput, MouseButton, TouchPhase, VirtualKeyCode, WindowEvent,
+};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
 
@@ -18,6 +27,8 @@ const WINDOW_WIDTH: u32 = 960;
 const WINDOW_HEIGHT: u32 = 540;
 const PLAYER_OWNER: i32 = 1;
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_666); // ~60 FPS
+const DEFAULT_SCENARIO_LABEL: &str = "Rust Sandbox";
+const DEFAULT_GROUND_HEIGHT: i32 = 360;
 
 fn main() -> Result<()> {
     let event_loop = EventLoop::new();
@@ -110,6 +121,19 @@ fn handle_window_event(
                 .context("failed to resize pixel buffer")?;
             app.resize(clamped.width, clamped.height)?;
         }
+        WindowEvent::CursorMoved { position, .. } => {
+            app.handle_cursor_moved(position)
+                .context("failed to process cursor movement")?;
+        }
+        WindowEvent::CursorLeft { .. } => {
+            app.pointer_left();
+        }
+        WindowEvent::MouseInput { state, button, .. } => {
+            if button == MouseButton::Left {
+                app.handle_mouse_button(state)
+                    .context("failed to process mouse button")?;
+            }
+        }
         WindowEvent::KeyboardInput {
             input:
                 KeyboardInput {
@@ -119,16 +143,19 @@ fn handle_window_event(
                 },
             ..
         } => {
-            if keycode == VirtualKeyCode::Escape && state == ElementState::Pressed {
-                control_flow.set_exit();
-                return Ok(());
-            }
             app.handle_key(keycode, state)
-                .context("failed to process input")?;
+                .context("failed to process key input")?;
+        }
+        WindowEvent::Touch(touch) => {
+            let position = GuiPoint::new(touch.location.x as f32, touch.location.y as f32);
+            app.handle_touch(touch.phase, position)
+                .context("failed to process touch input")?;
         }
         WindowEvent::Focused(focused) => {
             if focused {
                 window.request_redraw();
+            } else {
+                app.pointer_left();
             }
         }
         _ => {}
@@ -152,80 +179,147 @@ struct GameApp {
     energy_fraction: f32,
     scenario_label: String,
     fallback_ground: i32,
+    mode: AppMode,
+    active_scenario: Option<FrontendScenario>,
+}
+
+enum AppMode {
+    Menu(MenuState),
+    Running,
+}
+
+struct MenuState {
+    menu: StartupMenu,
+    pointer_position: Option<GuiPoint>,
+    entries: Vec<FrontendScenario>,
+}
+
+#[derive(Clone, Debug)]
+struct FrontendScenario {
+    identifier: String,
+    title: String,
+    description: Option<String>,
+    kind: ScenarioKind,
+    is_editable: bool,
+    is_playable: bool,
+    path: Option<PathBuf>,
+}
+
+impl FrontendScenario {
+    fn to_ui_entry(&self) -> ScenarioEntry {
+        ScenarioEntry {
+            identifier: self.identifier.clone(),
+            title: self.title.clone(),
+            description: self.description.clone(),
+            kind: self.kind,
+            is_editable: self.is_editable,
+            is_playable: self.is_playable,
+        }
+    }
+
+    fn from_resource(entry: &resource_scenario::ScenarioEntry) -> Self {
+        Self {
+            identifier: entry.identifier.clone(),
+            title: entry.title.clone(),
+            description: entry.description.clone(),
+            kind: ScenarioKind::Scenario,
+            is_editable: entry.is_editable,
+            is_playable: entry.is_playable,
+            path: Some(entry.path.clone()),
+        }
+    }
+
+    fn fallback() -> Self {
+        Self {
+            identifier: "rust_sandbox".to_string(),
+            title: DEFAULT_SCENARIO_LABEL.to_string(),
+            description: Some("Spawn a Rust-driven walker in a flat test landscape.".to_string()),
+            kind: ScenarioKind::Scenario,
+            is_editable: true,
+            is_playable: true,
+            path: None,
+        }
+    }
 }
 
 impl GameApp {
     fn new(width: u32, height: u32) -> Result<Self> {
-        let mut engine = Engine::new();
-        let mut definition = Definition::from_script("Walker", "Rust Walker", walker_script())?;
-
-        let mut actions = HashMap::new();
-        actions.insert(
-            "Walk".to_string(),
-            ActionSpec::default().with_procedure("Walk"),
-        );
-        definition.configure_actions(Some("Walk".to_string()), actions);
-        definition.set_crew_member(true);
-        let profile = MovementProfile::default()
-            .with_walk_speed(8)
-            .with_walk_acceleration(2);
-        definition.set_movement_profile(profile);
-        engine.register_definition(definition)?;
-
-        engine.set_environment(EnvironmentSettings::default());
-        engine.set_landscape(Landscape::flat(2048, 360));
-
-        let spawn = SpawnConfig::new("Walker")
-            .with_owner(PLAYER_OWNER)
-            .with_position(Vector2::new(240, 180))
-            .with_energy(100)
-            .with_action(ActionState::new("Walk"))
-            .with_crew_member(true);
-        let object_id = engine.spawn_object(spawn)?;
-        engine
-            .select_crew(PLAYER_OWNER, vec![object_id])
-            .context("failed to select spawned crew")?;
-        engine
-            .set_crew_cursor(PLAYER_OWNER, Some(object_id))
-            .context("failed to set crew cursor")?;
-
+        let engine = Engine::new();
         let snapshot = engine.snapshot();
+        let scenario_label = DEFAULT_SCENARIO_LABEL.to_string();
+        let mut graphics =
+            GraphicsSystem::new(width, height, DEFAULT_GROUND_HEIGHT, &scenario_label);
+        graphics.surface_mut().fill(Color::opaque(16, 28, 52));
 
-        let scenario_label = "Rust Sandbox".to_string();
-        let fallback_ground = 360;
-        let mut graphics = GraphicsSystem::new(width, height, fallback_ground, &scenario_label);
-        graphics
-            .surface_mut()
-            .fill(lc_graphics::Color::transparent());
+        let scenarios = load_frontend_scenarios();
+        let menu_entries = scenarios
+            .iter()
+            .map(FrontendScenario::to_ui_entry)
+            .collect::<Vec<_>>();
+        let mut menu = StartupMenu::new(menu_entries)
+            .map_err(|err| anyhow!("failed to create startup menu: {err}"))?;
+        menu.resize(width as f32, height as f32);
 
-        let mut app = Self {
+        Ok(Self {
             engine,
             graphics,
             input: InputDispatcher::new(),
             snapshot,
-            focus_id: Some(object_id),
+            focus_id: None,
             focus_snapshot: None,
             frame_text: String::new(),
             status_text: String::new(),
-            energy_fraction: 1.0,
+            energy_fraction: 0.0,
             scenario_label,
-            fallback_ground,
-        };
-        app.refresh_focus();
-        Ok(app)
+            fallback_ground: DEFAULT_GROUND_HEIGHT,
+            mode: AppMode::Menu(MenuState {
+                menu,
+                pointer_position: None,
+                entries: scenarios,
+            }),
+            active_scenario: None,
+        })
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         let mut graphics =
             GraphicsSystem::new(width, height, self.fallback_ground, &self.scenario_label);
-        graphics
-            .surface_mut()
-            .fill(lc_graphics::Color::transparent());
+        graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics = graphics;
+
+        if let AppMode::Menu(state) = &mut self.mode {
+            state.menu.resize(width as f32, height as f32);
+            state.pointer_position = None;
+        }
         Ok(())
     }
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
+        if matches!(self.mode, AppMode::Menu(_)) {
+            if let Some(gui_key) = map_key_code(key) {
+                match state {
+                    ElementState::Pressed => {
+                        self.handle_menu_input(|menu| menu.menu.handle_key_down(gui_key))?
+                    }
+                    ElementState::Released => {
+                        self.handle_menu_input(|menu| menu.menu.handle_key_up(gui_key))?
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        if matches!(self.mode, AppMode::Running) {
+            self.handle_engine_key(key, state)?;
+        }
+        Ok(())
+    }
+
+    fn handle_engine_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
         let event = match (key, state) {
             (VirtualKeyCode::Left, ElementState::Pressed) => {
                 Some(ControlEvent::Press(ControlButton::Left))
@@ -260,17 +354,99 @@ impl GameApp {
                 .input
                 .handle_event(&mut self.engine, PLAYER_OWNER, event)?;
         }
+        Ok(())
+    }
 
+    fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
+        let point = gui_point_from_position(position);
+        self.handle_menu_input(|state| {
+            state.pointer_position = Some(point);
+            state.menu.handle_pointer_move(point)
+        })
+    }
+
+    fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
+        let position = match &self.mode {
+            AppMode::Menu(state) => state.pointer_position,
+            _ => None,
+        };
+        if let Some(point) = position {
+            match button_state {
+                ElementState::Pressed => {
+                    self.handle_menu_input(|state| state.menu.handle_pointer_down(point))?
+                }
+                ElementState::Released => {
+                    self.handle_menu_input(|state| state.menu.handle_pointer_up(point))?
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
+        match phase {
+            TouchPhase::Started => self.handle_menu_input(|state| {
+                state.pointer_position = Some(position);
+                state.menu.handle_pointer_down(position)
+            }),
+            TouchPhase::Moved => self.handle_menu_input(|state| {
+                state.pointer_position = Some(position);
+                state.menu.handle_pointer_move(position)
+            }),
+            TouchPhase::Ended => {
+                let result = self.handle_menu_input(|state| {
+                    state.pointer_position = Some(position);
+                    state.menu.handle_pointer_up(position)
+                });
+                self.pointer_left();
+                result
+            }
+            TouchPhase::Cancelled => {
+                self.pointer_left();
+                Ok(())
+            }
+        }
+    }
+
+    fn pointer_left(&mut self) {
+        if let AppMode::Menu(state) = &mut self.mode {
+            state.pointer_position = None;
+        }
+    }
+
+    fn handle_menu_input<F>(&mut self, handler: F) -> Result<(), EngineError>
+    where
+        F: FnOnce(&mut MenuState) -> Vec<StartupMenuAction>,
+    {
+        let start_entry = {
+            if let AppMode::Menu(state) = &mut self.mode {
+                let actions = handler(state);
+                extract_start_action(state, actions)
+            } else {
+                None
+            }
+        };
+
+        if let Some(entry) = start_entry {
+            self.start_scenario(entry)?;
+        }
         Ok(())
     }
 
     fn update(&mut self) -> Result<(), EngineError> {
-        self.snapshot = self.engine.tick()?;
-        self.refresh_focus();
+        if matches!(self.mode, AppMode::Running) {
+            self.snapshot = self.engine.tick()?;
+            self.refresh_focus();
+        }
         Ok(())
     }
 
     fn refresh_focus(&mut self) {
+        if !matches!(self.mode, AppMode::Running) {
+            self.focus_snapshot = None;
+            return;
+        }
+
         if self
             .focus_id
             .and_then(|id| self.snapshot.object(id))
@@ -307,18 +483,27 @@ impl GameApp {
     }
 
     fn render(&mut self, frame: &mut [u8]) -> Result<()> {
-        let Some(focus) = self.focus_snapshot.as_ref() else {
+        if let AppMode::Menu(state) = &mut self.mode {
+            render_menu_frame(&mut self.graphics, &mut state.menu, frame);
             return Ok(());
-        };
-        let overlay = GraphicsOverlay {
-            frame_text: &self.frame_text,
-            status_text: &self.status_text,
-            energy_fraction: self.energy_fraction,
-        };
-        self.graphics
-            .update_overlay(&overlay)
-            .context("failed to update overlay")?;
-        self.graphics.render_frame(&self.snapshot, focus);
+        }
+        self.render_running(frame)
+    }
+
+    fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
+        if let Some(focus) = self.focus_snapshot.as_ref() {
+            let overlay = GraphicsOverlay {
+                frame_text: &self.frame_text,
+                status_text: &self.status_text,
+                energy_fraction: self.energy_fraction,
+            };
+            self.graphics
+                .update_overlay(&overlay)
+                .context("failed to update overlay")?;
+            self.graphics.render_frame(&self.snapshot, focus);
+        } else {
+            self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
+        }
 
         let surface = self.graphics.surface();
         let pixels = surface.pixels();
@@ -327,8 +512,112 @@ impl GameApp {
         } else {
             copy_surface(pixels, surface.width(), surface.height(), frame);
         }
-
         Ok(())
+    }
+
+    fn start_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
+        if let Some(path) = scenario.path.as_ref() {
+            println!(
+                "Starting scenario '{}' from {}",
+                scenario.title,
+                path.display()
+            );
+        } else {
+            println!("Starting scenario '{}' (sandbox fallback)", scenario.title);
+        }
+
+        self.engine = Engine::new();
+        self.input = InputDispatcher::new();
+        let mut definition = Definition::from_script("Walker", "Rust Walker", walker_script())?;
+
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default().with_procedure("Walk"),
+        );
+        definition.configure_actions(Some("Walk".to_string()), actions);
+        definition.set_crew_member(true);
+        let profile = MovementProfile::default()
+            .with_walk_speed(8)
+            .with_walk_acceleration(2);
+        definition.set_movement_profile(profile);
+        self.engine.register_definition(definition)?;
+
+        self.engine.set_environment(EnvironmentSettings::default());
+        self.engine
+            .set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
+
+        let spawn = SpawnConfig::new("Walker")
+            .with_owner(PLAYER_OWNER)
+            .with_position(Vector2::new(240, 180))
+            .with_energy(100)
+            .with_action(ActionState::new("Walk"))
+            .with_crew_member(true);
+        let object_id = self.engine.spawn_object(spawn)?;
+        self.engine.select_crew(PLAYER_OWNER, vec![object_id])?;
+        self.engine.set_crew_cursor(PLAYER_OWNER, Some(object_id))?;
+
+        self.snapshot = self.engine.snapshot();
+        self.focus_id = Some(object_id);
+        self.focus_snapshot = None;
+        self.scenario_label = scenario.title.clone();
+        self.active_scenario = Some(scenario);
+
+        let width = self.graphics.surface().width();
+        let height = self.graphics.surface().height();
+        self.graphics =
+            GraphicsSystem::new(width, height, self.fallback_ground, &self.scenario_label);
+        self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
+
+        self.mode = AppMode::Running;
+        self.refresh_focus();
+        Ok(())
+    }
+}
+
+fn extract_start_action(
+    state: &MenuState,
+    actions: Vec<StartupMenuAction>,
+) -> Option<FrontendScenario> {
+    for action in actions {
+        match action {
+            StartupMenuAction::StartScenario(summary) => {
+                if let Some(entry) = state
+                    .entries
+                    .iter()
+                    .find(|entry| entry.identifier == summary.identifier && entry.is_playable)
+                {
+                    return Some(entry.clone());
+                }
+            }
+            StartupMenuAction::OpenEntry(ScenarioSummary { identifier, .. }) => {
+                eprintln!(
+                    "Opening folders is not yet implemented for Rust menu items: {identifier}"
+                );
+            }
+            StartupMenuAction::EditEntry(ScenarioSummary { identifier, .. }) => {
+                eprintln!(
+                    "Editing entries is not yet implemented for Rust menu items: {identifier}"
+                );
+            }
+            StartupMenuAction::SelectionChanged(_) => {}
+        }
+    }
+    None
+}
+
+fn render_menu_frame(graphics: &mut GraphicsSystem, menu: &mut StartupMenu, frame: &mut [u8]) {
+    {
+        let surface = graphics.surface_mut();
+        surface.fill(Color::opaque(16, 28, 52));
+        menu.render(surface);
+    }
+    let surface = graphics.surface();
+    let pixels = surface.pixels();
+    if pixels.len() == frame.len() {
+        frame.copy_from_slice(pixels);
+    } else {
+        copy_surface(pixels, surface.width(), surface.height(), frame);
     }
 }
 
@@ -345,6 +634,81 @@ fn copy_surface(src: &[u8], width: u32, height: u32, dest: &mut [u8]) {
         if end <= src.len() && dest_offset + stride <= dest.len() {
             dest[dest_offset..dest_offset + stride].copy_from_slice(&src[src_offset..end]);
         }
+    }
+}
+
+fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
+    match code {
+        VirtualKeyCode::Return => Some(KeyCode::Enter),
+        VirtualKeyCode::Escape => Some(KeyCode::Escape),
+        VirtualKeyCode::Space => Some(KeyCode::Space),
+        VirtualKeyCode::Tab => Some(KeyCode::Tab),
+        VirtualKeyCode::Up => Some(KeyCode::Up),
+        VirtualKeyCode::Down => Some(KeyCode::Down),
+        VirtualKeyCode::Left => Some(KeyCode::Left),
+        VirtualKeyCode::Right => Some(KeyCode::Right),
+        _ => None,
+    }
+}
+
+fn gui_point_from_position(position: PhysicalPosition<f64>) -> GuiPoint {
+    GuiPoint::new(position.x as f32, position.y as f32)
+}
+
+fn load_frontend_scenarios() -> Vec<FrontendScenario> {
+    let mut scenarios = Vec::new();
+
+    if let Ok(paths) = AppPaths::discover() {
+        let roots = scenario_roots(&paths);
+        let existing_roots: Vec<_> = roots.into_iter().filter(|path| path.exists()).collect();
+        if !existing_roots.is_empty() {
+            match resource_scenario::discover_many(existing_roots.iter()) {
+                Ok(entries) => {
+                    let mut seen = HashSet::new();
+                    collect_scenarios(&entries, &mut seen, &mut scenarios);
+                }
+                Err(err) => {
+                    eprintln!("failed to discover scenarios from install roots: {err}");
+                }
+            }
+        }
+    } else {
+        eprintln!("App paths discovery failed; falling back to built-in sandbox scenario");
+    }
+
+    if scenarios.is_empty() {
+        scenarios.push(FrontendScenario::fallback());
+    } else {
+        scenarios.sort_by(|a, b| a.title.cmp(&b.title));
+    }
+    scenarios
+}
+
+fn scenario_roots(paths: &AppPaths) -> Vec<PathBuf> {
+    let mut roots = vec![
+        paths.scenario_dir(),
+        paths.install_root().join("Scenarios"),
+        paths.install_root().join("scenarios"),
+        paths.planet_dir().to_path_buf(),
+        paths.system_group_path().to_path_buf(),
+    ];
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn collect_scenarios(
+    entries: &[resource_scenario::ScenarioEntry],
+    seen: &mut HashSet<String>,
+    out: &mut Vec<FrontendScenario>,
+) {
+    for entry in entries {
+        if matches!(entry.kind, resource_scenario::ScenarioEntryKind::Scenario)
+            && seen.insert(entry.identifier.clone())
+        {
+            out.push(FrontendScenario::from_resource(entry));
+        }
+        collect_scenarios(&entry.children, seen, out);
     }
 }
 

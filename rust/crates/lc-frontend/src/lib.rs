@@ -1,4 +1,5 @@
 mod input;
+mod startup_menu;
 
 use lc_engine::{
     EnvironmentSettings, Landscape, ObjectSnapshot, SimulationSnapshot,
@@ -7,14 +8,17 @@ use lc_engine::{
 use lc_graphics::{
     Color, Rect as SurfaceRect, Surface, SurfaceSnapshot as GraphicsSurfaceSnapshot,
 };
-use lc_gui::{
-    DrawCommand, Gui, GuiResult, Point as GuiPoint, Rect as GuiRect, Size as GuiSize, WidgetId,
-};
+use lc_gui::{DrawCommand, Gui, GuiResult, Rect as GuiRect, Size as GuiSize, WidgetId};
 use std::collections::hash_map::DefaultHasher;
 use std::convert::TryFrom;
 use std::hash::{Hash, Hasher};
 
 pub use input::InputDispatcher;
+pub use lc_gui::{
+    GuiError as StartupMenuError, GuiResult as StartupMenuResult, KeyCode, Point as GuiPoint,
+    ScenarioEntry, ScenarioKind,
+};
+pub use startup_menu::{ScenarioSummary, StartupMenu, StartupMenuAction};
 
 const OVERLAY_HEIGHT: f32 = 120.0;
 
@@ -734,7 +738,7 @@ fn fill_polygon(surface: &mut Surface, points: &[(i32, i32)], color: Color) -> b
     drawn
 }
 
-fn fill_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
+pub(crate) fn fill_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
     let x0 = rect.origin.x.floor() as i32;
     let y0 = rect.origin.y.floor() as i32;
     let x1 = (rect.origin.x + rect.size.width).ceil() as i32;
@@ -752,7 +756,7 @@ fn fill_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
     }
 }
 
-fn draw_text(
+pub(crate) fn draw_text(
     surface: &mut Surface,
     rect: &GuiRect,
     text: &str,
