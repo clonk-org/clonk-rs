@@ -46,6 +46,10 @@
     "environment": {
       "settings": {
         "wind": 0,
+        "base_wind": 0,
+        "wind_target": 0,
+        "wind_update_timer": 0,
+        "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
         "temperature": 0,
@@ -315,7 +319,8 @@
     "definition_categories": {
       "Commander": 1,
       "Helper": 1
-    }
+    },
+    "transfer_zones": []
   },
   {
     "frame": 2,
@@ -398,6 +403,10 @@
     "environment": {
       "settings": {
         "wind": 0,
+        "base_wind": 0,
+        "wind_target": 0,
+        "wind_update_timer": 0,
+        "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
         "temperature": 0,
@@ -667,7 +676,8 @@
     "definition_categories": {
       "Commander": 1,
       "Helper": 1
-    }
+    },
+    "transfer_zones": []
   },
   {
     "frame": 3,
@@ -750,6 +760,10 @@
     "environment": {
       "settings": {
         "wind": 0,
+        "base_wind": 0,
+        "wind_target": 0,
+        "wind_update_timer": 0,
+        "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
         "temperature": 0,
@@ -1019,7 +1033,8 @@
     "definition_categories": {
       "Helper": 1,
       "Commander": 1
-    }
+    },
+    "transfer_zones": []
   },
   {
     "frame": 4,
@@ -1102,6 +1117,10 @@
     "environment": {
       "settings": {
         "wind": 0,
+        "base_wind": 0,
+        "wind_target": 0,
+        "wind_update_timer": 0,
+        "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
         "temperature": 0,
@@ -1369,9 +1388,10 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Helper": 1,
-      "Commander": 1
-    }
+      "Commander": 1,
+      "Helper": 1
+    },
+    "transfer_zones": []
   },
   {
     "frame": 5,
@@ -1420,6 +1440,10 @@
     "environment": {
       "settings": {
         "wind": 0,
+        "base_wind": 0,
+        "wind_target": 0,
+        "wind_update_timer": 0,
+        "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
         "temperature": 0,
@@ -1687,9 +1711,10 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Helper": 1,
-      "Commander": 1
-    }
+      "Commander": 1,
+      "Helper": 1
+    },
+    "transfer_zones": []
   },
   {
     "frame": 6,
@@ -1738,6 +1763,10 @@
     "environment": {
       "settings": {
         "wind": 0,
+        "base_wind": 0,
+        "wind_target": 0,
+        "wind_update_timer": 0,
+        "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
         "temperature": 0,
@@ -2007,6 +2036,7 @@
     "definition_categories": {
       "Helper": 1,
       "Commander": 1
-    }
+    },
+    "transfer_zones": []
   }
 ]

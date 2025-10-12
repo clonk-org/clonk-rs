@@ -1,7 +1,7 @@
 use crate::{
-    Definition, Engine, EngineError, FloatVector2, Landscape, ObjectStatus, ObjectUpdate,
-    ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, QueuedCommand, Recorder,
-    Recording, SpawnConfig, Vector2,
+    Definition, Engine, EngineError, EnvironmentSettings, FloatVector2, Landscape, ObjectStatus,
+    ObjectUpdate, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, QueuedCommand,
+    Recorder, Recording, RgbColor, SpawnConfig, Vector2,
 };
 
 const BASIC_MOVEMENT_SCRIPT: &str = r#"
@@ -143,6 +143,42 @@ pub fn queued_command_recording(frames: usize) -> Result<Recording, EngineError>
     Ok(recorder.into_recording())
 }
 
+/// Generate a deterministic recording that exercises dynamic environment updates such as
+/// wind drift, time-of-day advance, temperature cycles, and precipitation.
+pub fn environment_cycle_recording(frames: usize) -> Result<Recording, EngineError> {
+    let mut engine = Engine::with_seed(7_654_321);
+
+    let environment = EnvironmentSettings::new(6)
+        .with_wind_variation(4, 9)
+        .with_time_of_day(1_200)
+        .with_time_speed(35)
+        .with_precipitation(42)
+        .with_temperature(18)
+        .with_temperature_cycle(12, 18, 6)
+        .with_sky_color(RgbColor::new(24, 48, 96));
+    engine.set_environment(environment);
+    engine.set_landscape(Landscape::flat(96, 18));
+
+    let drifter = Definition::from_script("Drifter", "Drifter", PASSIVE_SCRIPT)?;
+    engine.register_definition(drifter)?;
+
+    engine.spawn_object(
+        SpawnConfig::new("Drifter")
+            .with_position(Vector2::new(20, 4))
+            .with_velocity(Vector2::new(0, 0))
+            .with_energy(72)
+            .with_owner(1),
+    )?;
+
+    let mut recorder = Recorder::new();
+    for _ in 0..frames {
+        let snapshot = engine.tick()?;
+        recorder.record(&snapshot);
+    }
+
+    Ok(recorder.into_recording())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +193,11 @@ mod tests {
     fn queued_command_recording_produces_expected_length() {
         let recording = queued_command_recording(6).expect("recording succeeds");
         assert_eq!(recording.frames().len(), 6);
+    }
+
+    #[test]
+    fn environment_cycle_recording_produces_expected_length() {
+        let recording = environment_cycle_recording(8).expect("recording succeeds");
+        assert_eq!(recording.frames().len(), 8);
     }
 }

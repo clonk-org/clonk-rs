@@ -29,6 +29,11 @@ const ENGINE_SNAPSHOT_SCENARIOS: &[EngineSnapshotScenario] = &[
         frames: 6,
         generator: fixtures::queued_command_recording,
     },
+    EngineSnapshotScenario {
+        name: "environment_cycle",
+        frames: 8,
+        generator: fixtures::environment_cycle_recording,
+    },
 ];
 
 fn main() -> Result<()> {
