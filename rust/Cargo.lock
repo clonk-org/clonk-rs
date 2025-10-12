@@ -1814,6 +1814,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gilrs",
+ "lc-audio",
  "lc-engine",
  "lc-frontend",
  "lc-graphics",

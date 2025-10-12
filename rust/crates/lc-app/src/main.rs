@@ -1,11 +1,14 @@
 mod gamepad;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::f32::consts::PI;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
+use lc_audio::{AudioError, AudioSystem, MusicHandle};
 use lc_engine::{
     ActionSpec, ActionState, ControlButton, ControlEvent, Definition, Engine, EngineError,
     EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectSnapshot, Scenario,
@@ -17,7 +20,7 @@ use lc_frontend::{
 };
 use lc_graphics::Color;
 use lc_platform::AppPaths;
-use lc_resources::scenario as resource_scenario;
+use lc_resources::{scenario as resource_scenario, Group};
 use pixels::{Pixels, SurfaceTexture};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{
@@ -34,6 +37,7 @@ const DEFAULT_SCENARIO_LABEL: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
 const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
 const BACK_ENTRY_TITLE: &str = "← Back";
+const AUDIO_CHANNELS: usize = 32;
 
 fn main() -> Result<()> {
     let event_loop = EventLoop::new();
@@ -177,6 +181,33 @@ fn enforce_min_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width.max(1), size.height.max(1))
 }
 
+struct AudioContext {
+    system: AudioSystem,
+    current_music: Option<MusicHandle>,
+}
+
+impl AudioContext {
+    fn try_new() -> Result<Self, AudioError> {
+        Ok(Self {
+            system: AudioSystem::new(AUDIO_CHANNELS)?,
+            current_music: None,
+        })
+    }
+
+    fn play_music(&mut self, data: &[u8], looped: bool) -> Result<(), AudioError> {
+        self.stop_music();
+        let music = self.system.load_music(data)?;
+        self.system.play_music(&music, looped)?;
+        self.current_music = Some(music);
+        Ok(())
+    }
+
+    fn stop_music(&mut self) {
+        self.system.halt_music();
+        self.current_music.take();
+    }
+}
+
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
@@ -194,6 +225,7 @@ struct GameApp {
     mode: AppMode,
     scenario_catalog: HashMap<String, FrontendScenario>,
     active_scenario: Option<FrontendScenario>,
+    audio: Option<AudioContext>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -388,6 +420,13 @@ impl GameApp {
 
         let scenario_catalog = build_scenario_catalog(&scenarios);
         let menu_state = MenuState::new(menu, scenarios);
+        let audio = match AudioContext::try_new() {
+            Ok(ctx) => Some(ctx),
+            Err(err) => {
+                eprintln!("audio initialisation failed: {err}");
+                None
+            }
+        };
 
         Ok(Self {
             engine,
@@ -406,6 +445,7 @@ impl GameApp {
             mode: AppMode::Menu,
             scenario_catalog,
             active_scenario: None,
+            audio,
         })
     }
 
@@ -815,6 +855,9 @@ impl GameApp {
         self.status_text.clear();
         self.energy_fraction = 0.0;
         self.active_scenario = None;
+        if let Some(audio) = self.audio.as_mut() {
+            audio.stop_music();
+        }
 
         self.fallback_ground = DEFAULT_GROUND_HEIGHT;
         self.scenario_label = self.menu_state.label_path();
@@ -893,6 +936,7 @@ impl GameApp {
         self.snapshot = self.engine.snapshot();
         self.refresh_focus();
         self.active_scenario = Some(scenario.clone());
+        self.play_scenario_audio(path);
         Ok(true)
     }
 
@@ -934,7 +978,38 @@ impl GameApp {
         self.snapshot = self.engine.snapshot();
         self.refresh_focus();
         self.active_scenario = Some(scenario);
+        self.play_sandbox_audio();
         Ok(())
+    }
+
+    fn play_scenario_audio(&mut self, path: &Path) {
+        if let Some(audio) = self.audio.as_mut() {
+            match load_scenario_music_bytes(path) {
+                Ok(Some(bytes)) => {
+                    if let Err(err) = audio.play_music(bytes.as_slice(), true) {
+                        eprintln!(
+                            "failed to start music for {}: {err}",
+                            path.display()
+                        );
+                        audio.stop_music();
+                    }
+                }
+                Ok(None) => audio.stop_music(),
+                Err(err) => eprintln!(
+                    "failed to load music from {}: {err}",
+                    path.display()
+                ),
+            }
+        }
+    }
+
+    fn play_sandbox_audio(&mut self) {
+        if let Some(audio) = self.audio.as_mut() {
+            if let Err(err) = audio.play_music(sandbox_music_bytes(), true) {
+                eprintln!("failed to start sandbox music: {err}");
+                audio.stop_music();
+            }
+        }
     }
 
     fn configure_running_state(&mut self, label: String, fallback_ground: i32) {
@@ -1152,6 +1227,120 @@ fn scenario_roots(paths: &AppPaths) -> Vec<PathBuf> {
     roots
 }
 
+fn load_scenario_music_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+    let group = Group::open(path)
+        .with_context(|| format!("failed to open scenario group at {}", path.display()))?;
+    find_music_asset(&group)
+        .with_context(|| format!("failed to inspect {} for music", path.display()))
+}
+
+fn find_music_asset(group: &Group) -> Result<Option<Vec<u8>>, lc_resources::GroupError> {
+    let entries = group.entries()?;
+    let mut best: Option<(PathBuf, (u8, u8, String))> = None;
+
+    for entry in &entries {
+        if entry.is_directory || !is_audio_path(&entry.relative_path) {
+            continue;
+        }
+        let key = music_sort_key(&entry.relative_path);
+        if best
+            .as_ref()
+            .map(|(_, current)| key < *current)
+            .unwrap_or(true)
+        {
+            best = Some((entry.relative_path.clone(), key));
+        }
+    }
+
+    if let Some((path, _)) = best {
+        let data = group.read_file(&path)?;
+        return Ok(Some(data));
+    }
+
+    for entry in entries.into_iter().filter(|entry| entry.is_directory) {
+        let child = group.open_child(&entry.relative_path)?;
+        if let Some(data) = find_music_asset(&child)? {
+            return Ok(Some(data));
+        }
+    }
+
+    Ok(None)
+}
+
+fn music_sort_key(path: &Path) -> (u8, u8, String) {
+    let in_music_dir = path
+        .components()
+        .any(|component| matches!(component.as_os_str().to_str(), Some(name) if name.eq_ignore_ascii_case("music")));
+    let extension_rank = match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("ogg") => 0,
+        Some("mp3") => 1,
+        Some("wav") => 2,
+        _ => 3,
+    };
+    let name = path.to_string_lossy().to_string();
+    (if in_music_dir { 0 } else { 1 }, extension_rank, name)
+}
+
+fn is_audio_path(path: &Path) -> bool {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("ogg") | Some("mp3") | Some("wav") => true,
+        _ => false,
+    }
+}
+
+fn sandbox_music_bytes() -> &'static [u8] {
+    static DATA: OnceLock<Vec<u8>> = OnceLock::new();
+    DATA.get_or_init(|| generate_sine_wave_wav(220.0, 1.5)).as_slice()
+}
+
+fn generate_sine_wave_wav(frequency_hz: f32, duration_seconds: f32) -> Vec<u8> {
+    let safe_duration = duration_seconds.max(0.1);
+    let sample_rate = 44_100u32;
+    let channels = 2u16;
+    let bits_per_sample = 16u16;
+    let frame_count = (sample_rate as f32 * safe_duration).round().max(1.0) as usize;
+    let block_align = (channels * (bits_per_sample / 8)) as u16;
+    let byte_rate = sample_rate * block_align as u32;
+    let data_len = frame_count * block_align as usize;
+    let chunk_size = 36 + data_len;
+
+    let mut buffer = Vec::with_capacity(44 + data_len);
+    buffer.extend_from_slice(b"RIFF");
+    buffer.extend_from_slice(&(chunk_size as u32).to_le_bytes());
+    buffer.extend_from_slice(b"WAVE");
+    buffer.extend_from_slice(b"fmt ");
+    buffer.extend_from_slice(&16u32.to_le_bytes());
+    buffer.extend_from_slice(&1u16.to_le_bytes());
+    buffer.extend_from_slice(&channels.to_le_bytes());
+    buffer.extend_from_slice(&sample_rate.to_le_bytes());
+    buffer.extend_from_slice(&byte_rate.to_le_bytes());
+    buffer.extend_from_slice(&block_align.to_le_bytes());
+    buffer.extend_from_slice(&bits_per_sample.to_le_bytes());
+    buffer.extend_from_slice(b"data");
+    buffer.extend_from_slice(&(data_len as u32).to_le_bytes());
+
+    let amplitude = i16::MAX as f32 * 0.2;
+    for frame in 0..frame_count {
+        let t = frame as f32 / sample_rate as f32;
+        let sample = (2.0 * PI * frequency_hz * t).sin();
+        let value = (sample * amplitude).round() as i16;
+        buffer.extend_from_slice(&value.to_le_bytes());
+        buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
+    buffer
+}
+
 fn walker_script() -> &'static str {
     r#"
 global func Initialize(state, random) { return nil; }
@@ -1162,6 +1351,7 @@ global func Step(state, frame, random) { return nil; }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lc_audio::decode_audio;
 
     fn sample_scenarios() -> Vec<FrontendScenario> {
         let child = FrontendScenario {
@@ -1218,5 +1408,13 @@ mod tests {
         assert_eq!(root_again.len(), 1);
         assert_eq!(root_again[0].identifier, "folder_missions");
         assert_eq!(state.label_path(), DEFAULT_SCENARIO_LABEL.to_string());
+    }
+
+    #[test]
+    fn sandbox_music_is_decodable() {
+        let audio = sandbox_music_bytes();
+        let decoded = decode_audio(audio).expect("sandbox music decodes");
+        assert_eq!(decoded.sample_rate, 44_100);
+        assert!(decoded.frames.len() > 2_000);
     }
 }
