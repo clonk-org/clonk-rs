@@ -17,8 +17,8 @@ use lc_engine::{
     Scenario, SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_frontend::{
-    GraphicsOverlay, GraphicsSystem, GuiPoint, InputDispatcher, KeyCode, ScenarioEntry,
-    ScenarioKind, StartupMenu, StartupMenuAction,
+    CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, InputDispatcher, KeyCode,
+    PlayerOverlay, ScenarioEntry, ScenarioKind, StartupMenu, StartupMenuAction,
 };
 use lc_graphics::Color;
 use lc_platform::{AppPaths, PathsError};
@@ -945,10 +945,12 @@ impl GameApp {
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
         if let Some(focus) = self.focus_snapshot.as_ref() {
+            let players = collect_player_overlays(&self.snapshot, self.focus_id);
             let overlay = GraphicsOverlay {
                 frame_text: &self.frame_text,
                 status_text: &self.status_text,
                 energy_fraction: self.energy_fraction,
+                players,
             };
             self.graphics
                 .update_overlay(&overlay)
@@ -1318,6 +1320,34 @@ fn copy_surface(src: &[u8], width: u32, height: u32, dest: &mut [u8]) {
     }
 }
 
+fn collect_player_overlays(
+    snapshot: &SimulationSnapshot,
+    focus_id: Option<ObjectId>,
+) -> Vec<PlayerOverlay> {
+    let mut players = Vec::with_capacity(snapshot.hud.players.len());
+    for player in &snapshot.hud.players {
+        let mut crew = Vec::with_capacity(player.crew.len());
+        for object_id in &player.crew {
+            if let Some(object) = snapshot.object(*object_id) {
+                let label = format!("{} #{}", object.definition_id, object.id.as_u64());
+                let energy_fraction = (object.energy.max(0).min(100) as f32) / 100.0;
+                let is_focus = focus_id == Some(object.id);
+                crew.push(CrewOverlay {
+                    label,
+                    energy_fraction,
+                    is_focus,
+                });
+            }
+        }
+        players.push(PlayerOverlay {
+            owner: player.owner,
+            eliminated: player.eliminated,
+            crew,
+        });
+    }
+    players
+}
+
 fn select_focus_candidate(snapshot: &SimulationSnapshot) -> Option<(ObjectId, i32, bool)> {
     for object in snapshot.objects.iter() {
         if is_focusable(object) && object.crew_member && object.owner == PLAYER_OWNER {
@@ -1609,6 +1639,13 @@ global func Step(state, frame, random) { return nil; }
 mod tests {
     use super::*;
     use lc_audio::decode_audio;
+    use lc_engine::{
+        ActionState, CommandDirection, Direction, EnvironmentFrame, HudPlayerSnapshot, HudSnapshot,
+        ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2, DEFAULT_CATEGORY,
+    };
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+    use std::collections::HashMap;
 
     fn sample_scenarios() -> Vec<FrontendScenario> {
         let child = FrontendScenario {
@@ -1634,6 +1671,108 @@ mod tests {
         };
 
         vec![folder]
+    }
+
+    #[test]
+    fn collect_player_overlay_marks_focus_and_energy() {
+        let focus = ObjectId::new(1);
+        let teammate = ObjectId::new(2);
+
+        let objects = vec![
+            ObjectSnapshot {
+                id: focus,
+                definition_id: "Clonk".into(),
+                position: Vector2::new(0, 0),
+                velocity: Vector2::ZERO,
+                energy: 80,
+                damage: 0,
+                action: ActionState::default(),
+                direction: Direction::default(),
+                command_direction: CommandDirection::default(),
+                action_procedure: None,
+                effects: Vec::new(),
+                vertices: Vec::new(),
+                container: None,
+                contents: Vec::new(),
+                status: ObjectStatus::Normal,
+                owner: 1,
+                category: DEFAULT_CATEGORY,
+                crew_member: true,
+                alive: true,
+            },
+            ObjectSnapshot {
+                id: teammate,
+                definition_id: "Balloon".into(),
+                position: Vector2::new(10, 0),
+                velocity: Vector2::ZERO,
+                energy: 40,
+                damage: 0,
+                action: ActionState::default(),
+                direction: Direction::default(),
+                command_direction: CommandDirection::default(),
+                action_procedure: None,
+                effects: Vec::new(),
+                vertices: Vec::new(),
+                container: None,
+                contents: Vec::new(),
+                status: ObjectStatus::Normal,
+                owner: 1,
+                category: DEFAULT_CATEGORY,
+                crew_member: true,
+                alive: true,
+            },
+        ];
+
+        let snapshot = SimulationSnapshot {
+            frame: 0,
+            physics: None,
+            objects,
+            environment: EnvironmentFrame::default(),
+            global_effects: Vec::new(),
+            particles: Vec::new(),
+            crew_selection: HashMap::new(),
+            crew_roles: HashMap::new(),
+            known_crew_owners: vec![1],
+            eliminated_crew_owners: Vec::new(),
+            landscape: None,
+            rng: ChaCha8Rng::seed_from_u64(1),
+            surfaces: Vec::new(),
+            hud: HudSnapshot {
+                players: vec![HudPlayerSnapshot {
+                    owner: 1,
+                    crew: vec![focus, teammate],
+                    focus: Some(focus),
+                    eliminated: false,
+                }],
+            },
+            controls: Vec::new(),
+            network_packets: Vec::new(),
+            definition_categories: HashMap::new(),
+            transfer_zones: Vec::new(),
+        };
+
+        let overlay = collect_player_overlays(&snapshot, Some(focus));
+        assert_eq!(overlay.len(), 1);
+        let player = &overlay[0];
+        assert_eq!(player.owner, 1);
+        assert!(!player.eliminated);
+        assert_eq!(player.crew.len(), 2);
+
+        let focus_entry = player
+            .crew
+            .iter()
+            .find(|crew| crew.is_focus)
+            .expect("focus highlight present");
+        assert!(focus_entry.label.contains("Clonk"));
+        assert!((focus_entry.energy_fraction - 0.8).abs() < f32::EPSILON);
+
+        let other_entry = player
+            .crew
+            .iter()
+            .find(|crew| !crew.is_focus)
+            .expect("non-focus crew present");
+        assert!(other_entry.label.contains("Balloon"));
+        assert!((other_entry.energy_fraction - 0.4).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -26,14 +26,47 @@ pub struct GraphicsOverlay<'a> {
     pub frame_text: &'a str,
     pub status_text: &'a str,
     pub energy_fraction: f32,
+    pub players: Vec<PlayerOverlay>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerOverlay {
+    pub owner: i32,
+    pub eliminated: bool,
+    pub crew: Vec<CrewOverlay>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CrewOverlay {
+    pub label: String,
+    pub energy_fraction: f32,
+    pub is_focus: bool,
+}
+
+#[derive(Debug)]
+struct PlayerWidgets {
+    owner: i32,
+    header_label: WidgetId,
+    status_label: WidgetId,
+    crew: Vec<CrewWidgets>,
+}
+
+#[derive(Debug)]
+struct CrewWidgets {
+    label: WidgetId,
+    gauge: WidgetId,
 }
 
 pub struct GraphicsSystem {
     surface: Surface,
     gui: Gui,
+    scenario_label_text: String,
+    scenario_label: WidgetId,
     frame_label: WidgetId,
     status_label: WidgetId,
     energy_gauge: WidgetId,
+    players_container: WidgetId,
+    player_widgets: Vec<PlayerWidgets>,
     viewport_x: i32,
     viewport_y: i32,
     surface_width: u32,
@@ -52,12 +85,13 @@ impl GraphicsSystem {
     ) -> Self {
         let mut gui = Gui::new();
         let root = gui.root();
-        gui.add_label(root, scenario_label);
+        let scenario_label_widget = gui.add_label(root, scenario_label);
         let frame_label = gui.add_label(root, "FRAME 000 X 000 Y 000 VX P00 VY P00");
         let status_label = gui.add_label(root, "READY 00OF00 GROUND 00 BATCH 000");
         let energy_gauge = gui.add_gauge(root);
         gui.set_gauge_fraction(energy_gauge, 1.0)
             .expect("initial gauge");
+        let players_container = gui.add_column(root, true);
 
         let mut surface = Surface::new(
             surface_width,
@@ -69,9 +103,13 @@ impl GraphicsSystem {
         Self {
             surface,
             gui,
+            scenario_label_text: scenario_label.to_string(),
+            scenario_label: scenario_label_widget,
             frame_label,
             status_label,
             energy_gauge,
+            players_container,
+            player_widgets: Vec::new(),
             viewport_x: 0,
             viewport_y: 0,
             surface_width,
@@ -104,12 +142,57 @@ impl GraphicsSystem {
     }
 
     pub fn update_overlay(&mut self, overlay: &GraphicsOverlay<'_>) -> GuiResult<()> {
+        self.ensure_player_widgets(&overlay.players)?;
         self.gui
             .set_label_text(self.frame_label, overlay.frame_text)?;
         self.gui
             .set_label_text(self.status_label, overlay.status_text)?;
         self.gui
             .set_gauge_fraction(self.energy_gauge, overlay.energy_fraction.clamp(0.0, 1.0))?;
+
+        let header_color = Color::opaque(208, 220, 252);
+        let info_color = Color::opaque(208, 208, 208);
+        let warning_color = Color::opaque(232, 174, 72);
+        let eliminated_color = Color::opaque(224, 92, 92);
+        let focus_color = Color::opaque(252, 242, 160);
+        let crew_color = Color::opaque(212, 212, 212);
+
+        for (player_overlay, widgets) in overlay.players.iter().zip(self.player_widgets.iter()) {
+            let header_text = format!("Player {}", player_overlay.owner);
+            self.gui.set_label_text(widgets.header_label, header_text)?;
+            self.gui
+                .set_label_color(widgets.header_label, header_color)?;
+
+            if player_overlay.eliminated {
+                self.gui
+                    .set_label_text(widgets.status_label, "Eliminated")?;
+                self.gui
+                    .set_label_color(widgets.status_label, eliminated_color)?;
+            } else if player_overlay.crew.is_empty() {
+                self.gui
+                    .set_label_text(widgets.status_label, "No crew available")?;
+                self.gui
+                    .set_label_color(widgets.status_label, warning_color)?;
+            } else {
+                self.gui.set_label_text(widgets.status_label, "")?;
+                self.gui.set_label_color(widgets.status_label, info_color)?;
+            }
+
+            for (crew_overlay, crew_widgets) in player_overlay.crew.iter().zip(widgets.crew.iter())
+            {
+                self.gui
+                    .set_label_text(crew_widgets.label, &crew_overlay.label)?;
+                if crew_overlay.is_focus {
+                    self.gui.set_label_color(crew_widgets.label, focus_color)?;
+                } else {
+                    self.gui.set_label_color(crew_widgets.label, crew_color)?;
+                }
+                self.gui.set_gauge_fraction(
+                    crew_widgets.gauge,
+                    crew_overlay.energy_fraction.clamp(0.0, 1.0),
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -379,6 +462,65 @@ impl GraphicsSystem {
                 } => draw_text(&mut self.surface, &rect, &text, color, font_size, padding),
             }
         }
+    }
+
+    fn ensure_player_widgets(&mut self, players: &[PlayerOverlay]) -> GuiResult<()> {
+        let mut structure_changed = players.len() != self.player_widgets.len();
+        if !structure_changed {
+            structure_changed =
+                players
+                    .iter()
+                    .zip(self.player_widgets.iter())
+                    .any(|(overlay, widgets)| {
+                        overlay.owner != widgets.owner || overlay.crew.len() != widgets.crew.len()
+                    });
+        }
+        if structure_changed {
+            self.rebuild_overlay(players)?;
+        }
+        Ok(())
+    }
+
+    fn rebuild_overlay(&mut self, players: &[PlayerOverlay]) -> GuiResult<()> {
+        let mut gui = Gui::new();
+        let root = gui.root();
+        let scenario_label = gui.add_label(root, self.scenario_label_text.clone());
+        let frame_label = gui.add_label(root, "");
+        let status_label = gui.add_label(root, "");
+        let energy_gauge = gui.add_gauge(root);
+        gui.set_gauge_fraction(energy_gauge, 1.0)?;
+        let players_container = gui.add_column(root, true);
+
+        let mut player_widgets = Vec::with_capacity(players.len());
+        for player in players {
+            let player_column = gui.add_column(players_container, true);
+            let header_label = gui.add_label(player_column, "");
+            let status_label = gui.add_label(player_column, "");
+            let crew_row = gui.add_row(player_column, false);
+            let mut crew_widgets = Vec::with_capacity(player.crew.len());
+            for _ in &player.crew {
+                let crew_column = gui.add_column(crew_row, false);
+                let label = gui.add_label(crew_column, "");
+                let gauge = gui.add_gauge(crew_column);
+                gui.set_gauge_fraction(gauge, 1.0)?;
+                crew_widgets.push(CrewWidgets { label, gauge });
+            }
+            player_widgets.push(PlayerWidgets {
+                owner: player.owner,
+                header_label,
+                status_label,
+                crew: crew_widgets,
+            });
+        }
+
+        self.gui = gui;
+        self.scenario_label = scenario_label;
+        self.frame_label = frame_label;
+        self.status_label = status_label;
+        self.energy_gauge = energy_gauge;
+        self.players_container = players_container;
+        self.player_widgets = player_widgets;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -846,6 +988,7 @@ mod tests {
                 frame_text: "FRAME",
                 status_text: "STATUS",
                 energy_fraction: 2.5,
+                players: Vec::new(),
             })
             .expect("overlay updates");
         graphics.render_frame(&snapshot, &focus);
