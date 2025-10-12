@@ -190,13 +190,15 @@ struct GameApp {
     energy_fraction: f32,
     scenario_label: String,
     fallback_ground: i32,
+    menu_state: MenuState,
     mode: AppMode,
     scenario_catalog: HashMap<String, FrontendScenario>,
     active_scenario: Option<FrontendScenario>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppMode {
-    Menu(MenuState),
+    Menu,
     Running,
 }
 
@@ -400,7 +402,8 @@ impl GameApp {
             energy_fraction: 0.0,
             scenario_label,
             fallback_ground: DEFAULT_GROUND_HEIGHT,
-            mode: AppMode::Menu(menu_state),
+            menu_state,
+            mode: AppMode::Menu,
             scenario_catalog,
             active_scenario: None,
         })
@@ -412,15 +415,15 @@ impl GameApp {
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics = graphics;
 
-        if let AppMode::Menu(state) = &mut self.mode {
-            state.menu().resize(width as f32, height as f32);
-            state.set_pointer_position(None);
+        if self.mode == AppMode::Menu {
+            self.menu_state.menu().resize(width as f32, height as f32);
+            self.menu_state.set_pointer_position(None);
         }
         Ok(())
     }
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
-        if matches!(self.mode, AppMode::Menu(_)) {
+        if self.mode == AppMode::Menu {
             if let Some(gui_key) = map_key_code(key) {
                 match state {
                     ElementState::Pressed => {
@@ -434,7 +437,11 @@ impl GameApp {
             return Ok(());
         }
 
-        if matches!(self.mode, AppMode::Running) {
+        if self.mode == AppMode::Running {
+            if key == VirtualKeyCode::Escape && state == ElementState::Pressed {
+                self.return_to_menu();
+                return Ok(());
+            }
             self.handle_engine_key(key, state)?;
         }
         Ok(())
@@ -513,7 +520,7 @@ impl GameApp {
         state: ElementState,
     ) -> Result<(), EngineError> {
         match self.mode {
-            AppMode::Menu(_) => {
+            AppMode::Menu => {
                 if let Some(key) = menu_key_from_control_button(button) {
                     match state {
                         ElementState::Pressed => {
@@ -543,7 +550,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         match action {
             GamepadActionType::Select => match self.mode {
-                AppMode::Menu(_) => match state {
+                AppMode::Menu => match state {
                     ElementState::Pressed => {
                         self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?
                     }
@@ -557,17 +564,21 @@ impl GameApp {
                     }
                 }
             },
-            GamepadActionType::Back => {
-                if matches!(self.mode, AppMode::Menu(_)) {
-                    match state {
-                        ElementState::Pressed => self.handle_menu_input(|menu| {
-                            menu.menu().handle_key_down(KeyCode::Escape)
-                        })?,
-                        ElementState::Released => self
-                            .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Escape))?,
+            GamepadActionType::Back => match self.mode {
+                AppMode::Menu => match state {
+                    ElementState::Pressed => {
+                        self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Escape))?
+                    }
+                    ElementState::Released => {
+                        self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Escape))?
+                    }
+                },
+                AppMode::Running => {
+                    if state == ElementState::Pressed {
+                        self.return_to_menu();
                     }
                 }
-            }
+            },
         }
         Ok(())
     }
@@ -581,11 +592,10 @@ impl GameApp {
     }
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
-        let position = match &self.mode {
-            AppMode::Menu(state) => state.pointer_position(),
-            _ => None,
-        };
-        if let Some(point) = position {
+        if self.mode != AppMode::Menu {
+            return Ok(());
+        }
+        if let Some(point) = self.menu_state.pointer_position() {
             match button_state {
                 ElementState::Pressed => {
                     self.handle_menu_input(|state| state.menu().handle_pointer_down(point))?
@@ -624,8 +634,8 @@ impl GameApp {
     }
 
     fn pointer_left(&mut self) {
-        if let AppMode::Menu(state) = &mut self.mode {
-            state.set_pointer_position(None);
+        if self.mode == AppMode::Menu {
+            self.menu_state.set_pointer_position(None);
         }
     }
 
@@ -633,14 +643,13 @@ impl GameApp {
     where
         F: FnOnce(&mut MenuState) -> Vec<StartupMenuAction>,
     {
-        let (start_identifier, updated_label) = {
-            if let AppMode::Menu(state) = &mut self.mode {
-                let actions = handler(state);
-                GameApp::process_menu_actions(state, actions)
-            } else {
-                (None, None)
-            }
-        };
+        if self.mode != AppMode::Menu {
+            return Ok(());
+        }
+
+        let actions = handler(&mut self.menu_state);
+        let (start_identifier, updated_label) =
+            GameApp::process_menu_actions(&mut self.menu_state, actions);
 
         if let Some(label) = updated_label {
             self.scenario_label = label;
@@ -764,8 +773,8 @@ impl GameApp {
     }
 
     fn render(&mut self, frame: &mut [u8]) -> Result<()> {
-        if let AppMode::Menu(state) = &mut self.mode {
-            render_menu_frame(&mut self.graphics, &mut state.menu, frame);
+        if self.mode == AppMode::Menu {
+            render_menu_frame(&mut self.graphics, self.menu_state.menu(), frame);
             return Ok(());
         }
         self.render_running(frame)
@@ -794,6 +803,33 @@ impl GameApp {
             copy_surface(pixels, surface.width(), surface.height(), frame);
         }
         Ok(())
+    }
+
+    fn return_to_menu(&mut self) {
+        self.engine = Engine::new();
+        self.input = InputDispatcher::new();
+        self.snapshot = self.engine.snapshot();
+        self.focus_id = None;
+        self.focus_snapshot = None;
+        self.frame_text.clear();
+        self.status_text.clear();
+        self.energy_fraction = 0.0;
+        self.active_scenario = None;
+
+        self.fallback_ground = DEFAULT_GROUND_HEIGHT;
+        self.scenario_label = self.menu_state.label_path();
+
+        let width = self.graphics.surface().width();
+        let height = self.graphics.surface().height();
+        self.graphics =
+            GraphicsSystem::new(width, height, self.fallback_ground, &self.scenario_label);
+        self.graphics.surface_mut().fill(Color::opaque(16, 28, 52));
+
+        self.menu_state.set_pointer_position(None);
+        self.menu_state.refresh_menu_entries();
+        self.menu_state.menu().resize(width as f32, height as f32);
+
+        self.mode = AppMode::Menu;
     }
 
     fn start_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
@@ -912,6 +948,7 @@ impl GameApp {
         self.frame_text.clear();
         self.status_text.clear();
         self.energy_fraction = 0.0;
+        self.menu_state.set_pointer_position(None);
         self.mode = AppMode::Running;
     }
 
