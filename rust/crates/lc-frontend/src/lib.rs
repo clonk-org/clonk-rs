@@ -132,6 +132,11 @@ impl GraphicsSystem {
             snapshot.landscape.as_ref(),
             lighting,
         );
+        self.draw_liquids(
+            environment.ambient_temperature,
+            snapshot.landscape.as_ref(),
+            lighting,
+        );
         self.draw_objects(&snapshot.objects, lighting);
         self.draw_gui_overlay();
 
@@ -240,6 +245,60 @@ impl GraphicsSystem {
             let ground_screen = ground_screen as u32;
             for y in ground_screen..self.surface_height {
                 let _ = self.surface.set_pixel(screen_x, y, ground_color);
+            }
+        }
+    }
+
+    fn draw_liquids(
+        &mut self,
+        ambient_temperature: i32,
+        landscape: Option<&Landscape>,
+        lighting: f32,
+    ) {
+        let Some(landscape) = landscape else {
+            return;
+        };
+        if landscape.liquids().is_empty() {
+            return;
+        }
+
+        let base_color =
+            Self::apply_lighting(Self::liquid_color_for_temperature(ambient_temperature), lighting);
+
+        let surface_width = self.surface_width as i32;
+        let surface_height = self.surface_height as i32;
+
+        for (world_x, column) in landscape.liquids().iter().enumerate() {
+            if column.segments().is_empty() {
+                continue;
+            }
+
+            let screen_x = world_x as i32 - self.viewport_x;
+            if screen_x < 0 || screen_x >= surface_width {
+                continue;
+            }
+
+            for segment in column.segments() {
+                let mut start = segment.top - self.viewport_y;
+                let mut end = segment.bottom - self.viewport_y;
+                if start > end {
+                    std::mem::swap(&mut start, &mut end);
+                }
+                if end < 0 || start >= surface_height {
+                    continue;
+                }
+                start = start.max(0);
+                end = end.min(surface_height - 1);
+
+                for screen_y in start..=end {
+                    let x = screen_x as u32;
+                    let y = screen_y as u32;
+                    let blended = match self.surface.get_pixel(x, y) {
+                        Some(existing) => blend_color_over(base_color, existing),
+                        None => base_color,
+                    };
+                    let _ = self.surface.set_pixel(x, y, blended);
+                }
             }
         }
     }
@@ -510,6 +569,18 @@ impl GraphicsSystem {
         )
     }
 
+    fn liquid_color_for_temperature(temperature: i32) -> Color {
+        let factor = Self::temperature_factor(temperature);
+        let cold = (36, 112, 200);
+        let warm = (48, 132, 160);
+        Color::new(
+            Self::blend_channel(cold.0, warm.0, factor),
+            Self::blend_channel(cold.1, warm.1, factor),
+            Self::blend_channel(cold.2, warm.2, factor),
+            192,
+        )
+    }
+
     fn temperature_factor(temperature: i32) -> f32 {
         let clamped = temperature.clamp(-50, 50);
         (clamped as f32 + 50.0) / 100.0
@@ -558,6 +629,27 @@ fn object_color(object: &ObjectSnapshot) -> Color {
     }
 
     Color::opaque(r, g, b)
+}
+
+fn blend_color_over(source: Color, dest: Color) -> Color {
+    let alpha = source.a as u16;
+    if alpha == 0 {
+        return dest;
+    }
+    if alpha == 255 {
+        return source;
+    }
+    let inv_alpha = 255u16 - alpha;
+    let blend_channel = |src: u8, dst: u8| -> u8 {
+        ((src as u16 * alpha + dst as u16 * inv_alpha) / 255) as u8
+    };
+
+    Color::new(
+        blend_channel(source.r, dest.r),
+        blend_channel(source.g, dest.g),
+        blend_channel(source.b, dest.b),
+        (alpha + (dest.a as u16 * inv_alpha) / 255).min(255) as u8,
+    )
 }
 
 fn fill_polygon(surface: &mut Surface, points: &[(i32, i32)], color: Color) -> bool {
@@ -676,7 +768,9 @@ fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lc_engine::{EnvironmentFrame, Landscape, ObjectId, ObjectVertex, RgbColor, Vector2};
+    use lc_engine::{
+        EnvironmentFrame, Landscape, LiquidSegment, ObjectId, ObjectVertex, RgbColor, Vector2,
+    };
     use lc_graphics::PixelFormat;
     use rand::SeedableRng;
 
@@ -940,5 +1034,47 @@ mod tests {
 
         assert_eq!(night_pixel, expected_night);
         assert_ne!(day_pixel, night_pixel);
+    }
+
+    #[test]
+    fn liquids_overlay_ground_with_blending() {
+        let mut snapshot = make_snapshot();
+        snapshot.environment.settings.time_of_day = EnvironmentSettings::TIME_CYCLE / 2;
+        snapshot.objects[0].position = Vector2::new(40, 50);
+        if let Some(landscape) = snapshot.landscape.as_mut() {
+            landscape.set_liquid_column(30, vec![LiquidSegment::new(40, 60)]);
+        }
+        let focus = snapshot.objects[0].clone();
+        let mut graphics = GraphicsSystem::new(120, 80, 80, "Liquid Scenario");
+        graphics.render_frame(&snapshot, &focus);
+
+        let (viewport_x, viewport_y) = graphics.viewport();
+        let screen_x = (30 - viewport_x) as u32;
+        let screen_y = (50 - viewport_y) as u32;
+
+        let pixel = graphics
+            .surface()
+            .get_pixel(screen_x, screen_y)
+            .expect("pixel in bounds");
+
+        let lighting = GraphicsSystem::lighting_factor(snapshot.environment.settings.time_of_day);
+        let liquid = GraphicsSystem::apply_lighting(
+            GraphicsSystem::liquid_color_for_temperature(snapshot.environment.ambient_temperature),
+            lighting,
+        );
+        let sky = GraphicsSystem::apply_lighting(
+            snapshot
+                .environment
+                .sky_color
+                .map(|color| Color::opaque(color.r, color.g, color.b))
+                .unwrap_or_else(|| {
+                    GraphicsSystem::sky_color_for_temperature(
+                        snapshot.environment.ambient_temperature,
+                    )
+                }),
+            lighting,
+        );
+        let expected = blend_color_over(liquid, sky);
+        assert_eq!(pixel, expected);
     }
 }
