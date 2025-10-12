@@ -262,8 +262,10 @@ impl GraphicsSystem {
             return;
         }
 
-        let base_color =
-            Self::apply_lighting(Self::liquid_color_for_temperature(ambient_temperature), lighting);
+        let base_color = Self::apply_lighting(
+            Self::liquid_color_for_temperature(ambient_temperature),
+            lighting,
+        );
 
         let surface_width = self.surface_width as i32;
         let surface_height = self.surface_height as i32;
@@ -640,9 +642,8 @@ fn blend_color_over(source: Color, dest: Color) -> Color {
         return source;
     }
     let inv_alpha = 255u16 - alpha;
-    let blend_channel = |src: u8, dst: u8| -> u8 {
-        ((src as u16 * alpha + dst as u16 * inv_alpha) / 255) as u8
-    };
+    let blend_channel =
+        |src: u8, dst: u8| -> u8 { ((src as u16 * alpha + dst as u16 * inv_alpha) / 255) as u8 };
 
     Color::new(
         blend_channel(source.r, dest.r),

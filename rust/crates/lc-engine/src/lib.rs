@@ -6,8 +6,8 @@ pub mod ffi;
 pub mod fixtures;
 mod input;
 mod landscape;
-pub mod ocf;
 mod math;
+pub mod ocf;
 mod pathfinder;
 mod record;
 pub mod scenario;
@@ -27,11 +27,11 @@ pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
 
 use compat::{
-    enter_environment_context, enter_physics_context, enter_random_context, EffectContextOutcome,
-    EnvironmentDelta, HostWorldContext, HostWorldObject, PhysicsDelta, DefinitionMetadata,
+    enter_environment_context, enter_physics_context, enter_random_context, DefinitionMetadata,
+    EffectContextOutcome, EnvironmentDelta, HostWorldContext, HostWorldObject, PhysicsDelta,
 };
-use ocf::NORMAL as OCF_NORMAL;
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
+use ocf::NORMAL as OCF_NORMAL;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::File;

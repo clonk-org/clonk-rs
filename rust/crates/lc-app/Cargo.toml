@@ -1,0 +1,12 @@
+[package]
+name = "lc-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+lc-engine = { path = "../lc-engine" }
+lc-frontend = { path = "../lc-frontend" }
+lc-graphics = { path = "../lc-graphics" }
+pixels = "0.13"
+winit = "0.28"

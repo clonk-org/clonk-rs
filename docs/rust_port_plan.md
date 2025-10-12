@@ -6,7 +6,7 @@
 - Continue shipping C++ binaries until deterministic replays, multiplayer soak, and UI flows stay green with the Rust build.
 
 ## Reality Check
-- Rust crates (`lc-engine`, `lc-script`, `lc-graphics`, `lc-network`, `lc-audio`, `lc-gui`, `lc-platform`) currently back parity tooling; `C4Game`, `C4GraphicsSystem`, and `C4Gui` still drive the live runtime.
+- Rust crates (`lc-engine`, `lc-script`, `lc-graphics`, `lc-network`, `lc-audio`, `lc-gui`, `lc-platform`) currently back parity tooling; `C4Game`, `C4GraphicsSystem`, and `C4Gui` still drive the live runtime. A new `lc-app` harness renders the engine and accepts input in a standalone window, but it remains a developer-only preview.
 - `lc-app` demo harness retired; workspace packaging now targets the `lc-game` launcher that bridges into the shipping runtime.
 - `RustEngineBridge` mirrors frames when `USE_RUST_ENGINE_VALIDATION` is enabled, but the authoritative scheduler, effects, pathfinding, lobby, and UI stacks are still C++.
 - Build, packaging, and updater flows are CMake-first; Cargo outputs are never shipped to players or CI artifacts.
@@ -36,7 +36,7 @@
 - **Gate:** headless Rust loop reproduces the deterministic regression pack byte-for-byte against C++ recordings.
 
 3. **Frontend & IO**
-  - Progress: `lc-frontend` renders the HUD overlay, keeps the camera locked to the focus object, now drives crew command input through the shared `PlayerInputState`, the software renderer plots object silhouettes from engine vertex data, GUI text flows through the shared bitmap font pipeline, the frame lighting curve is driven from `EnvironmentSettings::time_of_day` so sky, ground, and object shading respond to day/night cycles, and liquid columns now render with temperature-aware blending on the Rust overlay; next up is replacing remaining SDL/GDI surfaces.
+  - Progress: `lc-frontend` renders the HUD overlay, keeps the camera locked to the focus object, now drives crew command input through the shared `PlayerInputState`, the software renderer plots object silhouettes from engine vertex data, GUI text flows through the shared bitmap font pipeline, the frame lighting curve is driven from `EnvironmentSettings::time_of_day` so sky, ground, and object shading respond to day/night cycles, liquid columns now render with temperature-aware blending on the Rust overlay, and a new `lc-app` harness opens a winit/pixels window, ticks `lc-engine`, and mirrors the frame via `lc-frontend`; next up is replacing remaining SDL/GDI surfaces.
   - Implement rendering (software or wgpu/winit) to match C4 graphics, HUD, GUI widgets, and text output; unify font pipelines. Software overlay now respects engine vertex meshes and Rust-side bitmap font layout, and sprite atlas hashing now mirrors viewport/object captures for parity checks.
   - Port the full input stack and GUI/dialog system (startup, lobbies, editor, in-game menus); connect audio backends for music/effects parity.
   - **Gate:** Rust frontend renders the Startup Menu and in-game HUD, handles live input/audio, and no longer depends on C++ surfaces.

@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::math::integer_distance;
+use crate::ocf;
 #[cfg(test)]
 use crate::LiquidSegment;
 use crate::{
@@ -15,7 +16,6 @@ use crate::{
     TransferZoneState, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT,
     CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
 };
-use crate::ocf;
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
@@ -4458,7 +4458,13 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .with_category(definition_category)
             .with_id(id);
 
-        let preview_ocf = ocf::compute(metadata.ocf_base, metadata.crew_member, true, ObjectStatus::Normal, false);
+        let preview_ocf = ocf::compute(
+            metadata.ocf_base,
+            metadata.crew_member,
+            true,
+            ObjectStatus::Normal,
+            false,
+        );
         let preview = HostWorldObject::with_category(
             id,
             definition,
@@ -6162,8 +6168,8 @@ impl ObjectScopeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ActionSpec;
     use crate::ocf;
+    use crate::ActionSpec;
     use proptest::prelude::*;
     use rand::{Rng, SeedableRng};
     use std::collections::HashMap;
@@ -9501,26 +9507,24 @@ mod tests {
     fn get_ocf_returns_object_mask() {
         let ocf_mask = ocf::AVAILABLE | ocf::ALIVE;
         let object_id = ObjectId::new(1);
-        let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                object_id,
-                "Dummy",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            )
-            .with_ocf(ocf_mask),
-        ]);
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            object_id,
+            "Dummy",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_ocf(ocf_mask)]);
 
         let object_context = HostObjectContext::with_category(
             object_id,
