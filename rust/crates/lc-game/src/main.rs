@@ -1027,7 +1027,18 @@ fn validate_update_tool(paths: &AppPaths, logger: &LauncherLogger) -> Result<()>
 
     logger
         .log_line(&format!("located updater tool at {}", patcher.display()))
-        .context("failed to log updater tool path")
+        .context("failed to log updater tool path")?;
+
+    let summary = probe_update_tool(&patcher, install_root).with_context(|| {
+        format!(
+            "failed to execute {} while validating updater tool",
+            patcher.display()
+        )
+    })?;
+
+    logger
+        .log_line(&format!("c4group responded: {summary}"))
+        .context("failed to record updater probe output")
 }
 
 fn locate_update_tool(install_root: &Path) -> Result<PathBuf> {
@@ -1061,6 +1072,62 @@ fn candidate_patcher_paths(install_root: &Path) -> Vec<PathBuf> {
         .iter()
         .map(|relative| install_root.join(relative))
         .collect()
+}
+
+fn probe_update_tool(patcher: &Path, install_root: &Path) -> Result<String> {
+    let output = Command::new(patcher)
+        .current_dir(install_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("failed to spawn {}", patcher.display()))?;
+
+    if !output.status.success() {
+        let mut message = format!(
+            "c4group validation failed: {}",
+            describe_exit_status(&output.status)
+        );
+        if let Some(snippet) = summarise_tool_output(&output.stdout, &output.stderr) {
+            message.push_str(&format!(" ({snippet})"));
+        }
+        bail!(message);
+    }
+
+    let summary = summarise_tool_output(&output.stdout, &output.stderr)
+        .unwrap_or_else(|| "c4group produced no output".to_string());
+    Ok(summary)
+}
+
+fn summarise_tool_output(stdout: &[u8], stderr: &[u8]) -> Option<String> {
+    for raw in [stdout, stderr] {
+        if raw.is_empty() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(raw);
+        if let Some(line) = text.lines().map(str::trim).find(|line| !line.is_empty()) {
+            return Some(truncate_summary(line));
+        }
+    }
+    None
+}
+
+fn truncate_summary(line: &str) -> String {
+    const LIMIT: usize = 160;
+    let mut truncated = String::with_capacity(LIMIT + 1);
+    let mut chars = line.chars();
+    for _ in 0..(LIMIT - 1) {
+        if let Some(ch) = chars.next() {
+            truncated.push(ch);
+        } else {
+            return line.to_string();
+        }
+    }
+    if chars.next().is_none() {
+        return line.to_string();
+    }
+    truncated.push('…');
+    truncated
 }
 
 fn collect_runtime_logs(
@@ -1735,13 +1802,24 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn validate_update_tool_finds_primary_binary() {
+    fn validate_update_tool_runs_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
         let install_dir = TempDir::new().unwrap();
         let planet_dir = install_dir.path().join("planet");
         fs::create_dir_all(&planet_dir).unwrap();
         fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-        fs::write(install_dir.path().join("c4group"), b"stub").unwrap();
+        let patcher_path = install_dir.path().join("c4group");
+        fs::write(
+            &patcher_path,
+            b"#!/bin/sh\necho \"LegacyClonk C4Group 9.0\"\nexit 0\n",
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&patcher_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&patcher_path, perms).unwrap();
 
         let user_dir = TempDir::new().unwrap();
         let _guard = EnvGuard::set(&[
@@ -1753,7 +1831,12 @@ mod tests {
         paths.ensure_user_dirs().unwrap();
         let logger = LauncherLogger::new(&paths).unwrap();
 
-        assert!(validate_update_tool(&paths, &logger).is_ok());
+        validate_update_tool(&paths, &logger).unwrap();
+        let log_contents = std::fs::read_to_string(logger.path()).unwrap();
+        assert!(
+            log_contents.contains("c4group responded: LegacyClonk C4Group 9.0"),
+            "probe output missing in log:\n{log_contents}"
+        );
     }
 
     #[test]
@@ -1799,6 +1882,52 @@ mod tests {
         let logger = LauncherLogger::new(&paths).unwrap();
 
         assert!(validate_update_tool(&paths, &logger).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_update_tool_reports_probe_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+        let patcher_path = install_dir.path().join("c4group");
+        fs::write(
+            &patcher_path,
+            b"#!/bin/sh\necho \"probe failure\" >&2\nexit 3\n",
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&patcher_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&patcher_path, perms).unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        let logger = LauncherLogger::new(&paths).unwrap();
+
+        let err = validate_update_tool(&paths, &logger).unwrap_err();
+        let display = err.to_string();
+        let root = err.chain().last().unwrap().to_string();
+        assert!(
+            display.contains("failed to execute"),
+            "context missing command failure: {display}"
+        );
+        assert!(
+            root.contains("exit code 3"),
+            "unexpected root cause: {root}"
+        );
+        assert!(
+            root.contains("probe failure"),
+            "missing stderr snippet: {root}"
+        );
     }
 
     #[test]
