@@ -9,7 +9,6 @@
 ## Parity Gaps
 - Startup/menu flow still needs final production polish and richer menu presentation beyond the new HUD overlays; quick-save support remains complete.
 - Gameplay loop lacks persistent settings and integration with networking/editor toolchains; we still need to wire the Rust runtime into those surfaces.
-- CI still misses smoke/parity runs that boot the Rust runtime and compare against C++ recordings.
 
 ## Immediate Priorities
 1. Standalone Rust client parity
@@ -21,7 +20,7 @@
      - [x] SFX mixer wiring, scripted audio hooks, and asset resolution via registered sound groups.
 2. [x] Launcher parity: retire the C++ delegation for updates/support bundles and keep all prelaunch flows in Rust.
    - [x] Default `lc-game` to the Rust runtime (`lc-app`), synthesize `Clonk-rust-*.log` from runtime stdout/stderr, and preserve update/support bundle plumbing.
-3. Automated parity harness: record canonical scenarios from the C++ build, replay them through Rust headlessly, and gate CI on the comparison.
+3. [x] Automated parity harness: record canonical scenarios from the C++ build, replay them through Rust headlessly, and gate CI on the comparison (driven via `cargo xtask engine-snapshots verify` from CMake/CI).
 
 ## Validation Targets
 - `cargo run -p lc-app` enters the startup menu, launches scenarios, and keeps music running without runtime warnings.

@@ -677,6 +677,14 @@ if (USE_TESTS)
 	enable_testing()
 	add_subdirectory(tests)
 	get_property(MACRO_TARGETS DIRECTORY tests PROPERTY BUILDSYSTEM_TARGETS)
+	if (USE_RUST_ENGINE_VALIDATION)
+		add_test(
+			NAME rust_engine_snapshots
+			COMMAND cargo xtask engine-snapshots verify
+			WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/rust"
+		)
+		set_tests_properties(rust_engine_snapshots PROPERTIES RUN_SERIAL TRUE)
+	endif ()
 endif ()
 
 list(PREPEND MACRO_TARGETS standard)
