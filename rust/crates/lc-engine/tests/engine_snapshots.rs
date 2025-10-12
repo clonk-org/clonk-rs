@@ -1,4 +1,5 @@
-use lc_engine::{fixtures, EngineError, Playback, Recording};
+use lc_engine::fixtures::SNAPSHOT_SCENARIOS;
+use lc_engine::{EngineError, Playback, Recording};
 use std::env;
 use std::fs::{self, File};
 use std::io::BufReader;
@@ -72,15 +73,9 @@ where
 }
 
 #[test]
-fn basic_movement_matches_snapshot() {
-    run_snapshot_test("basic_movement.json", 6, |frames| {
-        fixtures::basic_movement_recording(frames)
-    });
-}
-
-#[test]
-fn queued_commands_match_snapshot() {
-    run_snapshot_test("queued_commands.json", 6, |frames| {
-        fixtures::queued_command_recording(frames)
-    });
+fn engine_snapshots_match_baselines() {
+    for scenario in SNAPSHOT_SCENARIOS {
+        let baseline_name = format!("{}.json", scenario.name);
+        run_snapshot_test(&baseline_name, scenario.default_frames, scenario.generator);
+    }
 }

@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
-use lc_engine::{fixtures, EngineError, Playback, Recording};
+use lc_engine::fixtures::SNAPSHOT_SCENARIOS;
+use lc_engine::{Playback, Recording};
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -9,32 +10,6 @@ use std::process::Command;
 use walkdir::WalkDir;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipWriter};
-
-type ScenarioGenerator = fn(usize) -> Result<Recording, EngineError>;
-
-struct EngineSnapshotScenario {
-    name: &'static str,
-    frames: usize,
-    generator: ScenarioGenerator,
-}
-
-const ENGINE_SNAPSHOT_SCENARIOS: &[EngineSnapshotScenario] = &[
-    EngineSnapshotScenario {
-        name: "basic_movement",
-        frames: 6,
-        generator: fixtures::basic_movement_recording,
-    },
-    EngineSnapshotScenario {
-        name: "queued_commands",
-        frames: 6,
-        generator: fixtures::queued_command_recording,
-    },
-    EngineSnapshotScenario {
-        name: "environment_cycle",
-        frames: 8,
-        generator: fixtures::environment_cycle_recording,
-    },
-];
 
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
@@ -101,8 +76,8 @@ fn record_engine_snapshots() -> Result<()> {
     fs::create_dir_all(&snapshot_dir)
         .with_context(|| format!("failed to create {}", snapshot_dir.display()))?;
 
-    for scenario in ENGINE_SNAPSHOT_SCENARIOS {
-        let recording = (scenario.generator)(scenario.frames)
+    for scenario in SNAPSHOT_SCENARIOS {
+        let recording = (scenario.generator)(scenario.default_frames)
             .with_context(|| format!("failed to record scenario `{}`", scenario.name))?;
         let path = snapshot_dir.join(format!("{}.json", scenario.name));
         let file =
@@ -118,7 +93,7 @@ fn record_engine_snapshots() -> Result<()> {
         println!(
             "wrote {} ({} frames)",
             display_path.display(),
-            scenario.frames
+            scenario.default_frames
         );
     }
 
@@ -129,27 +104,30 @@ fn verify_engine_snapshots() -> Result<()> {
     let paths = WorkspacePaths::detect()?;
     let snapshot_dir = engine_snapshot_dir(&paths);
 
-    for scenario in ENGINE_SNAPSHOT_SCENARIOS {
+    for scenario in SNAPSHOT_SCENARIOS {
         let path = snapshot_dir.join(format!("{}.json", scenario.name));
         let baseline = load_recording(&path)
             .with_context(|| format!("failed to load baseline {}", path.display()))?;
         let frames = baseline.frames().len();
-        if frames != scenario.frames {
+        if frames != scenario.default_frames {
             bail!(
                 "baseline {} contains {} frames but scenario expects {}",
                 path.display(),
                 frames,
-                scenario.frames
+                scenario.default_frames
             );
         }
         let playback = Playback::from_recording(baseline);
-        let actual = (scenario.generator)(scenario.frames)
+        let actual = (scenario.generator)(scenario.default_frames)
             .with_context(|| format!("failed to run scenario `{}`", scenario.name))?;
         playback
             .validate_sequence(actual.into_frames())
             .map_err(|error| anyhow!(error))
             .with_context(|| format!("snapshot mismatch for `{}`", scenario.name))?;
-        println!("validated {} ({} frames)", scenario.name, scenario.frames);
+        println!(
+            "validated {} ({} frames)",
+            scenario.name, scenario.default_frames
+        );
     }
 
     Ok(())

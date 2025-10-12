@@ -4,6 +4,13 @@ use crate::{
     Recorder, Recording, RgbColor, SpawnConfig, Vector2,
 };
 
+#[derive(Clone, Copy)]
+pub struct SnapshotScenario {
+    pub name: &'static str,
+    pub default_frames: usize,
+    pub generator: fn(usize) -> Result<Recording, EngineError>,
+}
+
 const BASIC_MOVEMENT_SCRIPT: &str = r#"
 global func Initialize(state, random)
 {
@@ -201,3 +208,21 @@ mod tests {
         assert_eq!(recording.frames().len(), 8);
     }
 }
+
+pub const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
+    SnapshotScenario {
+        name: "basic_movement",
+        default_frames: 6,
+        generator: basic_movement_recording,
+    },
+    SnapshotScenario {
+        name: "queued_commands",
+        default_frames: 6,
+        generator: queued_command_recording,
+    },
+    SnapshotScenario {
+        name: "environment_cycle",
+        default_frames: 8,
+        generator: environment_cycle_recording,
+    },
+];
