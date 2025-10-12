@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use lc_engine::{
     ActionSpec, ActionState, ControlButton, ControlEvent, Definition, Engine, EngineError,
-    EnvironmentSettings, Landscape, MovementProfile, ObjectId, SimulationSnapshot, SpawnConfig,
-    Vector2,
+    EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectSnapshot, Scenario,
+    SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_frontend::{
     GraphicsOverlay, GraphicsSystem, GuiPoint, InputDispatcher, KeyCode, ScenarioEntry,
@@ -516,20 +516,76 @@ impl GameApp {
     }
 
     fn start_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
-        if let Some(path) = scenario.path.as_ref() {
-            println!(
-                "Starting scenario '{}' from {}",
-                scenario.title,
-                path.display()
-            );
-        } else {
-            println!("Starting scenario '{}' (sandbox fallback)", scenario.title);
+        if self.try_start_real_scenario(&scenario)? {
+            return Ok(());
         }
+        self.start_sandbox_scenario(scenario)
+    }
+
+    fn try_start_real_scenario(
+        &mut self,
+        scenario: &FrontendScenario,
+    ) -> Result<bool, EngineError> {
+        let Some(path) = scenario.path.as_ref() else {
+            return Ok(false);
+        };
+
+        let scenario_data = match Scenario::load_from_path(path) {
+            Ok(data) => data,
+            Err(err) => {
+                eprintln!(
+                    "Failed to load scenario '{}' from {}: {err}",
+                    scenario.title,
+                    path.display()
+                );
+                return Ok(false);
+            }
+        };
+
+        println!(
+            "Starting scenario '{}' from {}",
+            scenario.title,
+            path.display()
+        );
 
         self.engine = Engine::new();
         self.input = InputDispatcher::new();
-        let mut definition = Definition::from_script("Walker", "Rust Walker", walker_script())?;
 
+        if let Err(err) = scenario_data.apply(&mut self.engine) {
+            eprintln!(
+                "Failed to apply scenario '{}' from {}: {err}",
+                scenario.title,
+                path.display()
+            );
+            return Ok(false);
+        }
+
+        self.snapshot = self.engine.snapshot();
+
+        let label = scenario_data
+            .name()
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| scenario.title.clone());
+        let ground = scenario_data
+            .ground_height_hint()
+            .unwrap_or(DEFAULT_GROUND_HEIGHT)
+            .max(0);
+
+        self.configure_running_state(label, ground);
+        self.apply_focus_selection();
+        self.snapshot = self.engine.snapshot();
+        self.refresh_focus();
+        self.active_scenario = Some(scenario.clone());
+        Ok(true)
+    }
+
+    fn start_sandbox_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
+        println!("Starting scenario '{}' (sandbox fallback)", scenario.title);
+
+        self.engine = Engine::new();
+        self.input = InputDispatcher::new();
+
+        let mut definition = Definition::from_script("Walker", "Rust Walker", walker_script())?;
         let mut actions = HashMap::new();
         actions.insert(
             "Walk".to_string(),
@@ -553,25 +609,51 @@ impl GameApp {
             .with_energy(100)
             .with_action(ActionState::new("Walk"))
             .with_crew_member(true);
-        let object_id = self.engine.spawn_object(spawn)?;
-        self.engine.select_crew(PLAYER_OWNER, vec![object_id])?;
-        self.engine.set_crew_cursor(PLAYER_OWNER, Some(object_id))?;
+        self.engine.spawn_object(spawn)?;
 
         self.snapshot = self.engine.snapshot();
-        self.focus_id = Some(object_id);
-        self.focus_snapshot = None;
-        self.scenario_label = scenario.title.clone();
+        self.configure_running_state(scenario.title.clone(), DEFAULT_GROUND_HEIGHT);
+        self.apply_focus_selection();
+        self.snapshot = self.engine.snapshot();
+        self.refresh_focus();
         self.active_scenario = Some(scenario);
+        Ok(())
+    }
 
+    fn configure_running_state(&mut self, label: String, fallback_ground: i32) {
+        self.scenario_label = label;
+        self.fallback_ground = fallback_ground;
         let width = self.graphics.surface().width();
         let height = self.graphics.surface().height();
         self.graphics =
             GraphicsSystem::new(width, height, self.fallback_ground, &self.scenario_label);
         self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
-
+        self.frame_text.clear();
+        self.status_text.clear();
+        self.energy_fraction = 0.0;
         self.mode = AppMode::Running;
-        self.refresh_focus();
-        Ok(())
+    }
+
+    fn apply_focus_selection(&mut self) {
+        if let Some((object_id, owner, crew_member)) = select_focus_candidate(&self.snapshot) {
+            self.focus_id = Some(object_id);
+            if crew_member && owner >= 0 {
+                if let Err(err) = self.engine.select_crew(owner, [object_id]) {
+                    eprintln!(
+                        "Failed to select crew member {} for owner {}: {err}",
+                        object_id, owner
+                    );
+                } else if let Err(err) = self.engine.set_crew_cursor(owner, Some(object_id)) {
+                    eprintln!(
+                        "Failed to set crew cursor to {} for owner {}: {err}",
+                        object_id, owner
+                    );
+                }
+            }
+        } else {
+            self.focus_id = None;
+        }
+        self.focus_snapshot = None;
     }
 }
 
@@ -635,6 +717,42 @@ fn copy_surface(src: &[u8], width: u32, height: u32, dest: &mut [u8]) {
             dest[dest_offset..dest_offset + stride].copy_from_slice(&src[src_offset..end]);
         }
     }
+}
+
+fn select_focus_candidate(snapshot: &SimulationSnapshot) -> Option<(ObjectId, i32, bool)> {
+    for object in snapshot.objects.iter() {
+        if is_focusable(object) && object.crew_member && object.owner == PLAYER_OWNER {
+            return Some((object.id, object.owner, true));
+        }
+    }
+    for object in snapshot.objects.iter() {
+        if is_focusable(object) && object.crew_member && object.owner >= 0 {
+            return Some((object.id, object.owner, true));
+        }
+    }
+    for object in snapshot.objects.iter() {
+        if is_focusable(object) && object.crew_member {
+            return Some((object.id, object.owner, true));
+        }
+    }
+    for object in snapshot.objects.iter() {
+        if is_focusable(object) && object.owner >= 0 {
+            return Some((object.id, object.owner, object.crew_member));
+        }
+    }
+    for object in snapshot.objects.iter() {
+        if is_focusable(object) {
+            return Some((object.id, object.owner, object.crew_member));
+        }
+    }
+    snapshot
+        .objects
+        .first()
+        .map(|object| (object.id, object.owner, object.crew_member))
+}
+
+fn is_focusable(object: &ObjectSnapshot) -> bool {
+    object.alive && object.status.is_active()
 }
 
 fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
