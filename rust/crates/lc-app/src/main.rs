@@ -1,4 +1,5 @@
 mod gamepad;
+mod settings;
 
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::f32::consts::PI;
@@ -26,6 +27,7 @@ use lc_platform::{AppPaths, PathsError};
 use lc_resources::{scenario as resource_scenario, Group};
 use pixels::{Pixels, SurfaceTexture};
 use serde::{Deserialize, Serialize};
+use settings::AudioOptions;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{
     ElementState, Event, KeyboardInput, MouseButton, TouchPhase, VirtualKeyCode, WindowEvent,
@@ -41,7 +43,6 @@ const DEFAULT_SCENARIO_LABEL: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
 const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
 const BACK_ENTRY_TITLE: &str = "← Back";
-const AUDIO_CHANNELS: usize = 32;
 const SAVE_DIR_NAME: &str = "Savegames";
 const QUICK_SAVE_FILE: &str = "quicksave.lcsave";
 const SAVE_FILE_VERSION: u32 = 1;
@@ -190,6 +191,7 @@ fn enforce_min_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
 
 struct AudioContext {
     system: AudioSystem,
+    options: AudioOptions,
     current_music: Option<MusicHandle>,
     loaded_sounds: HashMap<String, SoundHandle>,
     active_channels: HashMap<SoundInstanceKey, ChannelInfo>,
@@ -198,9 +200,10 @@ struct AudioContext {
 }
 
 impl AudioContext {
-    fn try_new() -> Result<Self, AudioError> {
+    fn try_new(options: AudioOptions) -> Result<Self, AudioError> {
         Ok(Self {
-            system: AudioSystem::new(AUDIO_CHANNELS)?,
+            system: AudioSystem::new(options.max_channels)?,
+            options,
             current_music: None,
             loaded_sounds: HashMap::new(),
             active_channels: HashMap::new(),
@@ -211,8 +214,12 @@ impl AudioContext {
 
     fn play_music(&mut self, data: &[u8], looped: bool) -> Result<(), AudioError> {
         self.stop_music();
+        if !self.options.music_enabled {
+            return Ok(());
+        }
         let music = self.system.load_music(data)?;
         self.system.play_music(&music, looped)?;
+        self.system.music_set_volume(self.options.music_volume);
         self.current_music = Some(music);
         Ok(())
     }
@@ -244,6 +251,14 @@ impl AudioContext {
         }
     }
 
+    fn music_enabled(&self) -> bool {
+        self.options.music_enabled
+    }
+
+    fn menu_music_enabled(&self) -> bool {
+        self.options.menu_music_enabled
+    }
+
     fn handle_events(
         &mut self,
         events: &[AudioCommand],
@@ -259,6 +274,9 @@ impl AudioContext {
                     looped,
                     custom_falloff,
                 } => {
+                    if !self.options.sound_enabled {
+                        continue;
+                    }
                     if let Err(err) = self.start_sound(
                         name,
                         *target,
@@ -295,6 +313,9 @@ impl AudioContext {
         snapshot: &SimulationSnapshot,
         focus: Option<&ObjectSnapshot>,
     ) -> Result<(), AudioError> {
+        if !self.options.sound_enabled {
+            return Ok(());
+        }
         let key = SoundInstanceKey::new(name, target);
         let handle = self.ensure_sound(name)?;
         let channel = self.system.play_sound(&handle, looped)?;
@@ -305,7 +326,8 @@ impl AudioContext {
             volume,
             custom_falloff,
         };
-        let (mix_volume, pan) = compute_mix_values(&info, snapshot, focus);
+        let (mut mix_volume, pan) = compute_mix_values(&info, snapshot, focus);
+        mix_volume *= self.options.sound_volume;
         self.system
             .channel_set_volume_and_pan(channel, mix_volume, pan);
         self.active_channels.insert(key, info);
@@ -330,8 +352,12 @@ impl AudioContext {
         let key = SoundInstanceKey::new(name, target);
         if let Some(info) = self.active_channels.get_mut(&key) {
             info.volume = volume;
+            if !self.options.sound_enabled {
+                return;
+            }
             let channel = info.channel;
-            let (mix_volume, pan) = compute_mix_values(info, snapshot, focus);
+            let (mut mix_volume, pan) = compute_mix_values(info, snapshot, focus);
+            mix_volume *= self.options.sound_volume;
             drop(info);
             self.system
                 .channel_set_volume_and_pan(channel, mix_volume, pan);
@@ -341,12 +367,19 @@ impl AudioContext {
     fn update_channels(&mut self, snapshot: &SimulationSnapshot, focus: Option<&ObjectSnapshot>) {
         let mut finished = Vec::new();
         let mut updates: Vec<(ChannelId, f32, f32)> = Vec::new();
+        if !self.options.sound_enabled {
+            if !self.active_channels.is_empty() {
+                self.reset_sfx();
+            }
+            return;
+        }
         for (key, info) in self.active_channels.iter_mut() {
             if !info.looped && !self.system.channel_is_playing(info.channel) {
                 finished.push(key.clone());
                 continue;
             }
-            let (mix_volume, pan) = compute_mix_values(info, snapshot, focus);
+            let (mut mix_volume, pan) = compute_mix_values(info, snapshot, focus);
+            mix_volume *= self.options.sound_volume;
             updates.push((info.channel, mix_volume, pan));
         }
         for (channel, volume, pan) in updates {
@@ -1125,7 +1158,19 @@ impl GameApp {
 
         let scenario_catalog = build_scenario_catalog(&scenarios);
         let menu_state = MenuState::new(menu, scenarios);
-        let audio = match AudioContext::try_new() {
+        let audio_options = cached_app_paths()
+            .ok()
+            .map(|paths| {
+                if let Err(err) = paths.ensure_user_dirs() {
+                    eprintln!(
+                        "warning: failed to ensure user data directories at {}: {err}",
+                        paths.user_data_dir().display()
+                    );
+                }
+                AudioOptions::load(Some(paths))
+            })
+            .unwrap_or_default();
+        let audio = match AudioContext::try_new(audio_options) {
             Ok(ctx) => Some(ctx),
             Err(err) => {
                 eprintln!("audio initialisation failed: {err}");
@@ -1852,6 +1897,10 @@ impl GameApp {
     fn play_scenario_audio(&mut self, path: &Path) {
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(Some(path));
+            if !audio.music_enabled() {
+                audio.stop_music();
+                return;
+            }
             match load_scenario_music_bytes(path) {
                 Ok(Some(bytes)) => {
                     if let Err(err) = audio.play_music(bytes.as_slice(), true) {
@@ -1868,6 +1917,10 @@ impl GameApp {
     fn play_sandbox_audio(&mut self) {
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(None);
+            if !audio.menu_music_enabled() {
+                audio.stop_music();
+                return;
+            }
             if let Err(err) = audio.play_music(sandbox_music_bytes(), true) {
                 eprintln!("failed to start sandbox music: {err}");
                 audio.stop_music();

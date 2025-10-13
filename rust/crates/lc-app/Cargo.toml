@@ -7,6 +7,7 @@ edition = "2021"
 anyhow = "1.0"
 gilrs = "0.10"
 lc-audio = { path = "../lc-audio" }
+lc-core = { path = "../lc-core" }
 lc-engine = { path = "../lc-engine" }
 lc-frontend = { path = "../lc-frontend" }
 lc-graphics = { path = "../lc-graphics" }

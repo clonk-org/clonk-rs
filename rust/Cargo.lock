@@ -1815,6 +1815,7 @@ dependencies = [
  "anyhow",
  "gilrs",
  "lc-audio",
+ "lc-core",
  "lc-engine",
  "lc-frontend",
  "lc-graphics",
