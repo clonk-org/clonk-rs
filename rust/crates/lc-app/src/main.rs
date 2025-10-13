@@ -1,4 +1,5 @@
 mod gamepad;
+mod input;
 mod settings;
 
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
@@ -12,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
+use input::KeyboardBindings;
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, ControlButton, ControlEvent, Definition, Engine,
@@ -84,7 +86,7 @@ fn main() -> Result<()> {
     let mut pixels = Pixels::new(size.width, size.height, surface)
         .context("failed to create pixel framebuffer")?;
 
-    let mut app = GameApp::new(size.width, size.height, audio_options)
+    let mut app = GameApp::new(size.width, size.height, audio_options, app_paths)
         .context("failed to initialise app state")?;
 
     let mut last_frame = Instant::now();
@@ -921,6 +923,7 @@ struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
     input: InputDispatcher,
+    bindings: KeyboardBindings,
     gamepads: GamepadManager,
     snapshot: SimulationSnapshot,
     focus_id: Option<ObjectId>,
@@ -1207,7 +1210,12 @@ fn current_unix_timestamp() -> u64 {
 }
 
 impl GameApp {
-    fn new(width: u32, height: u32, audio_options: AudioOptions) -> Result<Self> {
+    fn new(
+        width: u32,
+        height: u32,
+        audio_options: AudioOptions,
+        paths: Option<&AppPaths>,
+    ) -> Result<Self> {
         let engine = Engine::new();
         let snapshot = engine.snapshot();
         let scenario_label = DEFAULT_SCENARIO_LABEL.to_string();
@@ -1235,6 +1243,7 @@ impl GameApp {
             engine,
             graphics,
             input: InputDispatcher::new(),
+            bindings: KeyboardBindings::load(paths),
             gamepads: GamepadManager::new(),
             snapshot,
             focus_id: None,
@@ -1318,36 +1327,7 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<(), EngineError> {
-        let event = match (key, state) {
-            (VirtualKeyCode::Left, ElementState::Pressed) => {
-                Some(ControlEvent::Press(ControlButton::Left))
-            }
-            (VirtualKeyCode::Left, ElementState::Released) => {
-                Some(ControlEvent::Release(ControlButton::Left))
-            }
-            (VirtualKeyCode::Right, ElementState::Pressed) => {
-                Some(ControlEvent::Press(ControlButton::Right))
-            }
-            (VirtualKeyCode::Right, ElementState::Released) => {
-                Some(ControlEvent::Release(ControlButton::Right))
-            }
-            (VirtualKeyCode::Up, ElementState::Pressed) => {
-                Some(ControlEvent::Press(ControlButton::Up))
-            }
-            (VirtualKeyCode::Up, ElementState::Released) => {
-                Some(ControlEvent::Release(ControlButton::Up))
-            }
-            (VirtualKeyCode::Down, ElementState::Pressed) => {
-                Some(ControlEvent::Press(ControlButton::Down))
-            }
-            (VirtualKeyCode::Down, ElementState::Released) => {
-                Some(ControlEvent::Release(ControlButton::Down))
-            }
-            (VirtualKeyCode::Space, ElementState::Pressed) => Some(ControlEvent::ClearPressed),
-            _ => None,
-        };
-
-        if let Some(event) = event {
+        if let Some(event) = self.bindings.event_for_key(key, state) {
             self.dispatch_control_event(event)?;
         }
         Ok(())

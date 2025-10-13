@@ -4,13 +4,14 @@
 - `lc-game` now boots the Rust runtime by default, capturing stdout/stderr into runtime logs while keeping the existing update/support bundle tooling intact.
 - `lc-app` opens a winit/pixels window, lists real scenarios from install/user roots, runs them through `lc_engine`/`lc_frontend`, streams background music via `lc_audio`, and resolves SFX from scenario/global sound packs (synthetic fallback only when assets are missing).
 - Legacy config (`Config.Sound.*`) now drives Rust audio enablement, volumes, and mixer channel counts via `lc_core::std_config`.
+- Legacy keyboard bindings (`Config.Controls.*`) now feed the Rust input dispatcher so custom layouts persist across runs.
 - `Config.Graphics.*` now drives persisted window size/mode/maximize state in the Rust client (F11 toggles fullscreen; window moves/resizes save back on exit).
 - Rust subsystems (engine, script VM, graphics, audio, networking, resources, GUI) are unit/snapshot tested in isolation; only the preview harness stitches them together.
 - Startup/menu flow now renders HUD overlays sourced from engine HUD metadata, highlighting crew focus while broader UI polish continues; quick-save parity is complete.
 
 ## Parity Gaps
 - Startup/menu flow still needs final production polish and richer menu presentation beyond the new HUD overlays; quick-save support remains complete.
-- Persistent input bindings plus networking/editor toolchain integration remain outstanding; audio/video configs (enablement, volumes, channels, window state) now flow through the Rust runtime.
+- Networking/editor toolchain integration remains outstanding; audio/video configs (enablement, volumes, channels, window state) now flow through the Rust runtime.
 
 ## Immediate Priorities
 1. Standalone Rust client parity
