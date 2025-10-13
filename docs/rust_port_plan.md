@@ -8,11 +8,12 @@
 - `Config.Graphics.*` now drives persisted window size/mode/maximize state in the Rust client (F11 toggles fullscreen; window moves/resizes save back on exit).
 - Rust subsystems (engine, script VM, graphics, audio, networking, resources, GUI) are unit/snapshot tested in isolation; only the preview harness stitches them together.
 - Startup/menu flow now renders HUD overlays sourced from engine HUD metadata, highlights crew focus, and the scenario browser surfaces location/play/edit availability for each entry while broader UI polish continues; quick-save parity is complete.
+- `lc-network` decodes legacy `C4GameControlPacket` payloads into Rust `lc_engine` control structures so collected network traffic can be replayed and validated from the Rust side.
 - Scenario browser `Edit` actions now locate the legacy editor binary (honouring `LC_EDITOR_BINARY`) and spawn it for editable scenarios/folders.
 - Startup/menu flow now presents scenario preview art with placeholder renders for missing assets, letterboxed scaling, and a framed info panel backdrop.
 
 ## Parity Gaps
-- Networking/editor toolchain integration remains outstanding; audio/video configs (enablement, volumes, channels, window state) now flow through the Rust runtime.
+- Multiplayer transport/orchestration still lives in the legacy stack; the Rust runtime can decode queued control traffic but must assume the C++ peer handles discovery, hosting, resync, and dispatch.
 
 ## Immediate Priorities
 1. [x] Standalone Rust client parity

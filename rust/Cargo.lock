@@ -1986,6 +1986,7 @@ dependencies = [
 name = "lc-network"
 version = "0.1.0"
 dependencies = [
+ "lc-engine",
  "serde",
  "thiserror",
  "tokio",
