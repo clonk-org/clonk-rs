@@ -42,7 +42,9 @@ pub struct LegacyControlFrame {
     pub controls: Vec<EngineControlPacket>,
 }
 
-pub fn decode_control_packet(packet: &ControlPacket) -> Result<LegacyControlFrame, LegacyControlError> {
+pub fn decode_control_packet(
+    packet: &ControlPacket,
+) -> Result<LegacyControlFrame, LegacyControlError> {
     let mut frame = decode_control_payload(packet.payload())?;
     let header_client = packet.client_id();
     let header_tick = packet.tick();
@@ -92,7 +94,9 @@ pub fn decode_control_payload(payload: &[u8]) -> Result<LegacyControlFrame, Lega
     })
 }
 
-fn decode_control_list(reader: &mut Reader<'_>) -> Result<Vec<EngineControlPacket>, LegacyControlError> {
+fn decode_control_list(
+    reader: &mut Reader<'_>,
+) -> Result<Vec<EngineControlPacket>, LegacyControlError> {
     let mut controls = Vec::new();
     loop {
         let id = reader.read_u8()?;
@@ -107,7 +111,9 @@ fn decode_control_list(reader: &mut Reader<'_>) -> Result<Vec<EngineControlPacke
     Ok(controls)
 }
 
-fn decode_player_control(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+fn decode_player_control(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
     let player = reader.read_int32()?;
     let command = reader.read_int32()?;
     let data = reader.read_int32()?;
@@ -209,7 +215,9 @@ mod tests {
         payload.extend(encode_int32(client));
         payload.extend(encode_int32(tick));
         for control in controls {
-            payload.extend(encode_player_control(control[0], control[1], control[2], control[3]));
+            payload.extend(encode_player_control(
+                control[0], control[1], control[2], control[3],
+            ));
         }
         payload.push(PID_NONE);
         payload
@@ -263,7 +271,10 @@ mod tests {
         let error = decode_control_packet(&packet).unwrap_err();
         assert!(matches!(
             error,
-            LegacyControlError::ClientIdMismatch { header_id: 4, payload_id: 3 }
+            LegacyControlError::ClientIdMismatch {
+                header_id: 4,
+                payload_id: 3
+            }
         ));
         let packet = ControlPacket::builder(3, 11).payload(payload);
         let error = decode_control_packet(&packet).unwrap_err();

@@ -11,9 +11,10 @@
 - `lc-network` decodes legacy `C4GameControlPacket` payloads into Rust `lc_engine` control structures so collected network traffic can be replayed and validated from the Rust side.
 - Scenario browser `Edit` actions now locate the legacy editor binary (honouring `LC_EDITOR_BINARY`) and spawn it for editable scenarios/folders.
 - Startup/menu flow now presents scenario preview art with placeholder renders for missing assets, letterboxed scaling, and a framed info panel backdrop.
+- `lc-network` now owns the multiplayer host/client transport stack (handshake, lobby admission, control dispatch, backlog/resync scheduling) so the Rust runtime no longer relies on the C++ network orchestrator.
 
 ## Parity Gaps
-- Multiplayer transport/orchestration still lives in the legacy stack; the Rust runtime can decode queued control traffic but must assume the C++ peer handles discovery, hosting, resync, and dispatch.
+- _None identified._
 
 ## Immediate Priorities
 1. [x] Standalone Rust client parity

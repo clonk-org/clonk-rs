@@ -243,7 +243,7 @@ fn decode_varint(data: &[u8]) -> Result<(u32, usize), TransportError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{duplex, AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
     fn expect_frame(payload: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + payload.len());
