@@ -34,6 +34,7 @@ typedef struct LcGuiPoint {
 typedef enum LcGuiDrawCommandKind {
     LC_GUI_DRAW_COMMAND_QUAD = 0,
     LC_GUI_DRAW_COMMAND_TEXT = 1,
+    LC_GUI_DRAW_COMMAND_IMAGE = 2,
 } LcGuiDrawCommandKind;
 
 typedef struct LcGuiDrawCommand {
@@ -44,6 +45,10 @@ typedef struct LcGuiDrawCommand {
    size_t text_len;
    float font_size;
    float padding;
+   const uint8_t *image_ptr;
+   size_t image_len;
+   uint32_t image_width;
+   uint32_t image_height;
 } LcGuiDrawCommand;
 
 typedef enum LcGuiEventKind {

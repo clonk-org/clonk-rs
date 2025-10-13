@@ -33,6 +33,7 @@ struct Point {
 enum class DrawCommandKind {
     Quad,
     Text,
+    Image,
 };
 
 enum class GuiAction {
@@ -57,6 +58,9 @@ struct DrawCommand {
     std::string text;
     float font_size {0.0f};
     float padding {0.0f};
+    std::vector<uint8_t> pixels;
+    uint32_t image_width {0};
+    uint32_t image_height {0};
 };
 
 struct EventAction {

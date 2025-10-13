@@ -8,9 +8,10 @@
 - `Config.Graphics.*` now drives persisted window size/mode/maximize state in the Rust client (F11 toggles fullscreen; window moves/resizes save back on exit).
 - Rust subsystems (engine, script VM, graphics, audio, networking, resources, GUI) are unit/snapshot tested in isolation; only the preview harness stitches them together.
 - Startup/menu flow now renders HUD overlays sourced from engine HUD metadata, highlights crew focus, and the scenario browser surfaces location/play/edit availability for each entry while broader UI polish continues; quick-save parity is complete.
+- Scenario browser `Edit` actions now locate the legacy editor binary (honouring `LC_EDITOR_BINARY`) and spawn it for editable scenarios/folders.
 
 ## Parity Gaps
-- Startup/menu flow still needs preview art, editor launch parity, and broader visual polish beyond the new metadata panels.
+- Startup/menu flow still needs preview art and broader visual polish beyond the new metadata panels.
 - Networking/editor toolchain integration remains outstanding; audio/video configs (enablement, volumes, channels, window state) now flow through the Rust runtime.
 
 ## Immediate Priorities

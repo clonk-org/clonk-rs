@@ -1,9 +1,11 @@
 use crate::{Group, GroupError};
+use image::{load_from_memory, ImageError};
 use serde::Deserialize;
 use std::cmp::Ordering;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScenarioDiscoveryError {
@@ -31,6 +33,12 @@ pub enum ScenarioDiscoveryError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("failed to decode preview image at {path}: {source}")]
+    Preview {
+        path: PathBuf,
+        #[source]
+        source: ImageError,
+    },
     #[error("path is not valid UTF-8: {path}")]
     NonUtf8Path { path: PathBuf },
 }
@@ -42,6 +50,43 @@ pub enum ScenarioEntryKind {
     Editor,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioPreview {
+    width: u32,
+    height: u32,
+    pixels: Arc<[u8]>,
+}
+
+impl ScenarioPreview {
+    pub fn new(width: u32, height: u32, pixels: Vec<u8>) -> Self {
+        Self {
+            width,
+            height,
+            pixels: Arc::from(pixels.into_boxed_slice()),
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    pub fn into_arc(self) -> (u32, u32, Arc<[u8]>) {
+        (self.width, self.height, self.pixels)
+    }
+
+    pub fn clone_data(&self) -> Arc<[u8]> {
+        Arc::clone(&self.pixels)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScenarioEntry {
     pub identifier: String,
@@ -51,6 +96,7 @@ pub struct ScenarioEntry {
     pub kind: ScenarioEntryKind,
     pub is_editable: bool,
     pub is_playable: bool,
+    pub preview: Option<ScenarioPreview>,
     pub children: Vec<ScenarioEntry>,
 }
 
@@ -240,6 +286,7 @@ fn build_scenario_entry(
     }
 
     let title = title.unwrap_or(fallback);
+    let preview = load_preview_image(group)?;
 
     Ok(ScenarioEntry {
         identifier,
@@ -249,6 +296,7 @@ fn build_scenario_entry(
         kind: ScenarioEntryKind::Scenario,
         is_editable: group.is_directory(),
         is_playable: true,
+        preview,
         children: Vec::new(),
     })
 }
@@ -264,6 +312,7 @@ fn build_folder_entry(
     }
 
     let title = title.unwrap_or(fallback);
+    let preview = load_preview_image(group)?;
     let children = collect_children_from_group(group, &identifier)?;
 
     Ok(ScenarioEntry {
@@ -274,8 +323,86 @@ fn build_folder_entry(
         kind: ScenarioEntryKind::Folder,
         is_editable: group.is_directory(),
         is_playable: false,
+        preview,
         children,
     })
+}
+
+fn load_preview_image(group: &Group) -> Result<Option<ScenarioPreview>, ScenarioDiscoveryError> {
+    let entries = group
+        .entries()
+        .map_err(|err| group_error(group.root(), err))?;
+
+    let mut best: Option<((u8, u8, String), PathBuf)> = None;
+    for entry in entries.iter() {
+        if entry.is_directory {
+            continue;
+        }
+        if entry.relative_path.components().count() != 1 {
+            continue;
+        }
+        let Some(name) = entry
+            .relative_path
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
+            continue;
+        };
+        let Some(key) = preview_candidate_key(name) else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .map(|(current, _)| key < *current)
+            .unwrap_or(true)
+        {
+            best = Some((key, entry.relative_path.clone()));
+        }
+    }
+
+    let Some((_, relative_path)) = best else {
+        return Ok(None);
+    };
+
+    let absolute_path = group.root().join(&relative_path);
+    let bytes = group
+        .read_file(&relative_path)
+        .map_err(|err| group_error(&absolute_path, err))?;
+    let image = load_from_memory(&bytes).map_err(|source| ScenarioDiscoveryError::Preview {
+        path: absolute_path,
+        source,
+    })?;
+    let rgba = image.to_rgba8();
+    let width = rgba.width();
+    let height = rgba.height();
+    let data = rgba.into_raw();
+    Ok(Some(ScenarioPreview::new(width, height, data)))
+}
+
+fn preview_candidate_key(name: &str) -> Option<(u8, u8, String)> {
+    let lower = name.to_ascii_lowercase();
+    let prefix_rank = if lower.starts_with("title") {
+        0
+    } else if lower.starts_with("loader") {
+        1
+    } else if lower.starts_with("icon") {
+        2
+    } else {
+        return None;
+    };
+
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())?;
+    let ext_rank = match extension.as_str() {
+        "png" => 0,
+        "jpg" | "jpeg" => 1,
+        "bmp" => 2,
+        _ => return None,
+    };
+
+    Some((prefix_rank, ext_rank, lower))
 }
 
 fn classify_group(group: &Group) -> Result<GroupContentKind, ScenarioDiscoveryError> {

@@ -15,6 +15,7 @@ pub struct GuiHandle {
 pub struct RenderHandle {
     commands: Vec<LcGuiDrawCommand>,
     _texts: Vec<CString>,
+    _images: Vec<Vec<u8>>,
 }
 
 pub struct EventResultHandle {
@@ -80,6 +81,7 @@ impl From<LcGuiPoint> for Point {
 pub enum LcGuiDrawCommandKind {
     Quad = 0,
     Text = 1,
+    Image = 2,
 }
 
 #[repr(C)]
@@ -92,6 +94,10 @@ pub struct LcGuiDrawCommand {
     pub text_len: usize,
     pub font_size: f32,
     pub padding: f32,
+    pub image_ptr: *const u8,
+    pub image_len: usize,
+    pub image_width: u32,
+    pub image_height: u32,
 }
 
 impl LcGuiDrawCommand {
@@ -104,6 +110,10 @@ impl LcGuiDrawCommand {
             text_len: 0,
             font_size: 0.0,
             padding: 0.0,
+            image_ptr: ptr::null(),
+            image_len: 0,
+            image_width: 0,
+            image_height: 0,
         }
     }
 
@@ -125,9 +135,35 @@ impl LcGuiDrawCommand {
                 text_len: len,
                 font_size,
                 padding,
+                image_ptr: ptr::null(),
+                image_len: 0,
+                image_width: 0,
+                image_height: 0,
             },
             text,
         )
+    }
+
+    fn image(
+        rect: Rect,
+        width: u32,
+        height: u32,
+        pixels_ptr: *const u8,
+        pixels_len: usize,
+    ) -> Self {
+        Self {
+            kind: LcGuiDrawCommandKind::Image,
+            rect: rect.into(),
+            color: Color::transparent().into(),
+            text_ptr: ptr::null(),
+            text_len: 0,
+            font_size: 0.0,
+            padding: 0.0,
+            image_ptr: pixels_ptr,
+            image_len: pixels_len,
+            image_width: width,
+            image_height: height,
+        }
     }
 }
 
@@ -259,6 +295,7 @@ fn to_u32(id: WidgetId) -> Option<u32> {
 fn build_render_commands(commands: Vec<DrawCommand>) -> RenderHandle {
     let mut ffi_commands = Vec::with_capacity(commands.len());
     let mut texts = Vec::new();
+    let mut images = Vec::new();
     for command in commands {
         match command {
             DrawCommand::Quad { rect, color } => {
@@ -279,11 +316,24 @@ fn build_render_commands(commands: Vec<DrawCommand>) -> RenderHandle {
                 ffi_commands.push(cmd);
                 texts.push(stored);
             }
+            DrawCommand::Image { rect, image } => {
+                let mut pixels = image.pixels().to_vec();
+                let cmd = LcGuiDrawCommand::image(
+                    rect,
+                    image.width(),
+                    image.height(),
+                    pixels.as_ptr(),
+                    pixels.len(),
+                );
+                ffi_commands.push(cmd);
+                images.push(pixels);
+            }
         }
     }
     RenderHandle {
         commands: ffi_commands,
         _texts: texts,
+        _images: images,
     }
 }
 

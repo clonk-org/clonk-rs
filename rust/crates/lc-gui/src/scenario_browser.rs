@@ -1,5 +1,6 @@
 use crate::{
-    DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, GuiResult, KeyCode, Rect, Size, WidgetId,
+    DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, GuiResult, ImageData, KeyCode, Rect,
+    Size, WidgetId,
 };
 use std::fmt;
 
@@ -29,6 +30,7 @@ pub struct ScenarioEntry {
     pub is_editable: bool,
     pub is_playable: bool,
     pub location: Option<String>,
+    pub preview: Option<ImageData>,
 }
 
 impl ScenarioEntry {
@@ -187,6 +189,8 @@ impl ScenarioBrowser {
         }
         self.selected = None;
         self.gui
+            .set_picture_image(self.layout.info_panel.preview, None)?;
+        self.gui
             .set_label_text(self.layout.info_panel.title_label, "No scenario selected")?;
         self.gui
             .set_label_text(self.layout.info_panel.kind_label, "Kind: -")?;
@@ -241,6 +245,8 @@ impl ScenarioBrowser {
                 )?;
                 self.gui
                     .set_label_text(self.layout.info_panel.description_label, description)?;
+                self.gui
+                    .set_picture_image(self.layout.info_panel.preview, entry.preview.clone())?;
                 return Ok(());
             }
         }
@@ -406,6 +412,7 @@ impl ScenarioBrowserLayout {
 
         let _details_label = gui.add_label(root, "Details");
         let info_column = gui.add_column(root, true);
+        let preview = gui.add_picture(info_column, 320.0, 200.0);
         let title_label = gui.add_label(info_column, "No scenario selected");
         let kind_label = gui.add_label(info_column, "Kind: -");
         let availability_label = gui.add_label(info_column, "Playable: No    Editable: No");
@@ -421,6 +428,7 @@ impl ScenarioBrowserLayout {
         Self {
             entry_widgets,
             info_panel: InfoPanel {
+                preview,
                 title_label,
                 kind_label,
                 availability_label,
@@ -440,6 +448,7 @@ impl ScenarioBrowserLayout {
 
 #[derive(Debug)]
 struct InfoPanel {
+    preview: WidgetId,
     title_label: WidgetId,
     kind_label: WidgetId,
     availability_label: WidgetId,
@@ -477,6 +486,7 @@ mod tests {
                 is_editable: true,
                 is_playable: true,
                 location: Some("/scenarios/tutorial".into()),
+                preview: None,
             },
             ScenarioEntry {
                 identifier: "folder_1".into(),
@@ -486,6 +496,7 @@ mod tests {
                 is_editable: false,
                 is_playable: false,
                 location: Some("/scenarios/missions".into()),
+                preview: None,
             },
         ];
 
@@ -544,6 +555,7 @@ mod tests {
                 is_editable: false,
                 is_playable: true,
                 location: Some("/scenarios/tutorial".into()),
+                preview: None,
             },
             ScenarioEntry {
                 identifier: "folder_1".into(),
@@ -553,6 +565,7 @@ mod tests {
                 is_editable: true,
                 is_playable: false,
                 location: Some("/scenarios/campaign".into()),
+                preview: None,
             },
         ];
 

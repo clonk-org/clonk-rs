@@ -3,6 +3,7 @@ mod scenario_browser;
 
 use lc_graphics::{BitmapFont, Color};
 use std::fmt;
+use std::sync::Arc;
 
 pub use scenario_browser::{
     ScenarioBrowser, ScenarioBrowserMessage, ScenarioBrowserResponse, ScenarioEntry,
@@ -371,6 +372,27 @@ impl Gauge {
     }
 }
 
+#[derive(Debug, Clone)]
+struct Picture {
+    preferred_size: Size,
+    image: Option<ImageData>,
+    background: Color,
+}
+
+impl Picture {
+    fn new(width: f32, height: f32) -> Self {
+        Self {
+            preferred_size: Size::new(width.max(1.0), height.max(1.0)),
+            image: None,
+            background: Color::opaque(20, 32, 48),
+        }
+    }
+
+    fn intrinsic_size(&self) -> Size {
+        self.preferred_size
+    }
+}
+
 #[derive(Debug)]
 struct WidgetNode {
     id: WidgetId,
@@ -387,6 +409,7 @@ enum WidgetKind {
     Label(Label),
     Button(Button),
     Gauge(Gauge),
+    Picture(Picture),
 }
 
 impl WidgetKind {
@@ -397,6 +420,7 @@ impl WidgetKind {
             WidgetKind::Label(_) => "label",
             WidgetKind::Button(_) => "button",
             WidgetKind::Gauge(_) => "gauge",
+            WidgetKind::Picture(_) => "picture",
         }
     }
 }
@@ -426,6 +450,47 @@ pub enum DrawCommand {
         font_size: f32,
         padding: f32,
     },
+    Image {
+        rect: Rect,
+        image: ImageData,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageData {
+    width: u32,
+    height: u32,
+    pixels: Arc<[u8]>,
+}
+
+impl ImageData {
+    pub fn new(width: u32, height: u32, pixels: Vec<u8>) -> Self {
+        Self {
+            width,
+            height,
+            pixels: Arc::from(pixels.into_boxed_slice()),
+        }
+    }
+
+    pub fn from_arc(width: u32, height: u32, pixels: Arc<[u8]>) -> Self {
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
 }
 
 pub struct Gui {
@@ -502,6 +567,17 @@ impl Gui {
         id
     }
 
+    pub fn add_picture(&mut self, parent: WidgetId, width: f32, height: f32) -> WidgetId {
+        let id = self.alloc_id();
+        let node = WidgetNode::new(
+            id,
+            Some(parent),
+            WidgetKind::Picture(Picture::new(width, height)),
+        );
+        self.attach_child(parent, node);
+        id
+    }
+
     pub fn set_label_text(&mut self, id: WidgetId, text: impl Into<String>) -> GuiResult<()> {
         let node = self.widget_mut(id)?;
         match &mut node.kind {
@@ -568,6 +644,17 @@ impl Gui {
                 Ok(())
             }
             kind => Err(wrong_widget_type(id, "gauge", kind)),
+        }
+    }
+
+    pub fn set_picture_image(&mut self, id: WidgetId, image: Option<ImageData>) -> GuiResult<()> {
+        let node = self.widget_mut(id)?;
+        match &mut node.kind {
+            WidgetKind::Picture(picture) => {
+                picture.image = image;
+                Ok(())
+            }
+            kind => Err(wrong_widget_type(id, "picture", kind)),
         }
     }
 
@@ -702,6 +789,19 @@ impl Gui {
                     }
                 }
             }
+            WidgetKind::Picture(picture) => {
+                if let Some(image) = &picture.image {
+                    commands.push(DrawCommand::Image {
+                        rect: node.rect,
+                        image: image.clone(),
+                    });
+                } else {
+                    commands.push(DrawCommand::Quad {
+                        rect: node.rect,
+                        color: picture.background,
+                    });
+                }
+            }
             WidgetKind::Column(_) | WidgetKind::Row(_) => {}
         }
 
@@ -716,6 +816,7 @@ impl Gui {
             WidgetKind::Button(_) => self.layout_button(id, constraints, origin),
             WidgetKind::Row(_) => self.layout_row(id, constraints, origin),
             WidgetKind::Gauge(_) => self.layout_gauge(id, constraints, origin),
+            WidgetKind::Picture(_) => self.layout_picture(id, constraints, origin),
             WidgetKind::Column(_) => self.layout_column(id, constraints, origin),
         }
     }
@@ -770,6 +871,27 @@ impl Gui {
             gauge.intrinsic_size()
         };
         let size = intrinsic.clamp(constraints);
+        self.nodes[id.index()].rect = Rect::from_origin_size(origin, size);
+        size
+    }
+
+    fn layout_picture(
+        &mut self,
+        id: WidgetId,
+        constraints: LayoutConstraints,
+        origin: Point,
+    ) -> Size {
+        let intrinsic = {
+            let picture = match &self.nodes[id.index()].kind {
+                WidgetKind::Picture(picture) => picture,
+                _ => unreachable!(),
+            };
+            picture.intrinsic_size()
+        };
+        let size = Size::new(
+            intrinsic.width.min(constraints.max_width),
+            intrinsic.height.min(constraints.max_height),
+        );
         self.nodes[id.index()].rect = Rect::from_origin_size(origin, size);
         size
     }

@@ -1,5 +1,6 @@
 use crate::{
-    draw_text, fill_rect, GuiPoint, KeyCode, ScenarioEntry, ScenarioKind, StartupMenuResult,
+    draw_image, draw_text, fill_rect, GuiPoint, KeyCode, ScenarioEntry, ScenarioKind,
+    StartupMenuResult,
 };
 use lc_graphics::Surface;
 use lc_gui::{
@@ -93,6 +94,7 @@ impl StartupMenu {
                     font_size,
                     padding,
                 } => draw_text(surface, &rect, &text, color, font_size, padding),
+                DrawCommand::Image { rect, image } => draw_image(surface, &rect, &image),
             }
         }
     }
@@ -134,6 +136,7 @@ mod tests {
             is_editable: true,
             is_playable: true,
             location: None,
+            preview: None,
         }
     }
 

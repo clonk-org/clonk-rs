@@ -6,7 +6,8 @@ use lc_engine::{
     SurfaceSnapshot as EngineSurfaceSnapshot,
 };
 use lc_graphics::{
-    Color, Rect as SurfaceRect, Surface, SurfaceSnapshot as GraphicsSurfaceSnapshot,
+    Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
+    SurfaceSnapshot as GraphicsSurfaceSnapshot,
 };
 use lc_gui::{DrawCommand, Gui, GuiResult, Rect as GuiRect, Size as GuiSize, WidgetId};
 use std::collections::hash_map::DefaultHasher;
@@ -15,8 +16,8 @@ use std::hash::{Hash, Hasher};
 
 pub use input::InputDispatcher;
 pub use lc_gui::{
-    GuiError as StartupMenuError, GuiResult as StartupMenuResult, KeyCode, Point as GuiPoint,
-    ScenarioEntry, ScenarioKind,
+    GuiError as StartupMenuError, GuiResult as StartupMenuResult, ImageData, KeyCode,
+    Point as GuiPoint, ScenarioEntry, ScenarioKind,
 };
 pub use startup_menu::{ScenarioSummary, StartupMenu, StartupMenuAction};
 
@@ -460,6 +461,7 @@ impl GraphicsSystem {
                     font_size,
                     padding,
                 } => draw_text(&mut self.surface, &rect, &text, color, font_size, padding),
+                DrawCommand::Image { rect, image } => draw_image(&mut self.surface, &rect, &image),
             }
         }
     }
@@ -896,6 +898,108 @@ pub(crate) fn fill_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
             let _ = surface.set_pixel(x as u32, y as u32, color);
         }
     }
+}
+
+pub(crate) fn draw_image(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+        return;
+    }
+
+    let dest_width = rect.size.width.max(1.0).round() as u32;
+    let dest_height = rect.size.height.max(1.0).round() as u32;
+    if dest_width == 0 || dest_height == 0 || image.width() == 0 || image.height() == 0 {
+        return;
+    }
+
+    let dest_x = rect.origin.x.round() as i32;
+    let dest_y = rect.origin.y.round() as i32;
+
+    if dest_width == image.width() && dest_height == image.height() {
+        if let Ok(src_surface) = Surface::from_bytes(
+            image.width(),
+            image.height(),
+            PixelFormat::Rgba8888,
+            image.pixels().to_vec(),
+        ) {
+            let _ = surface.blit(&src_surface, SurfacePoint::new(dest_x, dest_y));
+        }
+        return;
+    }
+
+    let bounds = surface.bounds();
+    let src_width = image.width();
+    let src_height = image.height();
+    let pixels = image.pixels();
+
+    for dy in 0..dest_height {
+        let target_y = dest_y + dy as i32;
+        if target_y < bounds.y || target_y >= bounds.y + bounds.height as i32 {
+            continue;
+        }
+
+        let src_y = ((dy as f32 / dest_height as f32) * src_height as f32)
+            .floor()
+            .clamp(0.0, (src_height - 1) as f32) as u32;
+
+        for dx in 0..dest_width {
+            let target_x = dest_x + dx as i32;
+            if target_x < bounds.x || target_x >= bounds.x + bounds.width as i32 {
+                continue;
+            }
+
+            let src_x = ((dx as f32 / dest_width as f32) * src_width as f32)
+                .floor()
+                .clamp(0.0, (src_width - 1) as f32) as u32;
+            let idx = ((src_y * src_width + src_x) * 4) as usize;
+            if idx + 3 >= pixels.len() {
+                continue;
+            }
+
+            let color = Color::new(
+                pixels[idx],
+                pixels[idx + 1],
+                pixels[idx + 2],
+                pixels[idx + 3],
+            );
+
+            if color.a == 0 {
+                continue;
+            }
+
+            let blended = if color.a == 255 {
+                color
+            } else {
+                let background = surface
+                    .get_pixel(target_x as u32, target_y as u32)
+                    .unwrap_or_default();
+                blend_colors(color, background)
+            };
+
+            let _ = surface.set_pixel(target_x as u32, target_y as u32, blended);
+        }
+    }
+}
+
+fn blend_colors(foreground: Color, background: Color) -> Color {
+    if foreground.a == 0 {
+        return background;
+    }
+    if foreground.a == 255 {
+        return foreground;
+    }
+
+    let alpha = foreground.a as u16;
+    let inv_alpha = 255u16 - alpha;
+    let blend_channel =
+        |fg: u8, bg: u8| -> u8 { ((fg as u16 * alpha + bg as u16 * inv_alpha) / 255) as u8 };
+    let blended_alpha = alpha + (background.a as u16 * inv_alpha) / 255;
+
+    Color::new(
+        blend_channel(foreground.r, background.r),
+        blend_channel(foreground.g, background.g),
+        blend_channel(foreground.b, background.b),
+        blended_alpha.min(255) as u8,
+    )
 }
 
 pub(crate) fn draw_text(

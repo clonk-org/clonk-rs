@@ -62,6 +62,9 @@ std::vector<DrawCommand> ConvertCommands(const LcGuiDrawCommand *commands, size_
         switch (command.kind) {
         case LC_GUI_DRAW_COMMAND_QUAD:
             converted.kind = DrawCommandKind::Quad;
+            converted.pixels.clear();
+            converted.image_width = 0;
+            converted.image_height = 0;
             break;
         case LC_GUI_DRAW_COMMAND_TEXT:
             converted.kind = DrawCommandKind::Text;
@@ -70,6 +73,23 @@ std::vector<DrawCommand> ConvertCommands(const LcGuiDrawCommand *commands, size_
             } else {
                 converted.text.clear();
             }
+            converted.pixels.clear();
+            converted.image_width = 0;
+            converted.image_height = 0;
+            break;
+        case LC_GUI_DRAW_COMMAND_IMAGE:
+            converted.kind = DrawCommandKind::Image;
+            converted.text.clear();
+            if (command.image_ptr != nullptr && command.image_len > 0) {
+                converted.pixels.assign(
+                    command.image_ptr,
+                    command.image_ptr + command.image_len
+                );
+            } else {
+                converted.pixels.clear();
+            }
+            converted.image_width = command.image_width;
+            converted.image_height = command.image_height;
             break;
         default:
             throw std::runtime_error("Unknown GUI draw command from Rust");

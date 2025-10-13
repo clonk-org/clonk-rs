@@ -8,6 +8,7 @@ use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,7 +22,7 @@ use lc_engine::{
     ObjectSnapshot, Scenario, SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_frontend::{
-    CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, InputDispatcher, KeyCode,
+    CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData, InputDispatcher, KeyCode,
     PlayerOverlay, ScenarioEntry, ScenarioKind, StartupMenu, StartupMenuAction,
 };
 use lc_graphics::Color;
@@ -1053,6 +1054,7 @@ struct FrontendScenario {
     is_editable: bool,
     is_playable: bool,
     path: Option<PathBuf>,
+    preview: Option<ImageData>,
     children: Vec<FrontendScenario>,
 }
 
@@ -1066,6 +1068,7 @@ impl FrontendScenario {
             is_editable: self.is_editable,
             is_playable: self.is_playable,
             location: self.location_label(),
+            preview: self.preview.clone(),
         }
     }
 
@@ -1087,6 +1090,10 @@ impl FrontendScenario {
             }
         }
 
+        let preview = entry.preview.as_ref().map(|preview| {
+            ImageData::new(preview.width(), preview.height(), preview.pixels().to_vec())
+        });
+
         if matches!(kind, ScenarioKind::Scenario) && !seen.insert(identifier.clone()) {
             return None;
         }
@@ -1099,6 +1106,7 @@ impl FrontendScenario {
             is_editable: entry.is_editable,
             is_playable: entry.is_playable,
             path: Some(entry.path),
+            preview,
             children,
         })
     }
@@ -1122,6 +1130,7 @@ impl FrontendScenario {
             is_editable: true,
             is_playable: true,
             path: None,
+            preview: None,
             children: Vec::new(),
         }
     }
@@ -1164,6 +1173,7 @@ impl SavedScenarioInfo {
             is_editable: self.is_editable,
             is_playable: self.is_playable,
             path: self.path.clone(),
+            preview: None,
             children: Vec::new(),
         }
     }
@@ -1505,8 +1515,7 @@ impl GameApp {
         }
 
         let actions = handler(&mut self.menu_state);
-        let (start_identifier, updated_label) =
-            GameApp::process_menu_actions(&mut self.menu_state, actions);
+        let (start_identifier, updated_label) = self.process_menu_actions(actions);
 
         if let Some(label) = updated_label {
             self.scenario_label = label;
@@ -1523,7 +1532,7 @@ impl GameApp {
     }
 
     fn process_menu_actions(
-        state: &mut MenuState,
+        &mut self,
         actions: Vec<StartupMenuAction>,
     ) -> (Option<String>, Option<String>) {
         let mut start_identifier: Option<String> = None;
@@ -1537,12 +1546,13 @@ impl GameApp {
                 }
                 StartupMenuAction::OpenEntry(summary) => {
                     if summary.identifier == BACK_ENTRY_IDENTIFIER {
-                        state.leave_folder();
-                        updated_label = Some(state.label_path());
+                        self.menu_state.leave_folder();
+                        updated_label = Some(self.menu_state.label_path());
                         continue;
                     }
 
-                    let entry_kind = state
+                    let entry_kind = self
+                        .menu_state
                         .current_entries()
                         .iter()
                         .find(|entry| entry.identifier == summary.identifier)
@@ -1550,34 +1560,82 @@ impl GameApp {
 
                     match entry_kind {
                         Some(ScenarioKind::Folder) => {
-                            state.enter_folder(&summary.identifier);
-                            updated_label = Some(state.label_path());
+                            self.menu_state.enter_folder(&summary.identifier);
+                            updated_label = Some(self.menu_state.label_path());
                         }
                         Some(ScenarioKind::Scenario) => {
                             start_identifier = Some(summary.identifier);
                         }
                         Some(ScenarioKind::Editor) => {
-                            eprintln!(
-                                "Editing entries is not yet implemented for Rust menu items: {}",
-                                summary.identifier
-                            );
+                            if let Err(err) = self.launch_editor_by_identifier(&summary.identifier)
+                            {
+                                eprintln!(
+                                    "failed to launch legacy editor for `{}`: {err:?}",
+                                    summary.identifier
+                                );
+                            }
                         }
                         None => {
-                            state.enter_folder(&summary.identifier);
-                            updated_label = Some(state.label_path());
+                            self.menu_state.enter_folder(&summary.identifier);
+                            updated_label = Some(self.menu_state.label_path());
                         }
                     }
                 }
                 StartupMenuAction::EditEntry(summary) => {
-                    eprintln!(
-                        "Editing entries is not yet implemented for Rust menu items: {}",
-                        summary.identifier
-                    );
+                    if let Err(err) = self.launch_editor_by_identifier(&summary.identifier) {
+                        eprintln!(
+                            "failed to launch legacy editor for `{}`: {err:?}",
+                            summary.identifier
+                        );
+                    }
                 }
             }
         }
 
         (start_identifier, updated_label)
+    }
+
+    fn launch_editor_by_identifier(&mut self, identifier: &str) -> Result<()> {
+        let scenario = self
+            .scenario_catalog
+            .get(identifier)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!("selected scenario `{identifier}` is not available in the Rust catalog")
+            })?;
+        self.launch_editor_for_scenario(&scenario)
+    }
+
+    fn launch_editor_for_scenario(&mut self, scenario: &FrontendScenario) -> Result<()> {
+        if !scenario.is_editable {
+            anyhow::bail!(
+                "scenario `{}` is not marked editable in the catalog",
+                scenario.title
+            );
+        }
+        let Some(path) = scenario.path.as_ref() else {
+            anyhow::bail!(
+                "scenario `{}` has no filesystem path and cannot be opened in the legacy editor",
+                scenario.title
+            );
+        };
+        let editor_binary =
+            resolve_editor_binary().context("failed to resolve LegacyClonk editor binary")?;
+        let mut command = Command::new(&editor_binary);
+        command.arg(path);
+        if let Some(parent) = editor_binary.parent() {
+            command.current_dir(parent);
+        }
+        command
+            .spawn()
+            .with_context(|| format!("failed to launch editor at {}", editor_binary.display()))?;
+        self.status_text = format!("Launching editor for {}", scenario.title);
+        println!(
+            "Launching LegacyClonk editor `{}` for scenario at `{}`",
+            editor_binary.display(),
+            path.display()
+        );
+        Ok(())
     }
 
     fn update(&mut self) -> Result<(), EngineError> {
@@ -2143,6 +2201,7 @@ fn build_menu_entries(entries: &[FrontendScenario], include_back: bool) -> Vec<S
             is_editable: false,
             is_playable: false,
             location: None,
+            preview: None,
         });
     }
     result.extend(entries.iter().map(FrontendScenario::to_ui_entry));
@@ -2170,6 +2229,89 @@ fn insert_scenario_recursive(
     for child in &entry.children {
         insert_scenario_recursive(child, catalog);
     }
+}
+
+fn resolve_editor_binary() -> Result<PathBuf> {
+    if let Some(override_path) = std::env::var_os("LC_EDITOR_BINARY") {
+        let path = PathBuf::from(override_path);
+        if path.exists() {
+            return Ok(path);
+        }
+        anyhow::bail!(
+            "LC_EDITOR_BINARY points to `{}` but no such file exists",
+            path.display()
+        );
+    }
+
+    let paths = cached_app_paths()
+        .map_err(|err| anyhow!("unable to locate editor binary via app paths: {err}"))?;
+    let install_root = paths.install_root();
+    for candidate in editor_binary_candidates(install_root) {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(anyhow!(
+        "LegacyClonk editor binary not found under {}; set LC_EDITOR_BINARY to override",
+        install_root.display()
+    ))
+}
+
+fn editor_binary_candidates(base: &Path) -> Vec<PathBuf> {
+    fn push_candidate(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
+        if !candidates.iter().any(|existing| existing == &candidate) {
+            candidates.push(candidate);
+        }
+    }
+
+    let mut candidates = Vec::new();
+    let bin_dir = base.join("bin");
+
+    push_candidate(&mut candidates, base.join("Editor.exe"));
+    push_candidate(&mut candidates, base.join("editor.exe"));
+    push_candidate(&mut candidates, base.join("Editor"));
+    push_candidate(&mut candidates, base.join("editor"));
+    push_candidate(&mut candidates, base.join("lc-editor"));
+    push_candidate(&mut candidates, bin_dir.join("Editor.exe"));
+    push_candidate(&mut candidates, bin_dir.join("editor.exe"));
+    push_candidate(&mut candidates, bin_dir.join("Editor"));
+    push_candidate(&mut candidates, bin_dir.join("editor"));
+    push_candidate(&mut candidates, bin_dir.join("lc-editor"));
+
+    #[cfg(target_os = "macos")]
+    {
+        push_candidate(
+            &mut candidates,
+            base.join("Editor.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("Editor"),
+        );
+        push_candidate(
+            &mut candidates,
+            base.join("Editor.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("LegacyClonk Editor"),
+        );
+        push_candidate(
+            &mut candidates,
+            base.join("LegacyClonk Editor.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("LegacyClonk Editor"),
+        );
+        push_candidate(
+            &mut candidates,
+            base.join("LegacyClonk Editor.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("Editor"),
+        );
+    }
+
+    candidates
 }
 
 fn configure_sandbox_engine(engine: &mut Engine) -> Result<(), EngineError> {
@@ -2414,6 +2556,7 @@ mod tests {
             is_editable: true,
             is_playable: true,
             path: None,
+            preview: None,
             children: Vec::new(),
         };
 
@@ -2425,6 +2568,7 @@ mod tests {
             is_editable: false,
             is_playable: false,
             path: None,
+            preview: None,
             children: vec![child],
         };
 
@@ -2544,6 +2688,7 @@ mod tests {
             is_editable: true,
             is_playable: true,
             path: Some(PathBuf::from("/tmp/test.c4s")),
+            preview: None,
             children: Vec::new(),
         };
         let info = SavedScenarioInfo::from_frontend(&original, "Label", 123);
