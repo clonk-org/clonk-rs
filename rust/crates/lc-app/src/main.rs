@@ -27,16 +27,14 @@ use lc_platform::{AppPaths, PathsError};
 use lc_resources::{scenario as resource_scenario, Group};
 use pixels::{Pixels, SurfaceTexture};
 use serde::{Deserialize, Serialize};
-use settings::AudioOptions;
+use settings::{AudioOptions, DisplayMode, DisplayOptions};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{
     ElementState, Event, KeyboardInput, MouseButton, TouchPhase, VirtualKeyCode, WindowEvent,
 };
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{Window, WindowBuilder};
+use winit::window::{Fullscreen, Window, WindowBuilder};
 
-const WINDOW_WIDTH: u32 = 960;
-const WINDOW_HEIGHT: u32 = 540;
 const PLAYER_OWNER: i32 = 1;
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_666); // ~60 FPS
 const DEFAULT_SCENARIO_LABEL: &str = "Rust Sandbox";
@@ -49,22 +47,45 @@ const SAVE_FILE_VERSION: u32 = 1;
 
 fn main() -> Result<()> {
     let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("LegacyClonk (Rust preview)")
-        .with_inner_size(LogicalSize::new(
-            f64::from(WINDOW_WIDTH),
-            f64::from(WINDOW_HEIGHT),
-        ))
+    let app_paths = cached_app_paths().ok();
+    if let Some(paths) = app_paths {
+        if let Err(err) = paths.ensure_user_dirs() {
+            eprintln!(
+                "warning: failed to ensure user data directories at {}: {err}",
+                paths.user_data_dir().display()
+            );
+        }
+    }
+    let mut display_options = DisplayOptions::load(app_paths);
+    let audio_options = AudioOptions::load(app_paths);
+    let (initial_width, initial_height) = display_options.actual_size();
+    let mut window_builder = WindowBuilder::new().with_title("LegacyClonk (Rust preview)");
+    if matches!(display_options.mode, DisplayMode::Window) && !display_options.maximized {
+        if let Some((x, y)) = display_options.position {
+            window_builder = window_builder.with_position(PhysicalPosition::new(x, y));
+        }
+    }
+    window_builder = window_builder.with_inner_size(LogicalSize::new(
+        f64::from(initial_width),
+        f64::from(initial_height),
+    ));
+    let window = window_builder
         .build(&event_loop)
         .context("failed to create application window")?;
+    if display_options.maximized && matches!(display_options.mode, DisplayMode::Window) {
+        window.set_maximized(true);
+    }
+    if matches!(display_options.mode, DisplayMode::Fullscreen) {
+        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+    }
 
     let size = enforce_min_size(window.inner_size());
     let surface = SurfaceTexture::new(size.width, size.height, &window);
     let mut pixels = Pixels::new(size.width, size.height, surface)
         .context("failed to create pixel framebuffer")?;
 
-    let mut app =
-        GameApp::new(size.width, size.height).context("failed to initialise app state")?;
+    let mut app = GameApp::new(size.width, size.height, audio_options)
+        .context("failed to initialise app state")?;
 
     let mut last_frame = Instant::now();
 
@@ -72,9 +93,14 @@ fn main() -> Result<()> {
         *control_flow = ControlFlow::Poll;
         match event {
             Event::WindowEvent { window_id, event } if window_id == window.id() => {
-                if let Err(err) =
-                    handle_window_event(&window, &mut app, &mut pixels, event, control_flow)
-                {
+                if let Err(err) = handle_window_event(
+                    &window,
+                    &mut app,
+                    &mut pixels,
+                    &mut display_options,
+                    event,
+                    control_flow,
+                ) {
                     eprintln!("error: {err:?}");
                     control_flow.set_exit();
                 }
@@ -109,6 +135,14 @@ fn main() -> Result<()> {
             Event::LoopDestroyed => {}
             _ => {}
         }
+        if matches!(
+            *control_flow,
+            ControlFlow::Exit | ControlFlow::ExitWithCode(_)
+        ) {
+            if let Some(paths) = app_paths {
+                display_options.persist_if_dirty(paths);
+            }
+        }
     });
 }
 
@@ -116,6 +150,7 @@ fn handle_window_event(
     window: &Window,
     app: &mut GameApp,
     pixels: &mut Pixels,
+    display_options: &mut DisplayOptions,
     event: WindowEvent,
     control_flow: &mut ControlFlow,
 ) -> Result<()> {
@@ -132,6 +167,10 @@ fn handle_window_event(
                 .resize_buffer(clamped.width, clamped.height)
                 .context("failed to resize pixel buffer")?;
             app.resize(clamped.width, clamped.height)?;
+            if display_options.mode == DisplayMode::Window {
+                display_options.record_actual_size(clamped.width, clamped.height);
+            }
+            display_options.record_maximized(window.is_maximized());
         }
         WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
             let clamped = enforce_min_size(*new_inner_size);
@@ -142,6 +181,10 @@ fn handle_window_event(
                 .resize_buffer(clamped.width, clamped.height)
                 .context("failed to resize pixel buffer")?;
             app.resize(clamped.width, clamped.height)?;
+            if display_options.mode == DisplayMode::Window {
+                display_options.record_actual_size(clamped.width, clamped.height);
+            }
+            display_options.record_maximized(window.is_maximized());
         }
         WindowEvent::CursorMoved { position, .. } => {
             app.handle_cursor_moved(position)
@@ -165,8 +208,18 @@ fn handle_window_event(
                 },
             ..
         } => {
+            if state == ElementState::Pressed && keycode == VirtualKeyCode::F11 {
+                toggle_fullscreen(window, display_options);
+                return Ok(());
+            }
             app.handle_key(keycode, state)
                 .context("failed to process key input")?;
+        }
+        WindowEvent::Moved(position) => {
+            if display_options.mode == DisplayMode::Window && !window.is_maximized() {
+                display_options.record_position(position.x, position.y);
+            }
+            display_options.record_maximized(window.is_maximized());
         }
         WindowEvent::Touch(touch) => {
             let position = GuiPoint::new(touch.location.x as f32, touch.location.y as f32);
@@ -187,6 +240,18 @@ fn handle_window_event(
 
 fn enforce_min_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
     PhysicalSize::new(size.width.max(1), size.height.max(1))
+}
+
+fn toggle_fullscreen(window: &Window, display_options: &mut DisplayOptions) {
+    if window.fullscreen().is_some() {
+        window.set_fullscreen(None);
+        display_options.record_mode(DisplayMode::Window);
+        display_options.record_maximized(window.is_maximized());
+    } else {
+        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+        display_options.record_mode(DisplayMode::Fullscreen);
+        display_options.record_maximized(false);
+    }
 }
 
 struct AudioContext {
@@ -1142,7 +1207,7 @@ fn current_unix_timestamp() -> u64 {
 }
 
 impl GameApp {
-    fn new(width: u32, height: u32) -> Result<Self> {
+    fn new(width: u32, height: u32, audio_options: AudioOptions) -> Result<Self> {
         let engine = Engine::new();
         let snapshot = engine.snapshot();
         let scenario_label = DEFAULT_SCENARIO_LABEL.to_string();
@@ -1158,18 +1223,6 @@ impl GameApp {
 
         let scenario_catalog = build_scenario_catalog(&scenarios);
         let menu_state = MenuState::new(menu, scenarios);
-        let audio_options = cached_app_paths()
-            .ok()
-            .map(|paths| {
-                if let Err(err) = paths.ensure_user_dirs() {
-                    eprintln!(
-                        "warning: failed to ensure user data directories at {}: {err}",
-                        paths.user_data_dir().display()
-                    );
-                }
-                AudioOptions::load(Some(paths))
-            })
-            .unwrap_or_default();
         let audio = match AudioContext::try_new(audio_options) {
             Ok(ctx) => Some(ctx),
             Err(err) => {
