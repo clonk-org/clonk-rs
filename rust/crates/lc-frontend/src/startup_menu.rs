@@ -133,6 +133,7 @@ mod tests {
             kind: ScenarioKind::Scenario,
             is_editable: true,
             is_playable: true,
+            location: None,
         }
     }
 

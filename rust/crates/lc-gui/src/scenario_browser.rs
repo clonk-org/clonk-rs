@@ -28,6 +28,7 @@ pub struct ScenarioEntry {
     pub kind: ScenarioKind,
     pub is_editable: bool,
     pub is_playable: bool,
+    pub location: Option<String>,
 }
 
 impl ScenarioEntry {
@@ -190,6 +191,12 @@ impl ScenarioBrowser {
         self.gui
             .set_label_text(self.layout.info_panel.kind_label, "Kind: -")?;
         self.gui.set_label_text(
+            self.layout.info_panel.availability_label,
+            "Playable: No    Editable: No",
+        )?;
+        self.gui
+            .set_label_text(self.layout.info_panel.location_label, "Location: -")?;
+        self.gui.set_label_text(
             self.layout.info_panel.description_label,
             "Select a scenario to view its details.",
         )?;
@@ -215,6 +222,23 @@ impl ScenarioBrowser {
                     .set_label_text(self.layout.info_panel.title_label, title)?;
                 self.gui
                     .set_label_text(self.layout.info_panel.kind_label, kind_label)?;
+                let availability = format!(
+                    "Playable: {}    Editable: {}",
+                    if entry.is_playable { "Yes" } else { "No" },
+                    if entry.is_editable { "Yes" } else { "No" }
+                );
+                self.gui
+                    .set_label_text(self.layout.info_panel.availability_label, availability)?;
+                let location = entry
+                    .location
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                self.gui.set_label_text(
+                    self.layout.info_panel.location_label,
+                    format!("Location: {}", location),
+                )?;
                 self.gui
                     .set_label_text(self.layout.info_panel.description_label, description)?;
                 return Ok(());
@@ -384,6 +408,8 @@ impl ScenarioBrowserLayout {
         let info_column = gui.add_column(root, true);
         let title_label = gui.add_label(info_column, "No scenario selected");
         let kind_label = gui.add_label(info_column, "Kind: -");
+        let availability_label = gui.add_label(info_column, "Playable: No    Editable: No");
+        let location_label = gui.add_label(info_column, "Location: -");
         let description_label =
             gui.add_label(info_column, "Select a scenario to view its details.");
 
@@ -397,6 +423,8 @@ impl ScenarioBrowserLayout {
             info_panel: InfoPanel {
                 title_label,
                 kind_label,
+                availability_label,
+                location_label,
                 description_label,
             },
             action_buttons: ActionButtons { start, open, edit },
@@ -414,6 +442,8 @@ impl ScenarioBrowserLayout {
 struct InfoPanel {
     title_label: WidgetId,
     kind_label: WidgetId,
+    availability_label: WidgetId,
+    location_label: WidgetId,
     description_label: WidgetId,
 }
 
@@ -446,6 +476,7 @@ mod tests {
                 kind: ScenarioKind::Scenario,
                 is_editable: true,
                 is_playable: true,
+                location: Some("/scenarios/tutorial".into()),
             },
             ScenarioEntry {
                 identifier: "folder_1".into(),
@@ -454,6 +485,7 @@ mod tests {
                 kind: ScenarioKind::Folder,
                 is_editable: false,
                 is_playable: false,
+                location: Some("/scenarios/missions".into()),
             },
         ];
 
@@ -511,6 +543,7 @@ mod tests {
                 kind: ScenarioKind::Scenario,
                 is_editable: false,
                 is_playable: true,
+                location: Some("/scenarios/tutorial".into()),
             },
             ScenarioEntry {
                 identifier: "folder_1".into(),
@@ -519,6 +552,7 @@ mod tests {
                 kind: ScenarioKind::Folder,
                 is_editable: true,
                 is_playable: false,
+                location: Some("/scenarios/campaign".into()),
             },
         ];
 

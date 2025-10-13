@@ -1065,6 +1065,7 @@ impl FrontendScenario {
             kind: self.kind,
             is_editable: self.is_editable,
             is_playable: self.is_playable,
+            location: self.location_label(),
         }
     }
 
@@ -1100,6 +1101,16 @@ impl FrontendScenario {
             path: Some(entry.path),
             children,
         })
+    }
+
+    fn location_label(&self) -> Option<String> {
+        if let Some(path) = self.path.as_ref() {
+            return Some(path.display().to_string());
+        }
+        if self.path.is_none() && matches!(self.kind, ScenarioKind::Scenario) {
+            return Some("Built-in Rust sandbox".to_string());
+        }
+        None
     }
 
     fn fallback() -> Self {
@@ -2131,6 +2142,7 @@ fn build_menu_entries(entries: &[FrontendScenario], include_back: bool) -> Vec<S
             kind: ScenarioKind::Folder,
             is_editable: false,
             is_playable: false,
+            location: None,
         });
     }
     result.extend(entries.iter().map(FrontendScenario::to_ui_entry));
