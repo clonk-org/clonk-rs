@@ -1045,6 +1045,114 @@ impl MenuState {
     }
 }
 
+const PLACEHOLDER_PREVIEW_WIDTH: u32 = 320;
+const PLACEHOLDER_PREVIEW_HEIGHT: u32 = 200;
+
+fn generate_preview_placeholder(kind: ScenarioKind, title: &str) -> ImageData {
+    let (top, bottom, accent) = preview_palette(kind);
+    let mut pixels =
+        vec![0u8; (PLACEHOLDER_PREVIEW_WIDTH * PLACEHOLDER_PREVIEW_HEIGHT * 4) as usize];
+
+    let mut hasher = DefaultHasher::new();
+    title.hash(&mut hasher);
+    let seed = hasher.finish();
+
+    let stripe_spacing = 5 + (seed % 5) as u32;
+    let stripe_offset = if stripe_spacing == 0 {
+        0
+    } else {
+        (seed as u32) % stripe_spacing
+    };
+    let noise_seed = seed.rotate_left(17) ^ 0x9e37_79b9_7f4a_7c15;
+    let highlight_start = PLACEHOLDER_PREVIEW_HEIGHT.saturating_sub(48);
+
+    for y in 0..PLACEHOLDER_PREVIEW_HEIGHT {
+        let t = if PLACEHOLDER_PREVIEW_HEIGHT > 1 {
+            y as f32 / (PLACEHOLDER_PREVIEW_HEIGHT - 1) as f32
+        } else {
+            0.0
+        };
+        let mut base = lerp_color(top, bottom, t);
+        if y >= highlight_start {
+            let emphasis = (y - highlight_start) as f32 / 48.0;
+            base = blend_toward(base, accent, (0.25 + emphasis * 0.45).clamp(0.0, 0.65));
+        }
+
+        for x in 0..PLACEHOLDER_PREVIEW_WIDTH {
+            let mut color = base;
+            if ((x + y + stripe_offset) % stripe_spacing) == 0 {
+                color = blend_toward(color, accent, 0.35);
+            }
+
+            let base_noise = noise_seed
+                .wrapping_add((x as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+                .wrapping_add((y as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9));
+            let noise = (base_noise ^ (base_noise >> 32)) as u8;
+            let jitter = (noise as i16 - 128) / 18;
+            color = adjust_color_brightness(color, jitter);
+
+            let idx = ((y * PLACEHOLDER_PREVIEW_WIDTH + x) * 4) as usize;
+            pixels[idx] = color.r;
+            pixels[idx + 1] = color.g;
+            pixels[idx + 2] = color.b;
+            pixels[idx + 3] = color.a;
+        }
+    }
+
+    ImageData::new(
+        PLACEHOLDER_PREVIEW_WIDTH,
+        PLACEHOLDER_PREVIEW_HEIGHT,
+        pixels,
+    )
+}
+
+fn preview_palette(kind: ScenarioKind) -> (Color, Color, Color) {
+    match kind {
+        ScenarioKind::Scenario => (
+            Color::opaque(36, 52, 104),
+            Color::opaque(14, 20, 40),
+            Color::opaque(220, 184, 104),
+        ),
+        ScenarioKind::Folder => (
+            Color::opaque(30, 68, 72),
+            Color::opaque(14, 26, 32),
+            Color::opaque(160, 216, 200),
+        ),
+        ScenarioKind::Editor => (
+            Color::opaque(96, 52, 32),
+            Color::opaque(32, 20, 16),
+            Color::opaque(228, 164, 100),
+        ),
+    }
+}
+
+fn lerp_color(start: Color, end: Color, t: f32) -> Color {
+    let clamped = t.clamp(0.0, 1.0);
+    let lerp_channel = |s: u8, e: u8| -> u8 {
+        (s as f32 + (e as f32 - s as f32) * clamped)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color::new(
+        lerp_channel(start.r, end.r),
+        lerp_channel(start.g, end.g),
+        lerp_channel(start.b, end.b),
+        255,
+    )
+}
+
+fn blend_toward(base: Color, target: Color, factor: f32) -> Color {
+    lerp_color(base, target, factor.clamp(0.0, 1.0))
+}
+
+fn adjust_color_brightness(color: Color, delta: i16) -> Color {
+    let adjust = |channel: u8| -> u8 {
+        let value = channel as i16 + delta;
+        value.clamp(0, 255) as u8
+    };
+    Color::new(adjust(color.r), adjust(color.g), adjust(color.b), color.a)
+}
+
 #[derive(Clone, Debug)]
 struct FrontendScenario {
     identifier: String,
@@ -1090,9 +1198,13 @@ impl FrontendScenario {
             }
         }
 
-        let preview = entry.preview.as_ref().map(|preview| {
-            ImageData::new(preview.width(), preview.height(), preview.pixels().to_vec())
-        });
+        let preview = entry
+            .preview
+            .as_ref()
+            .map(|preview| {
+                ImageData::from_arc(preview.width(), preview.height(), preview.clone_data())
+            })
+            .or_else(|| Some(generate_preview_placeholder(kind.clone(), &entry.title)));
 
         if matches!(kind, ScenarioKind::Scenario) && !seen.insert(identifier.clone()) {
             return None;
@@ -1130,7 +1242,10 @@ impl FrontendScenario {
             is_editable: true,
             is_playable: true,
             path: None,
-            preview: None,
+            preview: Some(generate_preview_placeholder(
+                ScenarioKind::Scenario,
+                DEFAULT_SCENARIO_LABEL,
+            )),
             children: Vec::new(),
         }
     }
@@ -1173,7 +1288,10 @@ impl SavedScenarioInfo {
             is_editable: self.is_editable,
             is_playable: self.is_playable,
             path: self.path.clone(),
-            preview: None,
+            preview: Some(generate_preview_placeholder(
+                ScenarioKind::Scenario,
+                &self.title,
+            )),
             children: Vec::new(),
         }
     }
@@ -2573,6 +2691,25 @@ mod tests {
         };
 
         vec![folder]
+    }
+
+    #[test]
+    fn placeholder_preview_has_expected_dimensions() {
+        let preview = generate_preview_placeholder(ScenarioKind::Scenario, "Alpha");
+        assert_eq!(preview.width(), PLACEHOLDER_PREVIEW_WIDTH);
+        assert_eq!(preview.height(), PLACEHOLDER_PREVIEW_HEIGHT);
+        let pixels = preview.pixels();
+        let mut chunks = pixels.chunks_exact(4);
+        let mut varied = false;
+        if let Some(first) = chunks.next() {
+            for chunk in chunks {
+                if chunk != first {
+                    varied = true;
+                    break;
+                }
+            }
+        }
+        assert!(varied, "placeholder preview should contain color variation");
     }
 
     #[test]

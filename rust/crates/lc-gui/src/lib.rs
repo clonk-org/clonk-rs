@@ -64,6 +64,21 @@ impl Rect {
             && point.x < self.origin.x + self.size.width
             && point.y < self.origin.y + self.size.height
     }
+
+    pub fn inset(&self, amount: f32) -> Self {
+        self.inset_by(amount, amount)
+    }
+
+    pub fn inset_by(&self, horizontal: f32, vertical: f32) -> Self {
+        let horizontal = horizontal.max(0.0);
+        let vertical = vertical.max(0.0);
+        let width = (self.size.width - horizontal * 2.0).max(0.0);
+        let height = (self.size.height - vertical * 2.0).max(0.0);
+        Rect::from_origin_size(
+            Point::new(self.origin.x + horizontal, self.origin.y + vertical),
+            Size::new(width, height),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -377,6 +392,8 @@ struct Picture {
     preferred_size: Size,
     image: Option<ImageData>,
     background: Color,
+    frame_color: Color,
+    padding: f32,
 }
 
 impl Picture {
@@ -384,7 +401,9 @@ impl Picture {
         Self {
             preferred_size: Size::new(width.max(1.0), height.max(1.0)),
             image: None,
-            background: Color::opaque(20, 32, 48),
+            background: Color::opaque(24, 36, 58),
+            frame_color: Color::opaque(12, 20, 32),
+            padding: 6.0,
         }
     }
 
@@ -790,16 +809,23 @@ impl Gui {
                 }
             }
             WidgetKind::Picture(picture) => {
+                commands.push(DrawCommand::Quad {
+                    rect: node.rect,
+                    color: picture.frame_color,
+                });
+                let content_rect = node.rect.inset(1.0);
+                commands.push(DrawCommand::Quad {
+                    rect: content_rect,
+                    color: picture.background,
+                });
                 if let Some(image) = &picture.image {
-                    commands.push(DrawCommand::Image {
-                        rect: node.rect,
-                        image: image.clone(),
-                    });
-                } else {
-                    commands.push(DrawCommand::Quad {
-                        rect: node.rect,
-                        color: picture.background,
-                    });
+                    let image_bounds = content_rect.inset(picture.padding);
+                    if let Some(letterboxed) = letterbox_image_rect(image_bounds, image) {
+                        commands.push(DrawCommand::Image {
+                            rect: letterboxed,
+                            image: image.clone(),
+                        });
+                    }
                 }
             }
             WidgetKind::Column(_) | WidgetKind::Row(_) => {}
@@ -1053,6 +1079,36 @@ fn wrong_widget_type(id: WidgetId, expected: &'static str, kind: &WidgetKind) ->
     }
 }
 
+fn letterbox_image_rect(bounds: Rect, image: &ImageData) -> Option<Rect> {
+    if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
+        return None;
+    }
+    let width = image.width();
+    let height = image.height();
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let scale_x = bounds.size.width / width as f32;
+    let scale_y = bounds.size.height / height as f32;
+    let scale = scale_x.min(scale_y);
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+
+    let scaled_width = (width as f32 * scale).min(bounds.size.width).max(0.0);
+    let scaled_height = (height as f32 * scale).min(bounds.size.height).max(0.0);
+    let target_width = scaled_width.max(1.0).min(bounds.size.width);
+    let target_height = scaled_height.max(1.0).min(bounds.size.height);
+
+    let offset_x = (bounds.size.width - target_width) * 0.5;
+    let offset_y = (bounds.size.height - target_height) * 0.5;
+    Some(Rect::from_origin_size(
+        Point::new(bounds.origin.x + offset_x, bounds.origin.y + offset_y),
+        Size::new(target_width, target_height),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1185,6 +1241,68 @@ mod tests {
             quads.len(),
             1,
             "only background quad rendered when fraction is zero"
+        );
+    }
+
+    #[test]
+    fn picture_letterboxes_and_frames_image() {
+        let mut gui = Gui::new();
+        let root = gui.root();
+        let picture = gui.add_picture(root, 200.0, 100.0);
+
+        let pixels = vec![255u8; 200 * 200 * 4];
+        gui.set_picture_image(picture, Some(ImageData::new(200, 200, pixels)))
+            .expect("set picture image");
+        gui.layout(Size::new(200.0, 100.0));
+
+        let mut image_rect = None;
+        let mut frame_quads = 0;
+        for cmd in gui.render() {
+            match cmd {
+                DrawCommand::Image { rect, .. } => image_rect = Some(rect),
+                DrawCommand::Quad { .. } => frame_quads += 1,
+                _ => {}
+            }
+        }
+
+        let rect = image_rect.expect("image rendered");
+        let picture_bounds = gui.rect_of(picture).expect("picture bounds");
+        let padded_bounds = picture_bounds.inset(1.0).inset(6.0);
+        assert!(
+            (rect.size.width - rect.size.height).abs() < 0.01,
+            "expected letterboxed image with matching width/height, got {} x {}",
+            rect.size.width,
+            rect.size.height
+        );
+        assert!(
+            rect.size.width <= padded_bounds.size.width + 0.01,
+            "letterboxed width should fit inside padded bounds"
+        );
+        assert!(
+            rect.size.height <= padded_bounds.size.height + 0.01,
+            "letterboxed height should fit inside padded bounds"
+        );
+        assert!(
+            rect.origin.x >= padded_bounds.origin.x - 0.01,
+            "image origin should start within padded bounds"
+        );
+        assert!(
+            rect.origin.y >= padded_bounds.origin.y - 0.01,
+            "image origin should start within padded bounds"
+        );
+        assert!(
+            rect.origin.x + rect.size.width
+                <= padded_bounds.origin.x + padded_bounds.size.width + 0.01,
+            "image should not overflow padded bounds horizontally"
+        );
+        assert!(
+            rect.origin.y + rect.size.height
+                <= padded_bounds.origin.y + padded_bounds.size.height + 0.01,
+            "image should not overflow padded bounds vertically"
+        );
+        assert!(
+            frame_quads >= 2,
+            "expected frame/background quads for picture widget"
         );
     }
 
