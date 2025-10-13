@@ -15,7 +15,7 @@
 - Networking/editor toolchain integration remains outstanding; audio/video configs (enablement, volumes, channels, window state) now flow through the Rust runtime.
 
 ## Immediate Priorities
-1. Standalone Rust client parity
+1. [x] Standalone Rust client parity
    - [x] Boot window + scenario browser + deterministic engine loop in `lc-app`.
    - [x] Loop background music via `lc_audio` (real scenario tracks when present, sandbox fallback otherwise).
    - [x] Promote Rust UI/input/audio to production fidelity
