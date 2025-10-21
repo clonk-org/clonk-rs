@@ -654,7 +654,7 @@ impl SoundLibrary {
     fn find_wildcard(&self, pattern: &str) -> Option<usize> {
         let mut matches = Vec::new();
         for (index, entry) in self.entries.iter().enumerate() {
-            if matches_question_pattern(pattern, &entry.file_name) {
+            if matches_sound_pattern(pattern, &entry.file_name) {
                 matches.push(index);
             }
         }
@@ -748,9 +748,8 @@ impl SoundSearchTerms {
         if !has_extension {
             prepared.push_str(".wav");
         }
-        let normalized = prepared.replace('*', "?");
-        let has_wildcards = normalized.contains('?');
-        let normalized_lower = normalized.to_ascii_lowercase();
+        let has_wildcards = prepared.contains('*') || prepared.contains('?');
+        let normalized_lower = prepared.to_ascii_lowercase();
 
         let wildcard_pattern = if has_wildcards {
             Some(normalized_lower.clone())
@@ -916,14 +915,37 @@ fn is_probable_sound_container(path: &Path, name_lower: &str) -> bool {
     }
 }
 
-fn matches_question_pattern(pattern: &str, candidate: &str) -> bool {
-    if pattern.len() != candidate.len() {
-        return false;
+fn matches_sound_pattern(pattern: &str, candidate: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let candidate = candidate.as_bytes();
+
+    let mut p = 0;
+    let mut c = 0;
+    let mut star = None;
+    let mut match_index = 0;
+
+    while c < candidate.len() {
+        if p < pattern.len() && (pattern[p] == candidate[c] || pattern[p] == b'?') {
+            p += 1;
+            c += 1;
+        } else if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            match_index = c;
+            p += 1;
+        } else if let Some(star_index) = star {
+            p = star_index + 1;
+            match_index += 1;
+            c = match_index;
+        } else {
+            return false;
+        }
     }
-    pattern
-        .chars()
-        .zip(candidate.chars())
-        .all(|(p, c)| p == '?' || p == c)
+
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+
+    p == pattern.len()
 }
 
 fn extension_rank(ext: Option<&str>) -> usize {
@@ -2679,6 +2701,24 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::collections::HashMap;
+
+    #[test]
+    fn matches_sound_pattern_handles_glob_wildcards() {
+        assert!(matches_sound_pattern("clonk*", "clonk.wav"));
+        assert!(matches_sound_pattern("clonk*", "clonk001.wav"));
+        assert!(matches_sound_pattern("*.wav", "sound.wav"));
+        assert!(matches_sound_pattern("sound?.wav", "sound1.wav"));
+        assert!(!matches_sound_pattern("sound?.wav", "sound12.wav"));
+        assert!(matches_sound_pattern("mix???.ogg", "mix001.ogg"));
+        assert!(!matches_sound_pattern("mix???.ogg", "mix01.ogg"));
+    }
+
+    #[test]
+    fn sound_search_terms_preserves_wildcards() {
+        let terms = SoundSearchTerms::new("Sound*");
+        assert_eq!(terms.wildcard_pattern.as_deref(), Some("sound*.wav"));
+        assert!(terms.search_names.is_empty());
+    }
 
     fn sample_scenarios() -> Vec<FrontendScenario> {
         let child = FrontendScenario {

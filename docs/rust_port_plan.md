@@ -6,7 +6,9 @@
 
 **How to Run:** `cargo run` (launches full game with real scenarios and audio)
 
-**Recent Progress (2025-10-21):** Replaced busy-poll loop with fixed-step accumulator using `ControlFlow::WaitUntil` to align simulation cadence with the legacy engine; validated via `cargo test` and `cargo xtask engine-snapshots verify`.
+**Recent Progress (2025-10-21):**
+- Replaced busy-poll loop with fixed-step accumulator using `ControlFlow::WaitUntil` to align simulation cadence with the legacy engine; validated via `cargo test` and `cargo xtask engine-snapshots verify`.
+- Implemented legacy glob semantics for sound wildcard lookup and added regression tests.
 
 ## Architecture
 
@@ -27,12 +29,6 @@
 **C++ Codebase:** Legacy implementation remains in `src/` but is **no longer required** for the Rust runtime.
 
 ## Parity Gaps
-
-### High: Sound Wildcard Matching
-**Issue:** Pattern matching converts '*' to '?' with length equality check; likely differs from C++ glob semantics where '*' matches 0..n characters.
-**Location:** rust/crates/lc-app/src/main.rs:736-744, 904-912
-**Impact:** Audio asset resolution may fail or select different sounds than C++ for pattern-based references.
-**Fix:** Implement proper glob matching ('*' = 0..n, '?' = single char) to match legacy behavior.
 
 ### Medium: Multiplayer Integration Status
 **Issue:** Documentation claims lc-network "owns the multiplayer stack," but lc-app shows no host/join/lobby flows in code.
@@ -68,9 +64,8 @@
 
 ## Immediate Priorities
 
-1. **Fix sound wildcard semantics** - Support '*' as 0..n match (1 hour)
-2. **Clarify MP integration** - Document entry point or wire into lc-app (2-4 hours)
-3. **Add structured logging** - Replace println!/eprintln! with tracing (2-3 hours)
+1. **Clarify MP integration** - Document entry point or wire into lc-app (2-4 hours)
+2. **Add structured logging** - Replace println!/eprintln! with tracing (2-3 hours)
 
 ## Assets & Testing
 
