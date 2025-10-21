@@ -6,6 +6,8 @@
 
 **How to Run:** `cargo run` (launches full game with real scenarios and audio)
 
+**Recent Progress (2025-10-21):** Replaced busy-poll loop with fixed-step accumulator using `ControlFlow::WaitUntil` to align simulation cadence with the legacy engine; validated via `cargo test` and `cargo xtask engine-snapshots verify`.
+
 ## Architecture
 
 **Rust Crates:**
@@ -25,12 +27,6 @@
 **C++ Codebase:** Legacy implementation remains in `src/` but is **no longer required** for the Rust runtime.
 
 ## Parity Gaps
-
-### High: Simulation Determinism
-**Issue:** Event loop uses `ControlFlow::Poll` (busy-wait) and frame-rate-coupled ticks without fixed-step accumulator.
-**Location:** rust/crates/lc-app/src/main.rs:96, 117-125
-**Impact:** Simulation speed varies with host performance; risks divergence from C++ behavior and wastes CPU.
-**Fix:** Implement fixed-step accumulator with `ControlFlow::WaitUntil` and decouple render from tick rate.
 
 ### High: Sound Wildcard Matching
 **Issue:** Pattern matching converts '*' to '?' with length equality check; likely differs from C++ glob semantics where '*' matches 0..n characters.
@@ -67,15 +63,14 @@
 - [ ] Scenarios load and run with working audio/graphics/input
 - [ ] Quick-save/load works across sessions
 - [ ] `cargo test` passes on all platforms (macOS/Windows/Linux)
-- [ ] `cargo xtask engine-snapshots verify` validates determinism vs C++ baseline
+- [x] `cargo xtask engine-snapshots verify` validates determinism vs C++ baseline (2025-10-21 clean run)
 - [ ] Multiplayer host/join flows work (pending integration clarity)
 
 ## Immediate Priorities
 
-1. **Implement fixed-step loop** - Replace busy-poll with proper accumulator (1-2 hours)
-2. **Fix sound wildcard semantics** - Support '*' as 0..n match (1 hour)
-3. **Clarify MP integration** - Document entry point or wire into lc-app (2-4 hours)
-4. **Add structured logging** - Replace println!/eprintln! with tracing (2-3 hours)
+1. **Fix sound wildcard semantics** - Support '*' as 0..n match (1 hour)
+2. **Clarify MP integration** - Document entry point or wire into lc-app (2-4 hours)
+3. **Add structured logging** - Replace println!/eprintln! with tracing (2-3 hours)
 
 ## Assets & Testing
 

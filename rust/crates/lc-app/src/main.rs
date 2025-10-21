@@ -40,6 +40,7 @@ use winit::window::{Fullscreen, Window, WindowBuilder};
 
 const PLAYER_OWNER: i32 = 1;
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_666); // ~60 FPS
+const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp backlog to avoid runaway catch-up
 const DEFAULT_SCENARIO_LABEL: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
 const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
@@ -90,10 +91,10 @@ fn main() -> Result<()> {
     let mut app = GameApp::new(size.width, size.height, audio_options, app_paths)
         .context("failed to initialise app state")?;
 
-    let mut last_frame = Instant::now();
+    let mut previous_instant = Instant::now();
+    let mut accumulator = Duration::ZERO;
 
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
         match event {
             Event::WindowEvent { window_id, event } if window_id == window.id() => {
                 if let Err(err) = handle_window_event(
@@ -114,15 +115,29 @@ fn main() -> Result<()> {
                     control_flow.set_exit();
                     return;
                 }
-                if last_frame.elapsed() >= FRAME_INTERVAL {
+                let now = Instant::now();
+                let frame_time = now.saturating_duration_since(previous_instant);
+                previous_instant = now;
+                let clamped = frame_time.min(MAX_ACCUMULATED_TIME);
+                accumulator = (accumulator + clamped).min(MAX_ACCUMULATED_TIME);
+
+                let mut did_update = false;
+                while accumulator >= FRAME_INTERVAL {
                     if let Err(err) = app.update() {
                         eprintln!("tick failed: {err:?}");
                         control_flow.set_exit();
                         return;
                     }
-                    window.request_redraw();
-                    last_frame = Instant::now();
+                    accumulator -= FRAME_INTERVAL;
+                    did_update = true;
                 }
+
+                if did_update {
+                    window.request_redraw();
+                }
+
+                let wait_duration = FRAME_INTERVAL.saturating_sub(accumulator);
+                *control_flow = ControlFlow::WaitUntil(now + wait_duration);
             }
             Event::RedrawRequested(id) if id == window.id() => {
                 if let Err(err) = app.render(pixels.frame_mut()) {
