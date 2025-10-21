@@ -1839,12 +1839,14 @@ name = "lc-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "gilrs",
  "lc-audio",
  "lc-core",
  "lc-engine",
  "lc-frontend",
  "lc-graphics",
+ "lc-network",
  "lc-platform",
  "lc-resources",
  "pixels",
@@ -1852,6 +1854,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "serde",
  "serde_json",
+ "tokio",
  "winit",
 ]
 

@@ -34,6 +34,16 @@ pub enum LegacyControlError {
     TrailingData,
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum LegacyEncodeError {
+    #[error("control packet variant is not supported yet")]
+    UnsupportedPacket,
+    #[error("client id {0} exceeds supported range")]
+    ClientIdOutOfRange(ClientId),
+    #[error("control tick {0} exceeds supported range")]
+    TickOutOfRange(Tick),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LegacyControlFrame {
     pub client_id: ClientId,
@@ -182,42 +192,86 @@ fn clear_upper_i32(value: i32) -> i32 {
     (value << 25) >> 25
 }
 
+fn encode_int32(mut value: i32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = clear_upper_i32(value);
+        if chunk == value {
+            bytes.push(chunk as u8);
+            break;
+        } else {
+            bytes.push((chunk ^ 0x80) as u8);
+            value >>= 7;
+        }
+    }
+    bytes
+}
+
+fn append_int32(buffer: &mut Vec<u8>, value: i32) {
+    buffer.extend(encode_int32(value));
+}
+
+fn encode_player_control(buffer: &mut Vec<u8>, data: &PlayerControlData) {
+    buffer.push(CID_PLR_CONTROL);
+    append_int32(buffer, data.player);
+    append_int32(buffer, data.command);
+    append_int32(buffer, data.data);
+    append_int32(buffer, data.by_client);
+}
+
+fn encode_controls(
+    controls: &[EngineControlPacket],
+    buffer: &mut Vec<u8>,
+) -> Result<(), LegacyEncodeError> {
+    for control in controls {
+        match control {
+            EngineControlPacket::PlayerControl(data) => encode_player_control(buffer, data),
+            _ => return Err(LegacyEncodeError::UnsupportedPacket),
+        }
+    }
+    Ok(())
+}
+
+pub fn encode_control_payload(frame: &LegacyControlFrame) -> Result<Vec<u8>, LegacyEncodeError> {
+    let client_id = i32::try_from(frame.client_id)
+        .map_err(|_| LegacyEncodeError::ClientIdOutOfRange(frame.client_id))?;
+    let tick =
+        i32::try_from(frame.tick).map_err(|_| LegacyEncodeError::TickOutOfRange(frame.tick))?;
+    let mut payload = Vec::new();
+    append_int32(&mut payload, client_id);
+    append_int32(&mut payload, tick);
+    encode_controls(&frame.controls, &mut payload)?;
+    payload.push(PID_NONE);
+    Ok(payload)
+}
+
+pub fn encode_control_packet(
+    frame: &LegacyControlFrame,
+) -> Result<ControlPacket, LegacyEncodeError> {
+    let payload = encode_control_payload(frame)?;
+    Ok(ControlPacket::builder(frame.client_id, frame.tick)
+        .timestamp_ms(frame.timestamp_ms)
+        .payload(payload))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn encode_int32(mut value: i32) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        loop {
-            let chunk = clear_upper_i32(value);
-            if chunk == value {
-                bytes.push(chunk as u8);
-                break;
-            } else {
-                bytes.push((chunk ^ 0x80) as u8);
-                value >>= 7;
-            }
-        }
-        bytes
-    }
-
-    fn encode_player_control(player: i32, command: i32, data: i32, by_client: i32) -> Vec<u8> {
-        let mut bytes = vec![CID_PLR_CONTROL];
-        bytes.extend(encode_int32(player));
-        bytes.extend(encode_int32(command));
-        bytes.extend(encode_int32(data));
-        bytes.extend(encode_int32(by_client));
-        bytes
-    }
-
     fn build_payload(client: i32, tick: i32, controls: &[[i32; 4]]) -> Vec<u8> {
         let mut payload = Vec::new();
-        payload.extend(encode_int32(client));
-        payload.extend(encode_int32(tick));
+        payload.extend(super::encode_int32(client));
+        payload.extend(super::encode_int32(tick));
         for control in controls {
-            payload.extend(encode_player_control(
-                control[0], control[1], control[2], control[3],
-            ));
+            let data = PlayerControlData {
+                player: control[0],
+                command: control[1],
+                data: control[2],
+                by_client: control[3],
+            };
+            let mut encoded = Vec::new();
+            super::encode_player_control(&mut encoded, &data);
+            payload.extend(encoded);
         }
         payload.push(PID_NONE);
         payload
@@ -303,5 +357,26 @@ mod tests {
         payload = build_payload(1, -2, &[]);
         let error = decode_control_payload(&payload).unwrap_err();
         assert!(matches!(error, LegacyControlError::NegativeTick(-2)));
+    }
+
+    #[test]
+    fn encode_and_decode_roundtrip() {
+        let frame = LegacyControlFrame {
+            client_id: 3,
+            tick: 12,
+            timestamp_ms: 77,
+            controls: vec![EngineControlPacket::PlayerControl(PlayerControlData {
+                player: 1,
+                command: 5,
+                data: 0,
+                by_client: 3,
+            })],
+        };
+        let packet = encode_control_packet(&frame).expect("encoding succeeds");
+        let decoded = decode_control_packet(&packet).expect("decoding succeeds");
+        assert_eq!(decoded.client_id, frame.client_id);
+        assert_eq!(decoded.tick, frame.tick);
+        assert_eq!(decoded.timestamp_ms, frame.timestamp_ms);
+        assert_eq!(decoded.controls, frame.controls);
     }
 }

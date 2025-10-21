@@ -16,7 +16,11 @@ mod transfer;
 pub use action::{
     ActionLibrary, ActionProcedure, ActionSpec, ActionState, ActionUpdate, ActionUpdateResult,
 };
-pub use control::{ControlButton, ControlEvent, ControlPacket, PlayerControlData};
+pub use control::{
+    interpret_player_control_command, ControlButton, ControlEvent, ControlPacket,
+    PlayerControlData, COM_CLEAR_PRESSED_COMS, COM_DOWN, COM_LEFT, COM_RELEASE_OFFSET, COM_RIGHT,
+    COM_UP,
+};
 pub use effect::EffectState;
 pub use input::PlayerInputState;
 pub use landscape::{

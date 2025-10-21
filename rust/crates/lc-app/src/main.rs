@@ -1,18 +1,22 @@
 mod gamepad;
 mod input;
+mod network;
 mod settings;
 
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::convert::TryFrom;
 use std::f32::consts::PI;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
+use clap::Parser;
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
 use input::KeyboardBindings;
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
@@ -28,6 +32,7 @@ use lc_frontend::{
 use lc_graphics::Color;
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{scenario as resource_scenario, Group};
+use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, NetworkMode};
 use pixels::{Pixels, SurfaceTexture};
 use serde::{Deserialize, Serialize};
 use settings::{AudioOptions, DisplayMode, DisplayOptions};
@@ -49,7 +54,55 @@ const SAVE_DIR_NAME: &str = "Savegames";
 const QUICK_SAVE_FILE: &str = "quicksave.lcsave";
 const SAVE_FILE_VERSION: u32 = 1;
 
+#[derive(Debug, Parser)]
+#[command(name = "lc-app", about = "LegacyClonk Rust runtime", version)]
+struct Cli {
+    #[arg(long = "host", value_name = "ADDR", conflicts_with = "join")]
+    host: Option<String>,
+
+    #[arg(long = "join", value_name = "ADDR")]
+    join: Option<String>,
+
+    #[arg(long = "player-owner", value_name = "OWNER", default_value_t = PLAYER_OWNER)]
+    player_owner: i32,
+
+    #[arg(long = "player-name", value_name = "NAME", default_value = "Player")]
+    player_name: String,
+}
+
+struct RuntimeConfig {
+    player_owner: i32,
+    network: Option<NetworkMode>,
+}
+
+fn resolve_network_mode(cli: &Cli) -> Result<Option<NetworkMode>> {
+    if let Some(ref host_addr) = cli.host {
+        let bind_addr = parse_socket_addr(host_addr, "host")?;
+        return Ok(Some(NetworkMode::Host(HostSettings { bind_addr })));
+    }
+    if let Some(ref join_addr) = cli.join {
+        let server_addr = parse_socket_addr(join_addr, "join")?;
+        return Ok(Some(NetworkMode::Client(ClientSettings {
+            server_addr,
+            player_name: cli.player_name.clone(),
+        })));
+    }
+    Ok(None)
+}
+
+fn parse_socket_addr(input: &str, kind: &str) -> Result<SocketAddr> {
+    input
+        .parse::<SocketAddr>()
+        .with_context(|| format!("invalid {kind} address `{input}`"))
+}
+
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let runtime = RuntimeConfig {
+        player_owner: cli.player_owner,
+        network: resolve_network_mode(&cli)?,
+    };
+
     let event_loop = EventLoop::new();
     let app_paths = cached_app_paths().ok();
     if let Some(paths) = app_paths {
@@ -88,7 +141,7 @@ fn main() -> Result<()> {
     let mut pixels = Pixels::new(size.width, size.height, surface)
         .context("failed to create pixel framebuffer")?;
 
-    let mut app = GameApp::new(size.width, size.height, audio_options, app_paths)
+    let mut app = GameApp::new(size.width, size.height, audio_options, app_paths, runtime)
         .context("failed to initialise app state")?;
 
     let mut previous_instant = Instant::now();
@@ -976,6 +1029,8 @@ struct GameApp {
     scenario_catalog: HashMap<String, FrontendScenario>,
     active_scenario: Option<FrontendScenario>,
     audio: Option<AudioContext>,
+    network: Option<NetworkManager>,
+    local_owner: i32,
     last_save_path: Option<PathBuf>,
 }
 
@@ -1391,7 +1446,13 @@ impl GameApp {
         height: u32,
         audio_options: AudioOptions,
         paths: Option<&AppPaths>,
+        runtime: RuntimeConfig,
     ) -> Result<Self> {
+        let network = match runtime.network {
+            Some(mode) => Some(NetworkManager::for_mode(mode, runtime.player_owner)?),
+            None => None,
+        };
+
         let engine = Engine::new();
         let snapshot = engine.snapshot();
         let scenario_label = DEFAULT_SCENARIO_LABEL.to_string();
@@ -1435,6 +1496,8 @@ impl GameApp {
             active_scenario: None,
             audio,
             last_save_path: None,
+            network,
+            local_owner: runtime.player_owner,
         };
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);
@@ -1510,9 +1573,47 @@ impl GameApp {
     }
 
     fn dispatch_control_event(&mut self, event: ControlEvent) -> Result<(), EngineError> {
-        let _ = self
-            .input
-            .handle_event(&mut self.engine, PLAYER_OWNER, event)?;
+        if let Some(network) = self.network.as_ref() {
+            let frame = self.engine.frame();
+            let tick = u32::try_from(frame).unwrap_or(u32::MAX);
+            network.submit_local_control(self.local_owner, event, tick);
+        }
+        self.dispatch_control_event_for_owner(self.local_owner, event)
+    }
+
+    fn dispatch_control_event_for_owner(
+        &mut self,
+        owner: i32,
+        event: ControlEvent,
+    ) -> Result<(), EngineError> {
+        let _ = self.input.handle_event(&mut self.engine, owner, event)?;
+        Ok(())
+    }
+
+    fn process_network_events(&mut self) -> Result<(), EngineError> {
+        if let Some(network) = self.network.as_mut() {
+            for event in network.poll_events() {
+                match event {
+                    NetworkEvent::Control { owner, event } => {
+                        if self.mode == AppMode::Running {
+                            self.dispatch_control_event_for_owner(owner, event)?;
+                        }
+                    }
+                    NetworkEvent::PeerConnected { client_id } => {
+                        println!("network: client {client_id} connected");
+                    }
+                    NetworkEvent::PeerDisconnected { client_id, reason } => match reason {
+                        Some(reason) => {
+                            println!("network: client {client_id} disconnected ({reason})");
+                        }
+                        None => println!("network: client {client_id} disconnected"),
+                    },
+                    NetworkEvent::Error(message) => {
+                        eprintln!("network error: {message}");
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1794,6 +1895,7 @@ impl GameApp {
     }
 
     fn update(&mut self) -> Result<(), EngineError> {
+        self.process_network_events()?;
         if matches!(self.mode, AppMode::Running) {
             self.snapshot = self.engine.tick()?;
             self.refresh_focus();
@@ -1998,7 +2100,7 @@ impl GameApp {
         configure_sandbox_engine(&mut self.engine)?;
 
         let spawn = SpawnConfig::new("Walker")
-            .with_owner(PLAYER_OWNER)
+            .with_owner(self.local_owner)
             .with_position(Vector2::new(240, 180))
             .with_energy(100)
             .with_action(ActionState::new("Walk"))
@@ -2201,7 +2303,9 @@ impl GameApp {
     }
 
     fn apply_focus_selection(&mut self) {
-        if let Some((object_id, owner, crew_member)) = select_focus_candidate(&self.snapshot) {
+        if let Some((object_id, owner, crew_member)) =
+            select_focus_candidate(&self.snapshot, self.local_owner)
+        {
             self.focus_id = Some(object_id);
             if crew_member && owner >= 0 {
                 if let Err(err) = self.engine.select_crew(owner, [object_id]) {
@@ -2282,9 +2386,12 @@ fn collect_player_overlays(
     players
 }
 
-fn select_focus_candidate(snapshot: &SimulationSnapshot) -> Option<(ObjectId, i32, bool)> {
+fn select_focus_candidate(
+    snapshot: &SimulationSnapshot,
+    preferred_owner: i32,
+) -> Option<(ObjectId, i32, bool)> {
     for object in snapshot.objects.iter() {
-        if is_focusable(object) && object.crew_member && object.owner == PLAYER_OWNER {
+        if is_focusable(object) && object.crew_member && object.owner == preferred_owner {
             return Some((object.id, object.owner, true));
         }
     }

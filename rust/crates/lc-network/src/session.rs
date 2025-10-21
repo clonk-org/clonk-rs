@@ -105,14 +105,22 @@ pub enum HostCommand {
 #[derive(Debug)]
 pub struct HostHandle {
     command_tx: mpsc::Sender<HostCommand>,
-    event_rx: mpsc::Receiver<HostEvent>,
+    event_rx: Option<mpsc::Receiver<HostEvent>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     join_handle: tokio::task::JoinHandle<()>,
 }
 
 impl HostHandle {
     pub fn events(&mut self) -> &mut mpsc::Receiver<HostEvent> {
-        &mut self.event_rx
+        self.event_rx
+            .as_mut()
+            .expect("host event receiver already taken")
+    }
+
+    pub fn take_event_receiver(&mut self) -> mpsc::Receiver<HostEvent> {
+        self.event_rx
+            .take()
+            .expect("host event receiver already taken")
     }
 
     pub async fn submit_local_control(&self, packet: ControlPacket) -> Result<(), HostError> {
@@ -187,7 +195,7 @@ pub async fn start_host(
     ));
     Ok(HostHandle {
         command_tx,
-        event_rx,
+        event_rx: Some(event_rx),
         shutdown_tx: Some(shutdown_tx),
         join_handle,
     })
@@ -198,24 +206,46 @@ pub async fn connect_client(
     addr: SocketAddr,
     config: ClientConfig,
 ) -> Result<ClientHandle, ClientError> {
-    let stream = TcpStream::connect(addr)
+    let mut stream = TcpStream::connect(addr)
         .await
         .map_err(ClientError::Connect)?;
+    stream.set_nodelay(true).ok();
+
+    let ClientConfig { name, kind } = config;
+    let request = HandshakeRequest {
+        version: PROTOCOL_VERSION,
+        name,
+        kind,
+    };
+
+    write_handshake_request(&mut stream, &request)
+        .await
+        .map_err(|error| ClientError::Handshake(format!("failed to send handshake: {error}")))?;
+
+    let response = read_handshake_response(&mut stream)
+        .await
+        .map_err(|error| ClientError::Handshake(format!("failed to read handshake: {error}")))?;
+
+    if response.version != PROTOCOL_VERSION {
+        return Err(ClientError::Handshake(format!(
+            "host protocol {} incompatible with client {PROTOCOL_VERSION}",
+            response.version
+        )));
+    }
+
+    let client_id = response.client_id;
+
     let (command_tx, command_rx) = mpsc::channel::<ClientCommand>(64);
     let (event_tx, event_rx) = mpsc::channel::<ClientEvent>(64);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join_handle = tokio::spawn(run_client(
-        stream,
-        config,
-        command_rx,
-        event_tx.clone(),
-        shutdown_rx,
-    ));
+    let join_handle = tokio::spawn(run_client(stream, command_rx, event_tx, shutdown_rx));
+
     Ok(ClientHandle {
         command_tx,
-        event_rx,
+        event_rx: Some(event_rx),
         shutdown_tx: Some(shutdown_tx),
         join_handle,
+        client_id,
     })
 }
 
@@ -255,14 +285,27 @@ pub enum ClientCommand {
 #[derive(Debug)]
 pub struct ClientHandle {
     command_tx: mpsc::Sender<ClientCommand>,
-    event_rx: mpsc::Receiver<ClientEvent>,
+    event_rx: Option<mpsc::Receiver<ClientEvent>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     join_handle: tokio::task::JoinHandle<()>,
+    client_id: ClientId,
 }
 
 impl ClientHandle {
     pub fn events(&mut self) -> &mut mpsc::Receiver<ClientEvent> {
-        &mut self.event_rx
+        self.event_rx
+            .as_mut()
+            .expect("client event receiver already taken")
+    }
+
+    pub fn take_event_receiver(&mut self) -> mpsc::Receiver<ClientEvent> {
+        self.event_rx
+            .take()
+            .expect("client event receiver already taken")
+    }
+
+    pub fn client_id(&self) -> ClientId {
+        self.client_id
     }
 
     pub async fn submit_control(&self, packet: ControlPacket) -> Result<(), ClientError> {
@@ -890,52 +933,11 @@ mod tests {
 
 async fn run_client(
     mut stream: TcpStream,
-    config: ClientConfig,
     mut commands: mpsc::Receiver<ClientCommand>,
     event_tx: mpsc::Sender<ClientEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     stream.set_nodelay(true).ok();
-
-    let request = HandshakeRequest {
-        version: PROTOCOL_VERSION,
-        name: config.name,
-        kind: config.kind,
-    };
-
-    if let Err(error) = write_handshake_request(&mut stream, &request).await {
-        let _ = event_tx
-            .send(ClientEvent::Disconnected {
-                reason: Some(format!("handshake send failed: {error}")),
-            })
-            .await;
-        return;
-    }
-
-    let response = match read_handshake_response(&mut stream).await {
-        Ok(response) => response,
-        Err(error) => {
-            let _ = event_tx
-                .send(ClientEvent::Disconnected {
-                    reason: Some(format!("handshake receive failed: {error}")),
-                })
-                .await;
-            return;
-        }
-    };
-
-    if response.version != PROTOCOL_VERSION {
-        let _ = event_tx
-            .send(ClientEvent::Disconnected {
-                reason: Some(format!(
-                    "host protocol {} incompatible with client {PROTOCOL_VERSION}",
-                    response.version
-                )),
-            })
-            .await;
-        return;
-    }
-
     let mut transport = crate::ControlTransport::new(stream);
 
     loop {

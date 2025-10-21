@@ -9,6 +9,7 @@
 **Recent Progress (2025-10-21):**
 - Replaced busy-poll loop with fixed-step accumulator using `ControlFlow::WaitUntil` to align simulation cadence with the legacy engine; validated via `cargo test` and `cargo xtask engine-snapshots verify`.
 - Implemented legacy glob semantics for sound wildcard lookup and added regression tests.
+- Wired `lc-app` CLI multiplayer entry points (`--host <addr>`, `--join <addr>`) to the Rust `lc-network` stack and added encode/decode coverage for legacy control packets.
 
 ## Architecture
 
@@ -30,10 +31,10 @@
 
 ## Parity Gaps
 
-### Medium: Multiplayer Integration Status
-**Issue:** Documentation claims lc-network "owns the multiplayer stack," but lc-app shows no host/join/lobby flows in code.
-**Impact:** Multiplayer parity unverified; unclear if lc-app or lc-game provides MP entry points.
-**Fix:** Clarify primary MP entry point; integrate networking UI into lc-app or document lc-game delegation path. Add MP integration tests.
+### Medium: Multiplayer Validation Coverage
+**Issue:** Newly exposed `lc-app` host/join CLI path lacks automated verification (connectivity, reconnects, remote crew control).
+**Impact:** Manual smoke tests are required; regressions in control forwarding or session teardown could slip through CI.
+**Fix:** Add headless MP test harness (host + client) and exercise save/load & reconnect scenarios under automation.
 
 ### Medium: Savegame Fragility
 **Issue:** Hard version check with no schema migration (`SAVE_FILE_VERSION = 1`).
@@ -60,12 +61,12 @@
 - [ ] Quick-save/load works across sessions
 - [ ] `cargo test` passes on all platforms (macOS/Windows/Linux)
 - [x] `cargo xtask engine-snapshots verify` validates determinism vs C++ baseline (2025-10-21 clean run)
-- [ ] Multiplayer host/join flows work (pending integration clarity)
+- [ ] Multiplayer host/join flows work (`lc-app --host/--join`; add automated smoke test)
 
 ## Immediate Priorities
 
-1. **Clarify MP integration** - Document entry point or wire into lc-app (2-4 hours)
-2. **Add structured logging** - Replace println!/eprintln! with tracing (2-3 hours)
+1. **Add structured logging** - Replace println!/eprintln! with tracing (2-3 hours)
+2. **Automate MP smoke tests** - Headless host/client harness exercising control sync + save/load (3-5 hours)
 
 ## Assets & Testing
 
