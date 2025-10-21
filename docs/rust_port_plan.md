@@ -1,33 +1,96 @@
 # LegacyClonk Rust Port Plan
 
-## Current Snapshot
-- `lc-game` now boots the Rust runtime by default, capturing stdout/stderr into runtime logs while keeping the existing update/support bundle tooling intact.
-- `lc-app` opens a winit/pixels window, lists real scenarios from install/user roots, runs them through `lc_engine`/`lc_frontend`, streams background music via `lc_audio`, and resolves SFX from scenario/global sound packs (synthetic fallback only when assets are missing).
-- Legacy config (`Config.Sound.*`) now drives Rust audio enablement, volumes, and mixer channel counts via `lc_core::std_config`.
-- Legacy keyboard bindings (`Config.Controls.*`) now feed the Rust input dispatcher so custom layouts persist across runs.
-- `Config.Graphics.*` now drives persisted window size/mode/maximize state in the Rust client (F11 toggles fullscreen; window moves/resizes save back on exit).
-- Rust subsystems (engine, script VM, graphics, audio, networking, resources, GUI) are unit/snapshot tested in isolation; only the preview harness stitches them together.
-- Startup/menu flow now renders HUD overlays sourced from engine HUD metadata, highlights crew focus, and the scenario browser surfaces location/play/edit availability for each entry while broader UI polish continues; quick-save parity is complete.
-- `lc-network` decodes legacy `C4GameControlPacket` payloads into Rust `lc_engine` control structures so collected network traffic can be replayed and validated from the Rust side.
-- Scenario browser `Edit` actions now locate the legacy editor binary (honouring `LC_EDITOR_BINARY`) and spawn it for editable scenarios/folders.
-- Startup/menu flow now presents scenario preview art with placeholder renders for missing assets, letterboxed scaling, and a framed info panel backdrop.
-- `lc-network` now owns the multiplayer host/client transport stack (handshake, lobby admission, control dispatch, backlog/resync scheduling) so the Rust runtime no longer relies on the C++ network orchestrator.
+## Status: Feature-Complete with Parity Gaps
+
+**Port Completion:** All major subsystems ported to Rust. The `lc-app` binary is a fully functional game client with startup menu, scenario browser, audio (music + SFX), graphics, engine loop, networking, and savegame support.
+
+**How to Run:** `cargo run` (launches full game with real scenarios and audio)
+
+## Architecture
+
+**Rust Crates:**
+- `lc-engine` - Core game engine (physics, objects, landscape, actions, effects, recording/playback)
+- `lc-script` - C4Aul script VM port
+- `lc-graphics` - Surface rendering and pixel manipulation
+- `lc-audio` - Audio decoder + mixer (music/SFX channels)
+- `lc-frontend` - Graphics system, startup menu, scenario browser, input dispatcher
+- `lc-gui` - Widget system for UI overlays
+- `lc-resources` - C4Group file loading and scenario discovery
+- `lc-network` - Multiplayer transport (handshake, lobby, control dispatch, sync)
+- `lc-platform` - Platform abstractions and path discovery
+- `lc-core` - Shared types and config bridge to C++
+- `lc-app` - **Main game binary** (integrates all subsystems)
+- `lc-game` - Launcher wrapper (config/logging, delegates to runtime)
+
+**C++ Codebase:** Legacy implementation remains in `src/` but is **no longer required** for the Rust runtime.
 
 ## Parity Gaps
-- _None identified._
+
+### High: Simulation Determinism
+**Issue:** Event loop uses `ControlFlow::Poll` (busy-wait) and frame-rate-coupled ticks without fixed-step accumulator.
+**Location:** rust/crates/lc-app/src/main.rs:96, 117-125
+**Impact:** Simulation speed varies with host performance; risks divergence from C++ behavior and wastes CPU.
+**Fix:** Implement fixed-step accumulator with `ControlFlow::WaitUntil` and decouple render from tick rate.
+
+### High: Sound Wildcard Matching
+**Issue:** Pattern matching converts '*' to '?' with length equality check; likely differs from C++ glob semantics where '*' matches 0..n characters.
+**Location:** rust/crates/lc-app/src/main.rs:736-744, 904-912
+**Impact:** Audio asset resolution may fail or select different sounds than C++ for pattern-based references.
+**Fix:** Implement proper glob matching ('*' = 0..n, '?' = single char) to match legacy behavior.
+
+### Medium: Multiplayer Integration Status
+**Issue:** Documentation claims lc-network "owns the multiplayer stack," but lc-app shows no host/join/lobby flows in code.
+**Impact:** Multiplayer parity unverified; unclear if lc-app or lc-game provides MP entry points.
+**Fix:** Clarify primary MP entry point; integrate networking UI into lc-app or document lc-game delegation path. Add MP integration tests.
+
+### Medium: Savegame Fragility
+**Issue:** Hard version check with no schema migration (`SAVE_FILE_VERSION = 1`).
+**Location:** rust/crates/lc-app/src/main.rs:49, 1301-1307, 2041-2048
+**Impact:** Quick-saves break on any EngineState evolution; hampers parity testing.
+**Fix:** Add semantic versioning and migration layer for save format.
+
+### Low: Audio Mixing Model
+**Issue:** Linear panning/falloff may differ from C++ (which could use inverse-square, occlusion, etc.).
+**Location:** rust/crates/lc-app/src/main.rs:2577-2601
+**Impact:** Positional audio may sound different in large maps or busy scenes.
+**Fix:** Validate against C++ mix captures; adjust curves if needed.
+
+### Low: Build Ergonomics
+**Issue:** lc-engine builds rlib + cdylib + staticlib on every build (slow). Ad hoc println!/eprintln! logging.
+**Fix:** Feature-gate FFI artifacts. Replace print statements with structured logging (tracing/log).
+
+## Validation Checklist
+
+- [x] `cargo run` (no flags) launches lc-app with startup menu
+- [ ] Startup menu displays real scenarios from installation
+- [ ] Music plays in menu and during gameplay (when assets present)
+- [ ] Scenarios load and run with working audio/graphics/input
+- [ ] Quick-save/load works across sessions
+- [ ] `cargo test` passes on all platforms (macOS/Windows/Linux)
+- [ ] `cargo xtask engine-snapshots verify` validates determinism vs C++ baseline
+- [ ] Multiplayer host/join flows work (pending integration clarity)
 
 ## Immediate Priorities
-1. [x] Standalone Rust client parity
-   - [x] Boot window + scenario browser + deterministic engine loop in `lc-app`.
-   - [x] Loop background music via `lc_audio` (real scenario tracks when present, sandbox fallback otherwise).
-   - [x] Promote Rust UI/input/audio to production fidelity
-     - [x] Save/load parity via quick-save `.lcsave` snapshots in user data.
-     - [x] HUD overlays, menu integration, and scripted metadata polish.
-     - [x] SFX mixer wiring, scripted audio hooks, and asset resolution via registered sound groups.
-2. [x] Launcher parity: retire the C++ delegation for updates/support bundles and keep all prelaunch flows in Rust.
-   - [x] Default `lc-game` to the Rust runtime (`lc-app`), synthesize `Clonk-rust-*.log` from runtime stdout/stderr, and preserve update/support bundle plumbing.
-3. [x] Automated parity harness: record canonical scenarios from the C++ build, replay them through Rust headlessly, and gate CI on the comparison (driven via `cargo xtask engine-snapshots verify` from CMake/CI).
 
-## Validation Targets
-- `cargo run -p lc-app` enters the startup menu, launches scenarios, and keeps music running without runtime warnings.
-- `cargo test` and `cargo xtask engine-snapshots verify` stay green across macOS/Windows/Linux.
+1. **Implement fixed-step loop** - Replace busy-poll with proper accumulator (1-2 hours)
+2. **Fix sound wildcard semantics** - Support '*' as 0..n match (1 hour)
+3. **Clarify MP integration** - Document entry point or wire into lc-app (2-4 hours)
+4. **Add structured logging** - Replace println!/eprintln! with tracing (2-3 hours)
+
+## Assets & Testing
+
+**Required Assets:** Game requires `System.c4g` and scenario files (`.c4s`, `.c4f`) in installation directory.
+**Current Status:** Assets present at `planet/System.c4g` (symlinked from project root).
+
+**Testing Infrastructure:**
+- Unit/snapshot tests per crate
+- Engine snapshot verification via `cargo xtask` (compares Rust vs C++ determinism)
+- CI should gate on test suite + snapshot verification
+
+## Success Criteria
+
+Port achieves **exact behavior parity** when:
+1. `cargo run` launches game with working menu/audio/scenarios
+2. All validation checklist items pass
+3. Engine snapshots match C++ baseline (deterministic parity)
+4. No observable differences in gameplay, audio, or multiplayer
