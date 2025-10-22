@@ -112,7 +112,7 @@ where
     let mut entries = Vec::new();
     for root in roots {
         let root_path = root.as_ref();
-        let mut discovered = collect_from_directory(root_path, "")?;
+        let mut discovered = collect_from_path(root_path, "")?;
         entries.append(&mut discovered);
     }
     sort_entries(&mut entries);
@@ -195,6 +195,22 @@ fn collect_from_directory(
     Ok(result)
 }
 
+fn collect_from_path(
+    path: &Path,
+    parent_identifier: &str,
+) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
+    if path.is_dir() {
+        return collect_from_directory(path, parent_identifier);
+    }
+    if path.is_file() {
+        if !is_scenario_filename_os(path) && !is_folder_filename_os(path) {
+            return Ok(Vec::new());
+        }
+        return collect_from_group_file(path, parent_identifier);
+    }
+    Ok(Vec::new())
+}
+
 fn collect_children_from_group(
     group: &Group,
     parent_identifier: &str,
@@ -258,6 +274,35 @@ fn collect_children_from_group(
     }
     sort_entries(&mut result);
     Ok(result)
+}
+
+fn collect_from_group_file(
+    path: &Path,
+    parent_identifier: &str,
+) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
+    let name_os = match path.file_name() {
+        Some(name) => name,
+        None => return Ok(Vec::new()),
+    };
+    let name = match name_os.to_str() {
+        Some(name) => name,
+        None => {
+            return Err(ScenarioDiscoveryError::NonUtf8Path {
+                path: path.to_path_buf(),
+            })
+        }
+    };
+    let group = Group::open(path).map_err(|source| ScenarioDiscoveryError::Group {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let identifier = join_identifier(parent_identifier, name);
+    let entry = match classify_group(&group)? {
+        GroupContentKind::Scenario => build_scenario_entry(&group, identifier)?,
+        GroupContentKind::Folder => build_folder_entry(&group, identifier)?,
+        GroupContentKind::Other => return Ok(Vec::new()),
+    };
+    Ok(vec![entry])
 }
 
 fn build_scenario_entry(
@@ -684,6 +729,27 @@ mod tests {
         assert_eq!(folder_entry.kind, ScenarioEntryKind::Folder);
         assert_eq!(folder_entry.children.len(), 1);
         assert_eq!(folder_entry.children[0].title, "Packed Child");
+    }
+
+    #[test]
+    fn discover_many_handles_directory_and_file_roots() {
+        let dir = tempdir().unwrap();
+
+        let dir_root = dir.path().join("Root");
+        fs::create_dir(&dir_root).unwrap();
+        let alpha = dir_root.join("Alpha.c4s");
+        fs::create_dir(&alpha).unwrap();
+        fs::write(alpha.join("Scenario.json"), br#"{"name":"Alpha"}"#).unwrap();
+
+        let packed_path = dir.path().join("Packed.c4s");
+        let packed_bytes = build_group(&[("Scenario.json", br#"{"name":"Packed"}"#.to_vec())]);
+        fs::write(&packed_path, packed_bytes).unwrap();
+
+        let entries =
+            discover_many([dir_root.as_path(), packed_path.as_path()]).expect("discover many");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].title, "Alpha");
+        assert_eq!(entries[1].title, "Packed");
     }
 
     fn build_group(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {

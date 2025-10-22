@@ -6,6 +6,9 @@
 
 **How to Run:** `cargo run` (launches full game with real scenarios and audio)
 
+**Recent Progress (2025-10-25):**
+- Startup menu now lists real installation scenarios; scenario discovery tolerates file roots and regression tests cover the menu flow.
+
 **Recent Progress (2025-10-24):**
 - FFI exports now live behind crate feature `ffi`; default builds emit only `rlib` so the workspace no longer recompiles cdylib/staticlib on every edit. Documented the manual `cargo rustc -p <crate> --features ffi -- --crate-type staticlib --crate-type cdylib` flow for legacy bridge builds.
 
@@ -48,7 +51,7 @@ Default builds now emit only `rlib`. Enable the `ffi` feature on the target crat
 ## Validation Checklist
 
 - [x] `cargo run` (no flags) launches lc-app with startup menu
-- [ ] Startup menu displays real scenarios from installation
+- [x] Startup menu displays real scenarios from installation
 - [ ] Music plays in menu and during gameplay (when assets present)
 - [ ] Scenarios load and run with working audio/graphics/input
 - [ ] Quick-save/load works across sessions

@@ -3126,6 +3126,12 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::collections::HashMap;
+    use std::env;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use tempfile::tempdir;
 
     fn make_object(id: u64, definition: &str, position: Vector2) -> ObjectSnapshot {
         ObjectSnapshot {
@@ -3183,6 +3189,43 @@ mod tests {
             transfer_zones: Vec::new(),
             audio: Vec::new(),
         }
+    }
+
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Vec<(String, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&str, Option<&Path>)]) -> Self {
+            let lock = env_lock().lock().unwrap();
+            let mut saved = Vec::with_capacity(vars.len());
+            for (key, value) in vars {
+                let original = env::var_os(key);
+                saved.push((key.to_string(), original));
+                match value {
+                    Some(path) => env::set_var(key, path.as_os_str()),
+                    None => env::remove_var(key),
+                }
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(val) => env::set_var(&key, val),
+                    None => env::remove_var(&key),
+                }
+            }
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
@@ -3587,6 +3630,51 @@ mod tests {
         );
 
         cleanup_quicksave_file();
+    }
+
+    #[test]
+    fn load_frontend_scenarios_discovers_install_entries() {
+        let install_dir = tempdir().unwrap();
+
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let scenario_dir = install_dir.path().join("Scenarios");
+        let alpha_dir = scenario_dir.join("Alpha.c4s");
+        fs::create_dir_all(&alpha_dir).unwrap();
+        fs::write(
+            alpha_dir.join("Scenario.json"),
+            br#"{"name":"Alpha Mission"}"#,
+        )
+        .unwrap();
+
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+
+        let scenarios = load_frontend_scenarios();
+        assert_eq!(
+            scenarios.len(),
+            1,
+            "expected discovered scenario without fallback"
+        );
+        let scenario = &scenarios[0];
+        assert_eq!(scenario.identifier, "Alpha.c4s");
+        assert_eq!(scenario.title, "Alpha Mission");
+        assert!(scenario.is_playable);
+        assert_eq!(
+            scenario
+                .path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str()),
+            Some("Alpha.c4s")
+        );
     }
 
     fn cleanup_quicksave_file() {
