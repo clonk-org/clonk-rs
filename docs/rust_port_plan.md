@@ -6,6 +6,9 @@
 
 **How to Run:** `cargo run` (launches full game with real scenarios and audio)
 
+**Recent Progress (2025-10-23):**
+- Matched positional audio with the legacy AudibilityRadius (700px) and viewport panning model; added regression coverage for mix geometry to prevent regressions.
+
 **Recent Progress (2025-10-22):**
 - Added semantic-versioned quick-save format with migration pipeline; legacy saves now load under current engine and regression coverage guards the path.
 
@@ -36,12 +39,6 @@
 
 ## Parity Gaps
 
-### Low: Audio Mixing Model
-**Issue:** Linear panning/falloff may differ from C++ (which could use inverse-square, occlusion, etc.).
-**Location:** rust/crates/lc-app/src/main.rs:2577-2601
-**Impact:** Positional audio may sound different in large maps or busy scenes.
-**Fix:** Validate against C++ mix captures; adjust curves if needed.
-
 ### Low: Build Ergonomics
 **Issue:** lc-engine builds rlib + cdylib + staticlib on every build (slow).
 **Fix:** Feature-gate FFI artifacts.
@@ -59,7 +56,7 @@
 
 ## Immediate Priorities
 
-1. Validate audio mixing parity vs C++ captures
+1. Feature-gate FFI artifacts to improve build throughput
 
 ## Assets & Testing
 

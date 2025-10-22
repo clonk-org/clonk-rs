@@ -373,12 +373,17 @@ impl AudioContext {
         self.current_music.take();
     }
 
-    fn process_audio(&mut self, snapshot: &SimulationSnapshot, focus: Option<&ObjectSnapshot>) {
+    fn process_audio(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        focus: Option<&ObjectSnapshot>,
+        viewport_center: Vector2,
+    ) {
         let events = &snapshot.audio;
         if !events.is_empty() {
-            self.handle_events(events, snapshot, focus);
+            self.handle_events(events, snapshot, focus, viewport_center);
         }
-        self.update_channels(snapshot, focus);
+        self.update_channels(snapshot, focus, viewport_center);
     }
 
     fn reset_sfx(&mut self) {
@@ -408,6 +413,7 @@ impl AudioContext {
         events: &[AudioCommand],
         snapshot: &SimulationSnapshot,
         focus: Option<&ObjectSnapshot>,
+        viewport_center: Vector2,
     ) {
         for event in events {
             match event {
@@ -429,6 +435,7 @@ impl AudioContext {
                         *custom_falloff,
                         snapshot,
                         focus,
+                        viewport_center,
                     ) {
                         tracing::error!(sound = %name, error = %err, "failed to play sound");
                     }
@@ -441,7 +448,14 @@ impl AudioContext {
                     target,
                     volume,
                 } => {
-                    self.update_sound_volume(name, *target, *volume, snapshot, focus);
+                    self.update_sound_volume(
+                        name,
+                        *target,
+                        *volume,
+                        snapshot,
+                        focus,
+                        viewport_center,
+                    );
                 }
             }
         }
@@ -456,6 +470,7 @@ impl AudioContext {
         custom_falloff: Option<i32>,
         snapshot: &SimulationSnapshot,
         focus: Option<&ObjectSnapshot>,
+        viewport_center: Vector2,
     ) -> Result<(), AudioError> {
         if !self.options.sound_enabled {
             return Ok(());
@@ -470,7 +485,7 @@ impl AudioContext {
             volume,
             custom_falloff,
         };
-        let (mut mix_volume, pan) = compute_mix_values(&info, snapshot, focus);
+        let (mut mix_volume, pan) = compute_mix_values(&info, snapshot, focus, viewport_center);
         mix_volume *= self.options.sound_volume;
         self.system
             .channel_set_volume_and_pan(channel, mix_volume, pan);
@@ -492,6 +507,7 @@ impl AudioContext {
         volume: u8,
         snapshot: &SimulationSnapshot,
         focus: Option<&ObjectSnapshot>,
+        viewport_center: Vector2,
     ) {
         let key = SoundInstanceKey::new(name, target);
         if let Some(info) = self.active_channels.get_mut(&key) {
@@ -500,7 +516,7 @@ impl AudioContext {
                 return;
             }
             let channel = info.channel;
-            let (mut mix_volume, pan) = compute_mix_values(info, snapshot, focus);
+            let (mut mix_volume, pan) = compute_mix_values(info, snapshot, focus, viewport_center);
             mix_volume *= self.options.sound_volume;
             drop(info);
             self.system
@@ -508,7 +524,12 @@ impl AudioContext {
         }
     }
 
-    fn update_channels(&mut self, snapshot: &SimulationSnapshot, focus: Option<&ObjectSnapshot>) {
+    fn update_channels(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        focus: Option<&ObjectSnapshot>,
+        viewport_center: Vector2,
+    ) {
         let mut finished = Vec::new();
         let mut updates: Vec<(ChannelId, f32, f32)> = Vec::new();
         if !self.options.sound_enabled {
@@ -522,7 +543,7 @@ impl AudioContext {
                 finished.push(key.clone());
                 continue;
             }
-            let (mut mix_volume, pan) = compute_mix_values(info, snapshot, focus);
+            let (mut mix_volume, pan) = compute_mix_values(info, snapshot, focus, viewport_center);
             mix_volume *= self.options.sound_volume;
             updates.push((info.channel, mix_volume, pan));
         }
@@ -2119,8 +2140,21 @@ impl GameApp {
     }
 
     fn update_audio(&mut self) {
+        let fallback_center = {
+            let surface = self.graphics.surface();
+            Vector2::new((surface.width() as i32) / 2, (surface.height() as i32) / 2)
+        };
+        let viewport_center = self
+            .focus_snapshot
+            .as_ref()
+            .map(|object| object.position)
+            .unwrap_or(fallback_center);
         if let Some(audio) = self.audio.as_mut() {
-            audio.process_audio(&self.snapshot, self.focus_snapshot.as_ref());
+            audio.process_audio(
+                &self.snapshot,
+                self.focus_snapshot.as_ref(),
+                viewport_center,
+            );
         }
     }
 
@@ -2955,32 +2989,77 @@ fn sandbox_music_bytes() -> &'static [u8] {
         .as_slice()
 }
 
-const DEFAULT_FALLOFF_DISTANCE: i32 = 400;
-
 fn compute_mix_values(
     info: &ChannelInfo,
     snapshot: &SimulationSnapshot,
     focus: Option<&ObjectSnapshot>,
+    viewport_center: Vector2,
 ) -> (f32, f32) {
-    let base_volume = (info.volume as f32 / 100.0).clamp(0.0, 1.0);
-    let listener = focus.map(|obj| obj.position).unwrap_or(Vector2::new(0, 0));
-    let source = info
-        .target
-        .and_then(|id| snapshot.object(id))
-        .map(|obj| obj.position)
-        .unwrap_or(listener);
+    const AUDIBILITY_RADIUS: f32 = 700.0;
+    const PAN_DIVISOR: f32 = 5.0;
+    const PAN_LIMIT: f32 = 100.0;
 
-    let dx = (source.x - listener.x) as f32;
-    let dy = (source.y - listener.y) as f32;
-    let distance = (dx * dx + dy * dy).sqrt();
-    let falloff = info
-        .custom_falloff
-        .unwrap_or(DEFAULT_FALLOFF_DISTANCE)
-        .max(1) as f32;
-    let proximity = (1.0 - distance / falloff).clamp(0.0, 1.0);
-    let volume = base_volume * proximity;
-    let pan = (dx / falloff).clamp(-1.0, 1.0);
-    (volume, pan)
+    let base_volume = (info.volume as f32 / 100.0).clamp(0.0, 1.0);
+    let Some(target_id) = info.target else {
+        return (base_volume, 0.0);
+    };
+    let Some(target) = snapshot.object(target_id) else {
+        return (base_volume, 0.0);
+    };
+    let source = target.position;
+
+    let mut listeners: Vec<Vector2> = Vec::new();
+    if let Some(focus_object) = focus {
+        listeners.push(focus_object.position);
+    }
+    for player in &snapshot.hud.players {
+        if let Some(focus_id) = player.focus {
+            if let Some(object) = snapshot.object(focus_id) {
+                listeners.push(object.position);
+            }
+        }
+    }
+    if listeners.is_empty() {
+        listeners.push(viewport_center);
+    }
+
+    let mut best_audibility: f32 = 0.0;
+    for listener in &listeners {
+        let dx = (source.x - listener.x) as f32;
+        let dy = (source.y - listener.y) as f32;
+        let distance = (dx * dx + dy * dy).sqrt();
+        let mut audibility = (1.0 - distance / AUDIBILITY_RADIUS).clamp(0.0, 1.0);
+        if let Some(falloff_distance) = info.custom_falloff {
+            if falloff_distance != 0 {
+                let scale = AUDIBILITY_RADIUS / falloff_distance as f32;
+                audibility = (1.0 + (audibility - 1.0) * scale).clamp(0.0, 1.0);
+            }
+        }
+        best_audibility = best_audibility.max(audibility);
+    }
+
+    let mut pan_accumulator = 0.0;
+    let mut pan_contributors = 0;
+    if snapshot.hud.players.is_empty() {
+        pan_accumulator += (source.x - viewport_center.x) as f32 / PAN_DIVISOR;
+        pan_contributors = 1;
+    } else {
+        for player in &snapshot.hud.players {
+            let center = player
+                .focus
+                .and_then(|focus_id| snapshot.object(focus_id))
+                .map(|obj| obj.position)
+                .unwrap_or(viewport_center);
+            pan_accumulator += (source.x - center.x) as f32 / PAN_DIVISOR;
+            pan_contributors += 1;
+        }
+    }
+    if pan_contributors == 0 {
+        pan_accumulator += (source.x - viewport_center.x) as f32 / PAN_DIVISOR;
+    }
+    let pan = (pan_accumulator.clamp(-PAN_LIMIT, PAN_LIMIT)) / PAN_LIMIT;
+
+    (base_volume * best_audibility, pan.clamp(-1.0, 1.0))
 }
 
 fn generate_tone_wav(name: &str) -> Vec<u8> {
@@ -3042,11 +3121,69 @@ mod tests {
     use lc_audio::decode_audio;
     use lc_engine::{
         ActionState, CommandDirection, Direction, EnvironmentFrame, HudPlayerSnapshot, HudSnapshot,
-        ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2, DEFAULT_CATEGORY,
+        ObjectId, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2, DEFAULT_CATEGORY,
     };
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::collections::HashMap;
+
+    fn make_object(id: u64, definition: &str, position: Vector2) -> ObjectSnapshot {
+        ObjectSnapshot {
+            id: ObjectId::new(id),
+            definition_id: definition.to_string(),
+            position,
+            velocity: Vector2::new(0, 0),
+            energy: 100,
+            damage: 0,
+            action: ActionState::default(),
+            direction: Direction::default(),
+            command_direction: CommandDirection::default(),
+            action_procedure: None,
+            effects: Vec::new(),
+            vertices: Vec::new(),
+            container: None,
+            contents: Vec::new(),
+            status: ObjectStatus::Normal,
+            owner: 1,
+            category: DEFAULT_CATEGORY,
+            crew_member: true,
+            alive: true,
+        }
+    }
+
+    fn make_snapshot(
+        objects: Vec<ObjectSnapshot>,
+        hud_players: Vec<HudPlayerSnapshot>,
+    ) -> SimulationSnapshot {
+        let mut known_crew_owners: Vec<i32> =
+            hud_players.iter().map(|player| player.owner).collect();
+        known_crew_owners.sort_unstable();
+        known_crew_owners.dedup();
+
+        SimulationSnapshot {
+            frame: 0,
+            physics: None,
+            objects,
+            environment: EnvironmentFrame::default(),
+            global_effects: Vec::new(),
+            particles: Vec::new(),
+            crew_selection: HashMap::new(),
+            crew_roles: HashMap::new(),
+            known_crew_owners,
+            eliminated_crew_owners: Vec::new(),
+            landscape: None,
+            rng: ChaCha8Rng::seed_from_u64(1),
+            surfaces: Vec::new(),
+            hud: HudSnapshot {
+                players: hud_players,
+            },
+            controls: Vec::new(),
+            network_packets: Vec::new(),
+            definition_categories: HashMap::new(),
+            transfer_zones: Vec::new(),
+            audio: Vec::new(),
+        }
+    }
 
     #[test]
     fn matches_sound_pattern_handles_glob_wildcards() {
@@ -3064,6 +3201,83 @@ mod tests {
         let terms = SoundSearchTerms::new("Sound*");
         assert_eq!(terms.wildcard_pattern.as_deref(), Some("sound*.wav"));
         assert!(terms.search_names.is_empty());
+    }
+
+    #[test]
+    fn compute_mix_values_matches_cxx_audibility() {
+        let listener = make_object(1, "Listener", Vector2::new(1000, 1000));
+        let source = make_object(2, "Source", Vector2::new(1350, 1000));
+        let snapshot = make_snapshot(
+            vec![listener.clone(), source.clone()],
+            vec![HudPlayerSnapshot {
+                owner: 1,
+                crew: vec![listener.id],
+                focus: Some(listener.id),
+                eliminated: false,
+            }],
+        );
+        let info = ChannelInfo {
+            channel: ChannelId(0),
+            looped: false,
+            target: Some(source.id),
+            volume: 100,
+            custom_falloff: None,
+        };
+        let (volume, pan) =
+            compute_mix_values(&info, &snapshot, Some(&listener), Vector2::new(1000, 1000));
+        assert!((volume - 0.5).abs() < 1e-6, "volume={volume}");
+        assert!((pan - 0.7).abs() < 1e-6, "pan={pan}");
+    }
+
+    #[test]
+    fn compute_mix_values_respects_custom_falloff() {
+        let listener = make_object(1, "Listener", Vector2::new(1000, 1000));
+        let source = make_object(2, "Source", Vector2::new(1700, 1000));
+        let snapshot = make_snapshot(
+            vec![listener.clone(), source.clone()],
+            vec![HudPlayerSnapshot {
+                owner: 1,
+                crew: vec![listener.id],
+                focus: Some(listener.id),
+                eliminated: false,
+            }],
+        );
+        let info = ChannelInfo {
+            channel: ChannelId(0),
+            looped: false,
+            target: Some(source.id),
+            volume: 100,
+            custom_falloff: Some(1400),
+        };
+        let (volume, pan) =
+            compute_mix_values(&info, &snapshot, Some(&listener), Vector2::new(1000, 1000));
+        assert!((volume - 0.5).abs() < 1e-6, "volume={volume}");
+        assert!((pan - 1.0).abs() < 1e-6, "pan={pan}");
+    }
+
+    #[test]
+    fn compute_mix_values_for_global_sound_preserves_base_mix() {
+        let listener = make_object(1, "Listener", Vector2::new(0, 0));
+        let snapshot = make_snapshot(
+            vec![listener.clone()],
+            vec![HudPlayerSnapshot {
+                owner: 1,
+                crew: vec![listener.id],
+                focus: Some(listener.id),
+                eliminated: false,
+            }],
+        );
+        let info = ChannelInfo {
+            channel: ChannelId(0),
+            looped: false,
+            target: None,
+            volume: 80,
+            custom_falloff: None,
+        };
+        let (volume, pan) =
+            compute_mix_values(&info, &snapshot, Some(&listener), Vector2::new(0, 0));
+        assert!((volume - 0.8).abs() < 1e-6);
+        assert_eq!(pan, 0.0);
     }
 
     #[test]
