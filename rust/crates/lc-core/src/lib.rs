@@ -1,4 +1,5 @@
 pub mod chrono_util;
+#[cfg(feature = "ffi")]
 pub mod ffi;
 pub mod logging;
 pub mod std_buf;

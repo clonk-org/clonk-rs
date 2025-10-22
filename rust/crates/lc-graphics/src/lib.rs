@@ -1,4 +1,5 @@
 pub mod color;
+#[cfg(feature = "ffi")]
 pub mod ffi;
 pub mod font;
 pub mod snapshot;

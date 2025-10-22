@@ -2,6 +2,7 @@ mod action;
 mod compat;
 mod control;
 mod effect;
+#[cfg(feature = "ffi")]
 pub mod ffi;
 pub mod fixtures;
 mod input;

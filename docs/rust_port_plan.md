@@ -6,6 +6,9 @@
 
 **How to Run:** `cargo run` (launches full game with real scenarios and audio)
 
+**Recent Progress (2025-10-24):**
+- FFI exports now live behind crate feature `ffi`; default builds emit only `rlib` so the workspace no longer recompiles cdylib/staticlib on every edit. Documented the manual `cargo rustc -p <crate> --features ffi -- --crate-type staticlib --crate-type cdylib` flow for legacy bridge builds.
+
 **Recent Progress (2025-10-23):**
 - Matched positional audio with the legacy AudibilityRadius (700px) and viewport panning model; added regression coverage for mix geometry to prevent regressions.
 
@@ -40,8 +43,7 @@
 ## Parity Gaps
 
 ### Low: Build Ergonomics
-**Issue:** lc-engine builds rlib + cdylib + staticlib on every build (slow).
-**Fix:** Feature-gate FFI artifacts.
+Default builds now emit only `rlib`. Enable the `ffi` feature on the target crate and run `cargo rustc -p <crate> --features ffi -- --crate-type staticlib --crate-type cdylib` when legacy C++ artifacts are required.
 
 ## Validation Checklist
 
@@ -56,7 +58,7 @@
 
 ## Immediate Priorities
 
-1. Feature-gate FFI artifacts to improve build throughput
+- None (build gating complete)
 
 ## Assets & Testing
 

@@ -1,4 +1,5 @@
 mod decoder;
+#[cfg(feature = "ffi")]
 pub mod ffi;
 mod mixer;
 
