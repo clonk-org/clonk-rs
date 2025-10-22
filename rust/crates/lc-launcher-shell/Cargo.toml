@@ -11,11 +11,13 @@ lc-launcher-ui = { path = "../lc-launcher-ui" }
 lc-gui = { path = "../lc-gui" }
 lc-graphics = { path = "../lc-graphics" }
 lc-platform = { path = "../lc-platform" }
+lc-core = { path = "../lc-core" }
 pixels = "0.13"
 rfd = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 winit = "0.28"
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3.10"

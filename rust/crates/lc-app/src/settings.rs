@@ -46,9 +46,10 @@ impl AudioOptions {
             Ok(config) => options.apply_config(&config),
             Err(err) => {
                 if err.kind() != ErrorKind::NotFound {
-                    eprintln!(
-                        "warning: failed to load config from {}: {err}",
-                        config_path.display()
+                    tracing::warn!(
+                        error = %err,
+                        path = %config_path.display(),
+                        "failed to load audio config"
                     );
                 }
             }
@@ -227,9 +228,10 @@ impl DisplayOptions {
             Ok(config) => options.apply_config(&config),
             Err(err) => {
                 if err.kind() != ErrorKind::NotFound {
-                    eprintln!(
-                        "warning: failed to load config from {}: {err}",
-                        config_path.display()
+                    tracing::warn!(
+                        error = %err,
+                        path = %config_path.display(),
+                        "failed to load display config"
                     );
                 }
             }
@@ -293,9 +295,10 @@ impl DisplayOptions {
             Ok(config) => config,
             Err(err) if err.kind() == ErrorKind::NotFound => Config::new(),
             Err(err) => {
-                eprintln!(
-                    "warning: failed to load config for saving at {}: {err}",
-                    config_path.display()
+                tracing::warn!(
+                    error = %err,
+                    path = %config_path.display(),
+                    "failed to load config for saving display options"
                 );
                 return;
             }
@@ -315,9 +318,10 @@ impl DisplayOptions {
             config.set_in(Some("Graphics"), "PositionY", y.to_string());
         }
         if let Err(err) = config.save(&config_path) {
-            eprintln!(
-                "warning: failed to persist display settings to {}: {err}",
-                config_path.display()
+            tracing::warn!(
+                error = %err,
+                path = %config_path.display(),
+                "failed to persist display settings"
             );
             return;
         }

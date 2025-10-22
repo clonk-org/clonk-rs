@@ -38,6 +38,8 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
 
 fn main() -> Result<()> {
+    lc_core::logging::init();
+
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("LegacyClonk Launcher")
@@ -61,19 +63,19 @@ fn main() -> Result<()> {
             event,
         } if id == window_id => {
             if let Err(err) = app.handle_window_event(&mut pixels, event, control_flow) {
-                eprintln!("launcher shell encountered an error: {err:?}");
+                tracing::error!(error = ?err, "launcher shell encountered an error");
                 control_flow.set_exit();
             }
         }
         Event::MainEventsCleared => window.request_redraw(),
         Event::RedrawRequested(id) if id == window_id => {
             if let Err(err) = app.render(pixels.frame_mut()) {
-                eprintln!("failed to render UI: {err:?}");
+                tracing::error!(error = ?err, "failed to render launcher UI");
                 control_flow.set_exit();
                 return;
             }
             if let Err(err) = pixels.render() {
-                eprintln!("failed to swap buffers: {err:?}");
+                tracing::error!(error = ?err, "failed to swap buffers");
                 control_flow.set_exit();
             }
         }
@@ -522,7 +524,10 @@ impl LauncherApp {
             }
             WindowEvent::Focused(true) => {
                 if let Err(err) = self.refresh_state() {
-                    eprintln!("failed to refresh launcher state on focus gain: {err:?}");
+                    tracing::warn!(
+                        error = ?err,
+                        "failed to refresh launcher state on focus gain"
+                    );
                 }
             }
             WindowEvent::DroppedFile(_)
@@ -843,7 +848,7 @@ impl LauncherApp {
     fn process_response(&mut self, response: LauncherShellResponse) -> Result<()> {
         for message in response.messages {
             if let Err(err) = self.handle_message(message) {
-                eprintln!("launcher action failed: {err:?}");
+                tracing::error!(error = ?err, "launcher action failed");
                 let _ = self
                     .logger
                     .log_line(&format!("launcher action failed: {err}"));

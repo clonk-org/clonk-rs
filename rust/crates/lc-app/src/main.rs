@@ -97,6 +97,8 @@ fn parse_socket_addr(input: &str, kind: &str) -> Result<SocketAddr> {
 }
 
 fn main() -> Result<()> {
+    lc_core::logging::init();
+
     let cli = Cli::parse();
     let runtime = RuntimeConfig {
         player_owner: cli.player_owner,
@@ -107,9 +109,10 @@ fn main() -> Result<()> {
     let app_paths = cached_app_paths().ok();
     if let Some(paths) = app_paths {
         if let Err(err) = paths.ensure_user_dirs() {
-            eprintln!(
-                "warning: failed to ensure user data directories at {}: {err}",
-                paths.user_data_dir().display()
+            tracing::warn!(
+                error = %err,
+                path = %paths.user_data_dir().display(),
+                "failed to ensure user data directories"
             );
         }
     }
@@ -158,13 +161,13 @@ fn main() -> Result<()> {
                     event,
                     control_flow,
                 ) {
-                    eprintln!("error: {err:?}");
+                    tracing::error!(error = ?err, "window event handling failed");
                     control_flow.set_exit();
                 }
             }
             Event::MainEventsCleared => {
                 if let Err(err) = app.process_gamepad_events() {
-                    eprintln!("gamepad input failed: {err:?}");
+                    tracing::error!(error = ?err, "gamepad input failed");
                     control_flow.set_exit();
                     return;
                 }
@@ -177,7 +180,7 @@ fn main() -> Result<()> {
                 let mut did_update = false;
                 while accumulator >= FRAME_INTERVAL {
                     if let Err(err) = app.update() {
-                        eprintln!("tick failed: {err:?}");
+                        tracing::error!(error = ?err, "tick failed");
                         control_flow.set_exit();
                         return;
                     }
@@ -194,12 +197,12 @@ fn main() -> Result<()> {
             }
             Event::RedrawRequested(id) if id == window.id() => {
                 if let Err(err) = app.render(pixels.frame_mut()) {
-                    eprintln!("render failed: {err:?}");
+                    tracing::error!(error = ?err, "render failed");
                     control_flow.set_exit();
                     return;
                 }
                 if let Err(err) = pixels.render() {
-                    eprintln!("present failed: {err:?}");
+                    tracing::error!(error = ?err, "present failed");
                     control_flow.set_exit();
                 }
             }
@@ -422,7 +425,7 @@ impl AudioContext {
                         snapshot,
                         focus,
                     ) {
-                        eprintln!("failed to play sound {name}: {err}");
+                        tracing::error!(sound = %name, error = %err, "failed to play sound");
                     }
                 }
                 AudioCommand::StopSound { name, target } => {
@@ -546,10 +549,11 @@ impl AudioContext {
                         .missing_sounds
                         .insert(format!("asset::{}", resolved.cache_marker()))
                     {
-                        eprintln!(
-                            "failed to load sound asset `{}` from {}: {err}",
-                            name,
-                            resolved.describe()
+                        tracing::warn!(
+                            sound = %name,
+                            library = %resolved.describe(),
+                            error = %err,
+                            "failed to load sound asset"
                         );
                     }
                 }
@@ -569,7 +573,7 @@ impl AudioContext {
             .missing_sounds
             .insert(format!("request::{request_key}"))
         {
-            eprintln!("missing sound asset `{}`; using synthetic fallback", name);
+            tracing::warn!(sound = %name, "missing sound asset; using synthetic fallback");
         }
         Ok(handle)
     }
@@ -862,7 +866,7 @@ fn discover_global_sound_libraries() -> Vec<SoundLibrary> {
             }
         }
         Err(err) => {
-            eprintln!("sound asset discovery skipped: {err}");
+            tracing::warn!(error = %err, "sound asset discovery skipped");
         }
     }
     libraries
@@ -872,7 +876,7 @@ fn collect_sound_libraries_for_path(path: &Path) -> Vec<SoundLibrary> {
     let group = match Group::open(path) {
         Ok(group) => group,
         Err(err) => {
-            eprintln!("failed to open sound group {}: {err}", path.display());
+            tracing::warn!(path = %path.display(), error = %err, "failed to open sound group");
             return Vec::new();
         }
     };
@@ -887,9 +891,10 @@ fn collect_sound_libraries_for_path(path: &Path) -> Vec<SoundLibrary> {
 fn collect_sound_libraries_from_group(group: &Group, label: String) -> Vec<SoundLibrary> {
     let mut libs = Vec::new();
     if let Err(err) = collect_sound_libraries_recursive(group, label.as_str(), &mut libs) {
-        eprintln!(
-            "failed to inspect sound entries in {}: {err}",
-            group.root().display()
+        tracing::warn!(
+            path = %group.root().display(),
+            error = %err,
+            "failed to inspect sound entries"
         );
     }
     libs
@@ -1120,7 +1125,7 @@ impl MenuState {
         let include_back = self.stack.len() > 1;
         let entries = build_menu_entries(self.current_entries(), include_back);
         if let Err(err) = self.menu.set_entries(entries) {
-            eprintln!("failed to update startup menu entries: {err}");
+            tracing::error!(error = %err, "failed to update startup menu entries");
         }
     }
 
@@ -1471,7 +1476,7 @@ impl GameApp {
         let audio = match AudioContext::try_new(audio_options) {
             Ok(ctx) => Some(ctx),
             Err(err) => {
-                eprintln!("audio initialisation failed: {err}");
+                tracing::warn!(error = %err, "audio initialisation failed");
                 None
             }
         };
@@ -1523,13 +1528,13 @@ impl GameApp {
             match key {
                 VirtualKeyCode::F5 => {
                     if let Err(err) = self.quick_save() {
-                        eprintln!("quick save failed: {err:?}");
+                        tracing::error!(error = ?err, "quick save failed");
                     }
                     return Ok(());
                 }
                 VirtualKeyCode::F9 => {
                     if let Err(err) = self.quick_load() {
-                        eprintln!("quick load failed: {err:?}");
+                        tracing::error!(error = ?err, "quick load failed");
                     }
                     return Ok(());
                 }
@@ -1600,16 +1605,20 @@ impl GameApp {
                         }
                     }
                     NetworkEvent::PeerConnected { client_id } => {
-                        println!("network: client {client_id} connected");
+                        tracing::info!(%client_id, "network client connected");
                     }
                     NetworkEvent::PeerDisconnected { client_id, reason } => match reason {
                         Some(reason) => {
-                            println!("network: client {client_id} disconnected ({reason})");
+                            tracing::info!(
+                                %client_id,
+                                reason = %reason,
+                                "network client disconnected"
+                            );
                         }
-                        None => println!("network: client {client_id} disconnected"),
+                        None => tracing::info!(%client_id, "network client disconnected"),
                     },
                     NetworkEvent::Error(message) => {
-                        eprintln!("network error: {message}");
+                        tracing::error!(message = %message, "network error");
                     }
                 }
             }
@@ -1781,7 +1790,10 @@ impl GameApp {
             if let Some(scenario) = self.scenario_catalog.get(&identifier).cloned() {
                 self.start_scenario(scenario)?;
             } else {
-                eprintln!("Selected scenario `{identifier}` is not available in Rust catalog");
+                tracing::warn!(
+                    scenario = %identifier,
+                    "selected scenario is not available in Rust catalog"
+                );
             }
         }
         Ok(())
@@ -1825,9 +1837,10 @@ impl GameApp {
                         Some(ScenarioKind::Editor) => {
                             if let Err(err) = self.launch_editor_by_identifier(&summary.identifier)
                             {
-                                eprintln!(
-                                    "failed to launch legacy editor for `{}`: {err:?}",
-                                    summary.identifier
+                                tracing::error!(
+                                    scenario = %summary.identifier,
+                                    error = ?err,
+                                    "failed to launch legacy editor"
                                 );
                             }
                         }
@@ -1839,9 +1852,10 @@ impl GameApp {
                 }
                 StartupMenuAction::EditEntry(summary) => {
                     if let Err(err) = self.launch_editor_by_identifier(&summary.identifier) {
-                        eprintln!(
-                            "failed to launch legacy editor for `{}`: {err:?}",
-                            summary.identifier
+                        tracing::error!(
+                            scenario = %summary.identifier,
+                            error = ?err,
+                            "failed to launch legacy editor"
                         );
                     }
                 }
@@ -1886,10 +1900,10 @@ impl GameApp {
             .spawn()
             .with_context(|| format!("failed to launch editor at {}", editor_binary.display()))?;
         self.status_text = format!("Launching editor for {}", scenario.title);
-        println!(
-            "Launching LegacyClonk editor `{}` for scenario at `{}`",
-            editor_binary.display(),
-            path.display()
+        tracing::info!(
+            editor = %editor_binary.display(),
+            scenario = %path.display(),
+            "launching LegacyClonk editor"
         );
         Ok(())
     }
@@ -2036,19 +2050,20 @@ impl GameApp {
         let scenario_data = match Scenario::load_from_path(path) {
             Ok(data) => data,
             Err(err) => {
-                eprintln!(
-                    "Failed to load scenario '{}' from {}: {err}",
-                    scenario.title,
-                    path.display()
+                tracing::error!(
+                    scenario = %scenario.title,
+                    path = %path.display(),
+                    error = %err,
+                    "failed to load scenario"
                 );
                 return Ok(false);
             }
         };
 
-        println!(
-            "Starting scenario '{}' from {}",
-            scenario.title,
-            path.display()
+        tracing::info!(
+            scenario = %scenario.title,
+            path = %path.display(),
+            "starting scenario from disk"
         );
 
         self.engine = Engine::new();
@@ -2059,10 +2074,11 @@ impl GameApp {
         }
 
         if let Err(err) = scenario_data.apply(&mut self.engine) {
-            eprintln!(
-                "Failed to apply scenario '{}' from {}: {err}",
-                scenario.title,
-                path.display()
+            tracing::error!(
+                scenario = %scenario.title,
+                path = %path.display(),
+                error = %err,
+                "failed to apply scenario"
             );
             return Ok(false);
         }
@@ -2088,7 +2104,10 @@ impl GameApp {
     }
 
     fn start_sandbox_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
-        println!("Starting scenario '{}' (sandbox fallback)", scenario.title);
+        tracing::info!(
+            scenario = %scenario.title,
+            "starting sandbox fallback scenario"
+        );
 
         self.engine = Engine::new();
         self.input = InputDispatcher::new();
@@ -2263,12 +2282,22 @@ impl GameApp {
             match load_scenario_music_bytes(path) {
                 Ok(Some(bytes)) => {
                     if let Err(err) = audio.play_music(bytes.as_slice(), true) {
-                        eprintln!("failed to start music for {}: {err}", path.display());
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %err,
+                            "failed to start music"
+                        );
                         audio.stop_music();
                     }
                 }
                 Ok(None) => audio.stop_music(),
-                Err(err) => eprintln!("failed to load music from {}: {err}", path.display()),
+                Err(err) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "failed to load music"
+                    );
+                }
             }
         }
     }
@@ -2281,7 +2310,7 @@ impl GameApp {
                 return;
             }
             if let Err(err) = audio.play_music(sandbox_music_bytes(), true) {
-                eprintln!("failed to start sandbox music: {err}");
+                tracing::warn!(error = %err, "failed to start sandbox music");
                 audio.stop_music();
             }
         }
@@ -2309,14 +2338,18 @@ impl GameApp {
             self.focus_id = Some(object_id);
             if crew_member && owner >= 0 {
                 if let Err(err) = self.engine.select_crew(owner, [object_id]) {
-                    eprintln!(
-                        "Failed to select crew member {} for owner {}: {err}",
-                        object_id, owner
+                    tracing::warn!(
+                        object_id = %object_id,
+                        owner,
+                        error = %err,
+                        "failed to select crew member"
                     );
                 } else if let Err(err) = self.engine.set_crew_cursor(owner, Some(object_id)) {
-                    eprintln!(
-                        "Failed to set crew cursor to {} for owner {}: {err}",
-                        object_id, owner
+                    tracing::warn!(
+                        object_id = %object_id,
+                        owner,
+                        error = %err,
+                        "failed to set crew cursor"
                     );
                 }
             }
@@ -2596,31 +2629,42 @@ fn configure_sandbox_engine(engine: &mut Engine) -> Result<(), EngineError> {
 }
 
 fn load_frontend_scenarios() -> Vec<FrontendScenario> {
-    if let Ok(paths) = AppPaths::discover() {
-        let roots = scenario_roots(&paths);
-        let existing_roots: Vec<_> = roots.into_iter().filter(|path| path.exists()).collect();
-        if !existing_roots.is_empty() {
-            match resource_scenario::discover_many(existing_roots.iter()) {
-                Ok(entries) => {
-                    let mut seen = HashSet::new();
-                    let mut scenarios = Vec::new();
-                    for entry in entries {
-                        if let Some(converted) = FrontendScenario::from_resource(entry, &mut seen) {
-                            scenarios.push(converted);
+    match AppPaths::discover() {
+        Ok(paths) => {
+            let roots = scenario_roots(&paths);
+            let existing_roots: Vec<_> = roots.into_iter().filter(|path| path.exists()).collect();
+            if !existing_roots.is_empty() {
+                match resource_scenario::discover_many(existing_roots.iter()) {
+                    Ok(entries) => {
+                        let mut seen = HashSet::new();
+                        let mut scenarios = Vec::new();
+                        for entry in entries {
+                            if let Some(converted) =
+                                FrontendScenario::from_resource(entry, &mut seen)
+                            {
+                                scenarios.push(converted);
+                            }
+                        }
+                        if !scenarios.is_empty() {
+                            scenarios.sort_by(|a, b| a.title.cmp(&b.title));
+                            return scenarios;
                         }
                     }
-                    if !scenarios.is_empty() {
-                        scenarios.sort_by(|a, b| a.title.cmp(&b.title));
-                        return scenarios;
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "failed to discover scenarios from install roots"
+                        );
                     }
-                }
-                Err(err) => {
-                    eprintln!("failed to discover scenarios from install roots: {err}");
                 }
             }
         }
-    } else {
-        eprintln!("App paths discovery failed; falling back to built-in sandbox scenario");
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "app paths discovery failed; falling back to built-in sandbox scenario"
+            );
+        }
     }
 
     vec![FrontendScenario::fallback()]

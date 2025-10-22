@@ -60,8 +60,10 @@ struct Cli {
 }
 
 fn main() {
+    lc_core::logging::init();
+
     if let Err(error) = run() {
-        eprintln!("lc-game: {error:?}");
+        tracing::error!(error = ?error, "lc-game encountered an error");
         std::process::exit(1);
     }
 }
@@ -1571,9 +1573,13 @@ fn emit_launcher_report(
 }
 
 fn print_launcher_report(report: &SupportBundleReport) {
-    println!();
+    let mut stdout = io::stdout();
+    let _ = stdout.write_all(b"\n");
+    tracing::info!("");
     for line in &report.lines {
-        println!("{line}");
+        let _ = stdout.write_all(line.as_bytes());
+        let _ = stdout.write_all(b"\n");
+        tracing::info!("{}", line);
     }
 }
 
@@ -1586,7 +1592,10 @@ fn emit_automation_report(
     let payload = build_automation_report(paths, support_bundle, telemetry_summary, report);
     let json =
         serde_json::to_string_pretty(&payload).context("failed to serialise automation report")?;
-    println!("{json}");
+    let mut stdout = io::stdout();
+    let _ = stdout.write_all(json.as_bytes());
+    let _ = stdout.write_all(b"\n");
+    tracing::info!("{}", json);
     Ok(())
 }
 

@@ -29,9 +29,10 @@ impl KeyboardBindings {
             }
             Err(err) => {
                 if err.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!(
-                        "warning: failed to load controls config from {}: {err}",
-                        config_path.display()
+                    tracing::warn!(
+                        error = %err,
+                        path = %config_path.display(),
+                        "failed to load controls config"
                     );
                 }
             }

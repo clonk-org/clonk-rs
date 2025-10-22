@@ -10,6 +10,7 @@
 - Replaced busy-poll loop with fixed-step accumulator using `ControlFlow::WaitUntil` to align simulation cadence with the legacy engine; validated via `cargo test` and `cargo xtask engine-snapshots verify`.
 - Implemented legacy glob semantics for sound wildcard lookup and added regression tests.
 - Wired `lc-app` CLI multiplayer entry points (`--host <addr>`, `--join <addr>`) to the Rust `lc-network` stack and added encode/decode coverage for legacy control packets.
+- Replaced `println!/eprintln!` logging across Rust crates with `tracing` and centralised initialisation in `lc_core::logging`, preserving CLI output expectations.
 
 ## Architecture
 
@@ -49,8 +50,8 @@
 **Fix:** Validate against C++ mix captures; adjust curves if needed.
 
 ### Low: Build Ergonomics
-**Issue:** lc-engine builds rlib + cdylib + staticlib on every build (slow). Ad hoc println!/eprintln! logging.
-**Fix:** Feature-gate FFI artifacts. Replace print statements with structured logging (tracing/log).
+**Issue:** lc-engine builds rlib + cdylib + staticlib on every build (slow).
+**Fix:** Feature-gate FFI artifacts.
 
 ## Validation Checklist
 
@@ -65,8 +66,7 @@
 
 ## Immediate Priorities
 
-1. **Add structured logging** - Replace println!/eprintln! with tracing (2-3 hours)
-2. **Automate MP smoke tests** - Headless host/client harness exercising control sync + save/load (3-5 hours)
+1. **Automate MP smoke tests** - Headless host/client harness exercising control sync + save/load (3-5 hours)
 
 ## Assets & Testing
 

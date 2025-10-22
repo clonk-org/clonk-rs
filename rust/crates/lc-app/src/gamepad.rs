@@ -17,7 +17,7 @@ impl GamepadManager {
         let gilrs = match Gilrs::new() {
             Ok(instance) => Some(instance),
             Err(error) => {
-                eprintln!("warning: failed to initialise gamepad input: {error}");
+                tracing::warn!(error = %error, "failed to initialise gamepad input");
                 None
             }
         };

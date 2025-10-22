@@ -218,7 +218,7 @@ impl CpalBackend {
         let mix_u16 = mixer.clone();
 
         let err_fn = |err| {
-            eprintln!("cpal stream error: {err}");
+            tracing::error!(error = %err, "cpal stream error");
         };
 
         let stream = match config.sample_format() {

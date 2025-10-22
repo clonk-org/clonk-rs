@@ -12,6 +12,8 @@ use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 fn main() -> Result<()> {
+    lc_core::logging::init();
+
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         None | Some("--help") | Some("-h") => {
@@ -33,7 +35,7 @@ fn main() -> Result<()> {
 }
 
 fn print_usage() {
-    eprintln!(
+    tracing::info!(
         "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines."
     );
 }
@@ -65,7 +67,7 @@ fn engine_snapshots_command(args: &[String]) -> Result<()> {
 }
 
 fn print_engine_snapshots_usage() {
-    eprintln!(
+    tracing::info!(
         "Usage:\n  cargo xtask engine-snapshots record\n  cargo xtask engine-snapshots verify"
     );
 }
@@ -90,10 +92,10 @@ fn record_engine_snapshots() -> Result<()> {
             Ok(rel) => rel.to_path_buf(),
             Err(_) => path.clone(),
         };
-        println!(
-            "wrote {} ({} frames)",
-            display_path.display(),
-            scenario.default_frames
+        tracing::info!(
+            path = %display_path.display(),
+            frames = scenario.default_frames,
+            "wrote engine snapshot"
         );
     }
 
@@ -124,9 +126,10 @@ fn verify_engine_snapshots() -> Result<()> {
             .validate_sequence(actual.into_frames())
             .map_err(|error| anyhow!(error))
             .with_context(|| format!("snapshot mismatch for `{}`", scenario.name))?;
-        println!(
-            "validated {} ({} frames)",
-            scenario.name, scenario.default_frames
+        tracing::info!(
+            scenario = scenario.name,
+            frames = scenario.default_frames,
+            "validated engine snapshot"
         );
     }
 
@@ -151,12 +154,12 @@ fn package() -> Result<()> {
     build_lc_game(&paths)?;
     let package_dir = assemble_package_layout(&paths)?;
     let archive = create_archive(&paths, &package_dir)?;
-    println!("Packaged Rust port to {}", archive.display());
+    tracing::info!(path = %archive.display(), "packaged Rust port");
     Ok(())
 }
 
 fn build_lc_game(paths: &WorkspacePaths) -> Result<()> {
-    println!("Building lc-game (release)...");
+    tracing::info!("building lc-game (release)");
     let status = Command::new("cargo")
         .args(["build", "--release", "-p", "lc-game"])
         .current_dir(&paths.workspace_dir)

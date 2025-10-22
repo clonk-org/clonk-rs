@@ -376,7 +376,7 @@ impl StdScheduler {
             }
         } else if poll_result < 0 {
             let err = io::Error::last_os_error();
-            eprintln!("StdScheduler::execute poll failed: {}", err);
+            tracing::error!(error = %err, "StdScheduler::execute poll failed");
             success = false;
         }
 
@@ -447,7 +447,7 @@ impl StdScheduler {
             match wait_result {
                 WAIT_FAILED => {
                     let err = io::Error::last_os_error();
-                    eprintln!("StdScheduler::execute wait failed: {}", err);
+                    tracing::error!(error = %err, "StdScheduler::execute wait failed");
                     success = false;
                 }
                 WAIT_TIMEOUT => {}
@@ -468,7 +468,7 @@ impl StdScheduler {
                 match status {
                     WAIT_FAILED => {
                         let err = io::Error::last_os_error();
-                        eprintln!("StdScheduler::execute wait failed: {}", err);
+                        tracing::error!(error = %err, "StdScheduler::execute wait failed");
                         success = false;
                     }
                     WAIT_OBJECT_0 | WAIT_ABANDONED_0 => {
