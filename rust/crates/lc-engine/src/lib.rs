@@ -7,6 +7,7 @@ pub mod ffi;
 pub mod fixtures;
 mod input;
 mod landscape;
+mod material;
 mod math;
 pub mod ocf;
 mod pathfinder;
@@ -27,6 +28,7 @@ pub use input::PlayerInputState;
 pub use landscape::{
     CollisionResolution, Landscape, LandscapeCommand, LandscapeError, LiquidColumn, LiquidSegment,
 };
+pub use material::{Material, MaterialSet};
 pub use pathfinder::{PathFinder, PathWaypoint};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
@@ -3377,6 +3379,7 @@ struct ScenarioBatch {
 
 pub struct Engine {
     definitions: HashMap<DefinitionId, Definition>,
+    materials: MaterialSet,
     objects: Vec<Object>,
     next_object_id: u64,
     rng: ChaCha8Rng,
@@ -3698,6 +3701,7 @@ impl Engine {
     pub fn with_seed(seed: u64) -> Self {
         let mut engine = Self {
             definitions: HashMap::new(),
+            materials: MaterialSet::default(),
             objects: Vec::new(),
             next_object_id: 1,
             rng: ChaCha8Rng::seed_from_u64(seed),
@@ -3718,6 +3722,22 @@ impl Engine {
         };
         engine.environment.refresh_runtime_fields();
         engine
+    }
+
+    pub fn set_materials(&mut self, materials: MaterialSet) {
+        self.materials = materials;
+    }
+
+    pub fn materials(&self) -> &MaterialSet {
+        &self.materials
+    }
+
+    pub fn materials_mut(&mut self) -> &mut MaterialSet {
+        &mut self.materials
+    }
+
+    pub fn configure_materials_from_library(&mut self, library: &lc_resources::MaterialLibrary) {
+        self.materials = MaterialSet::from_resource_library(library);
     }
 
     pub fn frame(&self) -> u64 {

@@ -55,10 +55,11 @@
   - Per-player message queues
   - Message positioning and formatting
 
-- ❌ **Material System** (C4Material.cpp 🔗 lc-engine missing materials)
+- ⚠️ **Material System** (C4Material.cpp 🔗 lc-engine missing materials)
   - Terrain materials (earth, rock, gold, water, lava, acid, etc.)
   - Material physics (density, friction, temperature reactions)
   - Material conversion and reactions
+  - ✅ Definitions now load from install groups; runtime behaviour still missing
 
 - ❌ **Weather & Sky** (C4Weather.cpp, C4Sky.cpp 🔗 Not ported)
   - Dynamic weather (rain, snow, wind, lightning)
@@ -135,7 +136,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 ### Phase 1: Core Game Integration
 1. Port C4Def system to load real object definitions from Definition folders — ✅ Added `lc-resources::definition` (DefCore/ActMap/script parsing) with `Engine::Definition::from_resource`; sandbox now attempts to boot with real Clonk definitions when present (asset loading + scenario wiring still pending)
 2. ✅ Port Graphics.c4g loading for object graphics, fonts, UI elements — startup menu and UI components now render real assets from Graphics.c4g and Endeavour.ttf; walker sprite mapping added as first object graphic
-3. Port Material.txt system for terrain material definitions
+3. ✅ Port Material.txt system for terrain material definitions — `lc-resources::material` parses Material.txt/®.c4m files and `Engine` tracks a MaterialSet
 4. Make real scenarios actually load and work (not just parse and fall back)
 
 ### Phase 2: Essential Gameplay Systems
@@ -168,6 +169,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Audio playback (music/SFX mixing)
 - ✅ Window creation and basic input handling
 - ✅ Startup menu renders Graphics.c4g backgrounds and buttons with Endeavour.ttf fonts (no longer flat placeholders)
+- ✅ Material definitions load from install archives (lc-resources::material + Engine MaterialSet)
 
 **What Doesn't Work (Real Game Requirements):**
 - ❌ `cargo run` shows **demo only** (window title: "LegacyClonk (Rust preview)")
@@ -176,7 +178,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ❌ No real audio (synthetic tones for missing sounds)
 - ❌ No player management (no crew, no viewports, no menus)
-- ❌ No materials (no terrain types, no mining, no reactions)
+- ❌ Materials still unused at runtime (no terrain types, no mining, no reactions despite definitions loading)
 - ❌ No multiplayer lobby (transport exists but no game coordination)
 
 ---

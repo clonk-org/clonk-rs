@@ -23,8 +23,8 @@ use input::KeyboardBindings;
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, ControlButton, ControlEvent, Definition, Engine,
-    EngineError, EngineState, EnvironmentSettings, Landscape, MovementProfile, ObjectId,
-    ObjectSnapshot, Scenario, SimulationSnapshot, SpawnConfig, Vector2,
+    EngineError, EngineState, EnvironmentSettings, Landscape, MaterialSet, MovementProfile,
+    ObjectId, ObjectSnapshot, Scenario, SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_frontend::{
     draw_image, CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData, InputDispatcher,
@@ -1226,6 +1226,7 @@ struct GameApp {
     active_scenario: Option<FrontendScenario>,
     audio: Option<AudioContext>,
     assets: Arc<FrontendAssets>,
+    material_library: Option<Arc<MaterialSet>>,
     network: Option<NetworkManager>,
     local_owner: i32,
     last_save_path: Option<PathBuf>,
@@ -1834,6 +1835,94 @@ fn existing_quick_save_path() -> Option<PathBuf> {
     }
 }
 
+fn load_install_material_library(paths: Option<&AppPaths>) -> Option<Arc<MaterialSet>> {
+    let paths = match paths {
+        Some(paths) => paths,
+        None => return None,
+    };
+
+    let mut seen = HashSet::new();
+    for candidate in candidate_material_paths(paths) {
+        if !candidate.exists() {
+            continue;
+        }
+        let key = candidate.to_string_lossy().to_ascii_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        match try_materials_from_path(&candidate) {
+            Ok(set) if !set.is_empty() => {
+                let count = set.len();
+                tracing::info!(path = %candidate.display(), count, "loaded material definitions");
+                return Some(Arc::new(set));
+            }
+            Ok(_) => {
+                tracing::debug!(path = %candidate.display(), "material candidate contained no definitions");
+            }
+            Err(lc_resources::MaterialError::NotFound) => {}
+            Err(err) => {
+                tracing::debug!(path = %candidate.display(), error = %err, "material discovery attempt failed");
+            }
+        }
+    }
+    tracing::info!("no install material definitions found; using sandbox defaults");
+    None
+}
+
+fn candidate_material_paths(paths: &AppPaths) -> Vec<PathBuf> {
+    const GROUP_NAMES: &[&str] = &[
+        "Material.c4g",
+        "Material.ocg",
+        "Material.ocd",
+        "MatDefs.ocg",
+        "MatDefs.c4g",
+    ];
+
+    let mut candidates = Vec::new();
+
+    let planet_dir = paths.planet_dir();
+    if planet_dir.exists() {
+        candidates.push(planet_dir.to_path_buf());
+    }
+    let install_root = paths.install_root();
+    if install_root.exists() {
+        candidates.push(install_root.to_path_buf());
+    }
+    let scenario_dir = paths.scenario_dir();
+    if scenario_dir.exists() {
+        candidates.push(scenario_dir);
+    }
+    let system_group = paths.system_group_path();
+    if system_group.exists() {
+        candidates.push(system_group.to_path_buf());
+    }
+
+    for base in [
+        paths.planet_dir(),
+        paths.install_root(),
+        paths.system_group_path(),
+    ]
+    .into_iter()
+    {
+        for name in GROUP_NAMES {
+            let path = base.join(name);
+            if path.exists() {
+                candidates.push(path);
+            }
+        }
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn try_materials_from_path(path: &Path) -> Result<MaterialSet, lc_resources::MaterialError> {
+    let group = Group::open(path)?;
+    let library = lc_resources::MaterialLibrary::from_group(&group)?;
+    Ok(MaterialSet::from_resource_library(&library))
+}
+
 fn current_unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1854,8 +1943,12 @@ impl GameApp {
             None => None,
         };
         let assets = Arc::new(FrontendAssets::load(paths));
+        let material_library = load_install_material_library(paths);
 
-        let engine = Engine::new();
+        let mut engine = Engine::new();
+        if let Some(library) = material_library.as_ref() {
+            engine.set_materials((**library).clone());
+        }
         let snapshot = engine.snapshot();
         let scenario_label = DEFAULT_SCENARIO_LABEL.to_string();
         let mut graphics = GraphicsSystem::new(
@@ -1904,6 +1997,7 @@ impl GameApp {
             active_scenario: None,
             audio,
             assets: assets.clone(),
+            material_library: material_library.clone(),
             last_save_path: None,
             network,
             local_owner: runtime.player_owner,
@@ -1932,6 +2026,14 @@ impl GameApp {
             self.menu_state.set_pointer_position(None);
         }
         Ok(())
+    }
+
+    fn apply_material_library(&mut self) {
+        if let Some(materials) = self.material_library.as_ref() {
+            self.engine.set_materials((**materials).clone());
+        } else {
+            self.engine.set_materials(MaterialSet::default());
+        }
     }
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
@@ -2431,6 +2533,7 @@ impl GameApp {
 
     fn return_to_menu(&mut self) {
         self.engine = Engine::new();
+        self.apply_material_library();
         self.input = InputDispatcher::new();
         self.snapshot = self.engine.snapshot();
         self.focus_id = None;
@@ -2523,6 +2626,7 @@ impl GameApp {
         );
 
         self.engine = Engine::new();
+        self.apply_material_library();
         self.input = InputDispatcher::new();
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(Some(path));
@@ -2566,6 +2670,7 @@ impl GameApp {
         );
 
         self.engine = Engine::new();
+        self.apply_material_library();
         self.input = InputDispatcher::new();
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(None);
@@ -2664,6 +2769,7 @@ impl GameApp {
         let frontend = scenario_info.to_frontend();
 
         self.engine = Engine::new();
+        self.apply_material_library();
         self.input = InputDispatcher::new();
 
         if scenario_info.sandbox {
