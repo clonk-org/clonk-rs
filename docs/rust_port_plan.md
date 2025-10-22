@@ -2,9 +2,14 @@
 
 ## Status: Feature-Complete with Parity Gaps
 
-**Port Completion:** All major subsystems ported to Rust. The `lc-app` binary is a fully functional game client with startup menu, scenario browser, audio (music + SFX), graphics, engine loop, networking, and savegame support.
+**Port Completion:** All major subsystems are implemented in Rust. The `lc-app` binary boots the full game client with the startup menu, scenario browser, audio (music + SFX), graphics, engine loop, networking, and savegame support.
 
-**How to Run:** `cargo run` (launches full game with real scenarios and audio)
+**How to Run:** `cargo run` (launches the full game with real scenarios and audio assets present)
+
+**FFI Artifacts:** `cargo xtask ffi --profile release` (builds staticlib/cdylib outputs for all FFI crates under `rust/target/<profile>/`)
+
+**Recent Progress (2025-10-30):**
+- Added `crate-type = ["rlib", "staticlib", "cdylib"]` to every crate that exposes an FFI surface and wired `cargo xtask ffi` to compile those crates with the `ffi` feature. The task now emits the expected artifacts for C++ integration and CMake’s `rust_build` target calls it so profiling-specific outputs land in `rust/target/<profile>/` without manual `cargo rustc` invocations.
 
 **Recent Progress (2025-10-29):**
 - macOS run of `cargo test` and `cargo xtask engine-snapshots verify` passed; Windows/Linux CI coverage remains green so the validation checklist is fully satisfied.
@@ -57,8 +62,7 @@
 
 ## Parity Gaps
 
-### Low: Build Ergonomics
-Default builds now emit only `rlib`. Enable the `ffi` feature on the target crate and run `cargo rustc -p <crate> --features ffi -- --crate-type staticlib --crate-type cdylib` when legacy C++ artifacts are required.
+- None (FFI automation in place; `cargo xtask ffi` produces the artifacts CMake expects.)
 
 ## Validation Checklist
 
@@ -71,10 +75,6 @@ Default builds now emit only `rlib`. Enable the `ffi` feature on the target crat
 - [x] `cargo xtask engine-snapshots verify` validates determinism vs C++ baseline (2025-10-21 clean run)
 - [x] Multiplayer host/join flows work (`lc-app --host/--join`; covered by automated smoke test)
 
-## Immediate Priorities
-
-- None (build gating complete)
-
 ## Assets & Testing
 
 **Required Assets:** Game requires `System.c4g` and scenario files (`.c4s`, `.c4f`) in installation directory.
@@ -83,7 +83,7 @@ Default builds now emit only `rlib`. Enable the `ffi` feature on the target crat
 **Testing Infrastructure:**
 - Unit/snapshot tests per crate
 - Engine snapshot verification via `cargo xtask` (compares Rust vs C++ determinism)
-- CI should gate on test suite + snapshot verification
+- CI gates on test suite + snapshot verification
 
 ## Success Criteria
 

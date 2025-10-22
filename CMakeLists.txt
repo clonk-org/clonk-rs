@@ -135,20 +135,11 @@ if(USE_RUST_CONFIG OR USE_RUST_GROUP_VALIDATION OR USE_RUST_ENGINE_VALIDATION OR
         )
     endif()
 
-    set(RUST_BUILD_PACKAGES
-        --package lc-core
-        --package lc-resources
-        --package lc-engine
-        --package lc-gui
-    )
-    if (USE_RUST_PLATFORM_PATHS)
-        list(APPEND RUST_BUILD_PACKAGES --package lc-platform)
-    endif()
-
     add_custom_target(rust_build ALL
-        COMMAND cargo build --manifest-path ${CMAKE_SOURCE_DIR}/rust/Cargo.toml --lib ${RUST_BUILD_PACKAGES}
+        COMMAND cargo xtask ffi --profile ${CMAKE_BUILD_TYPE_LOWER}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/rust
-        COMMENT "Building Rust workspace"
+        COMMENT "Building Rust FFI libraries"
+        VERBATIM
     )
     set(RUST_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/rust/include")
 endif()

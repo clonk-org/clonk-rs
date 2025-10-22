@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use lc_engine::fixtures::SNAPSHOT_SCENARIOS;
 use lc_engine::{Playback, Recording};
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -30,13 +31,17 @@ fn main() -> Result<()> {
             let tail: Vec<String> = args.collect();
             engine_snapshots_command(&tail)
         }
+        Some("ffi") => {
+            let tail: Vec<String> = args.collect();
+            ffi_command(&tail)
+        }
         Some(cmd) => bail!("unknown command `{}` (try `cargo xtask --help`)", cmd),
     }
 }
 
 fn print_usage() {
     tracing::info!(
-        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines."
+        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask ffi [options]           Build staticlib/cdylib artifacts for C++ integration."
     );
 }
 
@@ -70,6 +75,271 @@ fn print_engine_snapshots_usage() {
     tracing::info!(
         "Usage:\n  cargo xtask engine-snapshots record\n  cargo xtask engine-snapshots verify"
     );
+}
+
+fn ffi_command(args: &[String]) -> Result<()> {
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+    {
+        print_ffi_usage();
+        return Ok(());
+    }
+
+    let mut profile = BuildProfile::Debug;
+    let mut requested = Vec::new();
+    let mut idx = 0;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--release" => {
+                profile = BuildProfile::Release;
+                idx += 1;
+            }
+            "--debug" => {
+                profile = BuildProfile::Debug;
+                idx += 1;
+            }
+            "--profile" => {
+                idx += 1;
+                let value = args
+                    .get(idx)
+                    .ok_or_else(|| anyhow!("`--profile` expects a value"))?;
+                profile = BuildProfile::from_str(value)
+                    .ok_or_else(|| anyhow!("unknown profile `{}`", value))?;
+                idx += 1;
+            }
+            "--package" | "-p" => {
+                idx += 1;
+                let value = args
+                    .get(idx)
+                    .ok_or_else(|| anyhow!("`{}` expects a crate name", args[idx - 1]))?;
+                requested.push(value.clone());
+                idx += 1;
+            }
+            other if other.starts_with('-') => {
+                bail!(
+                    "unknown argument `{}` (try `cargo xtask ffi --help`)",
+                    other
+                );
+            }
+            other => {
+                requested.push(other.to_string());
+                idx += 1;
+            }
+        }
+    }
+
+    let selected: Vec<&'static FfiCrate> = if requested.is_empty() {
+        FFI_CRATES.iter().collect()
+    } else {
+        let mut seen = BTreeSet::new();
+        let mut crates = Vec::new();
+        for name in requested {
+            let normalized = normalize_crate_name(&name);
+            if !seen.insert(normalized.clone()) {
+                continue;
+            }
+            let info =
+                crate_by_name(&normalized).ok_or_else(|| anyhow!("unknown crate `{}`", name))?;
+            crates.push(info);
+        }
+        crates
+    };
+
+    if selected.is_empty() {
+        bail!("no crates selected for FFI build");
+    }
+
+    let paths = WorkspacePaths::detect()?;
+    for krate in selected {
+        build_ffi_crate(krate, profile, &paths)?;
+    }
+    Ok(())
+}
+
+fn print_ffi_usage() {
+    tracing::info!(
+        "Usage:\n  cargo xtask ffi [--profile <debug|release>] [--package <crate> ...]\n\n  By default builds all FFI-enabled crates for the debug profile.\n  Pass --release or --profile release to emit optimized artifacts."
+    );
+}
+
+#[derive(Clone, Copy)]
+struct FfiCrate {
+    name: &'static str,
+    feature: Option<&'static str>,
+}
+
+const FFI_CRATES: &[FfiCrate] = &[
+    FfiCrate {
+        name: "lc-core",
+        feature: Some("ffi"),
+    },
+    FfiCrate {
+        name: "lc-resources",
+        feature: Some("ffi"),
+    },
+    FfiCrate {
+        name: "lc-engine",
+        feature: Some("ffi"),
+    },
+    FfiCrate {
+        name: "lc-gui",
+        feature: None,
+    },
+    FfiCrate {
+        name: "lc-platform",
+        feature: Some("ffi"),
+    },
+    FfiCrate {
+        name: "lc-graphics",
+        feature: Some("ffi"),
+    },
+    FfiCrate {
+        name: "lc-audio",
+        feature: Some("ffi"),
+    },
+    FfiCrate {
+        name: "lc-script",
+        feature: Some("ffi"),
+    },
+];
+
+fn crate_by_name(name: &str) -> Option<&'static FfiCrate> {
+    FFI_CRATES.iter().find(|candidate| candidate.name == name)
+}
+
+fn normalize_crate_name(raw: &str) -> String {
+    raw.replace('_', "-")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuildProfile {
+    Debug,
+    Release,
+}
+
+impl BuildProfile {
+    fn from_str(raw: &str) -> Option<Self> {
+        let lower = raw.to_ascii_lowercase();
+        match lower.as_str() {
+            "debug" | "dev" => Some(Self::Debug),
+            "release" | "relwithdebinfo" | "minsizerel" => Some(Self::Release),
+            _ => None,
+        }
+    }
+
+    fn apply(self, command: &mut Command) {
+        if matches!(self, Self::Release) {
+            command.arg("--release");
+        }
+    }
+
+    fn dir_name(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Release => "release",
+        }
+    }
+
+    fn display(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Release => "release",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ArtifactKind {
+    Static,
+    Dynamic,
+}
+
+fn build_ffi_crate(krate: &FfiCrate, profile: BuildProfile, paths: &WorkspacePaths) -> Result<()> {
+    tracing::info!(
+        crate = krate.name,
+        profile = profile.display(),
+        "building FFI artifacts"
+    );
+
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build");
+    profile.apply(&mut cmd);
+    cmd.arg("-p").arg(krate.name);
+    if let Some(feature) = krate.feature {
+        cmd.arg("--features").arg(feature);
+    }
+    let status = cmd
+        .current_dir(&paths.workspace_dir)
+        .status()
+        .with_context(|| format!("failed to invoke cargo for crate `{}`", krate.name))?;
+    if !status.success() {
+        bail!("cargo build failed for crate `{}`", krate.name);
+    }
+
+    let profile_dir = paths.profile_dir(profile);
+    let static_lib = find_artifact(&profile_dir, krate.name, ArtifactKind::Static)
+        .with_context(|| format!("crate `{}` did not emit a static library", krate.name))?;
+    let dynamic_lib = find_artifact(&profile_dir, krate.name, ArtifactKind::Dynamic)
+        .with_context(|| format!("crate `{}` did not emit a dynamic library", krate.name))?;
+
+    tracing::info!(
+        crate = krate.name,
+        static = %display_relative(&static_lib, &paths.repo_root),
+        dynamic = %display_relative(&dynamic_lib, &paths.repo_root),
+        "finished building FFI artifacts"
+    );
+    Ok(())
+}
+
+fn find_artifact(dir: &Path, crate_name: &str, kind: ArtifactKind) -> Option<PathBuf> {
+    let base = crate_name.replace('-', "_");
+    let mut candidates = Vec::new();
+    match kind {
+        ArtifactKind::Static => {
+            let static_exts: &[&str] = if cfg!(target_os = "windows") {
+                &["lib", "a"]
+            } else {
+                &["a", "lib"]
+            };
+            for ext in static_exts {
+                candidates.push(format!("lib{}.{}", base, ext));
+                candidates.push(format!("{}.{}", base, ext));
+            }
+        }
+        ArtifactKind::Dynamic => {
+            let dynamic_exts: &[&str] = if cfg!(target_os = "windows") {
+                &["dll"]
+            } else if cfg!(target_os = "macos") {
+                &["dylib"]
+            } else {
+                &["so"]
+            };
+            for ext in dynamic_exts {
+                candidates.push(format!("lib{}.{}", base, ext));
+                candidates.push(format!("{}.{}", base, ext));
+            }
+            if cfg!(target_os = "windows") {
+                candidates.push(format!("lib{}.dll.a", base));
+                candidates.push(format!("{}.dll.lib", base));
+            }
+        }
+    }
+
+    for candidate in candidates {
+        let path = dir.join(&candidate);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn display_relative(path: &Path, base: &Path) -> String {
+    match path.strip_prefix(base) {
+        Ok(rel) => rel.display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
 }
 
 fn record_engine_snapshots() -> Result<()> {
@@ -371,5 +641,9 @@ impl WorkspacePaths {
             workspace_dir,
             repo_root,
         })
+    }
+
+    fn profile_dir(&self, profile: BuildProfile) -> PathBuf {
+        self.workspace_dir.join("target").join(profile.dir_name())
     }
 }
