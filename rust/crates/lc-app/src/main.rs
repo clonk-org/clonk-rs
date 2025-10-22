@@ -3098,14 +3098,20 @@ fn collect_player_overlays(
     snapshot: &SimulationSnapshot,
     focus_id: Option<ObjectId>,
 ) -> Vec<PlayerOverlay> {
+    let detail_map: HashMap<_, _> = snapshot
+        .players
+        .iter()
+        .map(|state| (state.id, state))
+        .collect();
     let mut players = Vec::with_capacity(snapshot.hud.players.len());
     for player in &snapshot.hud.players {
         let mut crew = Vec::with_capacity(player.crew.len());
+        let cursor = detail_map.get(&player.owner).and_then(|state| state.cursor);
         for object_id in &player.crew {
             if let Some(object) = snapshot.object(*object_id) {
                 let label = format!("{} #{}", object.definition_id, object.id.as_u64());
                 let energy_fraction = (object.energy.max(0).min(100) as f32) / 100.0;
-                let is_focus = focus_id == Some(object.id);
+                let is_focus = focus_id == Some(object.id) || cursor == Some(object.id);
                 crew.push(CrewOverlay {
                     label,
                     energy_fraction,
@@ -3113,8 +3119,25 @@ fn collect_player_overlays(
                 });
             }
         }
+        let name = detail_map
+            .get(&player.owner)
+            .and_then(|state| {
+                if state.name.trim().is_empty() {
+                    None
+                } else {
+                    Some(state.name.clone())
+                }
+            })
+            .unwrap_or_else(|| format!("Player {}", player.owner));
+        let wealth = detail_map
+            .get(&player.owner)
+            .map(|state| state.wealth)
+            .unwrap_or(0);
         players.push(PlayerOverlay {
             owner: player.owner,
+            name,
+            wealth,
+            cursor,
             eliminated: player.eliminated,
             crew,
         });
@@ -3683,7 +3706,8 @@ mod tests {
     use lc_audio::decode_audio;
     use lc_engine::{
         ActionState, CommandDirection, Direction, EnvironmentFrame, HudPlayerSnapshot, HudSnapshot,
-        ObjectId, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2, DEFAULT_CATEGORY,
+        ObjectId, ObjectSnapshot, ObjectStatus, PlayerState, PlayerStatus, SimulationSnapshot,
+        Vector2, DEFAULT_CATEGORY,
     };
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
@@ -3735,6 +3759,7 @@ mod tests {
             environment: EnvironmentFrame::default(),
             global_effects: Vec::new(),
             particles: Vec::new(),
+            players: Vec::new(),
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
             known_crew_owners,
@@ -4026,13 +4051,14 @@ mod tests {
             },
         ];
 
-        let snapshot = SimulationSnapshot {
+        let mut snapshot = SimulationSnapshot {
             frame: 0,
             physics: None,
             objects,
             environment: EnvironmentFrame::default(),
             global_effects: Vec::new(),
             particles: Vec::new(),
+            players: Vec::new(),
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
             known_crew_owners: vec![1],
@@ -4055,27 +4081,44 @@ mod tests {
             audio: Vec::new(),
         };
 
+        snapshot.players.push(PlayerState {
+            id: 1,
+            name: "Alice".into(),
+            status: PlayerStatus::Active,
+            wealth: 120,
+            knowledge: Vec::new(),
+            inventory: HashMap::new(),
+            cursor: Some(focus),
+            viewports: Vec::new(),
+            crew: vec![focus, teammate],
+        });
+
         let overlay = collect_player_overlays(&snapshot, Some(focus));
         assert_eq!(overlay.len(), 1);
         let player = &overlay[0];
         assert_eq!(player.owner, 1);
+        assert_eq!(player.name, "Alice");
+        assert_eq!(player.wealth, 120);
+        assert_eq!(player.cursor, Some(focus));
         assert!(!player.eliminated);
         assert_eq!(player.crew.len(), 2);
 
-        let focus_entry = player
+        let mut focused = player
             .crew
             .iter()
-            .find(|crew| crew.is_focus)
-            .expect("focus highlight present");
+            .filter(|crew| crew.is_focus)
+            .collect::<Vec<_>>();
+        assert_eq!(focused.len(), 1, "only cursor object highlighted");
+        let focus_entry = focused.pop().expect("focus highlight present");
         assert!(focus_entry.label.contains("Clonk"));
         assert!((focus_entry.energy_fraction - 0.8).abs() < f32::EPSILON);
 
         let other_entry = player
             .crew
             .iter()
-            .find(|crew| !crew.is_focus)
+            .find(|crew| crew.label.contains("Balloon"))
             .expect("non-focus crew present");
-        assert!(other_entry.label.contains("Balloon"));
+        assert!(!other_entry.is_focus);
         assert!((other_entry.energy_fraction - 0.4).abs() < f32::EPSILON);
     }
 

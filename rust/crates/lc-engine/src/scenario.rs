@@ -2249,11 +2249,8 @@ global func Step(state, frame, random)
             "[DefCore]\nid=FOOO\nName=Foo Object\nCategory=0\nCrewMember=0\n",
         )
         .expect("write defcore");
-        std::fs::write(
-            foo_core.join("Script.c"),
-            "// empty definition script\n",
-        )
-        .expect("write definition script");
+        std::fs::write(foo_core.join("Script.c"), "// empty definition script\n")
+            .expect("write definition script");
 
         assert!(foo_core.join("DefCore.txt").exists(), "defcore exists");
         assert!(foo_core.join("Script.c").exists(), "script exists");

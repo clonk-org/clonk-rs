@@ -2,7 +2,7 @@ mod input;
 mod startup_menu;
 
 use lc_engine::{
-    EnvironmentSettings, Landscape, ObjectSnapshot, SimulationSnapshot,
+    EnvironmentSettings, Landscape, ObjectId, ObjectSnapshot, SimulationSnapshot,
     SurfaceSnapshot as EngineSurfaceSnapshot,
 };
 use lc_graphics::{
@@ -34,6 +34,9 @@ pub struct GraphicsOverlay<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerOverlay {
     pub owner: i32,
+    pub name: String,
+    pub wealth: i32,
+    pub cursor: Option<ObjectId>,
     pub eliminated: bool,
     pub crew: Vec<CrewOverlay>,
 }
@@ -166,7 +169,11 @@ impl GraphicsSystem {
         let crew_color = Color::opaque(212, 212, 212);
 
         for (player_overlay, widgets) in overlay.players.iter().zip(self.player_widgets.iter()) {
-            let header_text = format!("Player {}", player_overlay.owner);
+            let header_text = if player_overlay.name.is_empty() {
+                format!("Player {}", player_overlay.owner)
+            } else {
+                player_overlay.name.clone()
+            };
             self.gui.set_label_text(widgets.header_label, header_text)?;
             self.gui
                 .set_label_color(widgets.header_label, header_color)?;
@@ -182,7 +189,8 @@ impl GraphicsSystem {
                 self.gui
                     .set_label_color(widgets.status_label, warning_color)?;
             } else {
-                self.gui.set_label_text(widgets.status_label, "")?;
+                let wealth_text = format!("Wealth {}", player_overlay.wealth);
+                self.gui.set_label_text(widgets.status_label, wealth_text)?;
                 self.gui.set_label_color(widgets.status_label, info_color)?;
             }
 
@@ -1090,6 +1098,7 @@ mod tests {
             environment: EnvironmentFrame::default(),
             global_effects: Vec::new(),
             particles: Vec::new(),
+            players: Vec::new(),
             crew_selection: Default::default(),
             crew_roles: Default::default(),
             known_crew_owners: Vec::new(),

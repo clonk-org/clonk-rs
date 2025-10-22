@@ -7,7 +7,7 @@
 **C++ Codebase:** 454 source files implementing the full game
 **Rust Port:** 95 files implementing core subsystems only
 
-**What Works:** Engine simulation, basic graphics, audio playback, network transport, C4Group file parsing
+**What Works:** Engine simulation, basic graphics, audio playback, network transport, C4Group file parsing, player registry feeding HUD overlays
 **What's Missing:** Most of the actual game (see gaps below)
 
 ---
@@ -35,10 +35,10 @@
 ## Major Missing Features (C++ → Rust Parity Gaps)
 
 ### Category 1: Game Systems (NOT PORTED)
-- ❌ **Player Management** (C4Player.cpp 🔗 No Rust equivalent)
-  - Player join/leave, crew assignment, player-specific viewports
-  - Player inventory, wealth, knowledge systems
-  - Player cursor and direct control
+- ⚠️ **Player Management** (C4Player.cpp 🔗 Runtime APIs landed; strategic features pending)
+  - ✅ Engine exposes full player registry (join/leave, wealth, knowledge, inventory, cursor, per-player viewports)
+  - ✅ Simulation snapshots + HUD now surface player names/wealth/cursor for overlays
+  - ⏳ Remaining: menu/team integration, home-base evaluation, advanced control UX
 
 - ❌ **Viewport System** (C4Viewport.cpp 🔗 No multi-viewport support)
   - Multiple simultaneous viewports per player
@@ -170,7 +170,8 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Window creation and basic input handling
 - ✅ Startup menu renders Graphics.c4g backgrounds and buttons with Endeavour.ttf fonts (no longer flat placeholders)
 - ✅ Material definitions load from install archives (lc-resources::material + Engine MaterialSet)
-- ✅ Experimental: `.c4s` scenarios boot with real definitions and scripts when install data is available (lands in running state, but lacks player systems)
+- ✅ Player registry + HUD overlay surface real player metadata (names, wealth, cursor) sourced from engine snapshots
+- ⚠️ Experimental: `.c4s` scenarios boot with real definitions and scripts when install data is available (lands in running state, but full player UX still limited)
 
 **What Doesn't Work (Real Game Requirements):**
 - ❌ `cargo run` shows **demo only** (window title: "LegacyClonk (Rust preview)")

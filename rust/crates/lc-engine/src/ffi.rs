@@ -949,6 +949,7 @@ unsafe fn make_snapshot(
         environment: EnvironmentFrame::default(),
         global_effects: global_effects_vec,
         particles: particle_snapshots,
+        players: Vec::new(),
         crew_selection: crew_selection_map,
         crew_roles: crew_role_map,
         known_crew_owners,

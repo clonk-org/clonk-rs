@@ -5,7 +5,7 @@ use std::fmt;
 use std::io::{Read, Write};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recording {
     frames: Vec<SimulationSnapshot>,
 }
@@ -356,6 +356,7 @@ mod tests {
             environment: EnvironmentFrame::default(),
             global_effects: Vec::new(),
             particles: Vec::new(),
+            players: Vec::new(),
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
             known_crew_owners: Vec::new(),

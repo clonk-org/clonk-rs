@@ -11,6 +11,7 @@ mod material;
 mod math;
 pub mod ocf;
 mod pathfinder;
+mod player;
 mod record;
 pub mod scenario;
 mod transfer;
@@ -30,6 +31,7 @@ pub use landscape::{
 };
 pub use material::{Material, MaterialSet};
 pub use pathfinder::{PathFinder, PathWaypoint};
+pub use player::{Player, PlayerConfig, PlayerState, PlayerStatus, PlayerViewport};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
 
@@ -2054,6 +2056,10 @@ pub enum EngineError {
     DefinitionAlreadyExists(String),
     #[error("unknown definition `{0}`")]
     UnknownDefinition(String),
+    #[error("player {0} already exists")]
+    PlayerAlreadyExists(i32),
+    #[error("unknown player {0}")]
+    UnknownPlayer(i32),
     #[error("unknown object `{0}`")]
     UnknownObject(ObjectId),
     #[error("container error for object {object}: {detail}")]
@@ -2262,7 +2268,7 @@ pub struct ObjectSnapshot {
     pub alive: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimulationSnapshot {
     pub frame: u64,
     #[serde(default)]
@@ -2274,6 +2280,8 @@ pub struct SimulationSnapshot {
     pub global_effects: Vec<EffectState>,
     #[serde(default)]
     pub particles: Vec<ParticleSnapshot>,
+    #[serde(default)]
+    pub players: Vec<PlayerState>,
     #[serde(default)]
     pub crew_selection: HashMap<i32, CrewSelectionState>,
     #[serde(default)]
@@ -2327,6 +2335,8 @@ pub struct EngineState {
     pub objects: Vec<PersistedObject>,
     #[serde(default)]
     pub particles: Vec<ParticleSnapshot>,
+    #[serde(default)]
+    pub players: Vec<PlayerState>,
     #[serde(default)]
     pub crew_selection: HashMap<i32, CrewSelectionState>,
     #[serde(default)]
@@ -2412,6 +2422,7 @@ impl EngineState {
             landscape: snapshot.landscape.clone(),
             objects,
             particles: snapshot.particles.clone(),
+            players: snapshot.players.clone(),
             crew_selection: snapshot.crew_selection.clone(),
             crew_roles: snapshot.crew_roles.clone(),
             global_effects: snapshot.global_effects.clone(),
@@ -3390,6 +3401,7 @@ pub struct Engine {
     global_effects: Vec<EffectState>,
     particles: Vec<ActiveParticle>,
     scenario_script: Option<ScenarioScript>,
+    players: HashMap<i32, Player>,
     crew_selection: HashMap<i32, CrewSelection>,
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
     known_crew_owners: HashSet<i32>,
@@ -3712,6 +3724,7 @@ impl Engine {
             global_effects: Vec::new(),
             particles: Vec::new(),
             scenario_script: None,
+            players: HashMap::new(),
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
             known_crew_owners: HashSet::new(),
@@ -3722,6 +3735,129 @@ impl Engine {
         };
         engine.environment.refresh_runtime_fields();
         engine
+    }
+
+    pub fn register_player(&mut self, config: PlayerConfig) -> Result<(), EngineError> {
+        let id = config.id();
+        if self.players.contains_key(&id) {
+            return Err(EngineError::PlayerAlreadyExists(id));
+        }
+        let player = config.build();
+        self.players.insert(id, player);
+        self.sync_player_cursor(id);
+        Ok(())
+    }
+
+    pub fn remove_player(&mut self, id: i32) -> Result<Player, EngineError> {
+        let player = self
+            .players
+            .remove(&id)
+            .ok_or(EngineError::UnknownPlayer(id))?;
+        self.crew_selection.remove(&id);
+        self.crew_roles.remove(&id);
+        self.eliminated_crew_owners.remove(&id);
+        self.known_crew_owners.remove(&id);
+        self.refresh_elimination_state();
+        Ok(player)
+    }
+
+    pub fn player(&self, id: i32) -> Option<&Player> {
+        self.players.get(&id)
+    }
+
+    pub fn player_mut(&mut self, id: i32) -> Result<&mut Player, EngineError> {
+        self.players
+            .get_mut(&id)
+            .ok_or(EngineError::UnknownPlayer(id))
+    }
+
+    pub fn players(&self) -> impl Iterator<Item = &Player> {
+        self.players.values()
+    }
+
+    pub fn set_player_status(&mut self, id: i32, status: PlayerStatus) -> Result<(), EngineError> {
+        let player = self.player_mut(id)?;
+        player.set_status(status);
+        Ok(())
+    }
+
+    pub fn set_player_wealth(&mut self, id: i32, wealth: i32) -> Result<(), EngineError> {
+        let player = self.player_mut(id)?;
+        player.set_wealth(wealth);
+        Ok(())
+    }
+
+    pub fn adjust_player_wealth(&mut self, id: i32, delta: i32) -> Result<i32, EngineError> {
+        let player = self.player_mut(id)?;
+        Ok(player.adjust_wealth(delta))
+    }
+
+    pub fn grant_player_knowledge(
+        &mut self,
+        id: i32,
+        definition_id: impl Into<DefinitionId>,
+    ) -> Result<(), EngineError> {
+        let player = self.player_mut(id)?;
+        player.grant_knowledge(definition_id.into());
+        Ok(())
+    }
+
+    pub fn revoke_player_knowledge(
+        &mut self,
+        id: i32,
+        definition_id: &DefinitionId,
+    ) -> Result<(), EngineError> {
+        let player = self.player_mut(id)?;
+        player.revoke_knowledge(definition_id);
+        Ok(())
+    }
+
+    pub fn player_inventory(&self, id: i32) -> Result<&HashMap<DefinitionId, u32>, EngineError> {
+        self.player(id)
+            .map(|player| player.inventory())
+            .ok_or(EngineError::UnknownPlayer(id))
+    }
+
+    pub fn set_player_inventory_item(
+        &mut self,
+        id: i32,
+        definition_id: DefinitionId,
+        quantity: u32,
+    ) -> Result<(), EngineError> {
+        let player = self.player_mut(id)?;
+        player.set_inventory_item(definition_id, quantity);
+        Ok(())
+    }
+
+    pub fn adjust_player_inventory_item(
+        &mut self,
+        id: i32,
+        definition_id: DefinitionId,
+        delta: i32,
+    ) -> Result<u32, EngineError> {
+        let player = self.player_mut(id)?;
+        Ok(player.adjust_inventory_item(definition_id, delta))
+    }
+
+    pub fn replace_player_viewports(
+        &mut self,
+        id: i32,
+        viewports: Vec<PlayerViewport>,
+    ) -> Result<(), EngineError> {
+        let player = self.player_mut(id)?;
+        player.replace_viewports(viewports);
+        Ok(())
+    }
+
+    pub fn set_player_viewport(
+        &mut self,
+        id: i32,
+        index: usize,
+        viewport: PlayerViewport,
+    ) -> Result<(), EngineError> {
+        let player = self.player_mut(id)?;
+        player.set_viewport(index, viewport);
+        Ok(())
     }
 
     pub fn set_materials(&mut self, materials: MaterialSet) {
@@ -3999,6 +4135,7 @@ impl Engine {
         for id in validated {
             selection.select(id);
         }
+        self.sync_player_cursor(owner);
         Ok(())
     }
 
@@ -4014,6 +4151,7 @@ impl Engine {
                 self.crew_selection.remove(&owner);
             }
         }
+        self.sync_player_cursor(owner);
     }
 
     pub fn clear_crew_selection(&mut self, owner: i32) {
@@ -4021,6 +4159,7 @@ impl Engine {
             selection.clear();
         }
         self.crew_selection.remove(&owner);
+        self.sync_player_cursor(owner);
     }
 
     pub fn set_crew_cursor(
@@ -4067,6 +4206,7 @@ impl Engine {
             }
         }
 
+        self.sync_player_cursor(owner);
         Ok(())
     }
 
@@ -5057,10 +5197,11 @@ impl Engine {
             sky_color: self.environment.sky_color(),
         };
         let mut owners: Vec<_> = self
-            .known_crew_owners
-            .iter()
-            .chain(self.eliminated_crew_owners.iter())
+            .players
+            .keys()
             .copied()
+            .chain(self.known_crew_owners.iter().copied())
+            .chain(self.eliminated_crew_owners.iter().copied())
             .collect();
         owners.sort_unstable();
         owners.dedup();
@@ -5085,6 +5226,38 @@ impl Engine {
                 eliminated,
             });
         }
+        let mut player_states: Vec<_> = self
+            .players
+            .values()
+            .map(|player| {
+                let mut state = player.to_state();
+                let owner = player.id();
+                let mut crew: Vec<_> = self
+                    .objects
+                    .iter()
+                    .filter(|object| {
+                        object.state.owner == owner
+                            && object.state.crew_member
+                            && object.state.status.is_active()
+                    })
+                    .map(|object| object.id)
+                    .collect();
+                crew.sort_unstable();
+                state.crew = crew;
+                state.cursor = self
+                    .crew_selection
+                    .get(&owner)
+                    .and_then(|selection| selection.cursor())
+                    .or(state.cursor);
+                if self.eliminated_crew_owners.contains(&owner) {
+                    state.status = PlayerStatus::Eliminated;
+                } else if state.status == PlayerStatus::Eliminated {
+                    state.status = PlayerStatus::Active;
+                }
+                state
+            })
+            .collect();
+        player_states.sort_unstable_by_key(|state| state.id);
         let definition_categories = self
             .definitions
             .iter()
@@ -5097,6 +5270,7 @@ impl Engine {
             environment,
             global_effects: self.global_effects.clone(),
             particles,
+            players: player_states,
             crew_selection,
             crew_roles,
             known_crew_owners,
@@ -5153,6 +5327,8 @@ impl Engine {
             .iter()
             .map(ActiveParticle::snapshot)
             .collect();
+        let mut players: Vec<_> = self.players.values().map(Player::to_state).collect();
+        players.sort_unstable_by_key(|player| player.id);
 
         EngineState {
             frame: self.frame,
@@ -5162,6 +5338,7 @@ impl Engine {
             landscape: self.landscape.clone(),
             objects,
             particles,
+            players,
             crew_selection,
             crew_roles,
             global_effects: self.global_effects.clone(),
@@ -5259,6 +5436,14 @@ impl Engine {
             .filter(|(_, roles)| !roles.is_empty())
             .collect();
 
+        self.players = state
+            .players
+            .iter()
+            .cloned()
+            .map(Player::from_state)
+            .map(|player| (player.id(), player))
+            .collect();
+
         self.known_crew_owners = state.known_crew_owners.iter().cloned().collect();
         self.eliminated_crew_owners = state.eliminated_crew_owners.iter().cloned().collect();
 
@@ -5272,6 +5457,7 @@ impl Engine {
 
         self.prune_roles();
         self.prune_selection();
+        self.sync_all_player_cursors();
         self.refresh_elimination_state();
 
         Ok(())
@@ -5488,6 +5674,8 @@ impl Engine {
                 self.remove_from_roles(new_owner, object_id);
             }
         }
+        self.sync_player_cursor(previous_owner);
+        self.sync_player_cursor(new_owner);
     }
 
     fn remove_from_selection(&mut self, owner: i32, object_id: ObjectId) {
@@ -5497,6 +5685,7 @@ impl Engine {
                 self.crew_selection.remove(&owner);
             }
         }
+        self.sync_player_cursor(owner);
     }
 
     fn remove_from_roles(&mut self, owner: i32, object_id: ObjectId) {
@@ -5505,6 +5694,24 @@ impl Engine {
             if assignments.is_empty() {
                 self.crew_roles.remove(&owner);
             }
+        }
+        self.sync_player_cursor(owner);
+    }
+
+    fn sync_player_cursor(&mut self, owner: i32) {
+        if let Some(player) = self.players.get_mut(&owner) {
+            let cursor = self
+                .crew_selection
+                .get(&owner)
+                .and_then(|selection| selection.cursor());
+            player.set_cursor(cursor);
+        }
+    }
+
+    fn sync_all_player_cursors(&mut self) {
+        let owners: Vec<i32> = self.players.keys().copied().collect();
+        for owner in owners {
+            self.sync_player_cursor(owner);
         }
     }
 
@@ -5524,6 +5731,7 @@ impl Engine {
             selection.prune(&alive);
             !selection.is_empty()
         });
+        self.sync_all_player_cursors();
     }
 
     fn prune_roles(&mut self) {
@@ -5571,11 +5779,12 @@ impl Engine {
     }
 
     fn refresh_elimination_state(&mut self) {
-        if self.objects.is_empty() && self.known_crew_owners.is_empty() {
+        if self.objects.is_empty() && self.known_crew_owners.is_empty() && self.players.is_empty() {
             return;
         }
 
-        let mut active = HashSet::new();
+        let mut active_alive = HashSet::new();
+        let mut crew_map: HashMap<i32, Vec<ObjectId>> = HashMap::new();
         for object in &self.objects {
             if !object.state.crew_member {
                 continue;
@@ -5585,17 +5794,42 @@ impl Engine {
                 continue;
             }
             self.known_crew_owners.insert(owner);
-            if !object.state.status.is_active() || !object.state.alive {
-                continue;
+            if object.state.status.is_active() {
+                crew_map.entry(owner).or_default().push(object.id);
             }
-            active.insert(owner);
-            self.eliminated_crew_owners.remove(&owner);
+            if object.state.status.is_active() && object.state.alive {
+                active_alive.insert(owner);
+            }
         }
 
-        let known: Vec<i32> = self.known_crew_owners.iter().cloned().collect();
+        for crew in crew_map.values_mut() {
+            crew.sort_unstable_by_key(|id| id.as_u64());
+        }
+
+        if !self.players.is_empty() {
+            for (&owner, player) in self.players.iter_mut() {
+                let crew = crew_map.get(&owner).cloned().unwrap_or_default();
+                player.set_crew(crew);
+            }
+        }
+
+        let mut known: Vec<i32> = self.known_crew_owners.iter().copied().collect();
+        known.sort_unstable();
+        known.dedup();
+
         for owner in known {
-            if !active.contains(&owner) {
+            if active_alive.contains(&owner) {
+                self.eliminated_crew_owners.remove(&owner);
+                if let Some(player) = self.players.get_mut(&owner) {
+                    if player.status() == PlayerStatus::Eliminated {
+                        player.set_status(PlayerStatus::Active);
+                    }
+                }
+            } else {
                 self.eliminated_crew_owners.insert(owner);
+                if let Some(player) = self.players.get_mut(&owner) {
+                    player.set_status(PlayerStatus::Eliminated);
+                }
             }
         }
     }
@@ -8512,6 +8746,18 @@ mod tests {
     }
     "#;
 
+    const PASSIVE_PLAYER_SCRIPT: &str = r#"
+global func Initialize(state, random)
+{
+    return nil;
+}
+
+global func Step(state, frame, random)
+{
+    return nil;
+}
+"#;
+
     const EFFECT_HOST_SCRIPT: &str = r#"
     global func Initialize(state, random)
     {
@@ -10997,6 +11243,59 @@ mod tests {
         selected.sort_by_key(|id| id.as_u64());
         assert_eq!(selected, vec![first, second]);
         assert_eq!(engine.crew_cursor(1), Some(first));
+    }
+
+    #[test]
+    fn register_player_populates_snapshot_state() -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        engine.register_player(PlayerConfig::new(1, "Alice").with_wealth(75))?;
+        let mut definition = Definition::from_script("Walker", "Walker", PASSIVE_PLAYER_SCRIPT)?;
+        definition.set_crew_member(true);
+        engine.register_definition(definition)?;
+        let crew = engine.spawn_object(
+            SpawnConfig::new("Walker")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_position(Vector2::new(0, 0)),
+        )?;
+        assert_eq!(engine.player(1).unwrap().crew(), &[crew]);
+        let snapshot = engine.snapshot();
+        let player_state = snapshot
+            .players
+            .iter()
+            .find(|state| state.id == 1)
+            .expect("player state present");
+        assert_eq!(player_state.name, "Alice");
+        assert_eq!(player_state.wealth, 75);
+        assert_eq!(player_state.status, PlayerStatus::Active);
+        assert_eq!(player_state.crew, vec![crew]);
+        Ok(())
+    }
+
+    #[test]
+    fn player_cursor_tracks_selection_changes() -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        engine.register_player(PlayerConfig::new(1, "Cursor"))?;
+        let mut definition =
+            Definition::from_script("CursorCrew", "CursorCrew", PASSIVE_PLAYER_SCRIPT)?;
+        definition.set_crew_member(true);
+        engine.register_definition(definition)?;
+        let crew = engine.spawn_object(
+            SpawnConfig::new("CursorCrew")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_position(Vector2::new(0, 0)),
+        )?;
+        engine.select_crew(1, [crew])?;
+        assert_eq!(engine.player(1).unwrap().cursor(), Some(crew));
+        let snapshot = engine.snapshot();
+        let cursor = snapshot
+            .players
+            .iter()
+            .find(|state| state.id == 1)
+            .and_then(|state| state.cursor);
+        assert_eq!(cursor, Some(crew));
+        Ok(())
     }
 
     #[test]
