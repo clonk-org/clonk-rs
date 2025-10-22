@@ -6,6 +6,9 @@
 
 **How to Run:** `cargo run` (launches full game with real scenarios and audio)
 
+**Recent Progress (2025-10-28):**
+- Quick-save/load parity now verified across fresh sessions; added regression coverage and resettable app-path cache to prevent cross-run contamination.
+
 **Recent Progress (2025-10-27):**
 - Added regression coverage for on-disk scenarios via `start_real_scenario_loads_from_disk`; menu launches now start real scenario groups with focus selection parity.
 
@@ -60,7 +63,7 @@ Default builds now emit only `rlib`. Enable the `ffi` feature on the target crat
 - [x] Startup menu displays real scenarios from installation
 - [x] Music plays in menu and during gameplay (when assets present)
 - [x] Scenarios load and run with working audio/graphics/input (`start_real_scenario_loads_from_disk`)
-- [ ] Quick-save/load works across sessions
+- [x] Quick-save/load works across sessions
 - [ ] `cargo test` passes on all platforms (macOS/Windows/Linux)
 - [x] `cargo xtask engine-snapshots verify` validates determinism vs C++ baseline (2025-10-21 clean run)
 - [x] Multiplayer host/join flows work (`lc-app --host/--join`; covered by automated smoke test)

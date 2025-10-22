@@ -13,7 +13,7 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -58,6 +58,8 @@ const BACK_ENTRY_TITLE: &str = "← Back";
 const SAVE_DIR_NAME: &str = "Savegames";
 const QUICK_SAVE_FILE: &str = "quicksave.lcsave";
 const SAVE_FILE_VERSION: SaveFileVersion = SaveFileVersion::new(1, 0, 0);
+static APP_PATH_CACHE: Mutex<Option<std::result::Result<Arc<AppPaths>, PathsError>>> =
+    Mutex::new(None);
 
 #[derive(Debug, Parser)]
 #[command(name = "lc-app", about = "LegacyClonk Rust runtime", version)]
@@ -112,7 +114,7 @@ fn main() -> Result<()> {
 
     let event_loop = EventLoop::new();
     let app_paths = cached_app_paths().ok();
-    if let Some(paths) = app_paths {
+    if let Some(paths) = app_paths.as_ref() {
         if let Err(err) = paths.ensure_user_dirs() {
             tracing::warn!(
                 error = %err,
@@ -121,8 +123,8 @@ fn main() -> Result<()> {
             );
         }
     }
-    let mut display_options = DisplayOptions::load(app_paths);
-    let audio_options = AudioOptions::load(app_paths);
+    let mut display_options = DisplayOptions::load(app_paths.as_deref());
+    let audio_options = AudioOptions::load(app_paths.as_deref());
     let (initial_width, initial_height) = display_options.actual_size();
     let mut window_builder = WindowBuilder::new().with_title("LegacyClonk (Rust preview)");
     if matches!(display_options.mode, DisplayMode::Window) && !display_options.maximized {
@@ -149,8 +151,14 @@ fn main() -> Result<()> {
     let mut pixels = Pixels::new(size.width, size.height, surface)
         .context("failed to create pixel framebuffer")?;
 
-    let mut app = GameApp::new(size.width, size.height, audio_options, app_paths, runtime)
-        .context("failed to initialise app state")?;
+    let mut app = GameApp::new(
+        size.width,
+        size.height,
+        audio_options,
+        app_paths.as_deref(),
+        runtime,
+    )
+    .context("failed to initialise app state")?;
 
     let mut previous_instant = Instant::now();
     let mut accumulator = Duration::ZERO;
@@ -218,8 +226,8 @@ fn main() -> Result<()> {
             *control_flow,
             ControlFlow::Exit | ControlFlow::ExitWithCode(_)
         ) {
-            if let Some(paths) = app_paths {
-                display_options.persist_if_dirty(paths);
+            if let Some(paths) = app_paths.as_ref() {
+                display_options.persist_if_dirty(paths.as_ref());
             }
         }
     });
@@ -1628,12 +1636,21 @@ fn apply_save_migrations(mut save: SavedGameFile) -> Result<SavedGameFile> {
     Ok(save)
 }
 
-fn cached_app_paths() -> std::result::Result<&'static AppPaths, PathsError> {
-    static CACHE: OnceLock<std::result::Result<AppPaths, PathsError>> = OnceLock::new();
-    match CACHE.get_or_init(|| AppPaths::discover()) {
-        Ok(paths) => Ok(paths),
-        Err(err) => Err(err.clone()),
+fn cached_app_paths() -> std::result::Result<Arc<AppPaths>, PathsError> {
+    let mut cache = APP_PATH_CACHE.lock().unwrap();
+    if let Some(result) = cache.as_ref() {
+        return result.clone();
     }
+
+    let discovered = AppPaths::discover().map(Arc::new);
+    *cache = Some(discovered.clone());
+    discovered
+}
+
+#[cfg(test)]
+fn reset_cached_app_paths() {
+    let mut cache = APP_PATH_CACHE.lock().unwrap();
+    *cache = None;
 }
 
 fn resolve_save_directory() -> PathBuf {
@@ -3653,53 +3670,196 @@ mod tests {
     fn quick_save_round_trips_state() {
         lc_core::logging::init();
 
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions::default(),
-            None,
-            RuntimeConfig {
-                player_owner: 1,
-                network: None,
-            },
+        reset_cached_app_paths();
+        {
+            let _guard = EnvGuard::set(&[]);
+            reset_cached_app_paths();
+
+            let mut app = GameApp::new(
+                320,
+                200,
+                AudioOptions::default(),
+                None,
+                RuntimeConfig {
+                    player_owner: 1,
+                    network: None,
+                },
+            )
+            .expect("initialise app");
+            app.start_sandbox_scenario(FrontendScenario::fallback())
+                .expect("start sandbox scenario");
+
+            for _ in 0..5 {
+                app.update().expect("tick before save");
+            }
+            let saved_frame = app.snapshot.frame;
+
+            app.quick_save().expect("quick save succeeds");
+            assert!(
+                app.last_save_path
+                    .as_ref()
+                    .map(|path| path.ends_with(QUICK_SAVE_FILE))
+                    .unwrap_or(false),
+                "quick save should note the save path"
+            );
+
+            for _ in 0..3 {
+                app.update().expect("advance after save");
+            }
+            assert!(
+                app.snapshot.frame > saved_frame,
+                "frame should advance after save"
+            );
+
+            app.quick_load().expect("quick load succeeds");
+            assert_eq!(
+                app.snapshot.frame, saved_frame,
+                "quick load should restore saved frame"
+            );
+            assert!(
+                matches!(app.mode, AppMode::Running),
+                "quick load should keep the game running"
+            );
+
+            cleanup_quicksave_file();
+        }
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn quick_save_persists_across_sessions() {
+        lc_core::logging::init();
+
+        reset_cached_app_paths();
+
+        let install_dir = tempdir().unwrap();
+
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let scenario_dir = install_dir.path().join("Scenarios").join("Alpha.c4s");
+        let scripts_dir = scenario_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        fs::write(
+            scenario_dir.join("Scenario.json"),
+            r#"
+            {
+                "name": "Alpha Mission",
+                "ground_height": 72,
+                "landscape": { "kind": "flat", "width": 160, "height": 80 },
+                "definitions": [
+                    { "id": "Mover", "name": "Mover", "script": "scripts/mover.aul" }
+                ],
+                "initial_objects": [
+                    {
+                        "definition": "Mover",
+                        "position": [40, 48],
+                        "owner": 1,
+                        "crew_member": true
+                    }
+                ]
+            }
+            "#,
         )
-        .expect("initialise app");
-        app.start_sandbox_scenario(FrontendScenario::fallback())
-            .expect("start sandbox scenario");
+        .unwrap();
+        fs::write(scripts_dir.join("mover.aul"), walker_script()).unwrap();
 
-        for _ in 0..5 {
-            app.update().expect("tick before save");
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let quicksave_path = user_dir.join(SAVE_DIR_NAME).join(QUICK_SAVE_FILE);
+
+        {
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(install_dir.path())),
+                ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+            ]);
+
+            reset_cached_app_paths();
+
+            let saved_frame = {
+                let mut app = GameApp::new(
+                    320,
+                    200,
+                    AudioOptions::default(),
+                    None,
+                    RuntimeConfig {
+                        player_owner: 1,
+                        network: None,
+                    },
+                )
+                .expect("initialise app");
+
+                let scenario = app
+                    .scenario_catalog
+                    .get("Alpha.c4s")
+                    .cloned()
+                    .expect("scenario discovered");
+                app.start_scenario(scenario).expect("start disk scenario");
+
+                for _ in 0..5 {
+                    app.update().expect("advance simulation before save");
+                }
+                let frame_before_save = app.snapshot.frame;
+
+                app.quick_save().expect("quick save succeeds");
+                assert!(
+                    quicksave_path.exists(),
+                    "expected quick save file to be written"
+                );
+
+                frame_before_save
+            };
+
+            {
+                let mut app = GameApp::new(
+                    320,
+                    200,
+                    AudioOptions::default(),
+                    None,
+                    RuntimeConfig {
+                        player_owner: 1,
+                        network: None,
+                    },
+                )
+                .expect("initialise app after restart");
+
+                assert!(
+                    app.last_save_path
+                        .as_ref()
+                        .map(|path| path.ends_with(QUICK_SAVE_FILE))
+                        .unwrap_or(false),
+                    "expected quick save path to be remembered"
+                );
+                assert!(
+                    matches!(app.mode, AppMode::Menu),
+                    "new session should start in menu"
+                );
+
+                app.quick_load().expect("quick load succeeds");
+
+                assert!(
+                    matches!(app.mode, AppMode::Running),
+                    "quick load should enter running mode"
+                );
+                assert_eq!(
+                    app.snapshot.frame, saved_frame,
+                    "quick load should restore the saved frame"
+                );
+                assert!(
+                    app.active_scenario
+                        .as_ref()
+                        .and_then(|scenario| scenario.path.as_ref())
+                        .map(|path| path.ends_with("Alpha.c4s"))
+                        .unwrap_or(false),
+                    "loaded scenario should reference disk path"
+                );
+            }
+
+            reset_cached_app_paths();
         }
-        let saved_frame = app.snapshot.frame;
-
-        app.quick_save().expect("quick save succeeds");
-        assert!(
-            app.last_save_path
-                .as_ref()
-                .map(|path| path.ends_with(QUICK_SAVE_FILE))
-                .unwrap_or(false),
-            "quick save should note the save path"
-        );
-
-        for _ in 0..3 {
-            app.update().expect("advance after save");
-        }
-        assert!(
-            app.snapshot.frame > saved_frame,
-            "frame should advance after save"
-        );
-
-        app.quick_load().expect("quick load succeeds");
-        assert_eq!(
-            app.snapshot.frame, saved_frame,
-            "quick load should restore saved frame"
-        );
-        assert!(
-            matches!(app.mode, AppMode::Running),
-            "quick load should keep the game running"
-        );
-
-        cleanup_quicksave_file();
+        reset_cached_app_paths();
     }
 
     #[test]
@@ -3813,7 +3973,10 @@ mod tests {
 
         app.start_scenario(scenario).expect("start disk scenario");
 
-        assert!(matches!(app.mode, AppMode::Running), "mode should be Running");
+        assert!(
+            matches!(app.mode, AppMode::Running),
+            "mode should be Running"
+        );
         assert_eq!(app.scenario_label, "Alpha Mission");
         assert_eq!(app.fallback_ground, 72);
         assert!(
