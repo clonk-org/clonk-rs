@@ -6,6 +6,9 @@
 
 **How to Run:** `cargo run` (launches full game with real scenarios and audio)
 
+**Recent Progress (2025-10-22):**
+- Added semantic-versioned quick-save format with migration pipeline; legacy saves now load under current engine and regression coverage guards the path.
+
 **Recent Progress (2025-10-21):**
 - Replaced busy-poll loop with fixed-step accumulator using `ControlFlow::WaitUntil` to align simulation cadence with the legacy engine; validated via `cargo test` and `cargo xtask engine-snapshots verify`.
 - Implemented legacy glob semantics for sound wildcard lookup and added regression tests.
@@ -33,12 +36,6 @@
 
 ## Parity Gaps
 
-### Medium: Savegame Fragility
-**Issue:** Hard version check with no schema migration (`SAVE_FILE_VERSION = 1`).
-**Location:** rust/crates/lc-app/src/main.rs:49, 1301-1307, 2041-2048
-**Impact:** Quick-saves break on any EngineState evolution; hampers parity testing.
-**Fix:** Add semantic versioning and migration layer for save format.
-
 ### Low: Audio Mixing Model
 **Issue:** Linear panning/falloff may differ from C++ (which could use inverse-square, occlusion, etc.).
 **Location:** rust/crates/lc-app/src/main.rs:2577-2601
@@ -62,7 +59,7 @@
 
 ## Immediate Priorities
 
-1. **Savegame migration layer** - Version quick-save schema and add migrations to unblock engine changes
+1. Validate audio mixing parity vs C++ captures
 
 ## Assets & Testing
 

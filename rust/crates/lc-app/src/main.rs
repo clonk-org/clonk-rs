@@ -6,6 +6,7 @@ mod settings;
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::convert::TryFrom;
 use std::f32::consts::PI;
+use std::fmt;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -34,7 +35,11 @@ use lc_platform::{AppPaths, PathsError};
 use lc_resources::{scenario as resource_scenario, Group};
 use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, NetworkMode};
 use pixels::{Pixels, SurfaceTexture};
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{self, Unexpected, Visitor},
+    ser::Serializer,
+    Deserialize, Serialize,
+};
 use settings::{AudioOptions, DisplayMode, DisplayOptions};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{
@@ -52,7 +57,7 @@ const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
 const BACK_ENTRY_TITLE: &str = "← Back";
 const SAVE_DIR_NAME: &str = "Savegames";
 const QUICK_SAVE_FILE: &str = "quicksave.lcsave";
-const SAVE_FILE_VERSION: u32 = 1;
+const SAVE_FILE_VERSION: SaveFileVersion = SaveFileVersion::new(1, 0, 0);
 
 #[derive(Debug, Parser)]
 #[command(name = "lc-app", about = "LegacyClonk Rust runtime", version)]
@@ -1394,13 +1399,208 @@ impl SavedScenarioInfo {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SaveFileVersion {
+    major: u16,
+    minor: u16,
+    patch: u16,
+}
+
+impl SaveFileVersion {
+    const fn new(major: u16, minor: u16, patch: u16) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+
+    const fn major(self) -> u16 {
+        self.major
+    }
+
+    fn parse_str(input: &str) -> Result<Self, String> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err("save file version cannot be empty".to_string());
+        }
+
+        let mut components = trimmed.split('.').collect::<Vec<_>>();
+        if components.len() > 3 {
+            return Err(format!(
+                "save file version `{trimmed}` has too many components"
+            ));
+        }
+
+        while components.len() < 3 {
+            components.push("0");
+        }
+
+        let major = Self::parse_component(components[0], "major")?;
+        let minor = Self::parse_component(components[1], "minor")?;
+        let patch = Self::parse_component(components[2], "patch")?;
+        Ok(Self::new(major, minor, patch))
+    }
+
+    fn from_numeric(value: u64) -> Result<Self, String> {
+        if value > u16::MAX as u64 {
+            return Err(format!(
+                "legacy save file version `{value}` exceeds supported range"
+            ));
+        }
+        Ok(Self::new(value as u16, 0, 0))
+    }
+
+    fn parse_component(component: &str, name: &str) -> Result<u16, String> {
+        if component.is_empty() {
+            return Err(format!("save file version has empty {name} component"));
+        }
+        component
+            .parse::<u16>()
+            .map_err(|_| format!("save file version `{component}` is not a valid {name} number"))
+    }
+}
+
+impl fmt::Display for SaveFileVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+impl Serialize for SaveFileVersion {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for SaveFileVersion {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct SaveFileVersionVisitor;
+
+        impl<'de> Visitor<'de> for SaveFileVersionVisitor {
+            type Value = SaveFileVersion;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a semantic version string like \"1.0.0\" or legacy integer")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                SaveFileVersion::from_numeric(value).map_err(E::custom)
+            }
+
+            fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value < 0 {
+                    return Err(E::invalid_value(
+                        Unexpected::Signed(value),
+                        &"non-negative version number",
+                    ));
+                }
+                self.visit_u64(value as u64)
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                SaveFileVersion::parse_str(value).map_err(E::custom)
+            }
+
+            fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+        }
+
+        deserializer.deserialize_any(SaveFileVersionVisitor)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SavedGameFile {
-    version: u32,
+    version: SaveFileVersion,
     saved_at_seconds: u64,
     scenario: SavedScenarioInfo,
     focus_id: Option<ObjectId>,
     engine_state: EngineState,
+}
+
+struct SaveMigration {
+    from: SaveFileVersion,
+    to: SaveFileVersion,
+    apply: fn(SavedGameFile) -> Result<SavedGameFile>,
+}
+
+const SAVE_MIGRATIONS: &[SaveMigration] = &[];
+
+fn migrate_save_file(save: SavedGameFile) -> Result<SavedGameFile> {
+    if save.version == SAVE_FILE_VERSION {
+        return Ok(save);
+    }
+
+    if save.version.major() > SAVE_FILE_VERSION.major() {
+        anyhow::bail!(
+            "quick save requires lc-app {} or newer (current engine {})",
+            save.version,
+            SAVE_FILE_VERSION
+        );
+    }
+
+    if save.version.major() < SAVE_FILE_VERSION.major() {
+        anyhow::bail!(
+            "quick save version {} cannot be loaded by this engine (current {})",
+            save.version,
+            SAVE_FILE_VERSION
+        );
+    }
+
+    apply_save_migrations(save)
+}
+
+fn apply_save_migrations(mut save: SavedGameFile) -> Result<SavedGameFile> {
+    let mut applied = 0usize;
+    while save.version < SAVE_FILE_VERSION {
+        if let Some(migration) = SAVE_MIGRATIONS
+            .iter()
+            .find(|candidate| candidate.from == save.version)
+        {
+            tracing::info!(
+                from = %migration.from,
+                to = %migration.to,
+                "applying quick save migration"
+            );
+            save = (migration.apply)(save)?;
+            applied = applied
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("quick save migration overflow"))?;
+            if applied > SAVE_MIGRATIONS.len() {
+                anyhow::bail!("detected cycle in quick save migrations");
+            }
+            continue;
+        }
+
+        tracing::warn!(
+            from = %save.version,
+            to = %SAVE_FILE_VERSION,
+            "no explicit migration for quick save version; assuming backward compatibility"
+        );
+        save.version = SAVE_FILE_VERSION;
+    }
+
+    Ok(save)
 }
 
 fn cached_app_paths() -> std::result::Result<&'static AppPaths, PathsError> {
@@ -2196,13 +2396,8 @@ impl GameApp {
             .with_context(|| format!("failed to read quick save from {}", path.display()))?;
         let save: SavedGameFile =
             serde_json::from_str(&contents).context("failed to parse quick save data")?;
-        if save.version != SAVE_FILE_VERSION {
-            anyhow::bail!(
-                "unsupported quick save version {} (expected {})",
-                save.version,
-                SAVE_FILE_VERSION
-            );
-        }
+        let save =
+            migrate_save_file(save).context("failed to migrate quick save to current schema")?;
         self.apply_loaded_game(save)?;
         self.last_save_path = Some(path.clone());
         Ok(())
@@ -2869,6 +3064,46 @@ mod tests {
         let terms = SoundSearchTerms::new("Sound*");
         assert_eq!(terms.wildcard_pattern.as_deref(), Some("sound*.wav"));
         assert!(terms.search_names.is_empty());
+    }
+
+    #[test]
+    fn save_file_version_deserializes_legacy_integer() {
+        let version: SaveFileVersion = serde_json::from_str("1").expect("parse legacy version");
+        assert_eq!(version, SaveFileVersion::new(1, 0, 0));
+    }
+
+    #[test]
+    fn save_file_version_deserializes_string() {
+        let version: SaveFileVersion =
+            serde_json::from_str("\"2.3.4\"").expect("parse semantic string version");
+        assert_eq!(version, SaveFileVersion::new(2, 3, 4));
+    }
+
+    #[test]
+    fn migration_allows_previous_minor_version() {
+        let engine = Engine::new();
+        let engine_state = engine.capture_state();
+        let save = SavedGameFile {
+            version: SaveFileVersion::new(1, 0, 0),
+            saved_at_seconds: 0,
+            scenario: SavedScenarioInfo {
+                identifier: "test".to_string(),
+                title: "Test Scenario".to_string(),
+                description: None,
+                path: None,
+                is_editable: false,
+                is_playable: true,
+                label: "Test".to_string(),
+                fallback_ground: 0,
+                sandbox: true,
+            },
+            focus_id: None,
+            engine_state,
+        };
+
+        let migrated =
+            migrate_save_file(save).expect("legacy save should migrate to current schema");
+        assert_eq!(migrated.version, SAVE_FILE_VERSION);
     }
 
     fn sample_scenarios() -> Vec<FrontendScenario> {
