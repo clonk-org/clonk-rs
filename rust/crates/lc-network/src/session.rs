@@ -889,7 +889,7 @@ mod tests {
             .expect("connect client");
 
         // Drain the initial exec sync event sent to the client.
-        let client_events = client.events();
+        let mut client_events = client.take_event_receiver();
         if let Ok(Some(ClientEvent::ExecSync { .. })) =
             tokio::time::timeout(Duration::from_millis(200), client_events.recv()).await
         {
@@ -901,7 +901,7 @@ mod tests {
             .payload(vec![0x01, 0x02, 0x03]);
         client.submit_control(packet).await.expect("submit control");
 
-        let events = host.events();
+        let mut events = host.take_event_receiver();
         let mut saw_join = false;
         let mut saw_ready = false;
 
@@ -952,8 +952,8 @@ mod tests {
             .await
             .expect("connect client");
 
-        let mut host_events = host.events();
-        let mut client_events = client.events();
+        let mut host_events = host.take_event_receiver();
+        let mut client_events = client.take_event_receiver();
         drain_initial_exec_sync(&mut client_events).await;
 
         submit_control_pair(&mut host, &client, 0, vec![0xAA], vec![0x11]).await;
@@ -972,7 +972,7 @@ mod tests {
             connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
                 .await
                 .expect("connect second client");
-        let mut client_beta_events = client_beta.events();
+        let mut client_beta_events = client_beta.take_event_receiver();
         drain_initial_exec_sync(&mut client_beta_events).await;
 
         submit_control_pair(&mut host, &client_beta, 1, vec![0xBB], vec![0x22]).await;
@@ -1033,7 +1033,6 @@ mod tests {
                 Ok(Some(HostEvent::Ready { packet })) => break packet,
                 Ok(Some(HostEvent::ClientJoined { .. })) => continue,
                 Ok(Some(HostEvent::ClientLeft { .. })) => continue,
-                Ok(Some(HostEvent::PeerDisconnected { .. })) => continue,
                 Ok(Some(HostEvent::TransportError { error, .. })) => {
                     panic!("host reported transport error: {error}");
                 }
@@ -1068,7 +1067,6 @@ mod tests {
         loop {
             match timeout(duration, events.recv()).await {
                 Ok(Some(HostEvent::ClientLeft { .. })) => break,
-                Ok(Some(HostEvent::PeerDisconnected { .. })) => break,
                 Ok(Some(HostEvent::TransportError { .. })) => break,
                 Ok(Some(_)) => continue,
                 Ok(None) => panic!("host event stream ended unexpectedly"),

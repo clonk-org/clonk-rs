@@ -3747,6 +3747,96 @@ mod tests {
         );
     }
 
+    #[test]
+    fn start_real_scenario_loads_from_disk() {
+        lc_core::logging::init();
+
+        let install_dir = tempdir().unwrap();
+
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let scenario_dir = install_dir.path().join("Scenarios").join("Alpha.c4s");
+        let scripts_dir = scenario_dir.join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        fs::write(
+            scenario_dir.join("Scenario.json"),
+            r#"
+            {
+                "name": "Alpha Mission",
+                "ground_height": 72,
+                "landscape": { "kind": "flat", "width": 160, "height": 80 },
+                "definitions": [
+                    { "id": "Mover", "name": "Mover", "script": "scripts/mover.aul" }
+                ],
+                "initial_objects": [
+                    {
+                        "definition": "Mover",
+                        "position": [40, 48],
+                        "owner": 1,
+                        "crew_member": true
+                    }
+                ]
+            }
+            "#,
+        )
+        .unwrap();
+        fs::write(scripts_dir.join("mover.aul"), walker_script()).unwrap();
+
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            None,
+            RuntimeConfig {
+                player_owner: 1,
+                network: None,
+            },
+        )
+        .expect("initialise app");
+
+        let scenario = app
+            .scenario_catalog
+            .get("Alpha.c4s")
+            .cloned()
+            .expect("scenario discovered");
+        assert_eq!(scenario.title, "Alpha Mission");
+
+        app.start_scenario(scenario).expect("start disk scenario");
+
+        assert!(matches!(app.mode, AppMode::Running), "mode should be Running");
+        assert_eq!(app.scenario_label, "Alpha Mission");
+        assert_eq!(app.fallback_ground, 72);
+        assert!(
+            app.snapshot
+                .objects
+                .iter()
+                .any(|object| object.definition_id == "Mover"),
+            "expected spawned Mover object"
+        );
+        assert!(
+            app.focus_id.is_some(),
+            "expected focus to be assigned for crew member"
+        );
+        assert_eq!(
+            app.active_scenario
+                .as_ref()
+                .and_then(|active| active.path.as_ref())
+                .map(|path| path.as_path()),
+            Some(scenario_dir.as_path()),
+            "active scenario should track disk path"
+        );
+    }
+
     fn cleanup_quicksave_file() {
         let dir = resolve_save_directory();
         let path = dir.join(QUICK_SAVE_FILE);
