@@ -6,6 +6,9 @@
 
 **How to Run:** `cargo run` (launches full game with real scenarios and audio)
 
+**Recent Progress (2025-10-26):**
+- Menu music now starts automatically on launch and after returning from scenarios; sandbox fallback reuses the same loop with regression coverage (`menu_music_runs_in_menu_cycle`).
+
 **Recent Progress (2025-10-25):**
 - Startup menu now lists real installation scenarios; scenario discovery tolerates file roots and regression tests cover the menu flow.
 
@@ -52,7 +55,7 @@ Default builds now emit only `rlib`. Enable the `ffi` feature on the target crat
 
 - [x] `cargo run` (no flags) launches lc-app with startup menu
 - [x] Startup menu displays real scenarios from installation
-- [ ] Music plays in menu and during gameplay (when assets present)
+- [x] Music plays in menu and during gameplay (when assets present)
 - [ ] Scenarios load and run with working audio/graphics/input
 - [ ] Quick-save/load works across sessions
 - [ ] `cargo test` passes on all platforms (macOS/Windows/Linux)

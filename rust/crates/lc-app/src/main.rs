@@ -408,6 +408,10 @@ impl AudioContext {
         self.options.menu_music_enabled
     }
 
+    fn music_is_playing(&self) -> bool {
+        self.system.music_is_playing()
+    }
+
     fn handle_events(
         &mut self,
         events: &[AudioCommand],
@@ -1728,6 +1732,7 @@ impl GameApp {
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);
         }
+        app.ensure_menu_music();
         Ok(app)
     }
 
@@ -2264,6 +2269,27 @@ impl GameApp {
         self.menu_state.menu().resize(width as f32, height as f32);
 
         self.mode = AppMode::Menu;
+        self.ensure_menu_music();
+    }
+
+    fn ensure_menu_music(&mut self) {
+        if !matches!(self.mode, AppMode::Menu) {
+            return;
+        }
+        if let Some(audio) = self.audio.as_mut() {
+            audio.configure_scenario(None);
+            if !audio.menu_music_enabled() {
+                audio.stop_music();
+                return;
+            }
+            if audio.music_is_playing() {
+                return;
+            }
+            if let Err(err) = audio.play_music(sandbox_music_bytes(), true) {
+                tracing::warn!(error = %err, "failed to start menu music");
+                audio.stop_music();
+            }
+        }
     }
 
     fn start_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
@@ -3577,6 +3603,50 @@ mod tests {
         let decoded = decode_audio(audio).expect("sandbox music decodes");
         assert_eq!(decoded.sample_rate, 44_100);
         assert!(decoded.frames.len() > 2_000);
+    }
+
+    #[test]
+    fn menu_music_runs_in_menu_cycle() {
+        lc_core::logging::init();
+
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            None,
+            RuntimeConfig {
+                player_owner: 1,
+                network: None,
+            },
+        )
+        .expect("initialise app with audio");
+
+        assert!(
+            app.audio
+                .as_ref()
+                .map(|audio| audio.music_is_playing())
+                .unwrap_or(false),
+            "menu music should start on launch"
+        );
+
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start sandbox scenario");
+        assert!(
+            app.audio
+                .as_ref()
+                .map(|audio| audio.music_is_playing())
+                .unwrap_or(false),
+            "sandbox scenario should have looping music"
+        );
+
+        app.return_to_menu();
+        assert!(
+            app.audio
+                .as_ref()
+                .map(|audio| audio.music_is_playing())
+                .unwrap_or(false),
+            "menu music should resume after returning to the menu"
+        );
     }
 
     #[test]
