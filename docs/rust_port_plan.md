@@ -137,7 +137,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 1. Port C4Def system to load real object definitions from Definition folders — ✅ Added `lc-resources::definition` (DefCore/ActMap/script parsing) with `Engine::Definition::from_resource`; sandbox now attempts to boot with real Clonk definitions when present (asset loading + scenario wiring still pending)
 2. ✅ Port Graphics.c4g loading for object graphics, fonts, UI elements — startup menu and UI components now render real assets from Graphics.c4g and Endeavour.ttf; walker sprite mapping added as first object graphic
 3. ✅ Port Material.txt system for terrain material definitions — `lc-resources::material` parses Material.txt/®.c4m files and `Engine` tracks a MaterialSet
-4. Make real scenarios actually load and work (not just parse and fall back)
+4. ✅ Make real scenarios load with install definitions (gameplay still limited until player/viewport/menu systems land)
 
 ### Phase 2: Essential Gameplay Systems
 1. Port C4Player for real player management (not just owner IDs)
@@ -170,6 +170,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Window creation and basic input handling
 - ✅ Startup menu renders Graphics.c4g backgrounds and buttons with Endeavour.ttf fonts (no longer flat placeholders)
 - ✅ Material definitions load from install archives (lc-resources::material + Engine MaterialSet)
+- ✅ Experimental: `.c4s` scenarios boot with real definitions and scripts when install data is available (lands in running state, but lacks player systems)
 
 **What Doesn't Work (Real Game Requirements):**
 - ❌ `cargo run` shows **demo only** (window title: "LegacyClonk (Rust preview)")

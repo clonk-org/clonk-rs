@@ -4,7 +4,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use lc_resources::{Group, GroupError};
+use lc_resources::{
+    ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap,
+    DefinitionError as ResourceDefinitionError, Group, GroupError,
+    ResourceDefinition as ResourceDefinitionData,
+};
 use serde::de::Error as _;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::Deserialize;
@@ -19,6 +23,8 @@ use crate::{
 pub enum ScenarioError {
     #[error("scenario manifest `Scenario.json` not found")]
     ManifestMissing,
+    #[error("legacy scenario core `Scenario.txt` not found")]
+    LegacyCoreMissing,
     #[error("failed to parse scenario manifest: {0}")]
     ManifestParse(#[from] serde_json::Error),
     #[error("scenario resource error: {0}")]
@@ -27,6 +33,14 @@ pub enum ScenarioError {
     MissingScript { path: PathBuf },
     #[error("script file `{path}` is not valid UTF-8")]
     ScriptEncoding { path: PathBuf },
+    #[error("legacy scenario core `Scenario.txt` is not valid UTF-8")]
+    LegacyCoreEncoding,
+    #[error("legacy scenario definition source `{path}` could not be located")]
+    LegacyDefinitionNotFound { path: String },
+    #[error("definition load error: {0}")]
+    Definition(#[from] ResourceDefinitionError),
+    #[error("invalid legacy scenario data: {0}")]
+    LegacyParse(String),
     #[error("duplicate definition id `{0}` in scenario manifest")]
     DuplicateDefinition(String),
     #[error("initial object references unknown definition `{0}`")]
@@ -92,10 +106,37 @@ pub struct Scenario {
     script: Option<ScenarioScriptSource>,
 }
 
+pub trait LegacyDefinitionResolver {
+    fn resolve_definition_groups(
+        &self,
+        scenario: &Group,
+        identifier: &str,
+    ) -> Result<Vec<Group>, ScenarioError>;
+}
+
 impl Scenario {
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, ScenarioError> {
         let group = Group::open(path)?;
         Self::load_from_group(&group)
+    }
+
+    pub fn load_from_path_with<R: LegacyDefinitionResolver>(
+        path: impl AsRef<Path>,
+        resolver: &R,
+    ) -> Result<Self, ScenarioError> {
+        let group = Group::open(path)?;
+        Self::load_from_group_with(&group, resolver)
+    }
+
+    pub fn load_from_group_with<R: LegacyDefinitionResolver>(
+        group: &Group,
+        resolver: &R,
+    ) -> Result<Self, ScenarioError> {
+        match Self::load_from_group(group) {
+            Ok(scenario) => Ok(scenario),
+            Err(ScenarioError::ManifestMissing) => Self::load_legacy_from_group(group, resolver),
+            Err(err) => Err(err),
+        }
     }
 
     pub fn load_from_group(group: &Group) -> Result<Self, ScenarioError> {
@@ -110,6 +151,44 @@ impl Scenario {
 
         let manifest: ScenarioManifest = serde_json::from_slice(&manifest_bytes)?;
         Scenario::from_manifest(group, manifest)
+    }
+
+    fn load_legacy_from_group<R: LegacyDefinitionResolver>(
+        group: &Group,
+        resolver: &R,
+    ) -> Result<Self, ScenarioError> {
+        let manifest = parse_legacy_scenario_manifest(group)?;
+
+        let mut collected = Vec::new();
+        let mut seen_ids = HashSet::new();
+
+        for spec in &manifest.definition_specs {
+            let groups = resolver.resolve_definition_groups(group, spec)?;
+            if groups.is_empty() {
+                return Err(ScenarioError::LegacyDefinitionNotFound { path: spec.clone() });
+            }
+            for definition_group in groups {
+                collect_definitions_from_group(&definition_group, &mut seen_ids, &mut collected)?;
+            }
+        }
+
+        if collected.is_empty() {
+            return Err(ScenarioError::NoDefinitions);
+        }
+
+        let script = load_legacy_scenario_script(group)?;
+
+        Ok(Self {
+            name: manifest.title,
+            ticks: None,
+            ground_height_hint: manifest.ground_height_hint,
+            definitions: collected,
+            initial_spawns: Vec::new(),
+            landscape: None,
+            physics: None,
+            environment: None,
+            script,
+        })
     }
 
     pub fn name(&self) -> Option<&str> {
@@ -425,6 +504,261 @@ impl Scenario {
             script,
         })
     }
+}
+
+struct LegacyScenarioManifest {
+    title: Option<String>,
+    description: Option<String>,
+    definition_specs: Vec<String>,
+    ground_height_hint: Option<i32>,
+}
+
+fn parse_legacy_scenario_manifest(group: &Group) -> Result<LegacyScenarioManifest, ScenarioError> {
+    let bytes = match group.read_file("Scenario.txt") {
+        Ok(bytes) => bytes,
+        Err(GroupError::EntryNotFound(_)) => return Err(ScenarioError::LegacyCoreMissing),
+        Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(ScenarioError::LegacyCoreMissing)
+        }
+        Err(error) => return Err(ScenarioError::Resources(error)),
+    };
+
+    let text = String::from_utf8(bytes).map_err(|_| ScenarioError::LegacyCoreEncoding)?;
+    parse_legacy_scenario_text(&text)
+}
+
+fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, ScenarioError> {
+    let mut sections: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut current_section: Option<String> = None;
+
+    for raw_line in text.lines() {
+        let mut line = raw_line.trim_start_matches('\u{feff}').trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("//") {
+            continue;
+        }
+        if let Some(idx) = line.find("//") {
+            line = line[..idx].trim_end();
+        }
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let name = line[1..line.len() - 1].trim().to_ascii_lowercase();
+            current_section = Some(name.clone());
+            sections.entry(name).or_default();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let section = current_section
+            .clone()
+            .unwrap_or_else(|| "head".to_string());
+        sections
+            .entry(section)
+            .or_default()
+            .push((key.trim().to_string(), value.trim().to_string()));
+    }
+
+    let mut seen_specs = HashSet::new();
+    let mut definition_specs = Vec::new();
+    if let Some(def_entries) = sections.get("definitions") {
+        for (key, value) in def_entries {
+            if !key.to_ascii_lowercase().starts_with("definition") {
+                continue;
+            }
+            for fragment in split_definition_values(value) {
+                if seen_specs.insert(fragment.clone()) {
+                    definition_specs.push(fragment);
+                }
+            }
+        }
+    }
+
+    let title = sections
+        .get("head")
+        .and_then(|entries| find_entry(entries, "title"));
+
+    let description = sections
+        .get("head")
+        .and_then(|entries| find_entry(entries, "description"));
+
+    let ground_height_hint = derive_ground_height_hint(&sections);
+
+    Ok(LegacyScenarioManifest {
+        title,
+        description,
+        definition_specs,
+        ground_height_hint,
+    })
+}
+
+fn find_entry(entries: &[(String, String)], key: &str) -> Option<String> {
+    entries
+        .iter()
+        .find(|(entry_key, _)| entry_key.eq_ignore_ascii_case(key))
+        .and_then(|(_, value)| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+}
+
+fn split_definition_values(raw: &str) -> Vec<String> {
+    raw.split(';')
+        .map(|fragment| fragment.trim())
+        .filter(|fragment| !fragment.is_empty())
+        .map(normalize_definition_path)
+        .collect()
+}
+
+fn normalize_definition_path(raw: &str) -> String {
+    let mut trimmed = raw.trim().trim_matches(['"', '\''].as_ref());
+    while let Some(stripped) = trimmed.strip_prefix("./") {
+        trimmed = stripped;
+    }
+    while let Some(stripped) = trimmed.strip_prefix(".\\") {
+        trimmed = stripped;
+    }
+    let normalized = trimmed.replace('\\', "/");
+    normalized.trim_end_matches('/').to_string()
+}
+
+fn derive_ground_height_hint(sections: &HashMap<String, Vec<(String, String)>>) -> Option<i32> {
+    let landscape = sections.get("landscape")?;
+    let height = landscape
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("MapHeight"))
+        .and_then(|(_, value)| parse_c4sval_std(value));
+    let zoom = landscape
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("MapZoom"))
+        .and_then(|(_, value)| parse_c4sval_std(value))
+        .unwrap_or(1);
+    height.map(|h| h.max(0).saturating_mul(zoom.max(1)))
+}
+
+fn parse_c4sval_std(value: &str) -> Option<i32> {
+    let first = value.split(',').next()?.trim();
+    if first.is_empty() {
+        None
+    } else {
+        first.parse::<i32>().ok()
+    }
+}
+
+fn load_legacy_scenario_script(
+    group: &Group,
+) -> Result<Option<ScenarioScriptSource>, ScenarioError> {
+    const SCRIPT_CANDIDATES: [&str; 1] = ["Script.c"];
+    for candidate in SCRIPT_CANDIDATES {
+        if !group.exists(candidate) {
+            continue;
+        }
+        let bytes = group.read_file(candidate)?;
+        let source = String::from_utf8(bytes).map_err(|_| ScenarioError::ScriptEncoding {
+            path: PathBuf::from(candidate),
+        })?;
+        return Ok(Some(ScenarioScriptSource {
+            name: candidate.to_string(),
+            source,
+        }));
+    }
+    Ok(None)
+}
+
+fn collect_definitions_from_group(
+    group: &Group,
+    seen_ids: &mut HashSet<String>,
+    output: &mut Vec<ScenarioDefinition>,
+) -> Result<(), ScenarioError> {
+    if group.exists("DefCore.txt") {
+        let resource = ResourceDefinitionData::load(group)?;
+        let id = resource.core.id.clone();
+        if seen_ids.insert(id.clone()) {
+            output.push(scenario_definition_from_resource(resource));
+        }
+    }
+
+    for entry in group.entries()? {
+        if !entry.is_directory {
+            continue;
+        }
+        let child = group.open_child(&entry.relative_path)?;
+        collect_definitions_from_group(&child, seen_ids, output)?;
+    }
+    Ok(())
+}
+
+fn scenario_definition_from_resource(resource: ResourceDefinitionData) -> ScenarioDefinition {
+    let core = resource.core;
+    let script = resource.script;
+    let actions = resource.action_map.map(|map| convert_action_map(&map));
+
+    ScenarioDefinition {
+        id: core.id,
+        name: core.name,
+        script: script.combined().to_string(),
+        actions,
+        crew_member: core.crew_member,
+        movement: MovementProfile::default(),
+        category: core.category,
+    }
+}
+
+fn convert_action_map(map: &ResourceActionMap) -> DefinitionActions {
+    let mut specs = HashMap::new();
+    for (name, definition) in &map.actions {
+        specs.insert(name.clone(), convert_action_definition(definition));
+    }
+    DefinitionActions {
+        default_action: map.default_action.clone(),
+        specs,
+    }
+}
+
+fn convert_action_definition(action: &ResourceActionDefinition) -> ActionSpec {
+    let mut spec = ActionSpec::default();
+    if let Some(length) = action.length {
+        spec = spec.with_length(length);
+    }
+    if let Some(next) = &action.next_action {
+        spec = spec.with_next(next.clone());
+    }
+    if let Some(procedure) = &action.procedure {
+        spec = spec.with_procedure(procedure.clone());
+    }
+    if let Some(delay) = action.delay {
+        spec = spec.with_delay(delay);
+    }
+    if let Some(step) = action.step {
+        spec = spec.with_step(step);
+    }
+    if let Some(phase_call) = &action.phase_call {
+        spec = spec.with_phase_call(phase_call.clone());
+    }
+    if let Some(start_call) = &action.start_call {
+        spec = spec.with_start_call(start_call.clone());
+    }
+    if let Some(end_call) = &action.end_call {
+        spec = spec.with_end_call(end_call.clone());
+    }
+    if let Some(abort_call) = &action.abort_call {
+        spec = spec.with_abort_call(abort_call.clone());
+    }
+    if action.no_other_action {
+        spec = spec.with_no_other_action(true);
+    }
+    spec
 }
 
 fn read_group_file_bytes(group: &Group, path: &Path) -> Result<Vec<u8>, ScenarioError> {
@@ -1044,6 +1378,7 @@ impl EnvironmentManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
     const TEST_SCRIPT: &str = r#"
@@ -1858,6 +2193,117 @@ global func Step(state, frame, random)
         let snapshot = engine.tick().expect("tick succeeds");
         assert_eq!(snapshot.objects.len(), 2);
         assert!(snapshot.objects.iter().any(|object| object.owner == 99));
+    }
+
+    struct FileSystemResolver {
+        roots: Vec<PathBuf>,
+    }
+
+    impl LegacyDefinitionResolver for FileSystemResolver {
+        fn resolve_definition_groups(
+            &self,
+            scenario: &Group,
+            identifier: &str,
+        ) -> Result<Vec<Group>, ScenarioError> {
+            let mut groups = Vec::new();
+            let normalized = identifier.replace('\\', "/");
+            let path = Path::new(&normalized);
+
+            if let Ok(child) = scenario.open_child(path) {
+                groups.push(child);
+            }
+
+            for root in &self.roots {
+                let candidate = root.join(path);
+                if !candidate.exists() {
+                    continue;
+                }
+                let group = Group::open(&candidate)?;
+                if groups
+                    .iter()
+                    .all(|existing| existing.root() != group.root())
+                {
+                    groups.push(group);
+                }
+            }
+
+            if groups.is_empty() {
+                Err(ScenarioError::LegacyDefinitionNotFound {
+                    path: identifier.to_string(),
+                })
+            } else {
+                Ok(groups)
+            }
+        }
+    }
+
+    #[test]
+    fn loads_legacy_scenario_with_definitions() {
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let foo_core = defs_root.join("Foo.c4d");
+        std::fs::create_dir_all(&foo_core).expect("definition dir");
+        std::fs::write(
+            foo_core.join("DefCore.txt"),
+            "[DefCore]\nid=FOOO\nName=Foo Object\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write defcore");
+        std::fs::write(
+            foo_core.join("Script.c"),
+            "// empty definition script\n",
+        )
+        .expect("write definition script");
+
+        assert!(foo_core.join("DefCore.txt").exists(), "defcore exists");
+        assert!(foo_core.join("Script.c").exists(), "script exists");
+
+        let foo_group = Group::open(&foo_core).expect("open foo definition group");
+        ResourceDefinitionData::load(&foo_group).expect("load foo definition");
+
+        let scenario_dir = dir.path().join("LegacyScenario.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Legacy Test\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write legacy scenario core");
+        std::fs::write(
+            scenario_dir.join("Script.c"),
+            "global func Initialize(state, random) { return nil; }\n",
+        )
+        .expect("write legacy scenario script");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+
+        let scenario_group = Group::open(&scenario_dir).expect("open scenario group");
+        resolver
+            .resolve_definition_groups(&scenario_group, "Defs.c4d")
+            .expect("resolve definition root");
+
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("legacy scenario loads");
+        assert_eq!(scenario.name(), Some("Legacy Test"));
+
+        let mut engine = Engine::with_seed(0);
+        scenario
+            .apply(&mut engine)
+            .expect("legacy scenario applies");
+        let snapshot = engine.snapshot();
+        assert!(
+            snapshot.definition_categories.contains_key("FOOO"),
+            "expected legacy definition to be registered"
+        );
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("FOOO"))
+            .expect("spawn legacy definition");
+        let object = engine
+            .object_snapshot(id)
+            .expect("object created from legacy definition");
+        assert_eq!(object.definition_id, "FOOO");
     }
 
     #[test]

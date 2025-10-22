@@ -9,7 +9,7 @@ use std::f32::consts::PI;
 use std::fmt;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,10 +21,11 @@ use clap::Parser;
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
 use input::KeyboardBindings;
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
+use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, ControlButton, ControlEvent, Definition, Engine,
     EngineError, EngineState, EnvironmentSettings, Landscape, MaterialSet, MovementProfile,
-    ObjectId, ObjectSnapshot, Scenario, SimulationSnapshot, SpawnConfig, Vector2,
+    ObjectId, ObjectSnapshot, Scenario, ScenarioError, SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_frontend::{
     draw_image, CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData, InputDispatcher,
@@ -1541,6 +1542,131 @@ impl FrontendScenario {
     }
 }
 
+struct InstallDefinitionResolver {
+    app_paths: Option<Arc<AppPaths>>,
+}
+
+impl InstallDefinitionResolver {
+    fn new(app_paths: Option<Arc<AppPaths>>) -> Self {
+        Self { app_paths }
+    }
+
+    fn sanitize_identifier(identifier: &str) -> Option<PathBuf> {
+        let mut slice = identifier.trim();
+        if slice.is_empty() {
+            return None;
+        }
+        slice = slice.trim_matches(|c| c == '"' || c == '\'');
+        while let Some(stripped) = slice.strip_prefix("./") {
+            slice = stripped;
+        }
+        while let Some(stripped) = slice.strip_prefix(".\\") {
+            slice = stripped;
+        }
+        slice = slice.trim_matches('/');
+        if slice.is_empty() {
+            return None;
+        }
+        let normalized = slice.replace('\\', "/");
+        let normalized = normalized.trim_matches('/').to_string();
+        if normalized.is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(normalized))
+    }
+
+    fn open_and_push(
+        path: &Path,
+        groups: &mut Vec<Group>,
+        seen: &mut HashSet<PathBuf>,
+    ) -> Result<(), ScenarioError> {
+        match Group::open(path) {
+            Ok(group) => Self::push_group(groups, seen, group),
+            Err(err) if Self::should_ignore_error(&err) => {}
+            Err(err) => return Err(ScenarioError::Resources(err)),
+        }
+        Ok(())
+    }
+
+    fn push_group(groups: &mut Vec<Group>, seen: &mut HashSet<PathBuf>, group: Group) {
+        let root = group.root().to_path_buf();
+        if seen.insert(root) {
+            groups.push(group);
+        }
+    }
+
+    fn should_ignore_error(err: &GroupError) -> bool {
+        matches!(err, GroupError::Missing(_) | GroupError::NotDirectory(_))
+            || matches!(err, GroupError::Io(io_err) if io_err.kind() == io::ErrorKind::NotFound)
+    }
+}
+
+impl LegacyDefinitionResolver for InstallDefinitionResolver {
+    fn resolve_definition_groups(
+        &self,
+        scenario: &Group,
+        identifier: &str,
+    ) -> Result<Vec<Group>, ScenarioError> {
+        let Some(relative) = Self::sanitize_identifier(identifier) else {
+            return Err(ScenarioError::LegacyDefinitionNotFound {
+                path: identifier.to_string(),
+            });
+        };
+
+        let mut groups = Vec::new();
+        let mut seen = HashSet::new();
+
+        if relative.is_absolute() {
+            Self::open_and_push(&relative, &mut groups, &mut seen)?;
+        } else {
+            if let Ok(child) = scenario.open_child(&relative) {
+                Self::push_group(&mut groups, &mut seen, child);
+            }
+
+            for ancestor in scenario.root().ancestors() {
+                let candidate = ancestor.join(&relative);
+                match Group::open(&candidate) {
+                    Ok(group) => Self::push_group(&mut groups, &mut seen, group),
+                    Err(err) if Self::should_ignore_error(&err) => {}
+                    Err(err) => return Err(ScenarioError::Resources(err)),
+                }
+            }
+
+            if let Some(paths) = &self.app_paths {
+                let mut base_candidates = vec![
+                    paths.install_root().to_path_buf(),
+                    paths.planet_dir().to_path_buf(),
+                    paths.user_data_dir().to_path_buf(),
+                    paths.scenario_dir(),
+                ];
+                if let Some(parent) = paths.system_group_path().parent() {
+                    base_candidates.push(parent.to_path_buf());
+                }
+                let mut base_seen = HashSet::new();
+                for base in base_candidates {
+                    if !base_seen.insert(base.clone()) {
+                        continue;
+                    }
+                    let candidate = base.join(&relative);
+                    match Group::open(&candidate) {
+                        Ok(group) => Self::push_group(&mut groups, &mut seen, group),
+                        Err(err) if Self::should_ignore_error(&err) => {}
+                        Err(err) => return Err(ScenarioError::Resources(err)),
+                    }
+                }
+            }
+        }
+
+        if groups.is_empty() {
+            Err(ScenarioError::LegacyDefinitionNotFound {
+                path: identifier.to_string(),
+            })
+        } else {
+            Ok(groups)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SavedScenarioInfo {
     identifier: String,
@@ -2606,7 +2732,8 @@ impl GameApp {
             return Ok(false);
         };
 
-        let scenario_data = match Scenario::load_from_path(path) {
+        let resolver = InstallDefinitionResolver::new(cached_app_paths().ok());
+        let scenario_data = match Scenario::load_from_path_with(path, &resolver) {
             Ok(data) => data,
             Err(err) => {
                 tracing::error!(

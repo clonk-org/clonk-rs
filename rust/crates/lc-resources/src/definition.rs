@@ -1,5 +1,6 @@
 use crate::{Group, GroupError};
 use std::collections::HashMap;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -21,6 +22,7 @@ impl Definition {
         let action_map = match group.read_file("ActMap.txt") {
             Ok(bytes) => Some(parse_act_map(&bytes)?),
             Err(GroupError::EntryNotFound(_)) => None,
+            Err(GroupError::Io(ref err)) if err.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(DefinitionError::Resources(error)),
         };
 
