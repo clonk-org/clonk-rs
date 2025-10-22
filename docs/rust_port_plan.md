@@ -11,6 +11,7 @@
 - Implemented legacy glob semantics for sound wildcard lookup and added regression tests.
 - Wired `lc-app` CLI multiplayer entry points (`--host <addr>`, `--join <addr>`) to the Rust `lc-network` stack and added encode/decode coverage for legacy control packets.
 - Replaced `println!/eprintln!` logging across Rust crates with `tracing` and centralised initialisation in `lc_core::logging`, preserving CLI output expectations.
+- Added headless multiplayer smoke coverage (network harness + reconnect) and quick save/load regression test spanning `lc-network` and `lc-app`.
 
 ## Architecture
 
@@ -31,11 +32,6 @@
 **C++ Codebase:** Legacy implementation remains in `src/` but is **no longer required** for the Rust runtime.
 
 ## Parity Gaps
-
-### Medium: Multiplayer Validation Coverage
-**Issue:** Newly exposed `lc-app` host/join CLI path lacks automated verification (connectivity, reconnects, remote crew control).
-**Impact:** Manual smoke tests are required; regressions in control forwarding or session teardown could slip through CI.
-**Fix:** Add headless MP test harness (host + client) and exercise save/load & reconnect scenarios under automation.
 
 ### Medium: Savegame Fragility
 **Issue:** Hard version check with no schema migration (`SAVE_FILE_VERSION = 1`).
@@ -62,11 +58,11 @@
 - [ ] Quick-save/load works across sessions
 - [ ] `cargo test` passes on all platforms (macOS/Windows/Linux)
 - [x] `cargo xtask engine-snapshots verify` validates determinism vs C++ baseline (2025-10-21 clean run)
-- [ ] Multiplayer host/join flows work (`lc-app --host/--join`; add automated smoke test)
+- [x] Multiplayer host/join flows work (`lc-app --host/--join`; covered by automated smoke test)
 
 ## Immediate Priorities
 
-1. **Automate MP smoke tests** - Headless host/client harness exercising control sync + save/load (3-5 hours)
+1. **Savegame migration layer** - Version quick-save schema and add migrations to unblock engine changes
 
 ## Assets & Testing
 

@@ -3086,4 +3086,65 @@ mod tests {
         assert_eq!(decoded.sample_rate, 44_100);
         assert!(decoded.frames.len() > 2_000);
     }
+
+    #[test]
+    fn quick_save_round_trips_state() {
+        lc_core::logging::init();
+
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            None,
+            RuntimeConfig {
+                player_owner: 1,
+                network: None,
+            },
+        )
+        .expect("initialise app");
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start sandbox scenario");
+
+        for _ in 0..5 {
+            app.update().expect("tick before save");
+        }
+        let saved_frame = app.snapshot.frame;
+
+        app.quick_save().expect("quick save succeeds");
+        assert!(
+            app.last_save_path
+                .as_ref()
+                .map(|path| path.ends_with(QUICK_SAVE_FILE))
+                .unwrap_or(false),
+            "quick save should note the save path"
+        );
+
+        for _ in 0..3 {
+            app.update().expect("advance after save");
+        }
+        assert!(
+            app.snapshot.frame > saved_frame,
+            "frame should advance after save"
+        );
+
+        app.quick_load().expect("quick load succeeds");
+        assert_eq!(
+            app.snapshot.frame, saved_frame,
+            "quick load should restore saved frame"
+        );
+        assert!(
+            matches!(app.mode, AppMode::Running),
+            "quick load should keep the game running"
+        );
+
+        cleanup_quicksave_file();
+    }
+
+    fn cleanup_quicksave_file() {
+        let dir = resolve_save_directory();
+        let path = dir.join(QUICK_SAVE_FILE);
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }

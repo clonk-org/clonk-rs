@@ -865,6 +865,8 @@ impl ClientTask {
 mod tests {
     use super::*;
     use crate::ParticipantKind;
+    use std::time::Duration;
+    use tokio::time::timeout;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn host_emits_ready_for_single_client() {
@@ -928,6 +930,151 @@ mod tests {
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn control_sync_and_reconnect_smoke() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(
+            listener,
+            HostConfig {
+                max_players: 4,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("start host");
+
+        let mut client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .expect("connect client");
+
+        let mut host_events = host.events();
+        let mut client_events = client.events();
+        drain_initial_exec_sync(&mut client_events).await;
+
+        submit_control_pair(&mut host, &client, 0, vec![0xAA], vec![0x11]).await;
+
+        let first_host_ready = wait_for_host_ready(&mut host_events, Duration::from_secs(1)).await;
+        assert_eq!(first_host_ready.tick(), 0);
+
+        let first_client_ready =
+            wait_for_client_ready(&mut client_events, Duration::from_secs(1)).await;
+        assert_eq!(first_client_ready.tick(), 0);
+
+        client.shutdown().await.expect("client shutdown");
+        wait_for_client_departure(&mut host_events, Duration::from_secs(1)).await;
+
+        let mut client_beta =
+            connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
+                .await
+                .expect("connect second client");
+        let mut client_beta_events = client_beta.events();
+        drain_initial_exec_sync(&mut client_beta_events).await;
+
+        submit_control_pair(&mut host, &client_beta, 1, vec![0xBB], vec![0x22]).await;
+
+        let second_host_ready = wait_for_host_ready(&mut host_events, Duration::from_secs(1)).await;
+        assert_eq!(second_host_ready.tick(), 1);
+
+        let second_client_ready =
+            wait_for_client_ready(&mut client_beta_events, Duration::from_secs(1)).await;
+        assert_eq!(second_client_ready.tick(), 1);
+
+        client_beta
+            .shutdown()
+            .await
+            .expect("second client shutdown");
+        wait_for_client_departure(&mut host_events, Duration::from_secs(1)).await;
+
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    async fn submit_control_pair(
+        host: &mut HostHandle,
+        client: &ClientHandle,
+        tick: Tick,
+        host_payload: Vec<u8>,
+        client_payload: Vec<u8>,
+    ) {
+        let host_packet = ControlPacket::builder(0, tick)
+            .timestamp_ms(0)
+            .payload(host_payload);
+        host.submit_local_control(host_packet)
+            .await
+            .expect("host submit control");
+
+        let client_packet = ControlPacket::builder(client.client_id(), tick)
+            .timestamp_ms(0)
+            .payload(client_payload);
+        client
+            .submit_control(client_packet)
+            .await
+            .expect("client submit control");
+    }
+
+    async fn drain_initial_exec_sync(events: &mut mpsc::Receiver<ClientEvent>) {
+        if let Ok(Some(ClientEvent::ExecSync { .. })) =
+            timeout(Duration::from_millis(200), events.recv()).await
+        {
+            // expected initial sync packet
+        }
+    }
+
+    async fn wait_for_host_ready(
+        events: &mut mpsc::Receiver<HostEvent>,
+        duration: Duration,
+    ) -> ControlPacket {
+        loop {
+            match timeout(duration, events.recv()).await {
+                Ok(Some(HostEvent::Ready { packet })) => break packet,
+                Ok(Some(HostEvent::ClientJoined { .. })) => continue,
+                Ok(Some(HostEvent::ClientLeft { .. })) => continue,
+                Ok(Some(HostEvent::PeerDisconnected { .. })) => continue,
+                Ok(Some(HostEvent::TransportError { error, .. })) => {
+                    panic!("host reported transport error: {error}");
+                }
+                Ok(Some(HostEvent::Direct { .. })) | Ok(Some(HostEvent::ExecSync { .. })) => {
+                    continue
+                }
+                Ok(None) => panic!("host event stream ended unexpectedly"),
+                Err(_) => panic!("timed out waiting for host ready event"),
+            }
+        }
+    }
+
+    async fn wait_for_client_ready(
+        events: &mut mpsc::Receiver<ClientEvent>,
+        duration: Duration,
+    ) -> ControlPacket {
+        loop {
+            match timeout(duration, events.recv()).await {
+                Ok(Some(ClientEvent::Ready { packet })) => break packet,
+                Ok(Some(ClientEvent::ExecSync { .. })) => continue,
+                Ok(Some(ClientEvent::Direct { .. })) => continue,
+                Ok(Some(ClientEvent::Disconnected { reason })) => {
+                    panic!("client disconnected during test: {:?}", reason);
+                }
+                Ok(None) => panic!("client event stream ended unexpectedly"),
+                Err(_) => panic!("timed out waiting for client ready event"),
+            }
+        }
+    }
+
+    async fn wait_for_client_departure(events: &mut mpsc::Receiver<HostEvent>, duration: Duration) {
+        loop {
+            match timeout(duration, events.recv()).await {
+                Ok(Some(HostEvent::ClientLeft { .. })) => break,
+                Ok(Some(HostEvent::PeerDisconnected { .. })) => break,
+                Ok(Some(HostEvent::TransportError { .. })) => break,
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended unexpectedly"),
+                Err(_) => panic!("timed out waiting for client departure"),
+            }
+        }
     }
 }
 
