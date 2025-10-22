@@ -32,7 +32,11 @@ use lc_frontend::{
 };
 use lc_graphics::Color;
 use lc_platform::{AppPaths, PathsError};
-use lc_resources::{scenario as resource_scenario, Group};
+use lc_resources::{
+    scenario as resource_scenario, DefCore as ResourceDefCore,
+    DefinitionError as ResourceDefinitionError, Group, GroupError,
+    ResourceDefinition as ResourceDefinitionData,
+};
 use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, NetworkMode};
 use pixels::{Pixels, SurfaceTexture};
 use serde::{
@@ -2393,9 +2397,9 @@ impl GameApp {
             audio.reset_sfx();
         }
 
-        configure_sandbox_engine(&mut self.engine)?;
+        let spawn_definition = configure_sandbox_engine(&mut self.engine)?;
 
-        let spawn = SpawnConfig::new("Walker")
+        let spawn = SpawnConfig::new(spawn_definition)
             .with_owner(self.local_owner)
             .with_position(Vector2::new(240, 180))
             .with_energy(100)
@@ -2488,7 +2492,7 @@ impl GameApp {
         self.input = InputDispatcher::new();
 
         if scenario_info.sandbox {
-            configure_sandbox_engine(&mut self.engine)
+            let _ = configure_sandbox_engine(&mut self.engine)
                 .context("failed to prepare sandbox engine for saved game")?;
         } else {
             let path = frontend.path.as_ref().ok_or_else(|| {
@@ -2881,7 +2885,26 @@ fn editor_binary_candidates(base: &Path) -> Vec<PathBuf> {
     candidates
 }
 
-fn configure_sandbox_engine(engine: &mut Engine) -> Result<(), EngineError> {
+fn configure_sandbox_engine(engine: &mut Engine) -> Result<String, EngineError> {
+    let install_definition_id = "Clonk";
+    if let Some(resource_def) = try_load_install_definition(install_definition_id) {
+        match Definition::from_resource(&resource_def) {
+            Ok(definition) => {
+                engine.register_definition(definition)?;
+                engine.set_environment(EnvironmentSettings::default());
+                engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
+                return Ok(resource_def.core.id);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    definition = install_definition_id,
+                    error = %err,
+                    "failed to compile install definition; falling back to sandbox walker"
+                );
+            }
+        }
+    }
+
     let mut definition = Definition::from_script("Walker", "Rust Walker", walker_script())?;
     let mut actions = HashMap::new();
     actions.insert(
@@ -2897,7 +2920,76 @@ fn configure_sandbox_engine(engine: &mut Engine) -> Result<(), EngineError> {
     engine.register_definition(definition)?;
     engine.set_environment(EnvironmentSettings::default());
     engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
-    Ok(())
+    Ok("Walker".to_string())
+}
+
+fn try_load_install_definition(definition_id: &str) -> Option<ResourceDefinitionData> {
+    let paths = match cached_app_paths() {
+        Ok(paths) => paths,
+        Err(err) => {
+            tracing::debug!(
+                definition = definition_id,
+                error = %err,
+                "install root unavailable; cannot load real definition"
+            );
+            return None;
+        }
+    };
+
+    let objects_path = paths.planet_dir().join("Objects.ocd");
+    let objects_group = match Group::open(objects_path) {
+        Ok(group) => group,
+        Err(err) => {
+            tracing::debug!(
+                definition = definition_id,
+                error = %err,
+                "failed to open Objects.ocd; cannot load real definition"
+            );
+            return None;
+        }
+    };
+
+    match find_definition_in_group(&objects_group, definition_id) {
+        Ok(result) => result,
+        Err(err) => {
+            tracing::warn!(
+                definition = definition_id,
+                error = %err,
+                "error while searching for definition in install data"
+            );
+            None
+        }
+    }
+}
+
+fn find_definition_in_group(
+    group: &Group,
+    definition_id: &str,
+) -> Result<Option<ResourceDefinitionData>, ResourceDefinitionError> {
+    for entry in group.entries()? {
+        if !entry.is_directory {
+            continue;
+        }
+        let child = group.open_child(&entry.relative_path)?;
+        match ResourceDefCore::load(&child) {
+            Ok(core) => {
+                if core.id.eq_ignore_ascii_case(definition_id) {
+                    let definition = ResourceDefinitionData::load(&child)?;
+                    return Ok(Some(definition));
+                }
+            }
+            Err(ResourceDefinitionError::DefCoreMissing) => {}
+            Err(ResourceDefinitionError::Resources(err)) => match err {
+                GroupError::EntryNotFound(_) => {}
+                other => return Err(ResourceDefinitionError::Resources(other)),
+            },
+            Err(other) => return Err(other),
+        }
+        if let Some(found) = find_definition_in_group(&child, definition_id)? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
 }
 
 fn load_frontend_scenarios() -> Vec<FrontendScenario> {

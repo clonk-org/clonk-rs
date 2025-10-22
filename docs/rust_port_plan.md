@@ -1,46 +1,16 @@
 # LegacyClonk Rust Port Plan
 
-## Status: Feature-Complete with Parity Gaps
+## Status: Prototype - Core Systems Ported, Missing Critical Game Features
 
-**Port Completion:** All major subsystems are implemented in Rust. The `lc-app` binary boots the full game client with the startup menu, scenario browser, audio (music + SFX), graphics, engine loop, networking, and savegame support.
+**Reality Check:** `cargo run` launches a **preview/demo** titled "LegacyClonk (Rust preview)" showing a hardcoded "Rust Sandbox" with synthetic Walker objects, placeholder graphics, and generated audio tones. This is **NOT the real game.**
 
-**How to Run:** `cargo run` (launches the full game with real scenarios and audio assets present)
+**C++ Codebase:** 454 source files implementing the full game
+**Rust Port:** 95 files implementing core subsystems only
 
-**FFI Artifacts:** `cargo xtask ffi --profile release` (builds staticlib/cdylib outputs for all FFI crates under `rust/target/<profile>/`)
+**What Works:** Engine simulation, basic graphics, audio playback, network transport, C4Group file parsing
+**What's Missing:** Most of the actual game (see gaps below)
 
-**Recent Progress (2025-10-30):**
-- Added `crate-type = ["rlib", "staticlib", "cdylib"]` to every crate that exposes an FFI surface and wired `cargo xtask ffi` to compile those crates with the `ffi` feature. The task now emits the expected artifacts for C++ integration and CMake’s `rust_build` target calls it so profiling-specific outputs land in `rust/target/<profile>/` without manual `cargo rustc` invocations.
-
-**Recent Progress (2025-10-29):**
-- macOS run of `cargo test` and `cargo xtask engine-snapshots verify` passed; Windows/Linux CI coverage remains green so the validation checklist is fully satisfied.
-
-**Recent Progress (2025-10-28):**
-- Quick-save/load parity now verified across fresh sessions; added regression coverage and resettable app-path cache to prevent cross-run contamination.
-
-**Recent Progress (2025-10-27):**
-- Added regression coverage for on-disk scenarios via `start_real_scenario_loads_from_disk`; menu launches now start real scenario groups with focus selection parity.
-
-**Recent Progress (2025-10-26):**
-- Menu music now starts automatically on launch and after returning from scenarios; sandbox fallback reuses the same loop with regression coverage (`menu_music_runs_in_menu_cycle`).
-
-**Recent Progress (2025-10-25):**
-- Startup menu now lists real installation scenarios; scenario discovery tolerates file roots and regression tests cover the menu flow.
-
-**Recent Progress (2025-10-24):**
-- FFI exports now live behind crate feature `ffi`; default builds emit only `rlib` so the workspace no longer recompiles cdylib/staticlib on every edit. Documented the manual `cargo rustc -p <crate> --features ffi -- --crate-type staticlib --crate-type cdylib` flow for legacy bridge builds.
-
-**Recent Progress (2025-10-23):**
-- Matched positional audio with the legacy AudibilityRadius (700px) and viewport panning model; added regression coverage for mix geometry to prevent regressions.
-
-**Recent Progress (2025-10-22):**
-- Added semantic-versioned quick-save format with migration pipeline; legacy saves now load under current engine and regression coverage guards the path.
-
-**Recent Progress (2025-10-21):**
-- Replaced busy-poll loop with fixed-step accumulator using `ControlFlow::WaitUntil` to align simulation cadence with the legacy engine; validated via `cargo test` and `cargo xtask engine-snapshots verify`.
-- Implemented legacy glob semantics for sound wildcard lookup and added regression tests.
-- Wired `lc-app` CLI multiplayer entry points (`--host <addr>`, `--join <addr>`) to the Rust `lc-network` stack and added encode/decode coverage for legacy control packets.
-- Replaced `println!/eprintln!` logging across Rust crates with `tracing` and centralised initialisation in `lc_core::logging`, preserving CLI output expectations.
-- Added headless multiplayer smoke coverage (network harness + reconnect) and quick save/load regression test spanning `lc-network` and `lc-app`.
+---
 
 ## Architecture
 
@@ -49,46 +19,196 @@
 - `lc-script` - C4Aul script VM port
 - `lc-graphics` - Surface rendering and pixel manipulation
 - `lc-audio` - Audio decoder + mixer (music/SFX channels)
-- `lc-frontend` - Graphics system, startup menu, scenario browser, input dispatcher
+- `lc-frontend` - Startup menu, scenario browser, input dispatcher
 - `lc-gui` - Widget system for UI overlays
 - `lc-resources` - C4Group file loading and scenario discovery
 - `lc-network` - Multiplayer transport (handshake, lobby, control dispatch, sync)
 - `lc-platform` - Platform abstractions and path discovery
-- `lc-core` - Shared types and config bridge to C++
+- `lc-core` - Shared types and config bridge
 - `lc-app` - **Main game binary** (integrates all subsystems)
-- `lc-game` - Launcher wrapper (config/logging, delegates to runtime)
+- `lc-game` - Launcher wrapper
 
-**C++ Codebase:** Legacy implementation remains in `src/` but is **no longer required** for the Rust runtime.
+**C++ Codebase:** Legacy implementation in `src/` no longer required for Rust runtime.
 
-## Parity Gaps
+---
 
-- None (FFI automation in place; `cargo xtask ffi` produces the artifacts CMake expects.)
+## Major Missing Features (C++ → Rust Parity Gaps)
 
-## Validation Checklist
+### Category 1: Game Systems (NOT PORTED)
+- ❌ **Player Management** (C4Player.cpp 🔗 No Rust equivalent)
+  - Player join/leave, crew assignment, player-specific viewports
+  - Player inventory, wealth, knowledge systems
+  - Player cursor and direct control
 
-- [x] `cargo run` (no flags) launches lc-app with startup menu
-- [x] Startup menu displays real scenarios from installation
-- [x] Music plays in menu and during gameplay (when assets present)
-- [x] Scenarios load and run with working audio/graphics/input (`start_real_scenario_loads_from_disk`)
-- [x] Quick-save/load works across sessions
-- [x] `cargo test` passes on all platforms (macOS/Windows/Linux)
-- [x] `cargo xtask engine-snapshots verify` validates determinism vs C++ baseline (2025-10-21 clean run)
-- [x] Multiplayer host/join flows work (`lc-app --host/--join`; covered by automated smoke test)
+- ❌ **Viewport System** (C4Viewport.cpp 🔗 No multi-viewport support)
+  - Multiple simultaneous viewports per player
+  - Split-screen multiplayer
+  - Zoom, scroll, letterboxing for different aspect ratios
 
-## Assets & Testing
+- ❌ **Menu System** (C4Menu.h 🔗 No in-game menus)
+  - Context menus, object interaction menus
+  - Build menus, inventory menus, clonk control menus
+  - Menu callbacks and script integration
 
-**Required Assets:** Game requires `System.c4g` and scenario files (`.c4s`, `.c4f`) in installation directory.
-**Current Status:** Assets present at `planet/System.c4g` (symlinked from project root).
+- ❌ **Message System** (C4GameMessage.cpp 🔗 No message display)
+  - In-game messages, tutorials, mission objectives
+  - Per-player message queues
+  - Message positioning and formatting
 
-**Testing Infrastructure:**
-- Unit/snapshot tests per crate
-- Engine snapshot verification via `cargo xtask` (compares Rust vs C++ determinism)
-- CI gates on test suite + snapshot verification
+- ❌ **Material System** (C4Material.cpp 🔗 lc-engine missing materials)
+  - Terrain materials (earth, rock, gold, water, lava, acid, etc.)
+  - Material physics (density, friction, temperature reactions)
+  - Material conversion and reactions
+
+- ❌ **Weather & Sky** (C4Weather.cpp, C4Sky.cpp 🔗 Not ported)
+  - Dynamic weather (rain, snow, wind, lightning)
+  - Sky gradients, stars, celestial bodies
+  - Day/night cycles with lighting
+
+- ❌ **Particles (PXS)** (C4PXS.cpp 🔗 Basic particle system only)
+  - Material pixels (smoke, fire, water droplets, sparks)
+  - Particle-terrain interaction
+  - Particle-object collision
+
+### Category 2: Game Loop & Integration (INCOMPLETE)
+- ⚠️  **Scenario Loading** (works but defaults to demo)
+  - `Scenario::load_from_path()` exists but fails in practice
+  - Falls back to hardcoded "Rust Sandbox" with synthetic Walker
+  - Real scenario discovery exists but doesn't integrate properly
+
+- ⚠️  **Definition System** (partial - C4Def.cpp)
+  - Can load object definitions but limited to hardcoded Walker
+  - Missing definition graphics, sounds, ActMap integration
+  - No DefCore.txt parsing for real game objects
+
+- ⚠️  **Graphics Resources** (C4GraphicsResource.cpp 🔗 Minimal)
+  - Missing: Fonts, cursor graphics, GUI bitmaps, icon sets
+  - Missing: Definition graphics loading from Graphics.c4g
+  - Has: Basic surface rendering only
+
+- ⚠️  **Landscape Features** (C4Landscape.cpp is 88KB, lc-engine has basics only)
+  - Missing: Landscape modification (digging, blasting, incineration)
+  - Missing: Pixel-perfect material queries
+  - Missing: Landscape script integration (Earthquake, Incinerate, etc.)
+  - Has: Basic heightmap collision only
+
+### Category 3: Multiplayer & Networking (INCOMPLETE)
+- ⚠️  **Lobby System** (C4GameLobby.cpp 38KB 🔗 Not ported)
+  - Pre-game lobby with player join, team selection
+  - Scenario parameter configuration
+  - Resource synchronization before game start
+
+- ⚠️  **Network Clients** (C4Network2Client.cpp 🔗 Basic transport only)
+  - Client lifecycle management
+  - Client authentication and permissions
+  - Client-specific state tracking
+
+- ❌ **League/Ranking** (C4League.h 🔗 Not ported)
+  - Online matchmaking, account system
+  - Game statistics and player rankings
+  - League game recording
+
+### Category 4: Editor & Development (NOT PORTED)
+- ❌ **In-Game Console** (C4Console.cpp 🔗 Not ported)
+  - Script console for live debugging
+  - Object inspection and manipulation
+  - Command execution during gameplay
+
+- ❌ **Edit Cursor** (C4EditCursor.cpp 🔗 Not ported)
+  - Live object placement and editing
+  - Landscape editing tools
+  - Property modification
+
+### Category 5: Demo/Fallback Systems
+- ❌ **Synthetic Audio** (`lc-app/main.rs:601-617`) - Generates sine wave tones for missing sounds
+- ❌ **Placeholder Previews** (`lc-app/main.rs:1186-1241`) - Procedural gradient images
+- ❌ **Hardcoded Walker** (`lc-app/main.rs:2383-2414`) - Fixed spawn at (240, 180)
+- ❌ **Fallback Ground Height** (`lc-app/main.rs:55+`) - Hardcoded 360px default
+- ❌ **Sandbox Scenario** (`lc-app/main.rs:1371-1386`) - "Rust Sandbox" instead of real game
+
+---
+
+## Path to Real Game (NOT Fallback Removal)
+
+The documentation previously focused on "removing fallbacks." **This is backwards.** The fallbacks exist *because* the real game features are missing. The path forward is:
+
+### Phase 1: Core Game Integration
+1. Port C4Def system to load real object definitions from Definition folders — ✅ Added `lc-resources::definition` (DefCore/ActMap/script parsing) with `Engine::Definition::from_resource`; sandbox now attempts to boot with real Clonk definitions when present (asset loading + scenario wiring still pending)
+2. Port Graphics.c4g loading for object graphics, fonts, UI elements
+3. Port Material.txt system for terrain material definitions
+4. Make real scenarios actually load and work (not just parse and fall back)
+
+### Phase 2: Essential Gameplay Systems
+1. Port C4Player for real player management (not just owner IDs)
+2. Port C4Viewport for proper camera, zoom, split-screen
+3. Port C4Menu for object interaction menus
+4. Port C4GameMessage for mission text and objectives
+
+### Phase 3: Game Content & Polish
+1. Port full C4Landscape material modification system
+2. Port C4Weather and C4Sky for atmosphere
+3. Port C4PXS particle system for effects
+4. Integrate real game assets (objects, scenarios, graphics, sounds)
+
+### Phase 4: Remove Fallbacks
+**Only after Phases 1-3:** Remove synthetic audio, placeholder previews, sandbox scenario, hardcoded defaults
+
+**Current fallbacks are symptoms, not the disease.** Fix the missing game systems first.
+
+---
+
+## Current Implementation Status
+
+**What Actually Works:**
+- ✅ `cargo test` passes (unit tests for ported subsystems)
+- ✅ `cargo xtask engine-snapshots verify` (engine simulation determinism)
+- ✅ Basic engine ticks with physics simulation
+- ✅ C4Group file format parsing (can read .c4g/.c4s/.c4f files)
+- ✅ Network transport layer (`--host`/`--join` flags exist)
+- ✅ Audio playback (music/SFX mixing)
+- ✅ Window creation and basic input handling
+
+**What Doesn't Work (Real Game Requirements):**
+- ❌ `cargo run` shows **demo only** (window title: "LegacyClonk (Rust preview)")
+- ❌ No real scenarios load (falls back to hardcoded "Rust Sandbox")
+- ❌ No real object definitions (only synthetic Walker)
+- ❌ No real graphics (placeholder previews, missing object sprites)
+- ❌ No real audio (synthetic tones for missing sounds)
+- ❌ No player management (no crew, no viewports, no menus)
+- ❌ No materials (no terrain types, no mining, no reactions)
+- ❌ No multiplayer lobby (transport exists but no game coordination)
+
+---
 
 ## Success Criteria
 
-Port achieves **exact behavior parity** when:
-1. `cargo run` launches game with working menu/audio/scenarios
-2. All validation checklist items pass
-3. Engine snapshots match C++ baseline (deterministic parity)
-4. No observable differences in gameplay, audio, or multiplayer
+**Real game achieved when `cargo run` shows:**
+
+1. **Actual Startup Menu**
+   - Real scenario list from installation directory
+   - Actual scenario preview screenshots (not procedural gradients)
+   - Working scenario folders and navigation
+
+2. **Real Scenarios Load and Play**
+   - Load object definitions from scenario/system folders
+   - Display object graphics from Graphics.c4g
+   - Play actual scenario music and sound effects
+   - Spawn real game objects (Clonks, structures, animals, etc.)
+
+3. **Full Game Loop**
+   - Player management (join, crew selection, inventory)
+   - In-game menus (build, buy, interaction)
+   - Material terrain system (dig earth, mine gold, etc.)
+   - Weather and environmental effects
+   - Mission objectives and game messages
+
+4. **Multiplayer Works**
+   - Pre-game lobby with player join/leave
+   - Synchronized object spawning and control
+   - Network resilience and reconnection
+   - Spectator mode and replays
+
+5. **No Synthetic Content**
+   - Zero fallback scenarios, objects, graphics, or audio
+   - All assets loaded from real game files
+   - Behavior indistinguishable from C++ version

@@ -45,6 +45,9 @@ use std::io::{self, Read, Write};
 use std::ops::AddAssign;
 use std::path::Path;
 
+use lc_resources::{
+    ActionDefinition as ResourceActionDefinition, ResourceDefinition as ResourceDefinitionData,
+};
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, ScriptError, Value};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -2489,6 +2492,70 @@ impl Definition {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn from_resource(resource: &ResourceDefinitionData) -> Result<Self, EngineError> {
+        let name = resource
+            .core
+            .name
+            .clone()
+            .unwrap_or_else(|| resource.core.id.clone());
+        let mut definition =
+            Definition::from_script(resource.core.id.clone(), name, resource.script.combined())?;
+
+        if let Some(action_map) = &resource.action_map {
+            let mut specs = HashMap::new();
+            for (action_name, action_def) in &action_map.actions {
+                specs.insert(
+                    action_name.clone(),
+                    Self::convert_action_definition(action_def),
+                );
+            }
+            let default_action = action_map
+                .default_action
+                .clone()
+                .or_else(|| specs.keys().next().cloned());
+            definition.configure_actions(default_action, specs);
+        }
+
+        definition.set_crew_member(resource.core.crew_member);
+        definition.set_category(resource.core.category);
+        Ok(definition)
+    }
+
+    fn convert_action_definition(action: &ResourceActionDefinition) -> ActionSpec {
+        let mut spec = ActionSpec::default();
+        if let Some(procedure) = &action.procedure {
+            spec = spec.with_procedure(procedure.clone());
+        }
+        if let Some(length) = action.length {
+            spec = spec.with_length(length);
+        }
+        if let Some(next) = &action.next_action {
+            spec = spec.with_next(next.clone());
+        }
+        if let Some(delay) = action.delay {
+            spec = spec.with_delay(delay);
+        }
+        if let Some(step) = action.step {
+            spec = spec.with_step(step);
+        }
+        if let Some(phase) = &action.phase_call {
+            spec = spec.with_phase_call(phase.clone());
+        }
+        if let Some(start) = &action.start_call {
+            spec = spec.with_start_call(start.clone());
+        }
+        if let Some(end) = &action.end_call {
+            spec = spec.with_end_call(end.clone());
+        }
+        if let Some(abort) = &action.abort_call {
+            spec = spec.with_abort_call(abort.clone());
+        }
+        if action.no_other_action {
+            spec = spec.with_no_other_action(true);
+        }
+        spec
     }
 
     pub fn set_debugger_hooks(&mut self, hooks: DebuggerHooks) {
