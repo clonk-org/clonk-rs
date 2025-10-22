@@ -27,14 +27,15 @@ use lc_engine::{
     ObjectSnapshot, Scenario, SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_frontend::{
-    CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData, InputDispatcher, KeyCode,
-    PlayerOverlay, ScenarioEntry, ScenarioKind, StartupMenu, StartupMenuAction,
+    draw_image, CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData, InputDispatcher,
+    KeyCode, PlayerOverlay, ScenarioEntry, ScenarioKind, StartupMenu, StartupMenuAction,
 };
-use lc_graphics::Color;
+use lc_graphics::{BitmapFont, Color, TextFont, TrueTypeFont};
+use lc_gui::ButtonTextures;
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
-    scenario as resource_scenario, DefCore as ResourceDefCore,
-    DefinitionError as ResourceDefinitionError, Group, GroupError,
+    load_endeavour_font, scenario as resource_scenario, DefCore as ResourceDefCore,
+    DefinitionError as ResourceDefinitionError, GraphicsImage, GraphicsResource, Group, GroupError,
     ResourceDefinition as ResourceDefinitionData,
 };
 use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, NetworkMode};
@@ -84,6 +85,154 @@ struct Cli {
 struct RuntimeConfig {
     player_owner: i32,
     network: Option<NetworkMode>,
+}
+
+struct FrontendAssets {
+    font: Arc<dyn TextFont>,
+    menu_background: Option<ImageData>,
+    button_textures: Option<ButtonTextures>,
+    object_sprites: Arc<HashMap<String, ImageData>>,
+}
+
+impl FrontendAssets {
+    fn load(paths: Option<&AppPaths>) -> Self {
+        let font = Self::load_font(paths);
+        let mut menu_background = None;
+        let mut button_textures = None;
+        let mut sprites = HashMap::new();
+
+        if let Some(paths) = paths {
+            let graphics_path = paths.planet_dir().join("Graphics.c4g");
+            match GraphicsResource::open(&graphics_path) {
+                Ok(graphics) => {
+                    menu_background = graphics
+                        .load_image("StartupScenSelBG.png")
+                        .ok()
+                        .map(Self::image_to_data);
+                    button_textures = Self::load_button_textures(&graphics);
+                    if let Ok(sprite) = graphics.load_image("Crew.png") {
+                        sprites.insert("Walker".to_string(), Self::image_to_data(sprite));
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        path = %graphics_path.display(),
+                        error = %err,
+                        "failed to load Graphics.c4g assets"
+                    );
+                }
+            }
+        }
+
+        Self {
+            font,
+            menu_background,
+            button_textures,
+            object_sprites: Arc::new(sprites),
+        }
+    }
+
+    fn load_font(paths: Option<&AppPaths>) -> Arc<dyn TextFont> {
+        if let Some(paths) = paths {
+            let system_path = paths.system_group_path();
+            match Group::open(system_path) {
+                Ok(group) => match load_endeavour_font(&group) {
+                    Ok(resource) => match TrueTypeFont::from_bytes(resource.clone_bytes()) {
+                        Ok(font) => return Arc::new(font),
+                        Err(err) => {
+                            tracing::warn!(error = ?err, "failed to parse Endeavour.ttf");
+                        }
+                    },
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "failed to load Endeavour.ttf from system resources"
+                        );
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!(
+                        path = %system_path.display(),
+                        error = %err,
+                        "failed to open system group for fonts"
+                    );
+                }
+            }
+        }
+        Arc::new(BitmapFont::new())
+    }
+
+    fn font_arc(&self) -> Arc<dyn TextFont> {
+        self.font.clone()
+    }
+
+    fn menu_background(&self) -> Option<ImageData> {
+        self.menu_background.clone()
+    }
+
+    fn button_textures(&self) -> Option<ButtonTextures> {
+        self.button_textures.clone()
+    }
+
+    fn sprite_map(&self) -> Arc<HashMap<String, ImageData>> {
+        self.object_sprites.clone()
+    }
+
+    fn load_button_textures(graphics: &GraphicsResource) -> Option<ButtonTextures> {
+        let normal_image = graphics.load_image("StartupBigButton.png").ok()?;
+        let pressed_image = graphics.load_image("StartupBigButtonDown.png").ok()?;
+
+        let normal = Self::image_to_data(normal_image.clone());
+        let pressed = Self::image_to_data(pressed_image.clone());
+        let selected = Self::lighten_image(&normal_image, 0.25);
+        let disabled = Self::darken_image(&normal_image, 0.4);
+
+        Some(ButtonTextures {
+            normal,
+            pressed,
+            selected,
+            disabled: Some(disabled),
+        })
+    }
+
+    fn image_to_data(image: GraphicsImage) -> ImageData {
+        let (width, height, pixels) = image.into_parts();
+        ImageData::from_arc(width, height, pixels)
+    }
+
+    fn lighten_image(image: &GraphicsImage, amount: f32) -> ImageData {
+        let amount = amount.clamp(0.0, 1.0);
+        let mut pixels = image.pixels().to_vec();
+        for chunk in pixels.chunks_exact_mut(4) {
+            chunk[0] = lighten_channel(chunk[0], amount);
+            chunk[1] = lighten_channel(chunk[1], amount);
+            chunk[2] = lighten_channel(chunk[2], amount);
+        }
+        ImageData::new(image.width(), image.height(), pixels)
+    }
+
+    fn darken_image(image: &GraphicsImage, amount: f32) -> ImageData {
+        let amount = amount.clamp(0.0, 1.0);
+        let mut pixels = image.pixels().to_vec();
+        for chunk in pixels.chunks_exact_mut(4) {
+            chunk[0] = darken_channel(chunk[0], amount);
+            chunk[1] = darken_channel(chunk[1], amount);
+            chunk[2] = darken_channel(chunk[2], amount);
+        }
+        ImageData::new(image.width(), image.height(), pixels)
+    }
+}
+
+fn lighten_channel(value: u8, amount: f32) -> u8 {
+    let value = value as f32;
+    let adjusted = value + (255.0 - value) * amount;
+    adjusted.round().clamp(0.0, 255.0) as u8
+}
+
+fn darken_channel(value: u8, amount: f32) -> u8 {
+    let value = value as f32;
+    let adjusted = value * (1.0 - amount);
+    adjusted.round().clamp(0.0, 255.0) as u8
 }
 
 fn resolve_network_mode(cli: &Cli) -> Result<Option<NetworkMode>> {
@@ -1076,6 +1225,7 @@ struct GameApp {
     scenario_catalog: HashMap<String, FrontendScenario>,
     active_scenario: Option<FrontendScenario>,
     audio: Option<AudioContext>,
+    assets: Arc<FrontendAssets>,
     network: Option<NetworkManager>,
     local_owner: i32,
     last_save_path: Option<PathBuf>,
@@ -1703,17 +1853,24 @@ impl GameApp {
             Some(mode) => Some(NetworkManager::for_mode(mode, runtime.player_owner)?),
             None => None,
         };
+        let assets = Arc::new(FrontendAssets::load(paths));
 
         let engine = Engine::new();
         let snapshot = engine.snapshot();
         let scenario_label = DEFAULT_SCENARIO_LABEL.to_string();
-        let mut graphics =
-            GraphicsSystem::new(width, height, DEFAULT_GROUND_HEIGHT, &scenario_label);
+        let mut graphics = GraphicsSystem::new(
+            width,
+            height,
+            DEFAULT_GROUND_HEIGHT,
+            &scenario_label,
+            assets.font_arc(),
+            assets.sprite_map(),
+        );
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
 
         let scenarios = load_frontend_scenarios();
         let menu_entries = build_menu_entries(&scenarios, false);
-        let mut menu = StartupMenu::new(menu_entries)
+        let mut menu = StartupMenu::new(menu_entries, assets.font_arc(), assets.button_textures())
             .map_err(|err| anyhow!("failed to create startup menu: {err}"))?;
         menu.resize(width as f32, height as f32);
 
@@ -1746,6 +1903,7 @@ impl GameApp {
             scenario_catalog,
             active_scenario: None,
             audio,
+            assets: assets.clone(),
             last_save_path: None,
             network,
             local_owner: runtime.player_owner,
@@ -1758,8 +1916,14 @@ impl GameApp {
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
-        let mut graphics =
-            GraphicsSystem::new(width, height, self.fallback_ground, &self.scenario_label);
+        let mut graphics = GraphicsSystem::new(
+            width,
+            height,
+            self.fallback_ground,
+            &self.scenario_label,
+            self.assets.font_arc(),
+            self.assets.sprite_map(),
+        );
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics = graphics;
 
@@ -2227,7 +2391,12 @@ impl GameApp {
 
     fn render(&mut self, frame: &mut [u8]) -> Result<()> {
         if self.mode == AppMode::Menu {
-            render_menu_frame(&mut self.graphics, self.menu_state.menu(), frame);
+            render_menu_frame(
+                &mut self.graphics,
+                self.menu_state.menu(),
+                self.assets.as_ref(),
+                frame,
+            );
             return Ok(());
         }
         self.render_running(frame)
@@ -2281,8 +2450,14 @@ impl GameApp {
 
         let width = self.graphics.surface().width();
         let height = self.graphics.surface().height();
-        self.graphics =
-            GraphicsSystem::new(width, height, self.fallback_ground, &self.scenario_label);
+        self.graphics = GraphicsSystem::new(
+            width,
+            height,
+            self.fallback_ground,
+            &self.scenario_label,
+            self.assets.font_arc(),
+            self.assets.sprite_map(),
+        );
         self.graphics.surface_mut().fill(Color::opaque(16, 28, 52));
 
         self.menu_state.set_pointer_position(None);
@@ -2597,8 +2772,14 @@ impl GameApp {
         self.fallback_ground = fallback_ground;
         let width = self.graphics.surface().width();
         let height = self.graphics.surface().height();
-        self.graphics =
-            GraphicsSystem::new(width, height, self.fallback_ground, &self.scenario_label);
+        self.graphics = GraphicsSystem::new(
+            width,
+            height,
+            self.fallback_ground,
+            &self.scenario_label,
+            self.assets.font_arc(),
+            self.assets.sprite_map(),
+        );
         self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
         self.frame_text.clear();
         self.status_text.clear();
@@ -2636,10 +2817,23 @@ impl GameApp {
     }
 }
 
-fn render_menu_frame(graphics: &mut GraphicsSystem, menu: &mut StartupMenu, frame: &mut [u8]) {
+fn render_menu_frame(
+    graphics: &mut GraphicsSystem,
+    menu: &mut StartupMenu,
+    assets: &FrontendAssets,
+    frame: &mut [u8],
+) {
     {
         let surface = graphics.surface_mut();
-        surface.fill(Color::opaque(16, 28, 52));
+        if let Some(background) = assets.menu_background() {
+            let rect = lc_gui::Rect::from_origin_size(
+                GuiPoint::new(0.0, 0.0),
+                lc_gui::Size::new(surface.width() as f32, surface.height() as f32),
+            );
+            draw_image(surface, &rect, &background);
+        } else {
+            surface.fill(Color::opaque(16, 28, 52));
+        }
         menu.render(surface);
     }
     let surface = graphics.surface();
@@ -3498,6 +3692,10 @@ mod tests {
         assert_eq!(migrated.version, SAVE_FILE_VERSION);
     }
 
+    fn test_font() -> Arc<dyn TextFont> {
+        Arc::new(BitmapFont::new())
+    }
+
     fn sample_scenarios() -> Vec<FrontendScenario> {
         let child = FrontendScenario {
             identifier: "scenario_alpha".to_string(),
@@ -3679,7 +3877,7 @@ mod tests {
     fn menu_state_navigates_folders() {
         let scenarios = sample_scenarios();
         let entries = build_menu_entries(&scenarios, false);
-        let menu = StartupMenu::new(entries).expect("startup menu");
+        let menu = StartupMenu::new(entries, test_font(), None).expect("startup menu");
         let mut state = MenuState::new(menu, scenarios);
 
         assert_eq!(state.current_entries().len(), 1);

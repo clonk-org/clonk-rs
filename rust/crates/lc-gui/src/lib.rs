@@ -1,7 +1,7 @@
 pub mod ffi;
 mod scenario_browser;
 
-use lc_graphics::{BitmapFont, Color};
+use lc_graphics::{Color, TextFont};
 use std::fmt;
 use std::sync::Arc;
 
@@ -258,11 +258,11 @@ impl Label {
         }
     }
 
-    fn intrinsic_size(&self) -> Size {
-        let measured = measure_text(&self.text, self.font_size);
+    fn intrinsic_size(&self, font: &dyn TextFont) -> Size {
+        let metrics = font.measure_text(&self.text, self.font_size.max(1.0));
         Size::new(
-            measured.width + self.padding * 2.0,
-            measured.height + self.padding * 2.0,
+            metrics.width + self.padding * 2.0,
+            metrics.height + self.padding * 2.0,
         )
     }
 }
@@ -303,10 +303,10 @@ impl Button {
         }
     }
 
-    fn intrinsic_size(&self) -> Size {
-        let measured = measure_text(&self.text, self.font_size);
-        let width = (measured.width + self.padding * 2.0).max(self.min_width);
-        let height = measured.height + self.padding * 2.0;
+    fn intrinsic_size(&self, font: &dyn TextFont) -> Size {
+        let metrics = font.measure_text(&self.text, self.font_size.max(1.0));
+        let width = (metrics.width + self.padding * 2.0).max(self.min_width);
+        let height = metrics.height + self.padding * 2.0;
         Size::new(width, height)
     }
 
@@ -512,15 +512,25 @@ impl ImageData {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ButtonTextures {
+    pub normal: ImageData,
+    pub pressed: ImageData,
+    pub selected: ImageData,
+    pub disabled: Option<ImageData>,
+}
+
 pub struct Gui {
     nodes: Vec<WidgetNode>,
     root: WidgetId,
     next_id: usize,
     pressed_button: Option<WidgetId>,
+    font: Arc<dyn TextFont>,
+    button_textures: Option<ButtonTextures>,
 }
 
 impl Gui {
-    pub fn new() -> Self {
+    pub fn new(font: Arc<dyn TextFont>) -> Self {
         let root_id = WidgetId::new(0);
         let root_node = WidgetNode::new(
             root_id,
@@ -532,6 +542,8 @@ impl Gui {
             root: root_id,
             next_id: 1,
             pressed_button: None,
+            font,
+            button_textures: None,
         }
     }
 
@@ -655,6 +667,10 @@ impl Gui {
         }
     }
 
+    pub fn set_button_textures(&mut self, textures: Option<ButtonTextures>) {
+        self.button_textures = textures;
+    }
+
     pub fn set_gauge_fraction(&mut self, id: WidgetId, value: f32) -> GuiResult<()> {
         let node = self.widget_mut(id)?;
         match &mut node.kind {
@@ -767,10 +783,33 @@ impl Gui {
         let node = &self.nodes[id.index()];
         match &node.kind {
             WidgetKind::Button(button) => {
-                commands.push(DrawCommand::Quad {
-                    rect: node.rect,
-                    color: button.current_color(),
-                });
+                let mut drew_background = false;
+                if let Some(textures) = &self.button_textures {
+                    let image = if !button.enabled {
+                        textures
+                            .disabled
+                            .as_ref()
+                            .unwrap_or(&textures.normal)
+                            .clone()
+                    } else if button.pressed {
+                        textures.pressed.clone()
+                    } else if button.selected {
+                        textures.selected.clone()
+                    } else {
+                        textures.normal.clone()
+                    };
+                    commands.push(DrawCommand::Image {
+                        rect: node.rect,
+                        image,
+                    });
+                    drew_background = true;
+                }
+                if !drew_background {
+                    commands.push(DrawCommand::Quad {
+                        rect: node.rect,
+                        color: button.current_color(),
+                    });
+                }
                 commands.push(DrawCommand::Text {
                     rect: node.rect,
                     text: button.text.clone(),
@@ -858,7 +897,7 @@ impl Gui {
                 WidgetKind::Label(label) => label,
                 _ => unreachable!(),
             };
-            label.intrinsic_size()
+            label.intrinsic_size(self.font.as_ref())
         };
         let size = intrinsic.clamp(constraints);
         self.nodes[id.index()].rect = Rect::from_origin_size(origin, size);
@@ -876,7 +915,7 @@ impl Gui {
                 WidgetKind::Button(button) => button,
                 _ => unreachable!(),
             };
-            button.intrinsic_size()
+            button.intrinsic_size(self.font.as_ref())
         };
         let size = intrinsic.clamp(constraints);
         self.nodes[id.index()].rect = Rect::from_origin_size(origin, size);
@@ -1065,12 +1104,6 @@ impl Gui {
     }
 }
 
-fn measure_text(text: &str, font_size: f32) -> Size {
-    let font = BitmapFont::new();
-    let metrics = font.measure_text(text, font_size.max(1.0));
-    Size::new(metrics.width, metrics.height)
-}
-
 fn wrong_widget_type(id: WidgetId, expected: &'static str, kind: &WidgetKind) -> GuiError {
     GuiError::WrongWidgetType {
         id,
@@ -1112,6 +1145,7 @@ fn letterbox_image_rect(bounds: Rect, image: &ImageData) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lc_graphics::BitmapFont;
 
     fn center(rect: Rect) -> Point {
         Point::new(
@@ -1120,9 +1154,13 @@ mod tests {
         )
     }
 
+    fn test_font() -> Arc<dyn TextFont> {
+        Arc::new(BitmapFont::new())
+    }
+
     #[test]
     fn column_layout_places_children_vertically() {
-        let mut gui = Gui::new();
+        let mut gui = Gui::new(test_font());
         let root = gui.root();
         let label = gui.add_label(root, "Ready?");
         let button = gui.add_button(root, "Start Game");
@@ -1138,7 +1176,7 @@ mod tests {
 
     #[test]
     fn button_click_generates_activate_action() {
-        let mut gui = Gui::new();
+        let mut gui = Gui::new(test_font());
         let root = gui.root();
         let button = gui.add_button(root, "Launch");
 
@@ -1160,7 +1198,7 @@ mod tests {
 
     #[test]
     fn button_release_outside_cancels_action() {
-        let mut gui = Gui::new();
+        let mut gui = Gui::new(test_font());
         let root = gui.root();
         let button = gui.add_button(root, "Abort");
 
@@ -1177,7 +1215,7 @@ mod tests {
 
     #[test]
     fn render_emits_draw_commands() {
-        let mut gui = Gui::new();
+        let mut gui = Gui::new(test_font());
         let root = gui.root();
         gui.add_label(root, "Headline");
         gui.add_button(root, "Continue");
@@ -1194,7 +1232,7 @@ mod tests {
 
     #[test]
     fn gauge_renders_background_and_fill() {
-        let mut gui = Gui::new();
+        let mut gui = Gui::new(test_font());
         let root = gui.root();
         let gauge = gui.add_gauge(root);
 
@@ -1224,7 +1262,7 @@ mod tests {
 
     #[test]
     fn gauge_fraction_clamps_to_zero() {
-        let mut gui = Gui::new();
+        let mut gui = Gui::new(test_font());
         let root = gui.root();
         let gauge = gui.add_gauge(root);
 
@@ -1246,7 +1284,7 @@ mod tests {
 
     #[test]
     fn picture_letterboxes_and_frames_image() {
-        let mut gui = Gui::new();
+        let mut gui = Gui::new(test_font());
         let root = gui.root();
         let picture = gui.add_picture(root, 200.0, 100.0);
 
@@ -1308,7 +1346,7 @@ mod tests {
 
     #[test]
     fn gauge_respects_layout_constraints() {
-        let mut gui = Gui::new();
+        let mut gui = Gui::new(test_font());
         let root = gui.root();
         let gauge = gui.add_gauge(root);
 

@@ -7,12 +7,13 @@ use lc_engine::{
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
-    SurfaceSnapshot as GraphicsSurfaceSnapshot,
+    SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont,
 };
 use lc_gui::{DrawCommand, Gui, GuiResult, Rect as GuiRect, Size as GuiSize, WidgetId};
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::convert::TryFrom;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 pub use input::InputDispatcher;
 pub use lc_gui::{
@@ -61,6 +62,7 @@ struct CrewWidgets {
 pub struct GraphicsSystem {
     surface: Surface,
     gui: Gui,
+    font: Arc<dyn TextFont>,
     scenario_label_text: String,
     scenario_label: WidgetId,
     frame_label: WidgetId,
@@ -75,6 +77,7 @@ pub struct GraphicsSystem {
     fallback_ground_height: i32,
     world_width: i32,
     world_height: i32,
+    object_sprites: Arc<HashMap<String, ImageData>>,
 }
 
 impl GraphicsSystem {
@@ -83,8 +86,10 @@ impl GraphicsSystem {
         surface_height: u32,
         fallback_ground_height: i32,
         scenario_label: &str,
+        font: Arc<dyn TextFont>,
+        object_sprites: Arc<HashMap<String, ImageData>>,
     ) -> Self {
-        let mut gui = Gui::new();
+        let mut gui = Gui::new(font.clone());
         let root = gui.root();
         let scenario_label_widget = gui.add_label(root, scenario_label);
         let frame_label = gui.add_label(root, "FRAME 000 X 000 Y 000 VX P00 VY P00");
@@ -104,6 +109,7 @@ impl GraphicsSystem {
         Self {
             surface,
             gui,
+            font,
             scenario_label_text: scenario_label.to_string(),
             scenario_label: scenario_label_widget,
             frame_label,
@@ -118,6 +124,7 @@ impl GraphicsSystem {
             fallback_ground_height,
             world_width: surface_width as i32,
             world_height: fallback_ground_height.max(surface_height as i32).max(0),
+            object_sprites,
         }
     }
 
@@ -437,6 +444,18 @@ impl GraphicsSystem {
             return;
         }
 
+        if let Some(sprite) = self.object_sprites.get(&object.definition_id) {
+            let rect = GuiRect::from_origin_size(
+                GuiPoint::new(
+                    (screen_x - (sprite.width() as i32) / 2) as f32,
+                    (screen_y - (sprite.height() as i32) / 2) as f32,
+                ),
+                GuiSize::new(sprite.width() as f32, sprite.height() as f32),
+            );
+            draw_image(&mut self.surface, &rect, sprite);
+            return;
+        }
+
         let size = 6i32;
         let rect = GuiRect::from_origin_size(
             GuiPoint::new(
@@ -460,7 +479,15 @@ impl GraphicsSystem {
                     color,
                     font_size,
                     padding,
-                } => draw_text(&mut self.surface, &rect, &text, color, font_size, padding),
+                } => draw_text(
+                    &mut self.surface,
+                    &rect,
+                    &text,
+                    color,
+                    font_size,
+                    padding,
+                    self.font.as_ref(),
+                ),
                 DrawCommand::Image { rect, image } => draw_image(&mut self.surface, &rect, &image),
             }
         }
@@ -484,7 +511,7 @@ impl GraphicsSystem {
     }
 
     fn rebuild_overlay(&mut self, players: &[PlayerOverlay]) -> GuiResult<()> {
-        let mut gui = Gui::new();
+        let mut gui = Gui::new(self.font.clone());
         let root = gui.root();
         let scenario_label = gui.add_label(root, self.scenario_label_text.clone());
         let frame_label = gui.add_label(root, "");
@@ -900,7 +927,7 @@ pub(crate) fn fill_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
     }
 }
 
-pub(crate) fn draw_image(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
+pub fn draw_image(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
         return;
     }
@@ -1009,10 +1036,10 @@ pub(crate) fn draw_text(
     color: Color,
     font_size: f32,
     padding: f32,
+    font: &dyn TextFont,
 ) {
     let origin_x = rect.origin.x + padding;
     let origin_y = rect.origin.y + padding;
-    let font = lc_graphics::BitmapFont::new();
     font.draw_text(surface, origin_x, origin_y, text, font_size.max(1.0), color);
 }
 
@@ -1022,8 +1049,18 @@ mod tests {
     use lc_engine::{
         EnvironmentFrame, Landscape, LiquidSegment, ObjectId, ObjectVertex, RgbColor, Vector2,
     };
-    use lc_graphics::PixelFormat;
+    use lc_graphics::{BitmapFont, PixelFormat};
     use rand::SeedableRng;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn test_font() -> Arc<dyn TextFont> {
+        Arc::new(BitmapFont::new())
+    }
+
+    fn empty_sprites() -> Arc<HashMap<String, ImageData>> {
+        Arc::new(HashMap::new())
+    }
 
     fn make_snapshot() -> SimulationSnapshot {
         SimulationSnapshot {
@@ -1073,7 +1110,8 @@ mod tests {
     fn graphics_system_draws_ground() {
         let snapshot = make_snapshot();
         let focus = snapshot.objects[0].clone();
-        let mut graphics = GraphicsSystem::new(320, 180, 150, "Test Scenario");
+        let mut graphics =
+            GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
         graphics.set_world_width(256);
 
         let atlas = graphics.render_frame(&snapshot, &focus);
@@ -1087,7 +1125,8 @@ mod tests {
     fn overlay_updates_clamp_energy() {
         let snapshot = make_snapshot();
         let focus = snapshot.objects[0].clone();
-        let mut graphics = GraphicsSystem::new(320, 180, 150, "Test Scenario");
+        let mut graphics =
+            GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
         graphics
             .update_overlay(&GraphicsOverlay {
                 frame_text: "FRAME",
@@ -1110,7 +1149,8 @@ mod tests {
             ObjectVertex::new(-4, 4),
         ];
         let focus = snapshot.objects[0].clone();
-        let mut graphics = GraphicsSystem::new(120, 80, 60, "Atlas Scenario");
+        let mut graphics =
+            GraphicsSystem::new(120, 80, 60, "Atlas Scenario", test_font(), empty_sprites());
 
         let atlas = graphics.render_frame(&snapshot, &focus);
 
@@ -1128,7 +1168,8 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(100, 260);
         snapshot.landscape = Some(Landscape::flat(256, 280));
-        let mut graphics = GraphicsSystem::new(320, 180, 150, "Test Scenario");
+        let mut graphics =
+            GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
         let focus = snapshot.objects[0].clone();
         graphics.render_frame(&snapshot, &focus);
 
@@ -1141,7 +1182,8 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(100, 30);
         snapshot.landscape = Some(Landscape::flat(256, 200));
-        let mut graphics = GraphicsSystem::new(320, 180, 150, "Test Scenario");
+        let mut graphics =
+            GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
         let focus = snapshot.objects[0].clone();
         graphics.render_frame(&snapshot, &focus);
         let (_, top_view) = graphics.viewport();
@@ -1150,7 +1192,8 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(100, 360);
         snapshot.landscape = Some(Landscape::flat(256, 360));
-        let mut graphics = GraphicsSystem::new(320, 180, 150, "Test Scenario");
+        let mut graphics =
+            GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
         let focus = snapshot.objects[0].clone();
         graphics.render_frame(&snapshot, &focus);
         let (_, bottom_view) = graphics.viewport();
@@ -1197,7 +1240,8 @@ mod tests {
         ];
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
-        let mut graphics = GraphicsSystem::new(80, 60, 60, "Polygon Scenario");
+        let mut graphics =
+            GraphicsSystem::new(80, 60, 60, "Polygon Scenario", test_font(), empty_sprites());
         let focus = snapshot.objects[0].clone();
         graphics.render_frame(&snapshot, &focus);
 
@@ -1221,13 +1265,14 @@ mod tests {
         daytime.environment.settings.time_of_day = EnvironmentSettings::TIME_CYCLE / 2;
 
         let focus = daytime.objects[0].clone();
-        let mut day_view = GraphicsSystem::new(120, 80, 60, "Day");
+        let mut day_view = GraphicsSystem::new(120, 80, 60, "Day", test_font(), empty_sprites());
         day_view.render_frame(&daytime, &focus);
         let day_pixel = day_view.surface().get_pixel(0, 0).unwrap();
 
         let mut nighttime = daytime.clone();
         nighttime.environment.settings.time_of_day = 0;
-        let mut night_view = GraphicsSystem::new(120, 80, 60, "Night");
+        let mut night_view =
+            GraphicsSystem::new(120, 80, 60, "Night", test_font(), empty_sprites());
         let night_focus = nighttime.objects[0].clone();
         night_view.render_frame(&nighttime, &night_focus);
         let night_pixel = night_view.surface().get_pixel(0, 0).unwrap();
@@ -1250,7 +1295,8 @@ mod tests {
         daytime.environment.settings.time_of_day = EnvironmentSettings::TIME_CYCLE / 2;
         daytime.objects[0].position = Vector2::new(150, 140);
 
-        let mut day_view = GraphicsSystem::new(200, 150, 150, "Day Object");
+        let mut day_view =
+            GraphicsSystem::new(200, 150, 150, "Day Object", test_font(), empty_sprites());
         let day_focus = daytime.objects[0].clone();
         day_view.render_frame(&daytime, &day_focus);
         let (day_viewport_x, day_viewport_y) = day_view.viewport();
@@ -1263,7 +1309,8 @@ mod tests {
 
         let mut nighttime = daytime.clone();
         nighttime.environment.settings.time_of_day = 0;
-        let mut night_view = GraphicsSystem::new(200, 150, 150, "Night Object");
+        let mut night_view =
+            GraphicsSystem::new(200, 150, 150, "Night Object", test_font(), empty_sprites());
         let night_focus = nighttime.objects[0].clone();
         night_view.render_frame(&nighttime, &night_focus);
         let (night_viewport_x, night_viewport_y) = night_view.viewport();
@@ -1298,7 +1345,8 @@ mod tests {
             landscape.set_liquid_column(30, vec![LiquidSegment::new(40, 60)]);
         }
         let focus = snapshot.objects[0].clone();
-        let mut graphics = GraphicsSystem::new(120, 80, 80, "Liquid Scenario");
+        let mut graphics =
+            GraphicsSystem::new(120, 80, 80, "Liquid Scenario", test_font(), empty_sprites());
         graphics.render_frame(&snapshot, &focus);
 
         let (viewport_x, viewport_y) = graphics.viewport();

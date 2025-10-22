@@ -197,6 +197,24 @@ impl Surface {
         Ok(())
     }
 
+    pub fn blend_pixel(&mut self, x: u32, y: u32, color: Color) -> Result<(), SurfaceError> {
+        if x >= self.width || y >= self.height {
+            return Err(SurfaceError::OutOfBounds {
+                x,
+                y,
+                width: self.width,
+                height: self.height,
+            });
+        }
+        let bpp = self.format.bytes_per_pixel();
+        let offset = self.pixel_offset(x, y);
+        let slice = &mut self.data[offset..offset + bpp];
+        let existing = Self::read_color(self.format, slice);
+        let blended = color.blend_over(existing);
+        Self::write_color(self.format, slice, blended);
+        Ok(())
+    }
+
     pub fn get_pixel(&self, x: u32, y: u32) -> Option<Color> {
         if x >= self.width || y >= self.height {
             return None;

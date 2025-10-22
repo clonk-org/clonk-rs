@@ -2,11 +2,12 @@ use crate::{
     DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, KeyCode, LayoutConstraints, Point, Rect,
     Size, WidgetId,
 };
-use lc_graphics::Color;
+use lc_graphics::{BitmapFont, Color, TextFont};
 use std::convert::TryFrom;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
+use std::sync::Arc;
 
 pub struct GuiHandle {
     gui: Gui,
@@ -21,6 +22,10 @@ pub struct RenderHandle {
 pub struct EventResultHandle {
     captured: bool,
     actions: Vec<LcGuiEventAction>,
+}
+
+fn default_font() -> Arc<dyn TextFont> {
+    Arc::new(BitmapFont::new())
 }
 
 #[repr(C)]
@@ -359,7 +364,9 @@ fn layout_internal(handle: &mut GuiHandle, constraints: LayoutConstraints) {
 
 #[no_mangle]
 pub extern "C" fn lc_gui_create() -> *mut GuiHandle {
-    Box::into_raw(Box::new(GuiHandle { gui: Gui::new() }))
+    Box::into_raw(Box::new(GuiHandle {
+        gui: Gui::new(default_font()),
+    }))
 }
 
 #[no_mangle]
@@ -375,7 +382,7 @@ pub extern "C" fn lc_gui_free(handle: *mut GuiHandle) {
 #[no_mangle]
 pub extern "C" fn lc_gui_reset(handle: *mut GuiHandle) {
     if let Some(handle) = handle_mut(handle) {
-        handle.gui = Gui::new();
+        handle.gui = Gui::new(default_font());
     }
 }
 

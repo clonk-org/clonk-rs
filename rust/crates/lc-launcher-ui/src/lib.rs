@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use lc_graphics::Color;
+use lc_graphics::{BitmapFont, Color, TextFont};
 use lc_gui::{
     DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, GuiResult, Rect, Size, WidgetId,
 };
@@ -10,9 +10,14 @@ use lc_launcher::{
     ProviderBulkRetargetRecord, ProviderBulkRetargetSummary, ProviderDiagnostics,
     ProviderOverrideSource, ProviderPathStatus, ProviderStatus, SupportArtifact,
 };
+use std::sync::Arc;
 
 const REPORT_PREVIEW_VISIBLE_LINES: usize = 28;
 const REPORT_PREVIEW_SCROLL_STEP: usize = 12;
+
+fn default_font() -> Arc<dyn TextFont> {
+    Arc::new(BitmapFont::new())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
@@ -207,7 +212,7 @@ pub struct LauncherShellUi {
 impl LauncherShellUi {
     pub fn new(state: Option<LauncherShellState>, localization: Localization) -> GuiResult<Self> {
         let mut ui = Self {
-            gui: Gui::new(),
+            gui: Gui::new(default_font()),
             layout: LauncherShellLayout::default(),
             state: None,
             localization,
@@ -566,7 +571,7 @@ fn build_gui(
     report_search: Option<&ReportSearchState>,
     localization: &Localization,
 ) -> GuiResult<(Gui, LauncherShellLayout)> {
-    let mut gui = Gui::new();
+    let mut gui = Gui::new(default_font());
     let mut layout = LauncherShellLayout::default();
     let root = gui.root();
 

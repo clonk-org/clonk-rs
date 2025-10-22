@@ -10,6 +10,7 @@ lc-audio = { path = "../lc-audio" }
 lc-core = { path = "../lc-core" }
 lc-engine = { path = "../lc-engine" }
 lc-frontend = { path = "../lc-frontend" }
+lc-gui = { path = "../lc-gui" }
 lc-graphics = { path = "../lc-graphics" }
 lc-network = { path = "../lc-network" }
 lc-platform = { path = "../lc-platform" }

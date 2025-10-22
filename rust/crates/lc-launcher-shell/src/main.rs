@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use anyhow::{anyhow, Context, Result};
 use arboard::Clipboard;
-use lc_graphics::{Color, PixelFormat, Point, Surface};
+use lc_graphics::{BitmapFont, Color, PixelFormat, Point, Surface, TextFont};
 use lc_gui::{
     DrawCommand, GuiEvent, ImageData, KeyCode, Point as GuiPoint, Rect as GuiRect, Size as GuiSize,
 };
@@ -3332,7 +3332,7 @@ fn draw_text(
 ) {
     let origin_x = rect.origin.x + padding;
     let origin_y = rect.origin.y + padding;
-    let font = lc_graphics::BitmapFont::new();
+    let font = BitmapFont::new();
     font.draw_text(surface, origin_x, origin_y, text, font_size.max(1.0), color);
 }
 

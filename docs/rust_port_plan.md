@@ -82,8 +82,8 @@
   - No DefCore.txt parsing for real game objects
 
 - ⚠️  **Graphics Resources** (C4GraphicsResource.cpp 🔗 Minimal)
-  - Missing: Fonts, cursor graphics, GUI bitmaps, icon sets
-  - Missing: Definition graphics loading from Graphics.c4g
+  - Progress: Fonts, startup backgrounds, and button textures now sourced from Graphics.c4g; walker sprite mapped from crew assets
+  - Missing: Comprehensive definition graphics pipeline, cursor graphics, broader GUI icon sets
   - Has: Basic surface rendering only
 
 - ⚠️  **Landscape Features** (C4Landscape.cpp is 88KB, lc-engine has basics only)
@@ -134,7 +134,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 
 ### Phase 1: Core Game Integration
 1. Port C4Def system to load real object definitions from Definition folders — ✅ Added `lc-resources::definition` (DefCore/ActMap/script parsing) with `Engine::Definition::from_resource`; sandbox now attempts to boot with real Clonk definitions when present (asset loading + scenario wiring still pending)
-2. Port Graphics.c4g loading for object graphics, fonts, UI elements
+2. ✅ Port Graphics.c4g loading for object graphics, fonts, UI elements — startup menu and UI components now render real assets from Graphics.c4g and Endeavour.ttf; walker sprite mapping added as first object graphic
 3. Port Material.txt system for terrain material definitions
 4. Make real scenarios actually load and work (not just parse and fall back)
 
@@ -167,12 +167,13 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Network transport layer (`--host`/`--join` flags exist)
 - ✅ Audio playback (music/SFX mixing)
 - ✅ Window creation and basic input handling
+- ✅ Startup menu renders Graphics.c4g backgrounds and buttons with Endeavour.ttf fonts (no longer flat placeholders)
 
 **What Doesn't Work (Real Game Requirements):**
 - ❌ `cargo run` shows **demo only** (window title: "LegacyClonk (Rust preview)")
 - ❌ No real scenarios load (falls back to hardcoded "Rust Sandbox")
 - ❌ No real object definitions (only synthetic Walker)
-- ❌ No real graphics (placeholder previews, missing object sprites)
+- ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ❌ No real audio (synthetic tones for missing sounds)
 - ❌ No player management (no crew, no viewports, no menus)
 - ❌ No materials (no terrain types, no mining, no reactions)

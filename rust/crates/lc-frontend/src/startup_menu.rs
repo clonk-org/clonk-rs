@@ -2,11 +2,13 @@ use crate::{
     draw_image, draw_text, fill_rect, GuiPoint, KeyCode, ScenarioEntry, ScenarioKind,
     StartupMenuResult,
 };
-use lc_graphics::Surface;
+use lc_graphics::{Surface, TextFont};
+use lc_gui::ButtonTextures;
 use lc_gui::{
     DrawCommand, GuiEvent, ScenarioBrowser, ScenarioBrowserMessage, ScenarioEntrySummary,
     Size as GuiSize,
 };
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScenarioSummary {
@@ -36,14 +38,21 @@ pub enum StartupMenuAction {
 pub struct StartupMenu {
     browser: ScenarioBrowser,
     size: GuiSize,
+    font: Arc<dyn TextFont>,
 }
 
 impl StartupMenu {
-    pub fn new(entries: Vec<ScenarioEntry>) -> StartupMenuResult<Self> {
-        let browser = ScenarioBrowser::new(entries)?;
+    pub fn new(
+        entries: Vec<ScenarioEntry>,
+        font: Arc<dyn TextFont>,
+        button_textures: Option<ButtonTextures>,
+    ) -> StartupMenuResult<Self> {
+        let mut browser = ScenarioBrowser::new(entries, font.clone())?;
+        browser.set_button_textures(button_textures);
         Ok(Self {
             browser,
             size: GuiSize::new(0.0, 0.0),
+            font,
         })
     }
 
@@ -93,7 +102,15 @@ impl StartupMenu {
                     color,
                     font_size,
                     padding,
-                } => draw_text(surface, &rect, &text, color, font_size, padding),
+                } => draw_text(
+                    surface,
+                    &rect,
+                    &text,
+                    color,
+                    font_size,
+                    padding,
+                    self.font.as_ref(),
+                ),
                 DrawCommand::Image { rect, image } => draw_image(surface, &rect, &image),
             }
         }
@@ -127,6 +144,13 @@ impl StartupMenuAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lc_graphics::BitmapFont;
+    use std::sync::Arc;
+
+    fn test_font() -> Arc<dyn TextFont> {
+        Arc::new(BitmapFont::new())
+    }
+
     fn entry(identifier: &str, title: &str) -> ScenarioEntry {
         ScenarioEntry {
             identifier: identifier.to_string(),
@@ -143,7 +167,7 @@ mod tests {
     #[test]
     fn key_navigation_emits_start_action() {
         let entries = vec![entry("rust_sandbox", "Rust Sandbox")];
-        let mut menu = StartupMenu::new(entries).expect("menu");
+        let mut menu = StartupMenu::new(entries, test_font(), None).expect("menu");
         menu.resize(640.0, 480.0);
 
         let select = menu.handle_key_down(KeyCode::Down);

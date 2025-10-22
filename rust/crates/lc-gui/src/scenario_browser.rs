@@ -1,8 +1,9 @@
 use crate::{
-    DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, GuiResult, ImageData, KeyCode, Rect,
-    Size, WidgetId,
+    ButtonTextures, DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, GuiResult, ImageData,
+    KeyCode, Rect, Size, WidgetId,
 };
-use std::fmt;
+use lc_graphics::TextFont;
+use std::{fmt, sync::Arc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScenarioKind {
@@ -75,17 +76,21 @@ pub struct ScenarioBrowser {
     entries: Vec<ScenarioEntry>,
     layout: ScenarioBrowserLayout,
     selected: Option<usize>,
+    font: Arc<dyn TextFont>,
+    button_textures: Option<ButtonTextures>,
 }
 
 impl ScenarioBrowser {
-    pub fn new(entries: Vec<ScenarioEntry>) -> GuiResult<Self> {
-        let mut gui = Gui::new();
+    pub fn new(entries: Vec<ScenarioEntry>, font: Arc<dyn TextFont>) -> GuiResult<Self> {
+        let mut gui = Gui::new(font.clone());
         let layout = ScenarioBrowserLayout::build(&mut gui, &entries);
         let mut browser = Self {
             gui,
             entries,
             layout,
             selected: None,
+            font,
+            button_textures: None,
         };
         browser.clear_selection_ui()?;
         Ok(browser)
@@ -96,11 +101,20 @@ impl ScenarioBrowser {
     }
 
     pub fn set_entries(&mut self, entries: Vec<ScenarioEntry>) -> GuiResult<()> {
-        self.gui = Gui::new();
+        self.gui = Gui::new(self.font.clone());
+        if let Some(textures) = self.button_textures.clone() {
+            self.gui.set_button_textures(Some(textures));
+        }
         self.layout = ScenarioBrowserLayout::build(&mut self.gui, &entries);
         self.entries = entries;
         self.selected = None;
         self.clear_selection_ui()
+    }
+
+    pub fn set_button_textures(&mut self, textures: Option<ButtonTextures>) {
+        let gui_textures = textures.clone();
+        self.button_textures = textures;
+        self.gui.set_button_textures(gui_textures);
     }
 
     pub fn layout(&mut self, available: Size) -> Size {
@@ -467,12 +481,18 @@ struct ActionButtons {
 mod tests {
     use super::*;
     use crate::{GuiEvent, KeyCode, Point, Size};
+    use lc_graphics::BitmapFont;
+    use std::sync::Arc;
 
     fn center(rect: Rect) -> Point {
         Point::new(
             rect.origin.x + rect.size.width * 0.5,
             rect.origin.y + rect.size.height * 0.5,
         )
+    }
+
+    fn test_font() -> Arc<dyn TextFont> {
+        Arc::new(BitmapFont::new())
     }
 
     #[test]
@@ -500,7 +520,7 @@ mod tests {
             },
         ];
 
-        let mut browser = ScenarioBrowser::new(entries).expect("browser");
+        let mut browser = ScenarioBrowser::new(entries, test_font()).expect("browser");
         browser.layout(Size::new(480.0, 720.0));
 
         let button_id = browser.entry_button("scenario_1").expect("button");
@@ -569,7 +589,7 @@ mod tests {
             },
         ];
 
-        let mut browser = ScenarioBrowser::new(entries).expect("browser");
+        let mut browser = ScenarioBrowser::new(entries, test_font()).expect("browser");
         browser.layout(Size::new(480.0, 720.0));
 
         let first = browser.handle_event(GuiEvent::KeyDown { key: KeyCode::Down });
