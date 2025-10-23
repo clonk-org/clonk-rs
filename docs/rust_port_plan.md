@@ -124,7 +124,7 @@
   - Property modification
 
 ### Category 5: Demo/Fallback Systems
-- ❌ **Synthetic Audio** (`lc-app/main.rs:601-617`) - Generates sine wave tones for missing sounds
+- ✅ **Synthetic Audio** (`lc-app/main.rs`) - Missing sound assets now log once and skip playback instead of emitting synthetic tones
 - ❌ **Placeholder Previews** (`lc-app/main.rs:1186-1241`) - Procedural gradient images
 - ❌ **Hardcoded Walker** (`lc-app/main.rs:2383-2414`) - Fixed spawn at (240, 180)
 - ❌ **Fallback Ground Height** (`lc-app/main.rs:55+`) - Hardcoded 360px default
@@ -189,7 +189,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ❌ `cargo run` shows **demo only** (window title: "LegacyClonk (Rust preview)")
 - ⚠️ Definition runtime still incomplete (no scripted context menus, limited metadata, missing graphics/sound wiring)
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
-- ⚠️ Audio assets still incomplete (missing samples fall back to synthesized tones even though definition libraries now register)
+- ⚠️ Audio assets still incomplete (missing samples remain silent; asset coverage still partial)
 - ⚠️ Message frames/portraits still missing (text-only rendering today)
 - ⚠️ Material runtime still lacks particle-to-terrain backfill for advanced mining reactions even though BlastShiftTo parity and Blast2Object/PXS reactions now fire
 - ❌ No multiplayer lobby (transport exists but no game coordination)

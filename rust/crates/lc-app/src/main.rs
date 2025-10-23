@@ -658,7 +658,9 @@ impl AudioContext {
             return Ok(());
         }
         let key = SoundInstanceKey::new(name, target);
-        let handle = self.ensure_sound(name)?;
+        let Some(handle) = self.ensure_sound(name)? else {
+            return Ok(());
+        };
         let channel = self.system.play_sound(&handle, looped)?;
         let info = ChannelInfo {
             channel,
@@ -739,18 +741,18 @@ impl AudioContext {
         }
     }
 
-    fn ensure_sound(&mut self, name: &str) -> Result<SoundHandle, AudioError> {
+    fn ensure_sound(&mut self, name: &str) -> Result<Option<SoundHandle>, AudioError> {
         let request_key = name.to_ascii_lowercase();
         if let Some(resolved) = self.resolver.resolve_entry(name) {
             let cache_key = resolved.cache_key();
             if let Some(handle) = self.loaded_sounds.get(&cache_key) {
-                return Ok(handle.clone());
+                return Ok(Some(handle.clone()));
             }
             match resolved.load_audio() {
                 Ok(bytes) => {
                     let handle = self.system.load_sound(bytes.as_slice())?;
                     self.loaded_sounds.insert(cache_key.clone(), handle.clone());
-                    return Ok(handle);
+                    return Ok(Some(handle));
                 }
                 Err(err) => {
                     if self
@@ -764,26 +766,18 @@ impl AudioContext {
                             "failed to load sound asset"
                         );
                     }
+                    return Ok(None);
                 }
             }
         }
 
-        let fallback_cache_key = format!("__fallback::{}", request_key);
-        if let Some(handle) = self.loaded_sounds.get(&fallback_cache_key) {
-            return Ok(handle.clone());
-        }
-
-        let bytes = generate_tone_wav(name);
-        let handle = self.system.load_sound(bytes.as_slice())?;
-        self.loaded_sounds
-            .insert(fallback_cache_key.clone(), handle.clone());
         if self
             .missing_sounds
             .insert(format!("request::{request_key}"))
         {
-            tracing::warn!(sound = %name, "missing sound asset; using synthetic fallback");
+            tracing::warn!(sound = %name, "missing sound asset; skipping playback");
         }
-        Ok(handle)
+        Ok(None)
     }
 }
 
@@ -4486,14 +4480,6 @@ fn compute_mix_values(
     let pan = (pan_accumulator.clamp(-PAN_LIMIT, PAN_LIMIT)) / PAN_LIMIT;
 
     (base_volume * best_audibility, pan.clamp(-1.0, 1.0))
-}
-
-fn generate_tone_wav(name: &str) -> Vec<u8> {
-    let mut hasher = DefaultHasher::new();
-    name.hash(&mut hasher);
-    let hash = hasher.finish();
-    let freq = 220.0 + (hash % 660) as f32;
-    generate_sine_wave_wav(freq, 0.35)
 }
 
 fn generate_sine_wave_wav(frequency_hz: f32, duration_seconds: f32) -> Vec<u8> {
