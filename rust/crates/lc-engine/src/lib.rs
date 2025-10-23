@@ -9420,17 +9420,24 @@ global func Step(state, frame, random)
             engine.tick_player_systems();
         }
 
-        let leader = engine.player(1).expect("leader present");
-        let follower = engine.player(2).expect("follower present");
-        assert_eq!(leader.home_base_material().get("Brick"), Some(&1));
-        assert!(
-            follower.home_base_material().get("Brick").is_none(),
-            "follower should not receive materials when rule disabled"
-        );
+        {
+            let leader = engine.player(1).expect("leader present");
+            let follower = engine.player(2).expect("follower present");
+            assert_eq!(leader.home_base_material().get("Brick"), Some(&1));
+            assert!(
+                follower.home_base_material().get("Brick").is_none(),
+                "follower should not receive materials when rule disabled"
+            );
+        }
 
         engine.set_team_home_base_rule(true);
+        let leader_material = engine
+            .player(1)
+            .expect("leader present")
+            .home_base_material()
+            .clone();
         engine
-            .set_player_home_base_material(1, leader.home_base_material().clone())
+            .set_player_home_base_material(1, leader_material)
             .expect("update succeeds");
 
         let follower_after = engine.player(2).expect("follower present");

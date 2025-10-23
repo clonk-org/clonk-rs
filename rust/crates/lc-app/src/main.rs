@@ -1605,7 +1605,12 @@ impl InstallDefinitionResolver {
     }
 
     fn should_ignore_error(err: &GroupError) -> bool {
-        matches!(err, GroupError::Missing(_) | GroupError::NotDirectory(_))
+        matches!(
+            err,
+            GroupError::Missing(_)
+                | GroupError::NotDirectory(_)
+                | GroupError::EntryNotFound(_)
+        )
             || matches!(err, GroupError::Io(io_err) if io_err.kind() == io::ErrorKind::NotFound)
     }
 }
@@ -1633,6 +1638,14 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
             }
 
             for ancestor in scenario.root().ancestors() {
+                if let Ok(group) = Group::open(ancestor) {
+                    match group.open_child(&relative) {
+                        Ok(child) => Self::push_group(&mut groups, &mut seen, child),
+                        Err(err) if Self::should_ignore_error(&err) => {}
+                        Err(err) => return Err(ScenarioError::Resources(err)),
+                    }
+                }
+
                 let candidate = ancestor.join(&relative);
                 match Group::open(&candidate) {
                     Ok(group) => Self::push_group(&mut groups, &mut seen, group),
@@ -1645,6 +1658,7 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
                 let mut base_candidates = vec![
                     paths.install_root().to_path_buf(),
                     paths.planet_dir().to_path_buf(),
+                    paths.system_group_path().to_path_buf(),
                     paths.user_data_dir().to_path_buf(),
                     paths.scenario_dir(),
                 ];
@@ -1656,6 +1670,15 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
                     if !base_seen.insert(base.clone()) {
                         continue;
                     }
+
+                    if let Ok(group) = Group::open(&base) {
+                        match group.open_child(&relative) {
+                            Ok(child) => Self::push_group(&mut groups, &mut seen, child),
+                            Err(err) if Self::should_ignore_error(&err) => {}
+                            Err(err) => return Err(ScenarioError::Resources(err)),
+                        }
+                    }
+
                     let candidate = base.join(&relative);
                     match Group::open(&candidate) {
                         Ok(group) => Self::push_group(&mut groups, &mut seen, group),

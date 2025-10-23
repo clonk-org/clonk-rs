@@ -74,10 +74,9 @@
   - Particle-object collision
 
 ### Category 2: Game Loop & Integration (INCOMPLETE)
-- ⚠️  **Scenario Loading** (works but defaults to demo)
-  - `Scenario::load_from_path()` exists but fails in practice
-  - Falls back to hardcoded "Rust Sandbox" with synthetic Walker
-  - Real scenario discovery exists but doesn't integrate properly
+- ✅  **Scenario Loading** (real scenarios load when assets are present)
+  - Legacy resolver now searches packed install groups and ancestor folders before falling back
+  - Sandbox preview remains only as safety net when required assets are missing
 
 - ⚠️  **Definition System** (partial - C4Def.cpp)
   - Can load object definitions but limited to hardcoded Walker
@@ -171,6 +170,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Audio playback (music/SFX mixing)
 - ✅ Window creation and basic input handling
 - ✅ Startup menu renders Graphics.c4g backgrounds and buttons with Endeavour.ttf fonts (no longer flat placeholders)
+- ✅ Scenario loader resolves legacy definition paths from packed install groups before falling back to the sandbox preview
 - ✅ Material definitions load from install archives (lc-resources::material + Engine MaterialSet)
 - ✅ Player registry + HUD overlay surface real player metadata (names, wealth, cursor) sourced from engine snapshots
 - ✅ Cursor cycling and selection toggles now respect classic COM_Single/COM_Double timing with network serialization parity
@@ -182,7 +182,6 @@ The documentation previously focused on "removing fallbacks." **This is backward
 
 **What Doesn't Work (Real Game Requirements):**
 - ❌ `cargo run` shows **demo only** (window title: "LegacyClonk (Rust preview)")
-- ❌ No real scenarios load (falls back to hardcoded "Rust Sandbox")
 - ❌ No real object definitions (only synthetic Walker)
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ❌ No real audio (synthetic tones for missing sounds)
