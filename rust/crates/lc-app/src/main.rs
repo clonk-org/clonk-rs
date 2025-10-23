@@ -1,4 +1,5 @@
 mod gamepad;
+mod ingame_menu;
 mod input;
 mod network;
 mod settings;
@@ -19,14 +20,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
+use ingame_menu::{IngameMenuAction, IngameMenuState};
 use input::KeyboardBindings;
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
-    ActionSpec, ActionState, AudioCommand, ControlButton, ControlEvent, Definition, Engine,
-    EngineError, EngineState, EnvironmentSettings, Landscape, MaterialSet, MovementProfile,
-    ObjectId, ObjectSnapshot, PlayerStatus, Scenario, ScenarioError, SimulationSnapshot,
-    SpawnConfig, Vector2,
+    ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
+    ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, Landscape,
+    MaterialSet, MovementProfile, ObjectId, ObjectSnapshot, PlayerStatus, Scenario, ScenarioError,
+    SimulationSnapshot, SpawnConfig, Vector2,
 };
 use lc_frontend::{
     draw_image, CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData, InputDispatcher,
@@ -1224,6 +1226,7 @@ struct GameApp {
     scenario_label: String,
     fallback_ground: i32,
     menu_state: MenuState,
+    ingame_menu: Option<IngameMenuState>,
     mode: AppMode,
     scenario_catalog: HashMap<String, FrontendScenario>,
     active_scenario: Option<FrontendScenario>,
@@ -2120,6 +2123,7 @@ impl GameApp {
             scenario_label,
             fallback_ground: DEFAULT_GROUND_HEIGHT,
             menu_state,
+            ingame_menu: None,
             mode: AppMode::Menu,
             scenario_catalog,
             active_scenario: None,
@@ -2199,7 +2203,11 @@ impl GameApp {
 
         if self.mode == AppMode::Running {
             if key == VirtualKeyCode::Escape && state == ElementState::Pressed {
-                self.return_to_menu();
+                if self.ingame_menu.is_some() {
+                    self.close_ingame_menu();
+                } else {
+                    self.open_ingame_menu();
+                }
                 return Ok(());
             }
             self.handle_engine_key(key, state)?;
@@ -2219,6 +2227,16 @@ impl GameApp {
     }
 
     fn dispatch_control_event(&mut self, event: ControlEvent) -> Result<(), EngineError> {
+        if self.mode == AppMode::Running {
+            if let ControlEvent::Command { command, kind } = event {
+                if self.handle_ingame_menu_command(command, kind)? {
+                    return Ok(());
+                }
+            }
+            if self.ingame_menu.is_some() {
+                return Ok(());
+            }
+        }
         if let Some(network) = self.network.as_ref() {
             let frame = self.engine.frame();
             let tick = u32::try_from(frame).unwrap_or(u32::MAX);
@@ -2232,7 +2250,117 @@ impl GameApp {
         owner: i32,
         event: ControlEvent,
     ) -> Result<(), EngineError> {
+        if owner == self.local_owner && self.ingame_menu.is_some() {
+            if let ControlEvent::Command { command, kind } = event {
+                let _ = self.handle_ingame_menu_command(command, kind)?;
+            }
+            return Ok(());
+        }
         let _ = self.input.handle_event(&mut self.engine, owner, event)?;
+        Ok(())
+    }
+
+    fn open_ingame_menu(&mut self) {
+        if !matches!(self.mode, AppMode::Running) || self.ingame_menu.is_some() {
+            return;
+        }
+        let has_quick_save = self
+            .last_save_path
+            .as_ref()
+            .map(|path| path.exists())
+            .unwrap_or_else(|| existing_quick_save_path().is_some());
+        self.ingame_menu = Some(IngameMenuState::new(has_quick_save));
+        if self.status_text.is_empty() {
+            self.status_text = "Paused".to_string();
+        }
+    }
+
+    fn close_ingame_menu(&mut self) {
+        self.ingame_menu = None;
+        if self.status_text == "Paused" {
+            self.status_text.clear();
+        }
+    }
+
+    fn handle_ingame_menu_command(
+        &mut self,
+        command: ControlCommand,
+        kind: CommandKind,
+    ) -> Result<bool, EngineError> {
+        if !matches!(self.mode, AppMode::Running) {
+            return Ok(false);
+        }
+
+        if matches!(
+            command,
+            ControlCommand::MenuEnter
+                | ControlCommand::MenuEnterAll
+                | ControlCommand::MenuClose
+                | ControlCommand::MenuDown
+                | ControlCommand::MenuLeft
+                | ControlCommand::MenuRight
+                | ControlCommand::MenuSelect
+                | ControlCommand::MenuShowText
+                | ControlCommand::MenuUp
+        ) && self.ingame_menu.is_none()
+        {
+            return Ok(false);
+        }
+
+        if matches!(command, ControlCommand::PlayerMenu) {
+            if matches!(
+                kind,
+                CommandKind::Press | CommandKind::Single | CommandKind::Double
+            ) {
+                if self.ingame_menu.is_some() {
+                    self.close_ingame_menu();
+                } else {
+                    self.open_ingame_menu();
+                }
+            }
+            return Ok(true);
+        }
+
+        let Some(menu) = self.ingame_menu.as_mut() else {
+            return Ok(false);
+        };
+
+        if let Some(action) = menu.handle_command(command, kind) {
+            self.execute_ingame_menu_action(action)?;
+        }
+        Ok(true)
+    }
+
+    fn execute_ingame_menu_action(&mut self, action: IngameMenuAction) -> Result<(), EngineError> {
+        match action {
+            IngameMenuAction::Resume => {
+                self.close_ingame_menu();
+            }
+            IngameMenuAction::QuickSave => match self.quick_save() {
+                Ok(_) => {
+                    if let Some(menu) = self.ingame_menu.as_mut() {
+                        menu.set_quick_save_available(true);
+                    }
+                }
+                Err(err) => {
+                    tracing::error!(error = ?err, "quick save failed");
+                    self.status_text = format!("Quick save failed: {err:#}");
+                }
+            },
+            IngameMenuAction::QuickLoad => match self.quick_load() {
+                Ok(()) => {
+                    self.close_ingame_menu();
+                }
+                Err(err) => {
+                    tracing::error!(error = ?err, "quick load failed");
+                    self.status_text = format!("Quick load failed: {err:#}");
+                }
+            },
+            IngameMenuAction::AbortToMenu => {
+                self.close_ingame_menu();
+                self.return_to_menu();
+            }
+        }
         Ok(())
     }
 
@@ -2348,7 +2476,11 @@ impl GameApp {
                 },
                 AppMode::Running => {
                     if state == ElementState::Pressed {
-                        self.return_to_menu();
+                        if self.ingame_menu.is_some() {
+                            self.close_ingame_menu();
+                        } else {
+                            self.open_ingame_menu();
+                        }
                     }
                 }
             },
@@ -2652,6 +2784,14 @@ impl GameApp {
             self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
         }
 
+        if let Some(menu) = self.ingame_menu.as_ref() {
+            let font = self.assets.font_arc();
+            {
+                let surface = self.graphics.surface_mut();
+                menu.render(surface, font.as_ref());
+            }
+        }
+
         let surface = self.graphics.surface();
         let pixels = surface.pixels();
         if pixels.len() == frame.len() {
@@ -2663,6 +2803,7 @@ impl GameApp {
     }
 
     fn return_to_menu(&mut self) {
+        self.close_ingame_menu();
         self.engine = Engine::new();
         self.apply_material_library();
         self.input = InputDispatcher::new();
@@ -3023,6 +3164,7 @@ impl GameApp {
         self.status_text.clear();
         self.energy_fraction = 0.0;
         self.menu_state.set_pointer_position(None);
+        self.ingame_menu = None;
         self.mode = AppMode::Running;
     }
 
