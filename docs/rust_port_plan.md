@@ -65,6 +65,7 @@
   - ✅ ActMap `DigFree` values feed the Rust runtime; dig procedures now carve landscape columns when materials permit excavation
   - ✅ Dig2Object conversions track per-material dig output and spawn definition objects once configured ratios are met
   - ✅ BlastShiftTo now converts blasted columns to their configured target materials using the original probability curve
+  - ✅ Settled material particles now backfill landscape columns, restoring advanced mining parity
 
 - ✅ **Weather & Sky** (C4Weather.cpp, C4Sky.cpp 🔗 Ported)
   - ✅ Dynamic precipitation honors scenario settings (rain vs. snow), wind variation, and emits lightning events for HUD feedback
@@ -182,6 +183,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Team home-base rule produces and syncs materials between teammates (C4Player::ExecHomeBaseProduction)
 - ✅ In-game pause menu implemented (resume, quick save/load, abort) while gameplay continues; scripted context menus now surface definition-driven actions
 - ⚠️ Player inventory menu mirrors crew contents with navigation/selection feedback, shows value/mass stats, and now routes Focus/DropAll/build deliveries through definition `MenuCommand`
+- ✅ Material particle settling now backfills blasted columns so advanced mining reactions rebuild terrain
 - ⚠️ Experimental: `.c4s` scenarios boot with real definitions and scripts when install data is available (lands in running state, but full player UX still limited)
 - ✅ HUD renders global and object-attached messages using script `CustomMessage` calls with legacy timeouts
 - ✅ Sky background in the Rust frontend now blends a day/night gradient derived from engine time-of-day and ambient temperature
@@ -192,7 +194,6 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ⚠️ Audio assets still incomplete (missing samples remain silent; asset coverage still partial)
 - ⚠️ Message frames/portraits still missing (text-only rendering today)
-- ⚠️ Material runtime still lacks particle-to-terrain backfill for advanced mining reactions even though BlastShiftTo parity and Blast2Object/PXS reactions now fire
 - ❌ No multiplayer lobby (transport exists but no game coordination)
 
 ---

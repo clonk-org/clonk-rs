@@ -11102,6 +11102,16 @@ mod tests {
             .blast_circle(Vector2::new(6, 30), 3, None)
             .expect("blast applies");
 
+        let post_blast_surface = {
+            let snapshot = engine.snapshot();
+            let landscape = snapshot.landscape.as_ref().expect("landscape present");
+            landscape.surface()[6]
+        };
+        assert!(
+            post_blast_surface > 30,
+            "blast should lower the surface before particles settle"
+        );
+
         for _ in 0..24 {
             engine.tick().expect("tick succeeds");
         }
@@ -11109,8 +11119,12 @@ mod tests {
         let snapshot = engine.snapshot();
         let landscape = snapshot.landscape.expect("landscape present");
         assert!(
-            landscape.surface()[6] > 30,
-            "expected particles to raise the landscape surface"
+            landscape.surface()[6] <= 30,
+            "expected particles to backfill the landscape surface"
+        );
+        assert!(
+            landscape.surface()[6] < post_blast_surface,
+            "expected surface height to recover after particle settling"
         );
         Ok(())
     }

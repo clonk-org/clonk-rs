@@ -465,9 +465,12 @@ impl Landscape {
             return false;
         }
         self.ensure_material_capacity();
-        let height = self.surface[index].max(0);
-        let target = y.saturating_add(1).max(height);
-        if target == height {
+        let current_height = self.surface[index].max(0);
+        let mut target = y.saturating_add(1);
+        if target < 0 {
+            target = 0;
+        }
+        if target == current_height {
             self.solid_materials[index] = Some(material);
             return true;
         }
@@ -791,6 +794,17 @@ mod tests {
         landscape.set_default_solid_material(Some(material_a));
         assert_eq!(landscape.default_solid_material(), Some(material_a));
         assert_eq!(landscape.solid_material_at(3), Some(material_a));
+    }
+
+    #[test]
+    fn insert_material_backfills_surface_depth() {
+        let material = MaterialId::new(0).unwrap();
+        let mut landscape = Landscape::flat_with_material(5, 40, Some(material));
+        landscape.set_height(2, 60);
+        assert_eq!(landscape.surface()[2], 60);
+
+        assert!(landscape.insert_material_at(2, 39, material));
+        assert_eq!(landscape.surface()[2], 40);
     }
 
     #[test]
