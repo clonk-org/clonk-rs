@@ -38,7 +38,8 @@
 - ⚠️ **Player Management** (C4Player.cpp 🔗 Runtime APIs landed; strategic features pending)
   - ✅ Engine exposes full player registry (join/leave, wealth, knowledge, inventory, cursor, per-player viewports)
   - ✅ Simulation snapshots + HUD now surface player names/wealth/cursor for overlays
-  - ⏳ Remaining: menu/team integration, home-base evaluation, advanced control UX
+  - ✅ Team rule + home-base production synced across players (C4RULE_TeamHomebase parity)
+  - ⏳ Remaining: advanced control UX (menu bindings, cursor toggles)
 
 - ❌ **Viewport System** (C4Viewport.cpp 🔗 No multi-viewport support)
   - Multiple simultaneous viewports per player
@@ -140,7 +141,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 4. ✅ Make real scenarios load with install definitions (gameplay still limited until player/viewport/menu systems land)
 
 ### Phase 2: Essential Gameplay Systems
-1. Port C4Player for real player management (not just owner IDs)
+1. Port C4Player for real player management — ✅ Teams/home-base parity, ⚠️ control UX still missing
 2. Port C4Viewport for proper camera, zoom, split-screen
 3. Port C4Menu for object interaction menus
 4. Port C4GameMessage for mission text and objectives
@@ -171,6 +172,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Startup menu renders Graphics.c4g backgrounds and buttons with Endeavour.ttf fonts (no longer flat placeholders)
 - ✅ Material definitions load from install archives (lc-resources::material + Engine MaterialSet)
 - ✅ Player registry + HUD overlay surface real player metadata (names, wealth, cursor) sourced from engine snapshots
+- ✅ Team home-base rule produces and syncs materials between teammates (C4Player::ExecHomeBaseProduction)
 - ⚠️ Experimental: `.c4s` scenarios boot with real definitions and scripts when install data is available (lands in running state, but full player UX still limited)
 
 **What Doesn't Work (Real Game Requirements):**
@@ -179,7 +181,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ❌ No real object definitions (only synthetic Walker)
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ❌ No real audio (synthetic tones for missing sounds)
-- ❌ No player management (no crew, no viewports, no menus)
+- ❌ No in-game menus or viewport controls (player UX still largely missing)
 - ❌ Materials still unused at runtime (no terrain types, no mining, no reactions despite definitions loading)
 - ❌ No multiplayer lobby (transport exists but no game coordination)
 

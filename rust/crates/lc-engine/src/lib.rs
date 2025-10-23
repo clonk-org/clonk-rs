@@ -3404,6 +3404,7 @@ pub struct Engine {
     players: HashMap<i32, Player>,
     crew_selection: HashMap<i32, CrewSelection>,
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
+    team_home_base_rule: bool,
     known_crew_owners: HashSet<i32>,
     eliminated_crew_owners: HashSet<i32>,
     transfer_zones: TransferZoneTable,
@@ -3727,6 +3728,7 @@ impl Engine {
             players: HashMap::new(),
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
+            team_home_base_rule: false,
             known_crew_owners: HashSet::new(),
             eliminated_crew_owners: HashSet::new(),
             transfer_zones: TransferZoneTable::default(),
@@ -3745,6 +3747,7 @@ impl Engine {
         let player = config.build();
         self.players.insert(id, player);
         self.sync_player_cursor(id);
+        self.sync_team_home_base_for(id);
         Ok(())
     }
 
@@ -3758,6 +3761,11 @@ impl Engine {
         self.eliminated_crew_owners.remove(&id);
         self.known_crew_owners.remove(&id);
         self.refresh_elimination_state();
+        if self.team_home_base_rule {
+            if let Some(team) = player.team() {
+                self.sync_team_home_base_group(team);
+            }
+        }
         Ok(player)
     }
 
@@ -3778,6 +3786,25 @@ impl Engine {
     pub fn set_player_status(&mut self, id: i32, status: PlayerStatus) -> Result<(), EngineError> {
         let player = self.player_mut(id)?;
         player.set_status(status);
+        Ok(())
+    }
+
+    pub fn set_player_team(&mut self, id: i32, team: Option<i32>) -> Result<(), EngineError> {
+        {
+            let player = self.player_mut(id)?;
+            player.set_team(team);
+        }
+        self.sync_team_home_base_for(id);
+        Ok(())
+    }
+
+    pub fn set_player_surrendered(
+        &mut self,
+        id: i32,
+        surrendered: bool,
+    ) -> Result<(), EngineError> {
+        let player = self.player_mut(id)?;
+        player.set_surrendered(surrendered);
         Ok(())
     }
 
@@ -3860,6 +3887,39 @@ impl Engine {
         Ok(())
     }
 
+    pub fn set_player_home_base_material(
+        &mut self,
+        id: i32,
+        material: HashMap<DefinitionId, u32>,
+    ) -> Result<(), EngineError> {
+        {
+            let player = self.player_mut(id)?;
+            player.set_home_base_material(material);
+        }
+        self.sync_team_home_base_for(id);
+        Ok(())
+    }
+
+    pub fn set_player_home_base_production(
+        &mut self,
+        id: i32,
+        production: HashMap<DefinitionId, u32>,
+    ) -> Result<(), EngineError> {
+        let player = self.player_mut(id)?;
+        player.set_home_base_production(production);
+        Ok(())
+    }
+
+    pub fn adjust_player_home_base_material(
+        &mut self,
+        id: i32,
+        definition_id: DefinitionId,
+        delta: i32,
+    ) -> Result<u32, EngineError> {
+        let player = self.player_mut(id)?;
+        Ok(player.adjust_home_base_material(definition_id, delta))
+    }
+
     pub fn set_materials(&mut self, materials: MaterialSet) {
         self.materials = materials;
     }
@@ -3926,6 +3986,23 @@ impl Engine {
         let mut environment = environment;
         environment.refresh_runtime_fields();
         self.environment = environment;
+    }
+
+    pub fn team_home_base_rule(&self) -> bool {
+        self.team_home_base_rule
+    }
+
+    pub fn set_team_home_base_rule(&mut self, enabled: bool) {
+        if self.team_home_base_rule == enabled {
+            return;
+        }
+        self.team_home_base_rule = enabled;
+        if enabled {
+            let ids: Vec<_> = self.players.keys().copied().collect();
+            for id in ids {
+                self.sync_team_home_base_for(id);
+            }
+        }
     }
 
     fn host_world_context(&self) -> HostWorldContext {
@@ -4326,11 +4403,83 @@ impl Engine {
         Ok(id)
     }
 
+    fn tick_player_systems(&mut self) {
+        if self.players.is_empty() {
+            return;
+        }
+
+        let mut player_ids: Vec<_> = self.players.keys().copied().collect();
+        player_ids.sort_unstable();
+
+        let mut team_members: HashMap<i32, Vec<i32>> = HashMap::new();
+        let mut team_leaders: HashMap<i32, i32> = HashMap::new();
+
+        if self.team_home_base_rule {
+            for id in &player_ids {
+                if let Some(team) = self.players.get(id).and_then(|player| player.team()) {
+                    team_members.entry(team).or_default().push(*id);
+                }
+            }
+            for (&team, members) in team_members.iter_mut() {
+                members.sort_unstable();
+                let leader = members
+                    .iter()
+                    .copied()
+                    .find(|member_id| {
+                        self.players
+                            .get(member_id)
+                            .map(|player| {
+                                matches!(player.status(), PlayerStatus::Active)
+                                    && !player.surrendered()
+                            })
+                            .unwrap_or(false)
+                    })
+                    .or_else(|| members.first().copied());
+                if let Some(leader_id) = leader {
+                    team_leaders.insert(team, leader_id);
+                }
+            }
+        }
+
+        let mut team_updates: HashMap<i32, HashMap<DefinitionId, u32>> = HashMap::new();
+
+        for id in player_ids {
+            if let Some(player) = self.players.get_mut(&id) {
+                let should_produce = match player.team() {
+                    Some(team) if self.team_home_base_rule => {
+                        team_leaders.get(&team).copied() == Some(id)
+                    }
+                    _ => true,
+                };
+                if should_produce && player.advance_home_base_production() {
+                    if let Some(team) = player.team() {
+                        if self.team_home_base_rule {
+                            team_updates.insert(team, player.home_base_material().clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if self.team_home_base_rule && !team_updates.is_empty() {
+            for (team, material) in team_updates {
+                if let Some(members) = team_members.get(&team) {
+                    for member_id in members {
+                        if let Some(member) = self.players.get_mut(member_id) {
+                            member.set_home_base_material(material.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
         self.frame += 1;
         let frame = self.frame;
         self.tick_particles();
         self.environment.advance_frame(&mut self.rng);
+        self.tick_player_systems();
         if self.scenario_script.is_some() {
             let snapshot = self.snapshot();
             let random = self.next_random_i32();
@@ -5460,6 +5609,19 @@ impl Engine {
         self.sync_all_player_cursors();
         self.refresh_elimination_state();
 
+        if self.team_home_base_rule {
+            let mut teams: Vec<i32> = self
+                .players
+                .values()
+                .filter_map(|player| player.team())
+                .collect();
+            teams.sort_unstable();
+            teams.dedup();
+            for team in teams {
+                self.sync_team_home_base_group(team);
+            }
+        }
+
         Ok(())
     }
 
@@ -5712,6 +5874,48 @@ impl Engine {
         let owners: Vec<i32> = self.players.keys().copied().collect();
         for owner in owners {
             self.sync_player_cursor(owner);
+        }
+    }
+
+    fn sync_team_home_base_for(&mut self, id: i32) {
+        if !self.team_home_base_rule {
+            return;
+        }
+        let team = match self.players.get(&id).and_then(|player| player.team()) {
+            Some(team) => team,
+            None => return,
+        };
+        self.sync_team_home_base_group(team);
+    }
+
+    fn sync_team_home_base_group(&mut self, team: i32) {
+        if !self.team_home_base_rule {
+            return;
+        }
+        let mut members: Vec<i32> = self
+            .players
+            .iter()
+            .filter_map(|(&player_id, player)| {
+                if player.team() == Some(team) {
+                    Some(player_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if members.len() <= 1 {
+            return;
+        }
+        members.sort_unstable();
+        let leader_id = members[0];
+        let material = match self.players.get(&leader_id) {
+            Some(leader) => leader.home_base_material().clone(),
+            None => return,
+        };
+        for member_id in members.into_iter().skip(1) {
+            if let Some(member) = self.players.get_mut(&member_id) {
+                member.set_home_base_material(material.clone());
+            }
         }
     }
 
@@ -9003,6 +9207,104 @@ global func Step(state, frame, random)
         }
         "#;
         Definition::from_script("Test", "Test", source).expect("script compiles")
+    }
+
+    #[test]
+    fn home_base_production_shared_across_team_when_rule_enabled() {
+        let mut engine = Engine::new();
+        engine.set_team_home_base_rule(true);
+
+        let mut production = HashMap::new();
+        production.insert("Brick".to_string(), 10);
+
+        let leader = PlayerConfig::new(1, "Leader")
+            .with_team(Some(1))
+            .with_home_base_production(production.clone());
+        let follower = PlayerConfig::new(2, "Follower")
+            .with_team(Some(1))
+            .with_home_base_production(production.clone());
+
+        engine.register_player(leader).expect("leader registered");
+        engine
+            .register_player(follower)
+            .expect("follower registered");
+
+        for _ in 0..60 {
+            engine.tick_player_systems();
+        }
+
+        let leader = engine.player(1).expect("leader present");
+        let follower = engine.player(2).expect("follower present");
+        assert_eq!(leader.home_base_material().get("Brick"), Some(&1));
+        assert_eq!(follower.home_base_material().get("Brick"), Some(&1));
+    }
+
+    #[test]
+    fn home_base_production_respects_rule_toggle() {
+        let mut engine = Engine::new();
+        engine.set_team_home_base_rule(false);
+
+        let mut production = HashMap::new();
+        production.insert("Brick".to_string(), 10);
+
+        let leader = PlayerConfig::new(1, "Leader")
+            .with_team(Some(2))
+            .with_home_base_production(production.clone());
+        let follower = PlayerConfig::new(2, "Follower").with_team(Some(2));
+
+        engine.register_player(leader).expect("leader registered");
+        engine
+            .register_player(follower)
+            .expect("follower registered");
+
+        for _ in 0..60 {
+            engine.tick_player_systems();
+        }
+
+        let leader = engine.player(1).expect("leader present");
+        let follower = engine.player(2).expect("follower present");
+        assert_eq!(leader.home_base_material().get("Brick"), Some(&1));
+        assert!(
+            follower.home_base_material().get("Brick").is_none(),
+            "follower should not receive materials when rule disabled"
+        );
+
+        engine.set_team_home_base_rule(true);
+        engine
+            .set_player_home_base_material(1, leader.home_base_material().clone())
+            .expect("update succeeds");
+
+        let follower_after = engine.player(2).expect("follower present");
+        assert_eq!(follower_after.home_base_material().get("Brick"), Some(&1));
+    }
+
+    #[test]
+    fn enabling_team_rule_synchronizes_existing_members() {
+        let mut engine = Engine::new();
+
+        let mut material = HashMap::new();
+        material.insert("Brick".to_string(), 5);
+
+        let leader = PlayerConfig::new(1, "Leader")
+            .with_team(Some(3))
+            .with_home_base_material(material.clone());
+        let follower = PlayerConfig::new(2, "Follower").with_team(Some(3));
+
+        engine.register_player(leader).expect("leader registered");
+        engine
+            .register_player(follower)
+            .expect("follower registered");
+
+        let follower_before = engine.player(2).expect("follower present");
+        assert!(
+            follower_before.home_base_material().is_empty(),
+            "rule disabled keeps member inventory separate"
+        );
+
+        engine.set_team_home_base_rule(true);
+
+        let follower_after = engine.player(2).expect("follower present");
+        assert_eq!(follower_after.home_base_material().get("Brick"), Some(&5));
     }
 
     #[test]

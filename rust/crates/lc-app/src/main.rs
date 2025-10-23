@@ -4086,11 +4086,9 @@ mod tests {
             name: "Alice".into(),
             status: PlayerStatus::Active,
             wealth: 120,
-            knowledge: Vec::new(),
-            inventory: HashMap::new(),
             cursor: Some(focus),
-            viewports: Vec::new(),
             crew: vec![focus, teammate],
+            ..PlayerState::default()
         });
 
         let overlay = collect_player_overlays(&snapshot, Some(focus));
