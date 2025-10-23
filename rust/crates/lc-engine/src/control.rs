@@ -47,6 +47,23 @@ pub const COM_LEFT: u8 = 1;
 pub const COM_RIGHT: u8 = 2;
 pub const COM_UP: u8 = 3;
 pub const COM_DOWN: u8 = 4;
+pub const COM_THROW: u8 = 5;
+pub const COM_DIG: u8 = 6;
+pub const COM_SPECIAL: u8 = 7;
+pub const COM_SPECIAL2: u8 = 8;
+pub const COM_CURSOR_LEFT: u8 = 12;
+pub const COM_CURSOR_RIGHT: u8 = 13;
+pub const COM_CURSOR_TOGGLE: u8 = 14;
+pub const COM_PLAYER_MENU: u8 = 36;
+pub const COM_MENU_ENTER: u8 = 38;
+pub const COM_MENU_ENTER_ALL: u8 = 39;
+pub const COM_MENU_CLOSE: u8 = 40;
+pub const COM_MENU_SHOW_TEXT: u8 = 42;
+pub const COM_MENU_LEFT: u8 = 52;
+pub const COM_MENU_RIGHT: u8 = 53;
+pub const COM_MENU_UP: u8 = 54;
+pub const COM_MENU_DOWN: u8 = 55;
+pub const COM_MENU_SELECT: u8 = 60;
 pub const COM_CLEAR_PRESSED_COMS: u8 = 61;
 
 pub const COM_RELEASE_FIRST: u8 = COM_LEFT + COM_RELEASE_OFFSET;
@@ -64,7 +81,40 @@ pub enum ControlButton {
 pub enum ControlEvent {
     Press(ControlButton),
     Release(ControlButton),
+    Command {
+        command: ControlCommand,
+        kind: CommandKind,
+    },
     ClearPressed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandKind {
+    Press,
+    Release,
+    Single,
+    Double,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ControlCommand {
+    Throw,
+    Dig,
+    Special,
+    Special2,
+    CursorLeft,
+    CursorRight,
+    CursorToggle,
+    PlayerMenu,
+    MenuEnter,
+    MenuEnterAll,
+    MenuClose,
+    MenuShowText,
+    MenuLeft,
+    MenuRight,
+    MenuUp,
+    MenuDown,
+    MenuSelect,
 }
 
 pub fn interpret_player_control_command(command: i32) -> Option<ControlEvent> {
@@ -75,24 +125,109 @@ pub fn interpret_player_control_command(command: i32) -> Option<ControlEvent> {
         return None;
     }
     let mut raw = command as u8;
-    let is_release = raw >= COM_RELEASE_FIRST && raw <= COM_RELEASE_LAST;
-    if is_release {
-        raw = raw.saturating_sub(COM_RELEASE_OFFSET);
-    } else {
-        raw &= !(COM_SINGLE | COM_DOUBLE);
+    if raw >= COM_RELEASE_FIRST && raw <= COM_RELEASE_LAST {
+        let base = raw.saturating_sub(COM_RELEASE_OFFSET);
+        return interpret_base_command(base, CommandKind::Release);
     }
-    let button = match raw {
-        COM_LEFT => ControlButton::Left,
-        COM_RIGHT => ControlButton::Right,
-        COM_UP => ControlButton::Up,
-        COM_DOWN => ControlButton::Down,
-        _ => return None,
-    };
-    Some(if is_release {
-        ControlEvent::Release(button)
-    } else {
-        ControlEvent::Press(button)
-    })
+    let mut kind = CommandKind::Press;
+    if raw & COM_DOUBLE != 0 {
+        raw &= !COM_DOUBLE;
+        kind = CommandKind::Double;
+    } else if raw & COM_SINGLE != 0 {
+        raw &= !COM_SINGLE;
+        kind = CommandKind::Single;
+    }
+    interpret_base_command(raw, kind)
+}
+
+fn interpret_base_command(base: u8, kind: CommandKind) -> Option<ControlEvent> {
+    match base {
+        COM_LEFT => Some(match kind {
+            CommandKind::Release => ControlEvent::Release(ControlButton::Left),
+            _ => ControlEvent::Press(ControlButton::Left),
+        }),
+        COM_RIGHT => Some(match kind {
+            CommandKind::Release => ControlEvent::Release(ControlButton::Right),
+            _ => ControlEvent::Press(ControlButton::Right),
+        }),
+        COM_UP => Some(match kind {
+            CommandKind::Release => ControlEvent::Release(ControlButton::Up),
+            _ => ControlEvent::Press(ControlButton::Up),
+        }),
+        COM_DOWN => Some(match kind {
+            CommandKind::Release => ControlEvent::Release(ControlButton::Down),
+            _ => ControlEvent::Press(ControlButton::Down),
+        }),
+        COM_THROW => Some(ControlEvent::Command {
+            command: ControlCommand::Throw,
+            kind,
+        }),
+        COM_DIG => Some(ControlEvent::Command {
+            command: ControlCommand::Dig,
+            kind,
+        }),
+        COM_SPECIAL => Some(ControlEvent::Command {
+            command: ControlCommand::Special,
+            kind,
+        }),
+        COM_SPECIAL2 => Some(ControlEvent::Command {
+            command: ControlCommand::Special2,
+            kind,
+        }),
+        COM_CURSOR_LEFT => Some(ControlEvent::Command {
+            command: ControlCommand::CursorLeft,
+            kind,
+        }),
+        COM_CURSOR_RIGHT => Some(ControlEvent::Command {
+            command: ControlCommand::CursorRight,
+            kind,
+        }),
+        COM_CURSOR_TOGGLE => Some(ControlEvent::Command {
+            command: ControlCommand::CursorToggle,
+            kind,
+        }),
+        COM_PLAYER_MENU => Some(ControlEvent::Command {
+            command: ControlCommand::PlayerMenu,
+            kind,
+        }),
+        COM_MENU_ENTER => Some(ControlEvent::Command {
+            command: ControlCommand::MenuEnter,
+            kind,
+        }),
+        COM_MENU_ENTER_ALL => Some(ControlEvent::Command {
+            command: ControlCommand::MenuEnterAll,
+            kind,
+        }),
+        COM_MENU_CLOSE => Some(ControlEvent::Command {
+            command: ControlCommand::MenuClose,
+            kind,
+        }),
+        COM_MENU_SHOW_TEXT => Some(ControlEvent::Command {
+            command: ControlCommand::MenuShowText,
+            kind,
+        }),
+        COM_MENU_LEFT => Some(ControlEvent::Command {
+            command: ControlCommand::MenuLeft,
+            kind,
+        }),
+        COM_MENU_RIGHT => Some(ControlEvent::Command {
+            command: ControlCommand::MenuRight,
+            kind,
+        }),
+        COM_MENU_UP => Some(ControlEvent::Command {
+            command: ControlCommand::MenuUp,
+            kind,
+        }),
+        COM_MENU_DOWN => Some(ControlEvent::Command {
+            command: ControlCommand::MenuDown,
+            kind,
+        }),
+        COM_MENU_SELECT => Some(ControlEvent::Command {
+            command: ControlCommand::MenuSelect,
+            kind,
+        }),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,11 +531,34 @@ mod tests {
     }
 
     #[test]
+    fn interprets_cursor_toggle_command() {
+        let event = interpret_player_control_command(i32::from(COM_CURSOR_TOGGLE))
+            .expect("command event detected");
+        assert_eq!(
+            event,
+            ControlEvent::Command {
+                command: ControlCommand::CursorToggle,
+                kind: CommandKind::Press
+            }
+        );
+
+        let double = interpret_player_control_command(i32::from(COM_CURSOR_TOGGLE | COM_DOUBLE))
+            .expect("double command detected");
+        assert_eq!(
+            double,
+            ControlEvent::Command {
+                command: ControlCommand::CursorToggle,
+                kind: CommandKind::Double
+            }
+        );
+    }
+
+    #[test]
     fn ignores_unhandled_commands() {
         assert!(interpret_player_control_command(999).is_none());
         assert!(interpret_player_control_command(-5).is_none());
 
-        // Menu commands should be ignored.
-        assert!(interpret_player_control_command(38).is_none());
+        // Unknown menu-like command remains ignored.
+        assert!(interpret_player_control_command(41).is_none());
     }
 }

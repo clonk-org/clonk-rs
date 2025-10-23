@@ -1,15 +1,83 @@
 use std::collections::{HashMap, HashSet};
 
 use lc_core::std_config::Config;
-use lc_engine::{ControlButton, ControlEvent};
+use lc_engine::{CommandKind, ControlButton, ControlCommand, ControlEvent};
 use lc_platform::AppPaths;
 use winit::event::{ElementState, VirtualKeyCode};
 
 /// Keyboard control bindings backed by the legacy `Config.Controls` section.
 #[derive(Debug, Clone)]
 pub struct KeyboardBindings {
-    buttons: HashMap<VirtualKeyCode, ControlButton>,
+    bindings: HashMap<VirtualKeyCode, Binding>,
     clear_keys: HashSet<VirtualKeyCode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Binding {
+    kind: BindingKind,
+    emit_release: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingKind {
+    Button(ControlButton),
+    Command(ControlCommand),
+}
+
+impl Binding {
+    const fn button(button: ControlButton) -> Self {
+        Self {
+            kind: BindingKind::Button(button),
+            emit_release: true,
+        }
+    }
+
+    const fn command(command: ControlCommand, emit_release: bool) -> Self {
+        Self {
+            kind: BindingKind::Command(command),
+            emit_release,
+        }
+    }
+
+    fn press_event(self) -> ControlEvent {
+        match self.kind {
+            BindingKind::Button(button) => ControlEvent::Press(button),
+            BindingKind::Command(command) => ControlEvent::Command {
+                command,
+                kind: CommandKind::Press,
+            },
+        }
+    }
+
+    fn release_event(self) -> Option<ControlEvent> {
+        if !self.emit_release {
+            return None;
+        }
+        match self.kind {
+            BindingKind::Button(button) => Some(ControlEvent::Release(button)),
+            BindingKind::Command(command) => Some(ControlEvent::Command {
+                command,
+                kind: CommandKind::Release,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ControlBindingSpec {
+    index: usize,
+    default_key: VirtualKeyCode,
+    binding: Binding,
+}
+
+impl ControlBindingSpec {
+    const fn new(index: usize, default_key: VirtualKeyCode, binding: Binding) -> Self {
+        Self {
+            index,
+            default_key,
+            binding,
+        }
+    }
 }
 
 impl KeyboardBindings {
@@ -44,9 +112,9 @@ impl KeyboardBindings {
         let mut bindings = KeyboardBindings::default_bindings();
         let mut any_override = false;
 
-        for &(index, button) in CONTROL_BINDINGS {
-            if let Some(key) = read_keyboard_entry(config, 0, index) {
-                bindings.set_button_binding(button, key);
+        for spec in CONTROL_BINDING_SPECS {
+            if let Some(key) = read_keyboard_entry(config, 0, spec.index) {
+                bindings.set_binding(spec.binding, key);
                 any_override = true;
             }
         }
@@ -59,53 +127,111 @@ impl KeyboardBindings {
     }
 
     fn default_bindings() -> Self {
-        let mut buttons = HashMap::new();
-        insert_default(&mut buttons, VirtualKeyCode::S, ControlButton::Up);
-        insert_default(&mut buttons, VirtualKeyCode::Z, ControlButton::Left);
-        insert_default(&mut buttons, VirtualKeyCode::X, ControlButton::Down);
-        insert_default(&mut buttons, VirtualKeyCode::C, ControlButton::Right);
-        insert_default(&mut buttons, VirtualKeyCode::Up, ControlButton::Up);
-        insert_default(&mut buttons, VirtualKeyCode::Left, ControlButton::Left);
-        insert_default(&mut buttons, VirtualKeyCode::Down, ControlButton::Down);
-        insert_default(&mut buttons, VirtualKeyCode::Right, ControlButton::Right);
+        let mut bindings = HashMap::new();
+        for spec in CONTROL_BINDING_SPECS {
+            bindings.insert(spec.default_key, spec.binding);
+        }
+
+        insert_default_binding(
+            &mut bindings,
+            VirtualKeyCode::Up,
+            Binding::button(ControlButton::Up),
+        );
+        insert_default_binding(
+            &mut bindings,
+            VirtualKeyCode::Left,
+            Binding::button(ControlButton::Left),
+        );
+        insert_default_binding(
+            &mut bindings,
+            VirtualKeyCode::Down,
+            Binding::button(ControlButton::Down),
+        );
+        insert_default_binding(
+            &mut bindings,
+            VirtualKeyCode::Right,
+            Binding::button(ControlButton::Right),
+        );
 
         let clear_keys = HashSet::from([VirtualKeyCode::Space]);
 
         Self {
-            buttons,
+            bindings,
             clear_keys,
         }
     }
 
-    fn set_button_binding(&mut self, button: ControlButton, key: VirtualKeyCode) {
-        self.buttons.remove(&key);
-        self.buttons
-            .retain(|_, mapped_button| *mapped_button != button);
-        self.buttons.insert(key, button);
+    fn set_binding(&mut self, binding: Binding, key: VirtualKeyCode) {
+        self.bindings.remove(&key);
+        self.bindings.retain(|_, mapped| *mapped != binding);
+        self.bindings.insert(key, binding);
     }
 
     /// Returns the engine control event to emit for a given keyboard input.
     pub fn event_for_key(&self, key: VirtualKeyCode, state: ElementState) -> Option<ControlEvent> {
         match state {
             ElementState::Pressed => {
-                if let Some(button) = self.buttons.get(&key) {
-                    Some(ControlEvent::Press(*button))
+                if let Some(binding) = self.bindings.get(&key) {
+                    Some(binding.press_event())
                 } else if self.clear_keys.contains(&key) {
                     Some(ControlEvent::ClearPressed)
                 } else {
                     None
                 }
             }
-            ElementState::Released => self.buttons.get(&key).copied().map(ControlEvent::Release),
+            ElementState::Released => self
+                .bindings
+                .get(&key)
+                .and_then(|binding| binding.release_event()),
         }
     }
 }
 
-const CONTROL_BINDINGS: &[(usize, ControlButton)] = &[
-    (4, ControlButton::Up),
-    (6, ControlButton::Left),
-    (7, ControlButton::Down),
-    (8, ControlButton::Right),
+const CONTROL_BINDING_SPECS: &[ControlBindingSpec] = &[
+    ControlBindingSpec::new(
+        0,
+        VirtualKeyCode::Q,
+        Binding::command(ControlCommand::CursorLeft, true),
+    ),
+    ControlBindingSpec::new(
+        1,
+        VirtualKeyCode::W,
+        Binding::command(ControlCommand::CursorToggle, true),
+    ),
+    ControlBindingSpec::new(
+        2,
+        VirtualKeyCode::E,
+        Binding::command(ControlCommand::CursorRight, true),
+    ),
+    ControlBindingSpec::new(
+        3,
+        VirtualKeyCode::A,
+        Binding::command(ControlCommand::Throw, true),
+    ),
+    ControlBindingSpec::new(4, VirtualKeyCode::S, Binding::button(ControlButton::Up)),
+    ControlBindingSpec::new(
+        5,
+        VirtualKeyCode::D,
+        Binding::command(ControlCommand::Dig, true),
+    ),
+    ControlBindingSpec::new(6, VirtualKeyCode::Z, Binding::button(ControlButton::Left)),
+    ControlBindingSpec::new(7, VirtualKeyCode::X, Binding::button(ControlButton::Down)),
+    ControlBindingSpec::new(8, VirtualKeyCode::C, Binding::button(ControlButton::Right)),
+    ControlBindingSpec::new(
+        9,
+        VirtualKeyCode::R,
+        Binding::command(ControlCommand::PlayerMenu, false),
+    ),
+    ControlBindingSpec::new(
+        10,
+        VirtualKeyCode::V,
+        Binding::command(ControlCommand::Special, true),
+    ),
+    ControlBindingSpec::new(
+        11,
+        VirtualKeyCode::F,
+        Binding::command(ControlCommand::Special2, true),
+    ),
 ];
 
 fn read_keyboard_entry(
@@ -267,12 +393,12 @@ fn map_sdl_arrow_scancode(value: i32) -> Option<VirtualKeyCode> {
     }
 }
 
-fn insert_default(
-    buttons: &mut HashMap<VirtualKeyCode, ControlButton>,
+fn insert_default_binding(
+    bindings: &mut HashMap<VirtualKeyCode, Binding>,
     key: VirtualKeyCode,
-    button: ControlButton,
+    binding: Binding,
 ) {
-    buttons.insert(key, button);
+    bindings.insert(key, binding);
 }
 
 #[cfg(test)]
@@ -293,6 +419,42 @@ mod tests {
         assert_eq!(
             bindings.event_for_key(VirtualKeyCode::Space, ElementState::Pressed),
             Some(ControlEvent::ClearPressed)
+        );
+    }
+
+    #[test]
+    fn cursor_toggle_binding_produces_command() {
+        let bindings = KeyboardBindings::default_bindings();
+        assert_eq!(
+            bindings.event_for_key(VirtualKeyCode::W, ElementState::Pressed),
+            Some(ControlEvent::Command {
+                command: ControlCommand::CursorToggle,
+                kind: CommandKind::Press
+            })
+        );
+        assert_eq!(
+            bindings.event_for_key(VirtualKeyCode::W, ElementState::Released),
+            Some(ControlEvent::Command {
+                command: ControlCommand::CursorToggle,
+                kind: CommandKind::Release
+            })
+        );
+    }
+
+    #[test]
+    fn player_menu_binding_has_no_release() {
+        let bindings = KeyboardBindings::default_bindings();
+        assert_eq!(
+            bindings.event_for_key(VirtualKeyCode::R, ElementState::Pressed),
+            Some(ControlEvent::Command {
+                command: ControlCommand::PlayerMenu,
+                kind: CommandKind::Press
+            })
+        );
+        assert_eq!(
+            bindings.event_for_key(VirtualKeyCode::R, ElementState::Released),
+            None,
+            "player menu key should not emit release event"
         );
     }
 

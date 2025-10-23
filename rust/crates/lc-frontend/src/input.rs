@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 
 use lc_engine::{
-    CommandDirection, ControlEvent, CrewCommandTarget, Engine, EngineError, ObjectUpdate,
-    PlayerInputState,
+    CommandDirection, CommandKind, ControlCommand, ControlEvent, CrewCommandTarget, Engine,
+    EngineError, ObjectUpdate, PlayerInputState,
 };
 
 /// Centralises player input handling for the Rust frontend. Each player receives their own state
 /// machine that mirrors the legacy `Coms2ComDir` mapping, and the latest direction is forwarded to
 /// the currently selected crew members.
 pub struct InputDispatcher {
-    players: HashMap<i32, PlayerInputState>,
+    players: HashMap<i32, PlayerInputContext>,
 }
 
 impl InputDispatcher {
@@ -27,8 +27,20 @@ impl InputDispatcher {
         owner: i32,
         event: ControlEvent,
     ) -> Result<Option<CommandDirection>, EngineError> {
-        let state = self.players.entry(owner).or_default();
-        let maybe_direction = state.handle_event(event);
+        let frame = engine.frame();
+        let context = self
+            .players
+            .entry(owner)
+            .or_insert_with(PlayerInputContext::new);
+        let maybe_direction = match event {
+            ControlEvent::Press(button) => context.directional.press(button),
+            ControlEvent::Release(button) => context.directional.release(button),
+            ControlEvent::ClearPressed => context.directional.clear(),
+            ControlEvent::Command { command, kind } => {
+                handle_command(engine, owner, context, command, kind, frame)?;
+                None
+            }
+        };
         if let Some(direction) = maybe_direction {
             apply_direction(engine, owner, direction)?;
         }
@@ -39,9 +51,66 @@ impl InputDispatcher {
     pub fn command_direction(&self, owner: i32) -> CommandDirection {
         self.players
             .get(&owner)
-            .map(PlayerInputState::direction)
+            .map(|context| context.directional.direction())
             .unwrap_or(CommandDirection::Stop)
     }
+}
+
+const DOUBLE_CLICK_WINDOW: u64 = 10;
+
+struct PlayerInputContext {
+    directional: PlayerInputState,
+    selection: SelectionControlState,
+}
+
+impl PlayerInputContext {
+    fn new() -> Self {
+        Self {
+            directional: PlayerInputState::new(),
+            selection: SelectionControlState::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SelectionControlState {
+    last_toggle_frame: Option<u64>,
+}
+
+impl SelectionControlState {
+    fn new() -> Self {
+        Self {
+            last_toggle_frame: None,
+        }
+    }
+
+    fn register_toggle(&mut self, frame: u64) -> ToggleOutcome {
+        match self.last_toggle_frame {
+            Some(previous) if frame.saturating_sub(previous) <= DOUBLE_CLICK_WINDOW => {
+                self.last_toggle_frame = None;
+                ToggleOutcome::Double
+            }
+            _ => {
+                self.last_toggle_frame = Some(frame);
+                ToggleOutcome::Single
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.last_toggle_frame = None;
+    }
+}
+
+enum ToggleOutcome {
+    Single,
+    Double,
+}
+
+#[derive(Clone, Copy)]
+enum CycleDirection {
+    Next,
+    Previous,
 }
 
 fn apply_direction(
@@ -72,10 +141,122 @@ fn ensure_cursor(engine: &mut Engine, owner: i32) -> Result<(), EngineError> {
     Ok(())
 }
 
+fn cycle_cursor(
+    engine: &mut Engine,
+    owner: i32,
+    direction: CycleDirection,
+) -> Result<(), EngineError> {
+    let mut crew = engine.crew_members(owner);
+    if crew.is_empty() {
+        return Ok(());
+    }
+    crew.sort_by_key(|id| id.as_u64());
+    let target = match engine.crew_cursor(owner) {
+        Some(current) => {
+            if let Some((index, _)) = crew.iter().enumerate().find(|(_, id)| **id == current) {
+                match direction {
+                    CycleDirection::Next => crew.get(index + 1).copied().unwrap_or_else(|| crew[0]),
+                    CycleDirection::Previous => {
+                        if index == 0 {
+                            *crew.last().unwrap()
+                        } else {
+                            crew[index - 1]
+                        }
+                    }
+                }
+            } else {
+                crew[0]
+            }
+        }
+        None => crew[0],
+    };
+    engine.set_crew_cursor(owner, Some(target))?;
+    Ok(())
+}
+
+fn toggle_cursor_selection(engine: &mut Engine, owner: i32) -> Result<(), EngineError> {
+    ensure_cursor(engine, owner)?;
+    let Some(cursor) = engine.crew_cursor(owner) else {
+        return Ok(());
+    };
+    let selected = engine.selected_crew(owner);
+    if selected.contains(&cursor) {
+        engine.deselect_crew(owner, [cursor]);
+    } else {
+        engine.select_crew(owner, [cursor])?;
+    }
+    Ok(())
+}
+
+fn select_all_crew(engine: &mut Engine, owner: i32) -> Result<(), EngineError> {
+    let mut crew = engine.crew_members(owner);
+    if crew.is_empty() {
+        return Ok(());
+    }
+    crew.sort_by_key(|id| id.as_u64());
+    let cursor = crew[0];
+    engine.select_crew(owner, crew.clone())?;
+    engine.set_crew_cursor(owner, Some(cursor))?;
+    Ok(())
+}
+
+fn handle_command(
+    engine: &mut Engine,
+    owner: i32,
+    context: &mut PlayerInputContext,
+    command: ControlCommand,
+    kind: CommandKind,
+    frame: u64,
+) -> Result<(), EngineError> {
+    match command {
+        ControlCommand::CursorLeft => {
+            if matches!(
+                kind,
+                CommandKind::Press | CommandKind::Single | CommandKind::Double
+            ) {
+                cycle_cursor(engine, owner, CycleDirection::Previous)?;
+            }
+        }
+        ControlCommand::CursorRight => {
+            if matches!(
+                kind,
+                CommandKind::Press | CommandKind::Single | CommandKind::Double
+            ) {
+                cycle_cursor(engine, owner, CycleDirection::Next)?;
+            }
+        }
+        ControlCommand::CursorToggle => match kind {
+            CommandKind::Release => {}
+            CommandKind::Double => {
+                select_all_crew(engine, owner)?;
+                context.selection.clear();
+            }
+            CommandKind::Press | CommandKind::Single => {
+                match context.selection.register_toggle(frame) {
+                    ToggleOutcome::Single => toggle_cursor_selection(engine, owner)?,
+                    ToggleOutcome::Double => {
+                        select_all_crew(engine, owner)?;
+                        context.selection.clear();
+                    }
+                }
+            }
+        },
+        ControlCommand::PlayerMenu => {
+            if matches!(kind, CommandKind::Press) {
+                // Menu system not yet implemented in Rust frontend.
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lc_engine::{ControlButton, Definition, MovementProfile, SpawnConfig, Vector2, OWNER_NONE};
+    use lc_engine::{
+        ControlButton, Definition, MovementProfile, ObjectId, SpawnConfig, Vector2, OWNER_NONE,
+    };
 
     const WALKER_SCRIPT: &str = r#"
 global func Initialize(state, random) { return nil; }
@@ -91,6 +272,15 @@ global func Step(state, frame, random) { return nil; }
             .register_definition(definition)
             .expect("register definition");
         engine
+    }
+
+    fn spawn_crew_member(engine: &mut Engine, owner: i32, x: i32) -> Result<ObjectId, EngineError> {
+        engine.spawn_object(
+            SpawnConfig::new("Walker")
+                .with_owner(owner)
+                .with_crew_member(true)
+                .with_position(Vector2::new(x, 0)),
+        )
     }
 
     #[test]
@@ -146,6 +336,84 @@ global func Step(state, frame, random) { return nil; }
             .find(|object| object.owner == 1)
             .expect("crew present");
         assert_eq!(crew.command_direction, CommandDirection::Stop);
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_right_cycles_to_next_crew() -> Result<(), EngineError> {
+        let mut engine = setup_engine();
+        let first = spawn_crew_member(&mut engine, 1, 0)?;
+        let second = spawn_crew_member(&mut engine, 1, 10)?;
+        let mut dispatcher = InputDispatcher::new();
+
+        dispatcher.handle_event(
+            &mut engine,
+            1,
+            ControlEvent::Command {
+                command: ControlCommand::CursorRight,
+                kind: CommandKind::Press,
+            },
+        )?;
+
+        assert_eq!(engine.crew_cursor(1), Some(second));
+
+        dispatcher.handle_event(
+            &mut engine,
+            1,
+            ControlEvent::Command {
+                command: ControlCommand::CursorRight,
+                kind: CommandKind::Press,
+            },
+        )?;
+
+        assert_eq!(
+            engine.crew_cursor(1),
+            Some(first),
+            "cursor wraps to first crew"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_toggle_double_selects_all() -> Result<(), EngineError> {
+        let mut engine = setup_engine();
+        let first = spawn_crew_member(&mut engine, 1, 0)?;
+        let second = spawn_crew_member(&mut engine, 1, 10)?;
+        let mut dispatcher = InputDispatcher::new();
+
+        dispatcher.handle_event(
+            &mut engine,
+            1,
+            ControlEvent::Command {
+                command: ControlCommand::CursorToggle,
+                kind: CommandKind::Press,
+            },
+        )?;
+
+        let selected_once = engine.selected_crew(1);
+        assert_eq!(
+            selected_once,
+            vec![first],
+            "first toggle selects cursor crew"
+        );
+
+        dispatcher.handle_event(
+            &mut engine,
+            1,
+            ControlEvent::Command {
+                command: ControlCommand::CursorToggle,
+                kind: CommandKind::Press,
+            },
+        )?;
+
+        let mut selected_all = engine.selected_crew(1);
+        selected_all.sort_by_key(|id| id.as_u64());
+        assert_eq!(
+            selected_all,
+            vec![first, second],
+            "double toggle selects all crew"
+        );
+        assert_eq!(engine.crew_cursor(1), Some(first));
         Ok(())
     }
 

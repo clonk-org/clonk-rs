@@ -5,8 +5,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use lc_engine::{
-    interpret_player_control_command, ControlButton, ControlEvent, PlayerControlData,
-    COM_CLEAR_PRESSED_COMS, COM_DOWN, COM_LEFT, COM_RELEASE_OFFSET, COM_RIGHT, COM_UP,
+    interpret_player_control_command, CommandKind, ControlButton, ControlCommand, ControlEvent,
+    PlayerControlData, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT,
+    COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN,
+    COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT,
+    COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_PLAYER_MENU, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE,
+    COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
 };
 use lc_network::{
     connect_client, decode_control_packet, encode_control_packet, start_host, ClientConfig,
@@ -432,6 +436,7 @@ fn control_command_for_event(event: ControlEvent) -> Option<i32> {
         ControlEvent::Release(button) => {
             Some(i32::from(command_for_button(button) + COM_RELEASE_OFFSET))
         }
+        ControlEvent::Command { command, kind } => command_code_for(command, kind).map(i32::from),
         ControlEvent::ClearPressed => Some(i32::from(COM_CLEAR_PRESSED_COMS)),
     }
 }
@@ -443,6 +448,41 @@ fn command_for_button(button: ControlButton) -> u8 {
         ControlButton::Up => COM_UP,
         ControlButton::Down => COM_DOWN,
     }
+}
+
+fn command_code_for(command: ControlCommand, kind: CommandKind) -> Option<u8> {
+    let base = match command {
+        ControlCommand::Throw => COM_THROW,
+        ControlCommand::Dig => COM_DIG,
+        ControlCommand::Special => COM_SPECIAL,
+        ControlCommand::Special2 => COM_SPECIAL2,
+        ControlCommand::CursorLeft => COM_CURSOR_LEFT,
+        ControlCommand::CursorRight => COM_CURSOR_RIGHT,
+        ControlCommand::CursorToggle => COM_CURSOR_TOGGLE,
+        ControlCommand::PlayerMenu => COM_PLAYER_MENU,
+        ControlCommand::MenuEnter => COM_MENU_ENTER,
+        ControlCommand::MenuEnterAll => COM_MENU_ENTER_ALL,
+        ControlCommand::MenuClose => COM_MENU_CLOSE,
+        ControlCommand::MenuShowText => COM_MENU_SHOW_TEXT,
+        ControlCommand::MenuLeft => COM_MENU_LEFT,
+        ControlCommand::MenuRight => COM_MENU_RIGHT,
+        ControlCommand::MenuUp => COM_MENU_UP,
+        ControlCommand::MenuDown => COM_MENU_DOWN,
+        ControlCommand::MenuSelect => COM_MENU_SELECT,
+    };
+
+    let value = match kind {
+        CommandKind::Press => base,
+        CommandKind::Single => base | COM_SINGLE,
+        CommandKind::Double => base | COM_DOUBLE,
+        CommandKind::Release => {
+            if matches!(command, ControlCommand::PlayerMenu) {
+                return None;
+            }
+            base + COM_RELEASE_OFFSET
+        }
+    };
+    Some(value)
 }
 
 fn current_millis() -> u64 {

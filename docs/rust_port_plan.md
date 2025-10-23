@@ -39,7 +39,8 @@
   - ✅ Engine exposes full player registry (join/leave, wealth, knowledge, inventory, cursor, per-player viewports)
   - ✅ Simulation snapshots + HUD now surface player names/wealth/cursor for overlays
   - ✅ Team rule + home-base production synced across players (C4RULE_TeamHomebase parity)
-  - ⏳ Remaining: advanced control UX (menu bindings, cursor toggles)
+  - ✅ Advanced control UX landed: Rust input dispatcher now drives cursor cycling, selection toggles, and serializes player menu commands like the C++ runtime
+  - ⏳ Remaining: hook PlayerMenu command into the yet-to-be-ported in-game menu system
 
 - ✅ **Viewport System** (C4Viewport.cpp 🔗 Camera parity improved)
   - ✅ Multiple simultaneous viewports per player with dynamic split-screen layout
@@ -172,6 +173,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Startup menu renders Graphics.c4g backgrounds and buttons with Endeavour.ttf fonts (no longer flat placeholders)
 - ✅ Material definitions load from install archives (lc-resources::material + Engine MaterialSet)
 - ✅ Player registry + HUD overlay surface real player metadata (names, wealth, cursor) sourced from engine snapshots
+- ✅ Cursor cycling and selection toggles now respect classic COM_Single/COM_Double timing with network serialization parity
 - ✅ Team home-base rule produces and syncs materials between teammates (C4Player::ExecHomeBaseProduction)
 - ⚠️ Experimental: `.c4s` scenarios boot with real definitions and scripts when install data is available (lands in running state, but full player UX still limited)
 
@@ -181,7 +183,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ❌ No real object definitions (only synthetic Walker)
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ❌ No real audio (synthetic tones for missing sounds)
-- ❌ No in-game menus or viewport controls (player UX still largely missing)
+- ❌ No in-game menus (PlayerMenu command currently no-ops pending C4Menu port)
 - ❌ Materials still unused at runtime (no terrain types, no mining, no reactions despite definitions loading)
 - ❌ No multiplayer lobby (transport exists but no game coordination)
 
