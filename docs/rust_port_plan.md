@@ -41,6 +41,7 @@
   - ✅ Team rule + home-base production synced across players (C4RULE_TeamHomebase parity)
   - ✅ Advanced control UX landed: Rust input dispatcher now drives cursor cycling, selection toggles, and serializes player menu commands like the C++ runtime
   - ✅ PlayerMenu command now toggles the Rust pause menu; inventory/build menus and scripted context submenus handled by the Rust UI
+  - ✅ Script host functions (`GetPlayerCount`, `GetPlayerByIndex`, `GetPlayerName`, `GetPlayerTeam`, `GetPlayerID`, `GetPlayerType`) now expose player metadata to scenario scripts via the Rust engine
 
 - ✅ **Viewport System** (C4Viewport.cpp 🔗 Camera parity improved)
   - ✅ Multiple simultaneous viewports per player with dynamic split-screen layout

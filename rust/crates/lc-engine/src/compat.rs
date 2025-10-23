@@ -16,9 +16,9 @@ use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, AudioCommand,
     CommandDirection, DefinitionId, Direction, EnvironmentSettings, FloatVector2, Landscape,
     ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig,
-    ParticleLayer, ParticleScope, PathFinder, PhysicsSettings, QueuedCommand, SpawnConfig,
-    TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2, CNAT_BOTTOM, CNAT_CENTER,
-    CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
+    ParticleLayer, ParticleScope, PathFinder, PhysicsSettings, PlayerState, QueuedCommand,
+    SpawnConfig, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2, CNAT_BOTTOM,
+    CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -249,6 +249,8 @@ pub(crate) struct HostWorldContext {
     landscape: Option<Rc<Landscape>>,
     definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
     transfer_zones: Rc<Vec<TransferZoneState>>,
+    players: Rc<HashMap<i32, PlayerState>>,
+    player_order: Rc<Vec<i32>>,
     next_object_id: u64,
 }
 
@@ -260,6 +262,8 @@ impl Default for HostWorldContext {
             landscape: None,
             definitions: Rc::new(HashMap::new()),
             transfer_zones: Rc::new(Vec::new()),
+            players: Rc::new(HashMap::new()),
+            player_order: Rc::new(Vec::new()),
             next_object_id: 1,
         }
     }
@@ -271,7 +275,20 @@ impl HostWorldContext {
     where
         I: IntoIterator<Item = HostWorldObject>,
     {
-        Self::with_landscape(objects, None, HashMap::new(), Vec::new(), 1)
+        Self::with_landscape(objects, None, HashMap::new(), Vec::new(), HashMap::new(), 1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_objects_with_players<I, P>(objects: I, players: P) -> Self
+    where
+        I: IntoIterator<Item = HostWorldObject>,
+        P: IntoIterator<Item = PlayerState>,
+    {
+        let map = players
+            .into_iter()
+            .map(|state| (state.id, state))
+            .collect::<HashMap<_, _>>();
+        Self::with_landscape(objects, None, HashMap::new(), Vec::new(), map, 1)
     }
 
     pub(crate) fn with_landscape<I>(
@@ -279,6 +296,7 @@ impl HostWorldContext {
         landscape: Option<Landscape>,
         definitions: HashMap<DefinitionId, DefinitionMetadata>,
         transfer_zones: Vec<TransferZoneState>,
+        players: HashMap<i32, PlayerState>,
         next_object_id: u64,
     ) -> Self
     where
@@ -298,6 +316,12 @@ impl HostWorldContext {
             landscape: landscape.map(Rc::new),
             definitions: Rc::new(definitions),
             transfer_zones: Rc::new(transfer_zones),
+            player_order: Rc::new({
+                let mut ids: Vec<_> = players.keys().copied().collect();
+                ids.sort_unstable();
+                ids
+            }),
+            players: Rc::new(players),
             next_object_id,
         }
     }
@@ -328,6 +352,14 @@ impl HostWorldContext {
 
     pub(crate) fn definition_metadata(&self, id: &str) -> Option<&DefinitionMetadata> {
         self.definitions.get(id)
+    }
+
+    pub(crate) fn player_ids(&self) -> &[i32] {
+        self.player_order.as_ref()
+    }
+
+    pub(crate) fn player(&self, id: i32) -> Option<&PlayerState> {
+        self.players.get(&id)
     }
 }
 
@@ -415,6 +447,173 @@ fn value_to_i32(value: &Value, function: &str, parameter: &str) -> Result<i32, R
             other.type_name()
         ))),
     }
+}
+
+fn parse_player_type_filter(value: Option<&Value>, function: &str) -> Result<i32, RuntimeError> {
+    match value {
+        Some(Value::Int(filter)) => Ok(*filter),
+        Some(Value::Nil) | None => Ok(0),
+        Some(other) => Err(RuntimeError::new(format!(
+            "{}: expected int or nil for type filter, got {}",
+            function,
+            other.type_name()
+        ))),
+    }
+}
+
+fn player_type_matches(_player: &PlayerState, filter: i32) -> bool {
+    match filter {
+        0 => true,
+        1 => true,
+        _ => false,
+    }
+}
+
+fn get_player_count(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetPlayerCount expects at most 1 argument: type",
+        ));
+    }
+    let filter = parse_player_type_filter(args.get(0), "GetPlayerCount")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Int(0));
+        };
+        let count = context
+            .player_ids()
+            .iter()
+            .filter(|id| {
+                context
+                    .player_state(**id)
+                    .map(|player| player_type_matches(player, filter))
+                    .unwrap_or(false)
+            })
+            .count();
+        Ok(Value::Int(truncate_to_i32(count as u64)))
+    })
+}
+
+fn get_player_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "GetPlayerByIndex expects at least 1 argument: index",
+        ));
+    }
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "GetPlayerByIndex expects at most 2 arguments: index and type",
+        ));
+    }
+    let index = value_to_i32(&args[0], "GetPlayerByIndex", "index")?;
+    let filter = parse_player_type_filter(args.get(1), "GetPlayerByIndex")?;
+    if index < 0 {
+        return Ok(Value::Int(OWNER_NONE));
+    }
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Int(OWNER_NONE));
+        };
+        let matching: Vec<i32> = context
+            .player_ids()
+            .iter()
+            .filter_map(|id| {
+                context
+                    .player_state(*id)
+                    .filter(|player| player_type_matches(player, filter))
+                    .map(|_| *id)
+            })
+            .collect();
+        let idx = index as usize;
+        if idx >= matching.len() {
+            Ok(Value::Int(OWNER_NONE))
+        } else {
+            Ok(Value::Int(matching[idx]))
+        }
+    })
+}
+
+fn get_player_name(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new(
+            "GetPlayerName expects exactly 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetPlayerName", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        Ok(Value::String(player.name.clone()))
+    })
+}
+
+fn get_player_id(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new(
+            "GetPlayerID expects exactly 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetPlayerID", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        if context.player_state(player_id).is_some() {
+            Ok(Value::Int(player_id))
+        } else {
+            Ok(Value::Nil)
+        }
+    })
+}
+
+fn get_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new(
+            "GetPlayerTeam expects exactly 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetPlayerTeam", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        match player.team {
+            Some(team) => Ok(Value::Int(team)),
+            None => Ok(Value::Nil),
+        }
+    })
+}
+
+fn get_player_type(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new(
+            "GetPlayerType expects exactly 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetPlayerType", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        if context.player_state(player_id).is_some() {
+            Ok(Value::Int(1))
+        } else {
+            Ok(Value::Nil)
+        }
+    })
 }
 
 fn value_to_bool(value: &Value, function: &str, parameter: &str) -> Result<bool, RuntimeError> {
@@ -848,6 +1047,12 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetEffect", get_effect);
     script.register_host_function("GetEffectCount", get_effect_count);
     script.register_host_function("EffectVar", effect_var);
+    script.register_host_function("GetPlayerCount", get_player_count);
+    script.register_host_function("GetPlayerByIndex", get_player_by_index);
+    script.register_host_function("GetPlayerName", get_player_name);
+    script.register_host_function("GetPlayerTeam", get_player_team);
+    script.register_host_function("GetPlayerType", get_player_type);
+    script.register_host_function("GetPlayerID", get_player_id);
     script.register_host_function("SetAction", set_action);
     script.register_host_function("SetBridgeActionData", set_bridge_action_data);
     script.register_host_function("SetActionData", set_action_data);
@@ -6157,6 +6362,14 @@ impl EffectHostContext {
         }
     }
 
+    fn player_ids(&self) -> &[i32] {
+        self.world.player_ids()
+    }
+
+    fn player_state(&self, id: i32) -> Option<&PlayerState> {
+        self.world.player(id)
+    }
+
     fn object_context_mut(&mut self) -> Option<&mut ObjectScopeContext> {
         self.object.as_mut()
     }
@@ -6854,6 +7067,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             1,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
@@ -6871,6 +7085,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             1,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
@@ -6889,6 +7104,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             8,
         );
         let object_context = HostObjectContext::new(
@@ -6925,6 +7141,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             1,
         );
         let (solid, _) = with_effect_context(None, &[], world.clone(), 1, || {
@@ -6949,6 +7166,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             1,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
@@ -6967,6 +7185,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             1,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
@@ -6974,6 +7193,72 @@ mod tests {
         });
         let value = result.expect("GBackLiquid succeeds");
         assert_eq!(value, Value::Bool(true));
+    }
+
+    #[test]
+    fn get_player_count_counts_registered_players() {
+        let mut alice = PlayerState::default();
+        alice.id = 1;
+        alice.name = "Alice".into();
+        let mut bob = PlayerState::default();
+        bob.id = 2;
+        bob.name = "Bob".into();
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![alice, bob],
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_player_count(&[]));
+        assert_eq!(result.expect("GetPlayerCount succeeds"), Value::Int(2));
+    }
+
+    #[test]
+    fn get_player_by_index_returns_player_number() {
+        let mut alice = PlayerState::default();
+        alice.id = 1;
+        alice.name = "Alice".into();
+        let mut carol = PlayerState::default();
+        carol.id = 3;
+        carol.name = "Carol".into();
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![alice, carol],
+        );
+        let args = [Value::Int(1)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_player_by_index(&args));
+        assert_eq!(result.expect("GetPlayerByIndex succeeds"), Value::Int(3));
+    }
+
+    #[test]
+    fn get_player_name_returns_registered_name() {
+        let mut player = PlayerState::default();
+        player.id = 5;
+        player.name = "Delta".into();
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let args = [Value::Int(5)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_player_name(&args));
+        assert_eq!(
+            result.expect("GetPlayerName succeeds"),
+            Value::String("Delta".into())
+        );
+    }
+
+    #[test]
+    fn get_player_team_returns_nil_when_unset() {
+        let player = PlayerState {
+            id: 7,
+            name: "Eta".into(),
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let args = [Value::Int(7)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_player_team(&args));
+        assert_eq!(result.expect("GetPlayerTeam succeeds"), Value::Nil);
     }
 
     #[test]
@@ -7000,6 +7285,7 @@ mod tests {
             None,
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             1,
         );
         let (result, outcome) =
@@ -8219,6 +8505,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             1,
         );
         let (result, _) = with_effect_context(
@@ -8263,6 +8550,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             1,
         );
         let (result, _) = with_effect_context(
@@ -8860,6 +9148,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             1,
         );
         let args = [

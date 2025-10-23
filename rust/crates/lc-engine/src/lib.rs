@@ -5027,6 +5027,11 @@ impl Engine {
             })
             .collect();
         let transfer_zones = self.transfer_zones.states();
+        let players: HashMap<i32, PlayerState> = self
+            .players
+            .values()
+            .map(|player| (player.id(), player.to_state()))
+            .collect();
         HostWorldContext::with_landscape(
             self.objects.iter().map(|object| {
                 let definition = self.definitions.get(&object.definition_id);
@@ -5073,6 +5078,7 @@ impl Engine {
             landscape,
             definition_metadata,
             transfer_zones,
+            players,
             self.next_object_id,
         )
     }
@@ -9581,6 +9587,11 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
             )
         })
         .collect();
+    let players: HashMap<i32, PlayerState> = snapshot
+        .players
+        .iter()
+        .map(|state| (state.id, state.clone()))
+        .collect();
     HostWorldContext::with_landscape(
         snapshot.objects.iter().map(|object| {
             HostWorldObject::with_category(
@@ -9606,6 +9617,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         snapshot.landscape.clone(),
         definition_metadata,
         snapshot.transfer_zones.clone(),
+        players,
         next_object_id,
     )
 }
