@@ -41,10 +41,10 @@
   - ✅ Team rule + home-base production synced across players (C4RULE_TeamHomebase parity)
   - ⏳ Remaining: advanced control UX (menu bindings, cursor toggles)
 
-- ⚠️ **Viewport System** (C4Viewport.cpp 🔗 Camera parity in progress)
+- ✅ **Viewport System** (C4Viewport.cpp 🔗 Camera parity improved)
   - ✅ Multiple simultaneous viewports per player with dynamic split-screen layout
   - ✅ Split-screen multiplayer rendering fed by engine player viewports
-  - ⏳ Zoom scaling, camera smoothing, and letterboxing for aspect-ratio mismatches
+  - ✅ Zoom scaling, camera smoothing, and automatic letterboxing for aspect mismatches
 
 - ❌ **Menu System** (C4Menu.h 🔗 No in-game menus)
   - Context menus, object interaction menus
@@ -142,7 +142,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 
 ### Phase 2: Essential Gameplay Systems
 1. Port C4Player for real player management — ✅ Teams/home-base parity, ⚠️ control UX still missing
-2. ⚠️ Port C4Viewport for proper camera, zoom, split-screen — multi-viewport layout and engine view feeds landed; zoom scaling & camera polish pending
+2. ✅ Port C4Viewport for proper camera, zoom, split-screen — smooth camera easing, zoom scaling, and letterboxing now mirror the C++ behaviour
 3. Port C4Menu for object interaction menus
 4. Port C4GameMessage for mission text and objectives
 

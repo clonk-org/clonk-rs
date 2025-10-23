@@ -10,7 +10,7 @@ use lc_graphics::{
     SurfaceSnapshot as GraphicsSurfaceSnapshot, TextFont,
 };
 use lc_gui::{DrawCommand, Gui, GuiResult, Rect as GuiRect, Size as GuiSize, WidgetId};
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::convert::TryFrom;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -23,6 +23,70 @@ pub use lc_gui::{
 pub use startup_menu::{ScenarioSummary, StartupMenu, StartupMenuAction};
 
 const OVERLAY_HEIGHT: f32 = 120.0;
+const MIN_VIEWPORT_ZOOM: f32 = 0.125;
+const MAX_VIEWPORT_ZOOM: f32 = 4.0;
+const CAMERA_SMOOTHING_ALPHA: f32 = 0.2;
+const CAMERA_SNAP_THRESHOLD: f32 = 1.0;
+const CAMERA_JUMP_THRESHOLD: f32 = 256.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CameraKey {
+    owner: i32,
+    focus: ObjectId,
+}
+
+#[derive(Debug, Clone)]
+struct CameraState {
+    x: f32,
+    y: f32,
+    zoom: f32,
+    initialized: bool,
+}
+
+impl CameraState {
+    fn new(x: f32, y: f32, zoom: f32) -> Self {
+        Self {
+            x,
+            y,
+            zoom,
+            initialized: false,
+        }
+    }
+
+    fn update(
+        &mut self,
+        target_x: f32,
+        target_y: f32,
+        zoom: f32,
+        min_x: f32,
+        max_x: f32,
+        min_y: f32,
+        max_y: f32,
+    ) -> (f32, f32) {
+        if !self.initialized || (self.zoom - zoom).abs() > 0.01 {
+            self.x = target_x;
+            self.y = target_y;
+            self.initialized = true;
+        } else {
+            self.x = smooth_value(self.x, target_x);
+            self.y = smooth_value(self.y, target_y);
+        }
+
+        self.zoom = zoom;
+        self.x = self.x.clamp(min_x, max_x);
+        self.y = self.y.clamp(min_y, max_y);
+        (self.x, self.y)
+    }
+}
+
+fn smooth_value(current: f32, target: f32) -> f32 {
+    let delta = target - current;
+    if delta.abs() <= CAMERA_SNAP_THRESHOLD || delta.abs() >= CAMERA_JUMP_THRESHOLD {
+        target
+    } else {
+        current + delta * CAMERA_SMOOTHING_ALPHA
+    }
+}
 
 pub struct GraphicsOverlay<'a> {
     pub frame_text: &'a str,
@@ -95,8 +159,10 @@ struct ActiveViewport {
     owner: i32,
     focus: ObjectId,
     rect: SurfaceRect,
-    viewport_x: i32,
-    viewport_y: i32,
+    content_rect: SurfaceRect,
+    viewport_x: f32,
+    viewport_y: f32,
+    zoom: f32,
 }
 
 pub struct GraphicsSystem {
@@ -110,8 +176,9 @@ pub struct GraphicsSystem {
     energy_gauge: WidgetId,
     players_container: WidgetId,
     player_widgets: Vec<PlayerWidgets>,
-    viewport_x: i32,
-    viewport_y: i32,
+    viewport_x: f32,
+    viewport_y: f32,
+    viewport_zoom: f32,
     surface_width: u32,
     surface_height: u32,
     fallback_ground_height: i32,
@@ -119,6 +186,7 @@ pub struct GraphicsSystem {
     world_height: i32,
     object_sprites: Arc<HashMap<String, ImageData>>,
     active_viewports: Vec<ActiveViewport>,
+    camera_states: HashMap<CameraKey, CameraState>,
 }
 
 impl GraphicsSystem {
@@ -158,8 +226,9 @@ impl GraphicsSystem {
             energy_gauge,
             players_container,
             player_widgets: Vec::new(),
-            viewport_x: 0,
-            viewport_y: 0,
+            viewport_x: 0.0,
+            viewport_y: 0.0,
+            viewport_zoom: 1.0,
             surface_width,
             surface_height,
             fallback_ground_height,
@@ -167,6 +236,7 @@ impl GraphicsSystem {
             world_height: fallback_ground_height.max(surface_height as i32).max(0),
             object_sprites,
             active_viewports: Vec::new(),
+            camera_states: HashMap::new(),
         }
     }
 
@@ -259,13 +329,22 @@ impl GraphicsSystem {
         self.active_viewports.clear();
         self.surface.fill(Color::opaque(8, 12, 24)); // base fill before compositing viewports
 
-        self.render_viewports(snapshot, viewports);
+        let mut used_camera_keys = Vec::new();
+        self.render_viewports(snapshot, viewports, &mut used_camera_keys);
+        let used_keys: HashSet<_> = used_camera_keys.into_iter().collect();
+        self.camera_states.retain(|key, _| used_keys.contains(key));
+
         self.draw_gui_overlay();
 
         self.collect_sprite_atlas(snapshot)
     }
 
-    fn render_viewports(&mut self, snapshot: &SimulationSnapshot, viewports: &[ViewportInput<'_>]) {
+    fn render_viewports(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        viewports: &[ViewportInput<'_>],
+        used_camera_keys: &mut Vec<CameraKey>,
+    ) {
         if viewports.is_empty() {
             if let Some(object) = snapshot.objects.first() {
                 let default = ViewportInput::from_focus(object);
@@ -273,6 +352,7 @@ impl GraphicsSystem {
                     snapshot,
                     &default,
                     SurfaceRect::new(0, 0, self.surface_width, self.surface_height),
+                    used_camera_keys,
                 );
             }
             return;
@@ -280,7 +360,7 @@ impl GraphicsSystem {
 
         let layout = self.layout_viewports(viewports.len());
         for (input, rect) in viewports.iter().zip(layout.into_iter()) {
-            self.render_viewport(snapshot, input, rect);
+            self.render_viewport(snapshot, input, rect, used_camera_keys);
         }
     }
 
@@ -289,26 +369,102 @@ impl GraphicsSystem {
         snapshot: &SimulationSnapshot,
         input: &ViewportInput<'_>,
         rect: SurfaceRect,
+        used_camera_keys: &mut Vec<CameraKey>,
     ) {
         if rect.width == 0 || rect.height == 0 {
             return;
         }
 
         let format = self.surface.format();
-        let viewport_surface = Surface::new(rect.width, rect.height, format);
-        let main_surface = std::mem::replace(&mut self.surface, viewport_surface);
+        let mut viewport_surface = Surface::new(rect.width, rect.height, format);
+        viewport_surface.fill(Color::opaque(0, 0, 0));
 
         let saved_surface_width = self.surface_width;
         let saved_surface_height = self.surface_height;
         let saved_viewport_x = self.viewport_x;
         let saved_viewport_y = self.viewport_y;
+        let saved_viewport_zoom = self.viewport_zoom;
         let saved_world_width = self.world_width;
         let saved_world_height = self.world_height;
 
         self.surface_width = rect.width;
         self.surface_height = rect.height;
         self.update_world_dimensions(snapshot.landscape.as_ref());
-        self.update_viewport(input.focus, Some(input.center));
+
+        let zoom = input.zoom.clamp(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM);
+        let world_width = if self.world_width > 0 {
+            self.world_width as f32
+        } else {
+            rect.width.max(1) as f32 / zoom
+        };
+        let world_height = if self.world_height > 0 {
+            self.world_height as f32
+        } else {
+            rect.height.max(1) as f32 / zoom
+        };
+
+        let mut visible_world_width = (rect.width as f32 / zoom).max(1.0);
+        let mut visible_world_height = (rect.height as f32 / zoom).max(1.0);
+
+        if visible_world_width > world_width && world_width > 0.0 {
+            visible_world_width = world_width;
+        }
+        if visible_world_height > world_height && world_height > 0.0 {
+            visible_world_height = world_height;
+        }
+
+        let content_width = (visible_world_width * zoom)
+            .round()
+            .clamp(1.0, rect.width as f32) as u32;
+        let content_height = (visible_world_height * zoom)
+            .round()
+            .clamp(1.0, rect.height as f32) as u32;
+
+        let offset_x = ((rect.width as i32 - content_width as i32) / 2).max(0);
+        let offset_y = ((rect.height as i32 - content_height as i32) / 2).max(0);
+
+        let target = input.center;
+        let target_x = target.x as f32;
+        let target_y = target.y as f32;
+
+        let desired_origin_x = target_x - visible_world_width / 2.0;
+        let desired_origin_y = target_y - visible_world_height / 2.0;
+
+        let max_origin_x = (world_width - visible_world_width).max(0.0);
+        let max_origin_y = (world_height - visible_world_height).max(0.0);
+
+        let clamped_origin_x = desired_origin_x.clamp(0.0, max_origin_x);
+        let clamped_origin_y = desired_origin_y.clamp(0.0, max_origin_y);
+
+        let key = CameraKey {
+            owner: input.owner,
+            focus: input.focus.id,
+        };
+
+        let state = self
+            .camera_states
+            .entry(key)
+            .or_insert_with(|| CameraState::new(clamped_origin_x, clamped_origin_y, zoom));
+        let (origin_x, origin_y) = state.update(
+            clamped_origin_x,
+            clamped_origin_y,
+            zoom,
+            0.0,
+            max_origin_x,
+            0.0,
+            max_origin_y,
+        );
+        used_camera_keys.push(key);
+
+        self.viewport_x = origin_x;
+        self.viewport_y = origin_y;
+        self.viewport_zoom = zoom;
+
+        self.surface_width = content_width;
+        self.surface_height = content_height;
+
+        let content_surface = Surface::new(content_width.max(1), content_height.max(1), format);
+        let main_surface = std::mem::replace(&mut self.surface, content_surface);
 
         let environment = &snapshot.environment;
         let lighting = Self::lighting_factor(environment.settings.time_of_day);
@@ -332,25 +488,32 @@ impl GraphicsSystem {
         );
         self.draw_objects(&snapshot.objects, lighting);
 
-        let viewport_x = self.viewport_x;
-        let viewport_y = self.viewport_y;
+        let content_surface = std::mem::replace(&mut self.surface, main_surface);
 
-        let rendered_surface = std::mem::replace(&mut self.surface, main_surface);
         self.surface_width = saved_surface_width;
         self.surface_height = saved_surface_height;
         self.viewport_x = saved_viewport_x;
         self.viewport_y = saved_viewport_y;
+        self.viewport_zoom = saved_viewport_zoom;
         self.world_width = saved_world_width;
         self.world_height = saved_world_height;
 
-        blit_surface(&mut self.surface, &rendered_surface, rect.x, rect.y);
+        blit_surface(&mut viewport_surface, &content_surface, offset_x, offset_y);
+        blit_surface(&mut self.surface, &viewport_surface, rect.x, rect.y);
 
         self.active_viewports.push(ActiveViewport {
             owner: input.owner,
             focus: input.focus.id,
             rect,
-            viewport_x,
-            viewport_y,
+            content_rect: SurfaceRect::new(
+                rect.x + offset_x,
+                rect.y + offset_y,
+                content_width,
+                content_height,
+            ),
+            viewport_x: origin_x,
+            viewport_y: origin_y,
+            zoom,
         });
     }
 
@@ -418,30 +581,20 @@ impl GraphicsSystem {
     }
 
     pub fn ground_height_at(&self, landscape: Option<&Landscape>, x: i32) -> i32 {
-        self.surface_height_at(landscape, x)
+        let clamped_x = if self.world_width > 0 {
+            x.clamp(0, self.world_width.saturating_sub(1))
+        } else {
+            x
+        };
+        self.surface_height_at(landscape, clamped_x)
             .unwrap_or(self.fallback_ground_height)
-    }
-
-    fn update_viewport(&mut self, focus: &ObjectSnapshot, center: Option<Vector2>) {
-        let target = center.unwrap_or_else(|| focus.position);
-        let half_width = (self.surface_width / 2) as i32;
-        let half_height = (self.surface_height / 2) as i32;
-
-        let max_offset_x = (self.world_width - self.surface_width as i32).max(0);
-        let max_offset_y = (self.world_height - self.surface_height as i32).max(0);
-
-        let desired_x = (target.x - half_width).clamp(0, max_offset_x);
-        let desired_y = (target.y - half_height).clamp(0, max_offset_y);
-
-        self.viewport_x = desired_x;
-        self.viewport_y = desired_y;
     }
 
     fn update_world_dimensions(&mut self, landscape: Option<&Landscape>) {
         if let Some(landscape) = landscape {
             let width = landscape.width() as i32;
             if width > 0 {
-                self.world_width = width.max(self.surface_width as i32);
+                self.world_width = width;
             }
 
             let mut max_surface_height = landscape
@@ -453,7 +606,20 @@ impl GraphicsSystem {
             if max_surface_height < self.fallback_ground_height {
                 max_surface_height = self.fallback_ground_height;
             }
-            self.world_height = max_surface_height.max(self.surface_height as i32);
+            if max_surface_height <= 0 {
+                max_surface_height = self.surface_height as i32;
+            }
+            self.world_height = max_surface_height.max(1);
+        } else {
+            if self.world_width <= 0 {
+                self.world_width = self.surface_width as i32;
+            }
+            if self.world_height <= 0 {
+                self.world_height = self
+                    .fallback_ground_height
+                    .max(self.surface_height as i32)
+                    .max(1);
+            }
         }
     }
 
@@ -507,19 +673,24 @@ impl GraphicsSystem {
             Self::ground_color_for_temperature(ambient_temperature),
             lighting,
         );
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let surface_height = self.surface_height as i32;
+        let max_world_x = self.world_width.saturating_sub(1).max(0);
         for screen_x in 0..self.surface_width {
-            let world_x = self.viewport_x + screen_x as i32;
-            let ground_world = self.ground_height_at(landscape, world_x);
-            let mut ground_screen = ground_world - self.viewport_y;
+            let pixel_center = screen_x as f32 + 0.5;
+            let world_x = self.viewport_x + pixel_center / zoom;
+            let world_x_index = world_x.floor() as i32;
+            let world_x_index = world_x_index.clamp(0, max_world_x);
+            let ground_world = self.ground_height_at(landscape, world_x_index);
+            let mut ground_screen = ((ground_world as f32 - self.viewport_y) * zoom).round() as i32;
             if ground_screen < 0 {
                 ground_screen = 0;
             }
-            if ground_screen >= self.surface_height as i32 {
+            if ground_screen >= surface_height {
                 continue;
             }
-            let ground_screen = ground_screen as u32;
-            for y in ground_screen..self.surface_height {
-                let _ = self.surface.set_pixel(screen_x, y, ground_color);
+            for y in ground_screen..surface_height {
+                let _ = self.surface.set_pixel(screen_x, y as u32, ground_color);
             }
         }
     }
@@ -542,6 +713,7 @@ impl GraphicsSystem {
             lighting,
         );
 
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let surface_width = self.surface_width as i32;
         let surface_height = self.surface_height as i32;
 
@@ -550,14 +722,14 @@ impl GraphicsSystem {
                 continue;
             }
 
-            let screen_x = world_x as i32 - self.viewport_x;
+            let screen_x = ((world_x as f32 - self.viewport_x) * zoom).round() as i32;
             if screen_x < 0 || screen_x >= surface_width {
                 continue;
             }
 
             for segment in column.segments() {
-                let mut start = segment.top - self.viewport_y;
-                let mut end = segment.bottom - self.viewport_y;
+                let mut start = ((segment.top as f32 - self.viewport_y) * zoom).round() as i32;
+                let mut end = ((segment.bottom as f32 - self.viewport_y) * zoom).round() as i32;
                 if start > end {
                     std::mem::swap(&mut start, &mut end);
                 }
@@ -587,62 +759,69 @@ impl GraphicsSystem {
     }
 
     fn paint_object(&mut self, object: &ObjectSnapshot, lighting: f32) {
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let content_width = self.surface_width as f32;
+        let content_height = self.surface_height as f32;
         let color = object_color(object).modulate(lighting);
         if object.vertices.len() >= 3 {
             let mut points = Vec::with_capacity(object.vertices.len());
-            let mut min_x = i32::MAX;
-            let mut max_x = i32::MIN;
-            let mut min_y = i32::MAX;
-            let mut max_y = i32::MIN;
+            let mut min_x = f32::MAX;
+            let mut max_x = f32::MIN;
+            let mut min_y = f32::MAX;
+            let mut max_y = f32::MIN;
             for vertex in &object.vertices {
-                let x = object.position.x + vertex.x - self.viewport_x;
-                let y = object.position.y + vertex.y - self.viewport_y;
-                points.push((x, y));
+                let world_x = (object.position.x + vertex.x) as f32;
+                let world_y = (object.position.y + vertex.y) as f32;
+                let x = (world_x - self.viewport_x) * zoom;
+                let y = (world_y - self.viewport_y) * zoom;
+                points.push((x.round() as i32, y.round() as i32));
                 min_x = min_x.min(x);
                 max_x = max_x.max(x);
                 min_y = min_y.min(y);
                 max_y = max_y.max(y);
             }
 
-            if max_x >= 0
-                && min_x < self.surface_width as i32
-                && max_y >= 0
-                && min_y < self.surface_height as i32
+            if max_x >= -zoom
+                && min_x <= content_width + zoom
+                && max_y >= -zoom
+                && min_y <= content_height + zoom
                 && fill_polygon(&mut self.surface, &points, color)
             {
                 return;
             }
         }
 
-        let screen_x = object.position.x - self.viewport_x;
-        let screen_y = object.position.y - self.viewport_y;
-        if screen_x < -10
-            || screen_y < -10
-            || screen_x > self.surface_width as i32 + 10
-            || screen_y > self.surface_height as i32 + 10
+        let screen_x = (object.position.x as f32 - self.viewport_x) * zoom;
+        let screen_y = (object.position.y as f32 - self.viewport_y) * zoom;
+        if screen_x < -10.0
+            || screen_y < -10.0
+            || screen_x > content_width + 10.0
+            || screen_y > content_height + 10.0
         {
             return;
         }
 
         if let Some(sprite) = self.object_sprites.get(&object.definition_id) {
+            let sprite_width = (sprite.width() as f32 * zoom).max(1.0);
+            let sprite_height = (sprite.height() as f32 * zoom).max(1.0);
             let rect = GuiRect::from_origin_size(
                 GuiPoint::new(
-                    (screen_x - (sprite.width() as i32) / 2) as f32,
-                    (screen_y - (sprite.height() as i32) / 2) as f32,
+                    screen_x - sprite_width / 2.0,
+                    screen_y - sprite_height / 2.0,
                 ),
-                GuiSize::new(sprite.width() as f32, sprite.height() as f32),
+                GuiSize::new(sprite_width, sprite_height),
             );
             draw_image(&mut self.surface, &rect, sprite);
             return;
         }
 
-        let size = 6i32;
+        let size = (6.0 * zoom).max(3.0);
         let rect = GuiRect::from_origin_size(
             GuiPoint::new(
-                (screen_x - size / 2).max(0) as f32,
-                (screen_y - size / 2).max(0) as f32,
+                (screen_x - size / 2.0).max(0.0),
+                (screen_y - size / 2.0).max(0.0),
             ),
-            GuiSize::new(size as f32, size as f32),
+            GuiSize::new(size, size),
         );
         fill_rect(&mut self.surface, &rect, color);
     }
@@ -736,8 +915,16 @@ impl GraphicsSystem {
     pub fn viewport(&self) -> (i32, i32) {
         self.active_viewports
             .first()
-            .map(|viewport| (viewport.viewport_x, viewport.viewport_y))
-            .unwrap_or((self.viewport_x, self.viewport_y))
+            .map(|viewport| {
+                (
+                    viewport.viewport_x.round() as i32,
+                    viewport.viewport_y.round() as i32,
+                )
+            })
+            .unwrap_or((
+                self.viewport_x.round() as i32,
+                self.viewport_y.round() as i32,
+            ))
     }
 
     fn surface_height_at(&self, landscape: Option<&Landscape>, x: i32) -> Option<i32> {
@@ -860,37 +1047,51 @@ impl GraphicsSystem {
             return None;
         }
 
+        let base_x = viewport.content_rect.x as f32;
+        let base_y = viewport.content_rect.y as f32;
+        let zoom = viewport.zoom.max(MIN_VIEWPORT_ZOOM);
+
         if object.vertices.is_empty() {
-            let screen_x = object.position.x - viewport.viewport_x + viewport.rect.x;
-            let screen_y = object.position.y - viewport.viewport_y + viewport.rect.y;
-            let size = 6;
-            let half = size / 2;
-            let rect = SurfaceRect::new(screen_x - half, screen_y - half, size as u32, size as u32);
+            let screen_x = (object.position.x as f32 - viewport.viewport_x) * zoom + base_x;
+            let screen_y = (object.position.y as f32 - viewport.viewport_y) * zoom + base_y;
+            let size = (6.0 * zoom).max(3.0);
+            let half = size / 2.0;
+            let rect = SurfaceRect::new(
+                (screen_x - half).floor() as i32,
+                (screen_y - half).floor() as i32,
+                size.ceil() as u32,
+                size.ceil() as u32,
+            );
             return rect.intersection(viewport.rect);
         }
 
-        let mut min_x = i32::MAX;
-        let mut max_x = i32::MIN;
-        let mut min_y = i32::MAX;
-        let mut max_y = i32::MIN;
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
         for vertex in &object.vertices {
-            let x = object.position.x + vertex.x - viewport.viewport_x + viewport.rect.x;
-            let y = object.position.y + vertex.y - viewport.viewport_y + viewport.rect.y;
+            let world_x = (object.position.x + vertex.x) as f32;
+            let world_y = (object.position.y + vertex.y) as f32;
+            let x = (world_x - viewport.viewport_x) * zoom + base_x;
+            let y = (world_y - viewport.viewport_y) * zoom + base_y;
             min_x = min_x.min(x);
             max_x = max_x.max(x);
             min_y = min_y.min(y);
             max_y = max_y.max(y);
         }
 
+        if !(min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite()) {
+            return None;
+        }
         if min_x > max_x || min_y > max_y {
             return None;
         }
 
-        let padding = 2i64;
-        let left = (min_x as i64 - padding).clamp(i32::MIN as i64, i32::MAX as i64);
-        let top = (min_y as i64 - padding).clamp(i32::MIN as i64, i32::MAX as i64);
-        let right = (max_x as i64 + padding).clamp(i32::MIN as i64, i32::MAX as i64);
-        let bottom = (max_y as i64 + padding).clamp(i32::MIN as i64, i32::MAX as i64);
+        let padding = (2.0 * zoom).max(1.0);
+        let left = (min_x - padding).floor() as i32;
+        let top = (min_y - padding).floor() as i32;
+        let right = (max_x + padding).ceil() as i32;
+        let bottom = (max_y + padding).ceil() as i32;
 
         if right < left || bottom < top {
             return None;
@@ -898,7 +1099,7 @@ impl GraphicsSystem {
 
         let width = (right - left + 1).max(1) as u32;
         let height = (bottom - top + 1).max(1) as u32;
-        SurfaceRect::new(left as i32, top as i32, width, height).intersection(viewport.rect)
+        SurfaceRect::new(left, top, width, height).intersection(viewport.rect)
     }
 
     fn sky_color_for_temperature(temperature: i32) -> Color {
@@ -1576,6 +1777,32 @@ mod tests {
 
         assert_eq!(night_pixel, expected_night);
         assert_ne!(day_pixel, night_pixel);
+    }
+
+    #[test]
+    fn narrow_world_produces_letterbox_content_rect() {
+        let mut snapshot = make_snapshot();
+        snapshot.landscape = Some(Landscape::flat(40, 40));
+        snapshot.objects[0].position = Vector2::new(20, 20);
+
+        let focus = &snapshot.objects[0];
+        let mut graphics =
+            GraphicsSystem::new(120, 80, 40, "Letterbox", test_font(), empty_sprites());
+        let viewports = vec![ViewportInput::new(0, Vector2::new(20, 20), 1.0, focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let viewport = graphics
+            .active_viewports
+            .first()
+            .expect("expected active viewport");
+        assert!(viewport.content_rect.width < viewport.rect.width);
+        assert_eq!(viewport.content_rect.width, 40);
+
+        let left_bar = viewport.content_rect.x - viewport.rect.x;
+        let right_bar = (viewport.rect.x + viewport.rect.width as i32)
+            - (viewport.content_rect.x + viewport.content_rect.width as i32);
+        assert!(left_bar > 0);
+        assert!(right_bar > 0);
     }
 
     #[test]
