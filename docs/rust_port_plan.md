@@ -80,7 +80,7 @@
 
 - ⚠️  **Definition System** (partial - C4Def.cpp)
   - ✅ Sandbox fallback now loads install definitions (Clonk et al.) instead of the synthetic Walker
-  - ⚠️ Definition metadata beyond id/name/category still minimal; DefCore fields like value/mass/pictures unused
+  - ✅ DefCore now surfaces value/mass data (and picture rect metadata) to the engine; inventory UI shows per-item stats
   - ⚠️ Missing definition graphics pipeline and sound wiring; ActMap is parsed but not visualised
 
 - ⚠️  **Graphics Resources** (C4GraphicsResource.cpp 🔗 Minimal)
@@ -177,7 +177,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Cursor cycling and selection toggles now respect classic COM_Single/COM_Double timing with network serialization parity
 - ✅ Team home-base rule produces and syncs materials between teammates (C4Player::ExecHomeBaseProduction)
 - ⚠️ In-game pause menu implemented (resume, quick save/load, abort) while gameplay continues; object/build menus still pending
-- ⚠️ Player inventory menu mirrors crew contents with navigation/selection feedback and MenuEnterAll drop actions; scripted command execution still missing
+- ⚠️ Player inventory menu mirrors crew contents with navigation/selection feedback, shows value/mass stats, and MenuEnterAll drop actions; scripted command execution still missing
 - ⚠️ Experimental: `.c4s` scenarios boot with real definitions and scripts when install data is available (lands in running state, but full player UX still limited)
 - ✅ HUD renders global and object-attached messages using script `CustomMessage` calls with legacy timeouts
 

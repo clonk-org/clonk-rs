@@ -72,6 +72,8 @@ pub(crate) struct DefinitionMetadata {
     pub category: i32,
     pub ocf_base: u32,
     pub crew_member: bool,
+    pub value: i32,
+    pub mass: i32,
 }
 
 impl HostWorldObject {
@@ -4811,6 +4813,8 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                     .unwrap_or(DEFAULT_CATEGORY),
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
+                value: 0,
+                mass: 0,
             });
         let definition_category = metadata.category;
 

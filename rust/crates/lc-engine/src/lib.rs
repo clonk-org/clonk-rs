@@ -59,7 +59,8 @@ use std::ops::AddAssign;
 use std::path::Path;
 
 use lc_resources::{
-    ActionDefinition as ResourceActionDefinition, ResourceDefinition as ResourceDefinitionData,
+    ActionDefinition as ResourceActionDefinition, PictureRect as ResourcePictureRect,
+    ResourceDefinition as ResourceDefinitionData,
 };
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, ScriptError, Value};
 use rand::{Rng, SeedableRng};
@@ -2448,6 +2449,25 @@ impl EngineState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefinitionPicture {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl From<ResourcePictureRect> for DefinitionPicture {
+    fn from(rect: ResourcePictureRect) -> Self {
+        Self {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        }
+    }
+}
+
 pub struct Definition {
     id: DefinitionId,
     name: String,
@@ -2459,6 +2479,9 @@ pub struct Definition {
     movement: MovementProfile,
     category: i32,
     ocf_base: u32,
+    value: i32,
+    mass: i32,
+    picture: Option<DefinitionPicture>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2510,6 +2533,9 @@ impl Definition {
             movement: MovementProfile::default(),
             category: DEFAULT_CATEGORY,
             ocf_base: OCF_NORMAL,
+            value: 0,
+            mass: 0,
+            picture: None,
         })
     }
 
@@ -2547,6 +2573,9 @@ impl Definition {
 
         definition.set_crew_member(resource.core.crew_member);
         definition.set_category(resource.core.category);
+        definition.set_value(resource.core.value);
+        definition.set_mass(resource.core.mass);
+        definition.set_picture(resource.core.picture.map(DefinitionPicture::from));
         Ok(definition)
     }
 
@@ -2645,6 +2674,30 @@ impl Definition {
             state.status,
             state.container.is_some(),
         )
+    }
+
+    pub fn value(&self) -> i32 {
+        self.value
+    }
+
+    pub fn set_value(&mut self, value: i32) {
+        self.value = value.max(0);
+    }
+
+    pub fn mass(&self) -> i32 {
+        self.mass
+    }
+
+    pub fn set_mass(&mut self, mass: i32) {
+        self.mass = mass.max(0);
+    }
+
+    pub fn picture(&self) -> Option<DefinitionPicture> {
+        self.picture
+    }
+
+    pub fn set_picture(&mut self, picture: Option<DefinitionPicture>) {
+        self.picture = picture;
     }
 
     fn call_initialize(
@@ -4062,6 +4115,8 @@ impl Engine {
                         category: definition.category(),
                         ocf_base: definition.ocf_base(),
                         crew_member: definition.is_crew(),
+                        value: definition.value(),
+                        mass: definition.mass(),
                     },
                 )
             })
@@ -4451,6 +4506,24 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .map(|definition| definition.name())
+    }
+
+    pub fn definition_value(&self, definition_id: &str) -> Option<i32> {
+        self.definitions
+            .get(definition_id)
+            .map(|definition| definition.value())
+    }
+
+    pub fn definition_mass(&self, definition_id: &str) -> Option<i32> {
+        self.definitions
+            .get(definition_id)
+            .map(|definition| definition.mass())
+    }
+
+    pub fn definition_picture(&self, definition_id: &str) -> Option<DefinitionPicture> {
+        self.definitions
+            .get(definition_id)
+            .and_then(|definition| definition.picture())
     }
 
     pub fn spawn_object(&mut self, config: SpawnConfig) -> Result<ObjectId, EngineError> {
@@ -7750,6 +7823,8 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     category: *category,
                     ocf_base: OCF_NORMAL,
                     crew_member: false,
+                    value: 0,
+                    mass: 0,
                 },
             )
         })

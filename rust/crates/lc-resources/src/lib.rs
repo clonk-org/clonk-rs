@@ -9,7 +9,7 @@ pub mod scenario;
 
 pub use definition::{
     ActionDefinition, ActionMap, DefCore, Definition as ResourceDefinition, DefinitionError,
-    DefinitionScript, DefinitionScriptFile,
+    DefinitionScript, DefinitionScriptFile, PictureRect,
 };
 pub use font::{load_endeavour_font, load_ttf, FontResource, FontResourceError};
 pub use graphics::{GraphicsError, GraphicsImage, GraphicsResource};

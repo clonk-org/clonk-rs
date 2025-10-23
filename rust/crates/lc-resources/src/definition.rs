@@ -41,6 +41,9 @@ pub struct DefCore {
     pub name: Option<String>,
     pub category: i32,
     pub crew_member: bool,
+    pub value: i32,
+    pub mass: i32,
+    pub picture: Option<PictureRect>,
 }
 
 impl DefCore {
@@ -75,6 +78,15 @@ impl DefinitionScript {
 pub struct DefinitionScriptFile {
     pub path: PathBuf,
     pub contents: String,
+}
+
+/// Rectangle metadata parsed from `Picture=` in `DefCore.txt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PictureRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 /// Representation of `ActMap.txt`.
@@ -134,6 +146,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut category: i32 = 0;
     let mut category_set = false;
     let mut crew_member = false;
+    let mut object_value: i32 = 0;
+    let mut object_mass: i32 = 0;
+    let mut picture: Option<PictureRect> = None;
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -173,12 +188,23 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     name = Some(value.to_string());
                 }
             }
+            "value" => {
+                object_value = parse_i32(value).unwrap_or(0);
+            }
+            "mass" => {
+                object_mass = parse_i32(value).unwrap_or(0).max(0);
+            }
             "category" => {
                 category = parse_category(value)?;
                 category_set = true;
             }
             "crewmember" => {
                 crew_member = parse_bool(value);
+            }
+            "picture" => {
+                if let Some(rect) = parse_rect(value) {
+                    picture = Some(rect);
+                }
             }
             _ => {}
         }
@@ -195,6 +221,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         name,
         category,
         crew_member,
+        value: object_value,
+        mass: object_mass,
+        picture,
     })
 }
 
@@ -405,6 +434,23 @@ fn parse_u32(value: &str) -> Option<u32> {
     parse_i64(value).and_then(|num| if num < 0 { None } else { Some(num as u32) })
 }
 
+fn parse_rect(value: &str) -> Option<PictureRect> {
+    let mut parts = value
+        .split(|c: char| c == ',' || c == ';')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty());
+    let x = parse_i32(parts.next()?)?;
+    let y = parse_i32(parts.next()?)?;
+    let width = parse_i32(parts.next()?)?;
+    let height = parse_i32(parts.next()?)?;
+    Some(PictureRect {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
 fn parse_i32(value: &str) -> Option<i32> {
     parse_i64(value).and_then(|num| num.try_into().ok())
 }
@@ -529,5 +575,29 @@ EndCall=OnIdleEnd
         assert_eq!(idle.next_action.as_deref(), Some("Idle"));
         assert_eq!(idle.start_call.as_deref(), Some("OnIdleStart"));
         assert_eq!(idle.end_call.as_deref(), Some("OnIdleEnd"));
+    }
+
+    #[test]
+    fn parse_def_core_value_mass_picture() {
+        let data = br#"
+            [DefCore]
+            id=VALU
+            Name=Valuable
+            Value=75
+            Mass=12
+            Picture=1,2,32,24
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert_eq!(parsed.value, 75);
+        assert_eq!(parsed.mass, 12);
+        assert_eq!(
+            parsed.picture,
+            Some(PictureRect {
+                x: 1,
+                y: 2,
+                width: 32,
+                height: 24
+            })
+        );
     }
 }

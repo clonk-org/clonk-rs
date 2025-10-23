@@ -333,18 +333,38 @@ fn collect_inventory(
         let name = engine
             .definition_name(&child.definition_id)
             .unwrap_or(&child.definition_id);
+        let description = build_definition_summary(engine, &child.definition_id);
         if let Some(index) = lookup.get(&child.definition_id).copied() {
             if let Some(entry) = order.get_mut(index) {
                 entry.push_instance(child.id);
             }
         } else {
             let index = order.len();
-            let entry = ObjectMenuItem::new(name, &child.definition_id, None, child.id);
+            let entry = ObjectMenuItem::new(name, &child.definition_id, description, child.id);
             order.push(entry);
             lookup.insert(child.definition_id.clone(), index);
         }
     }
     order
+}
+
+fn build_definition_summary(engine: &Engine, definition_id: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(value) = engine.definition_value(definition_id) {
+        if value > 0 {
+            parts.push(format!("Value {value}"));
+        }
+    }
+    if let Some(mass) = engine.definition_mass(definition_id) {
+        if mass > 0 {
+            parts.push(format!("Mass {mass}"));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" • "))
+    }
 }
 
 fn fill_rect(surface: &mut Surface, rect: Rect, color: Color) {
@@ -381,7 +401,7 @@ fn draw_border(surface: &mut Surface, rect: Rect, color: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lc_engine::{Engine, ObjectSnapshot, ObjectStatus, Vector2};
+    use lc_engine::{Definition, Engine, MovementProfile, ObjectSnapshot, ObjectStatus, Vector2};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
@@ -500,5 +520,28 @@ mod tests {
             }
             _ => panic!("expected execute action"),
         }
+    }
+
+    #[test]
+    fn inventory_item_uses_definition_metadata() {
+        let mut engine = Engine::new();
+        let mut shovel =
+            Definition::from_script("Shovel", "Shovel", "func Initialize() {}").unwrap();
+        shovel.set_movement_profile(MovementProfile::default());
+        shovel.set_value(75);
+        shovel.set_mass(18);
+        engine
+            .register_definition(shovel)
+            .expect("register shovel definition");
+
+        let crew = make_object(1, "Clonk");
+        let contents = vec![make_object(2, "Shovel")];
+        let snapshot = make_snapshot(crew.clone(), contents);
+        let menu = ObjectMenuState::new(&engine, &snapshot, crew.id).expect("menu should exist");
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(
+            menu.items[0].description.as_deref(),
+            Some("Value 75 • Mass 18")
+        );
     }
 }
