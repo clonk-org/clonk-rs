@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 const MAX_HOME_BASE_MATERIAL: u32 = 25;
+const MAX_SET_WEALTH: i32 = 100_000;
+const MAX_WEALTH_ADJUSTMENT: i32 = 10_000;
+const MAX_SCORE: i32 = 100_000;
+const MIN_SCORE: i32 = -100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +71,18 @@ pub struct PlayerState {
     #[serde(default)]
     pub wealth: i32,
     #[serde(default)]
+    pub points: i32,
+    #[serde(default)]
+    pub value: i32,
+    #[serde(default)]
+    pub initial_value: i32,
+    #[serde(default)]
+    pub value_gain: i32,
+    #[serde(default)]
+    pub objects_owned: u32,
+    #[serde(default)]
+    pub initial_value_set: bool,
+    #[serde(default)]
     pub knowledge: Vec<DefinitionId>,
     #[serde(default)]
     pub inventory: HashMap<DefinitionId, u32>,
@@ -94,6 +110,12 @@ pub struct Player {
     team: Option<i32>,
     surrendered: bool,
     wealth: i32,
+    points: i32,
+    value: i32,
+    initial_value: i32,
+    value_gain: i32,
+    objects_owned: u32,
+    initial_value_set: bool,
     knowledge: HashSet<DefinitionId>,
     inventory: HashMap<DefinitionId, u32>,
     cursor: Option<ObjectId>,
@@ -114,6 +136,12 @@ impl Player {
             team: None,
             surrendered: false,
             wealth: 0,
+            points: 0,
+            value: 0,
+            initial_value: 0,
+            value_gain: 0,
+            objects_owned: 0,
+            initial_value_set: false,
             knowledge: HashSet::new(),
             inventory: HashMap::new(),
             cursor: None,
@@ -134,6 +162,12 @@ impl Player {
             team,
             surrendered,
             wealth,
+            points,
+            value,
+            initial_value,
+            value_gain,
+            objects_owned,
+            initial_value_set,
             knowledge,
             inventory,
             cursor,
@@ -150,6 +184,12 @@ impl Player {
             team,
             surrendered,
             wealth,
+            points,
+            value,
+            initial_value,
+            value_gain,
+            objects_owned,
+            initial_value_set,
             knowledge: knowledge.into_iter().collect(),
             inventory,
             cursor,
@@ -172,6 +212,12 @@ impl Player {
             team,
             surrendered,
             wealth,
+            points,
+            value,
+            initial_value,
+            value_gain,
+            objects_owned,
+            initial_value_set,
             knowledge,
             inventory,
             cursor,
@@ -189,6 +235,12 @@ impl Player {
             team,
             surrendered,
             wealth,
+            points,
+            value,
+            initial_value,
+            value_gain,
+            objects_owned,
+            initial_value_set,
             knowledge: knowledge.into_iter().collect(),
             inventory,
             cursor,
@@ -213,6 +265,12 @@ impl Player {
             team: self.team,
             surrendered: self.surrendered,
             wealth: self.wealth,
+            points: self.points,
+            value: self.value,
+            initial_value: self.initial_value,
+            value_gain: self.value_gain,
+            objects_owned: self.objects_owned,
+            initial_value_set: self.initial_value_set,
             knowledge,
             inventory: self.inventory.clone(),
             cursor: self.cursor,
@@ -274,21 +332,63 @@ impl Player {
     }
 
     pub fn set_wealth(&mut self, wealth: i32) {
-        self.wealth = wealth.max(0);
+        self.wealth = wealth.clamp(0, MAX_SET_WEALTH);
     }
 
     pub fn adjust_wealth(&mut self, delta: i32) -> i32 {
-        self.wealth = if delta >= 0 {
-            self.wealth.saturating_add(delta)
-        } else {
-            let decrease = delta.saturating_abs();
-            if self.wealth >= decrease {
-                self.wealth - decrease
-            } else {
-                0
-            }
-        };
+        let updated = (self.wealth as i64 + i64::from(delta))
+            .clamp(0, i64::from(MAX_WEALTH_ADJUSTMENT)) as i32;
+        self.wealth = updated;
         self.wealth
+    }
+
+    pub fn points(&self) -> i32 {
+        self.points
+    }
+
+    pub fn set_points(&mut self, points: i32) -> i32 {
+        self.points = points.clamp(MIN_SCORE, MAX_SCORE);
+        self.points
+    }
+
+    pub fn adjust_points(&mut self, delta: i32) -> i32 {
+        let updated = (self.points as i64 + i64::from(delta))
+            .clamp(i64::from(MIN_SCORE), i64::from(MAX_SCORE)) as i32;
+        self.points = updated;
+        self.points
+    }
+
+    pub fn value(&self) -> i32 {
+        self.value
+    }
+
+    pub fn value_gain(&self) -> i32 {
+        self.value_gain
+    }
+
+    pub fn initial_value(&self) -> i32 {
+        self.initial_value
+    }
+
+    pub fn objects_owned(&self) -> u32 {
+        self.objects_owned
+    }
+
+    pub fn update_asset_value(&mut self, value: i32, objects_owned: u32) {
+        self.value = value;
+        self.objects_owned = objects_owned;
+        if !self.initial_value_set {
+            self.initial_value = value;
+            self.initial_value_set = true;
+        }
+        let gain = i64::from(self.value) - i64::from(self.initial_value);
+        self.value_gain = gain.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    }
+
+    pub fn reset_initial_value(&mut self) {
+        self.initial_value = self.value;
+        self.initial_value_set = true;
+        self.value_gain = 0;
     }
 
     pub fn knowledge(&self) -> impl Iterator<Item = &DefinitionId> {
@@ -482,6 +582,12 @@ pub struct PlayerConfig {
     team: Option<i32>,
     surrendered: bool,
     wealth: i32,
+    points: i32,
+    value: i32,
+    initial_value: i32,
+    value_gain: i32,
+    objects_owned: u32,
+    initial_value_set: bool,
     knowledge: Vec<DefinitionId>,
     inventory: HashMap<DefinitionId, u32>,
     cursor: Option<ObjectId>,
@@ -501,6 +607,12 @@ impl PlayerConfig {
             team: None,
             surrendered: false,
             wealth: 0,
+            points: 0,
+            value: 0,
+            initial_value: 0,
+            value_gain: 0,
+            objects_owned: 0,
+            initial_value_set: false,
             knowledge: Vec::new(),
             inventory: HashMap::new(),
             cursor: None,
@@ -529,6 +641,24 @@ impl PlayerConfig {
 
     pub fn with_wealth(mut self, wealth: i32) -> Self {
         self.wealth = wealth;
+        self
+    }
+
+    pub fn with_points(mut self, points: i32) -> Self {
+        self.points = points;
+        self
+    }
+
+    pub fn with_initial_value(mut self, value: i32) -> Self {
+        self.initial_value = value;
+        self.value = value;
+        self.value_gain = 0;
+        self.initial_value_set = true;
+        self
+    }
+
+    pub fn with_objects_owned(mut self, objects_owned: u32) -> Self {
+        self.objects_owned = objects_owned;
         self
     }
 

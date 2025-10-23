@@ -5657,6 +5657,50 @@ impl Engine {
                 }
             }
         }
+
+        self.update_player_asset_values();
+    }
+
+    pub(crate) fn update_player_asset_values(&mut self) {
+        if self.players.is_empty() {
+            return;
+        }
+
+        let mut totals: HashMap<i32, (i64, u32)> = self
+            .players
+            .iter()
+            .map(|(&id, player)| {
+                let base = i64::from(player.points()) + i64::from(player.wealth());
+                (id, (base, 0))
+            })
+            .collect();
+
+        for object in &self.objects {
+            if !object.state.status.is_active() {
+                continue;
+            }
+            let owner = object.state.owner;
+            if owner == OWNER_NONE {
+                continue;
+            }
+            let Some(entry) = totals.get_mut(&owner) else {
+                continue;
+            };
+            let value = self
+                .definitions
+                .get(&object.definition_id)
+                .map(|definition| definition.value())
+                .unwrap_or(0);
+            entry.0 = (entry.0 + i64::from(value)).clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+            entry.1 = entry.1.saturating_add(1);
+        }
+
+        for (id, (value, objects)) in totals {
+            if let Some(player) = self.players.get_mut(&id) {
+                let clamped = value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                player.update_asset_value(clamped, objects);
+            }
+        }
     }
 
     fn tick_weather_events(&mut self, frame: u64) {
@@ -14011,6 +14055,30 @@ global func MenuCommand(state, kind, selection)
         assert_eq!(player_state.wealth, 75);
         assert_eq!(player_state.status, PlayerStatus::Active);
         assert_eq!(player_state.crew, vec![crew]);
+        Ok(())
+    }
+
+    #[test]
+    fn player_asset_value_accounts_for_owned_objects() -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        engine.register_player(
+            PlayerConfig::new(1, "Miner")
+                .with_wealth(25)
+                .with_points(10),
+        )?;
+
+        let mut definition = Definition::from_script("Ore", "Ore", PASSIVE_PLAYER_SCRIPT)?;
+        definition.set_value(60);
+        engine.register_definition(definition)?;
+
+        engine.spawn_object(SpawnConfig::new("Ore").with_owner(1))?;
+
+        engine.update_player_asset_values();
+
+        let player = engine.player(1).expect("player present");
+        assert_eq!(player.value(), 95);
+        assert_eq!(player.value_gain(), 0);
+        assert_eq!(player.objects_owned(), 1);
         Ok(())
     }
 

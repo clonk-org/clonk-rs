@@ -616,6 +616,82 @@ fn get_player_type(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn get_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new(
+            "GetWealth expects exactly 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetWealth", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        Ok(Value::Int(player.wealth))
+    })
+}
+
+fn get_score(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new(
+            "GetScore expects exactly 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetScore", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        Ok(Value::Int(player.points))
+    })
+}
+
+fn get_plr_value(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new(
+            "GetPlrValue expects exactly 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetPlrValue", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        Ok(Value::Int(player.value))
+    })
+}
+
+fn get_plr_value_gain(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new(
+            "GetPlrValueGain expects exactly 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetPlrValueGain", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        Ok(Value::Int(player.value_gain))
+    })
+}
+
 fn value_to_bool(value: &Value, function: &str, parameter: &str) -> Result<bool, RuntimeError> {
     match value {
         Value::Bool(flag) => Ok(*flag),
@@ -1053,6 +1129,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerTeam", get_player_team);
     script.register_host_function("GetPlayerType", get_player_type);
     script.register_host_function("GetPlayerID", get_player_id);
+    script.register_host_function("GetWealth", get_wealth);
+    script.register_host_function("GetScore", get_score);
+    script.register_host_function("GetPlrValue", get_plr_value);
+    script.register_host_function("GetPlrValueGain", get_plr_value_gain);
     script.register_host_function("SetAction", set_action);
     script.register_host_function("SetBridgeActionData", set_bridge_action_data);
     script.register_host_function("SetActionData", set_action_data);
@@ -7259,6 +7339,70 @@ mod tests {
         let args = [Value::Int(7)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_player_team(&args));
         assert_eq!(result.expect("GetPlayerTeam succeeds"), Value::Nil);
+    }
+
+    #[test]
+    fn get_wealth_returns_player_wealth() {
+        let player = PlayerState {
+            id: 12,
+            wealth: 87,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let args = [Value::Int(12)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_wealth(&args));
+        assert_eq!(result.expect("GetWealth succeeds"), Value::Int(87));
+    }
+
+    #[test]
+    fn get_score_returns_player_points() {
+        let player = PlayerState {
+            id: 4,
+            points: 135,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let args = [Value::Int(4)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_score(&args));
+        assert_eq!(result.expect("GetScore succeeds"), Value::Int(135));
+    }
+
+    #[test]
+    fn get_plr_value_returns_total_value() {
+        let player = PlayerState {
+            id: 9,
+            value: 320,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let args = [Value::Int(9)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_plr_value(&args));
+        assert_eq!(result.expect("GetPlrValue succeeds"), Value::Int(320));
+    }
+
+    #[test]
+    fn get_plr_value_gain_returns_gain() {
+        let player = PlayerState {
+            id: 9,
+            value_gain: 45,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let args = [Value::Int(9)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_plr_value_gain(&args));
+        assert_eq!(result.expect("GetPlrValueGain succeeds"), Value::Int(45));
     }
 
     #[test]
