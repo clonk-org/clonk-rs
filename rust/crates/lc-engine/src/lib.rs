@@ -1102,6 +1102,38 @@ impl EnvironmentSettings {
         self.sky_color
     }
 
+    pub fn resolved_sky_color(&self, ambient_temperature: i32) -> RgbColor {
+        self.sky_color
+            .unwrap_or_else(|| Self::dynamic_sky_color(self.time_of_day, ambient_temperature))
+    }
+
+    fn dynamic_sky_color(time_of_day: u16, ambient_temperature: i32) -> RgbColor {
+        let normalized_time = f32::from(time_of_day) / f32::from(Self::TIME_CYCLE.max(1));
+        let daylight = (1.0 - (normalized_time * core::f32::consts::TAU).cos()) * 0.5;
+        let daylight = daylight.clamp(0.0, 1.0);
+
+        let temperature_factor = ((ambient_temperature + 50) as f32 / 100.0).clamp(0.0, 1.0);
+
+        let cold_day = [96.0, 140.0, 212.0];
+        let warm_day = [148.0, 196.0, 255.0];
+        let night = [12.0, 20.0, 48.0];
+
+        let mut day_color = [0.0; 3];
+        for (idx, value) in day_color.iter_mut().enumerate() {
+            let cold = cold_day[idx];
+            let warm = warm_day[idx];
+            *value = cold + (warm - cold) * temperature_factor;
+        }
+
+        let mut channel = [0u8; 3];
+        for idx in 0..3 {
+            let value = night[idx] + (day_color[idx] - night[idx]) * daylight;
+            channel[idx] = value.round().clamp(0.0, 255.0) as u8;
+        }
+
+        RgbColor::new(channel[0], channel[1], channel[2])
+    }
+
     pub fn ambient_temperature(&self, frame: u64) -> i32 {
         let base = self.temperature.saturating_add(self.climate);
         if self.temperature_variation == 0 || self.temperature_period == 0 {
@@ -6142,12 +6174,14 @@ impl Engine {
         let mut eliminated_crew_owners: Vec<_> =
             self.eliminated_crew_owners.iter().cloned().collect();
         eliminated_crew_owners.sort_unstable();
+        let ambient_temperature = self.environment.ambient_temperature(self.frame);
+        let sky_color = self.environment.resolved_sky_color(ambient_temperature);
         let environment = EnvironmentFrame {
             settings: self.environment,
             wind_force: self.environment.wind_force(self.frame),
-            ambient_temperature: self.environment.ambient_temperature(self.frame),
+            ambient_temperature,
             precipitation: self.environment.precipitation(),
-            sky_color: self.environment.sky_color(),
+            sky_color: Some(sky_color),
         };
         let mut owners: Vec<_> = self
             .players
@@ -12548,6 +12582,36 @@ global func MenuCommand(state, kind, selection)
 
         let cleared = configured.without_sky_color();
         assert!(cleared.sky_color().is_none());
+    }
+
+    #[test]
+    fn resolved_sky_color_reflects_time_and_temperature() {
+        let midnight = EnvironmentSettings::new(0).with_time_of_day(0);
+        let midnight_color = midnight.resolved_sky_color(midnight.ambient_temperature(0));
+
+        let midday = midnight.with_time_of_day(1200);
+        let midday_color = midday.resolved_sky_color(midday.ambient_temperature(0));
+
+        assert!(
+            midday_color.r > midnight_color.r
+                && midday_color.g > midnight_color.g
+                && midday_color.b > midnight_color.b,
+            "daylight should brighten sky color"
+        );
+
+        let cold = midday.with_temperature(-40);
+        let warm = midday.with_temperature(40);
+        let cold_color = cold.resolved_sky_color(cold.ambient_temperature(0));
+        let warm_color = warm.resolved_sky_color(warm.ambient_temperature(0));
+
+        assert!(
+            warm_color.r >= cold_color.r,
+            "warmer temperatures should not reduce red channel"
+        );
+        assert!(
+            warm_color.b >= cold_color.b,
+            "warmer temperatures should not reduce blue channel"
+        );
     }
 
     #[test]

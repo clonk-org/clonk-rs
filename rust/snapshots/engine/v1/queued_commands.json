@@ -65,10 +65,15 @@
       "wind_force": 0,
       "ambient_temperature": 0,
       "precipitation": 0,
-      "sky_color": null
+      "sky_color": {
+        "r": 12,
+        "g": 20,
+        "b": 48
+      }
     },
     "global_effects": [],
     "particles": [],
+    "players": [],
     "crew_selection": {},
     "crew_roles": {},
     "known_crew_owners": [],
@@ -270,7 +275,58 @@
         {
           "segments": []
         }
-      ]
+      ],
+      "solid_materials": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "default_solid_material": null
     },
     "rng": {
       "seed": [
@@ -312,15 +368,17 @@
     },
     "surfaces": [],
     "hud": {
-      "players": []
+      "players": [],
+      "messages": []
     },
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
-    "transfer_zones": []
+    "transfer_zones": [],
+    "audio": []
   },
   {
     "frame": 2,
@@ -422,10 +480,15 @@
       "wind_force": 0,
       "ambient_temperature": 0,
       "precipitation": 0,
-      "sky_color": null
+      "sky_color": {
+        "r": 12,
+        "g": 20,
+        "b": 48
+      }
     },
     "global_effects": [],
     "particles": [],
+    "players": [],
     "crew_selection": {},
     "crew_roles": {},
     "known_crew_owners": [],
@@ -627,7 +690,58 @@
         {
           "segments": []
         }
-      ]
+      ],
+      "solid_materials": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "default_solid_material": null
     },
     "rng": {
       "seed": [
@@ -669,7 +783,8 @@
     },
     "surfaces": [],
     "hud": {
-      "players": []
+      "players": [],
+      "messages": []
     },
     "controls": [],
     "network_packets": [],
@@ -677,7 +792,8 @@
       "Commander": 1,
       "Helper": 1
     },
-    "transfer_zones": []
+    "transfer_zones": [],
+    "audio": []
   },
   {
     "frame": 3,
@@ -779,10 +895,15 @@
       "wind_force": 0,
       "ambient_temperature": 0,
       "precipitation": 0,
-      "sky_color": null
+      "sky_color": {
+        "r": 12,
+        "g": 20,
+        "b": 48
+      }
     },
     "global_effects": [],
     "particles": [],
+    "players": [],
     "crew_selection": {},
     "crew_roles": {},
     "known_crew_owners": [],
@@ -984,7 +1105,58 @@
         {
           "segments": []
         }
-      ]
+      ],
+      "solid_materials": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "default_solid_material": null
     },
     "rng": {
       "seed": [
@@ -1026,7 +1198,8 @@
     },
     "surfaces": [],
     "hud": {
-      "players": []
+      "players": [],
+      "messages": []
     },
     "controls": [],
     "network_packets": [],
@@ -1034,7 +1207,8 @@
       "Helper": 1,
       "Commander": 1
     },
-    "transfer_zones": []
+    "transfer_zones": [],
+    "audio": []
   },
   {
     "frame": 4,
@@ -1136,10 +1310,15 @@
       "wind_force": 0,
       "ambient_temperature": 0,
       "precipitation": 0,
-      "sky_color": null
+      "sky_color": {
+        "r": 12,
+        "g": 20,
+        "b": 48
+      }
     },
     "global_effects": [],
     "particles": [],
+    "players": [],
     "crew_selection": {},
     "crew_roles": {},
     "known_crew_owners": [],
@@ -1341,7 +1520,58 @@
         {
           "segments": []
         }
-      ]
+      ],
+      "solid_materials": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "default_solid_material": null
     },
     "rng": {
       "seed": [
@@ -1383,15 +1613,17 @@
     },
     "surfaces": [],
     "hud": {
-      "players": []
+      "players": [],
+      "messages": []
     },
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
-    "transfer_zones": []
+    "transfer_zones": [],
+    "audio": []
   },
   {
     "frame": 5,
@@ -1459,10 +1691,15 @@
       "wind_force": 0,
       "ambient_temperature": 0,
       "precipitation": 0,
-      "sky_color": null
+      "sky_color": {
+        "r": 12,
+        "g": 20,
+        "b": 48
+      }
     },
     "global_effects": [],
     "particles": [],
+    "players": [],
     "crew_selection": {},
     "crew_roles": {},
     "known_crew_owners": [],
@@ -1664,7 +1901,58 @@
         {
           "segments": []
         }
-      ]
+      ],
+      "solid_materials": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "default_solid_material": null
     },
     "rng": {
       "seed": [
@@ -1706,15 +1994,17 @@
     },
     "surfaces": [],
     "hud": {
-      "players": []
+      "players": [],
+      "messages": []
     },
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
-    "transfer_zones": []
+    "transfer_zones": [],
+    "audio": []
   },
   {
     "frame": 6,
@@ -1782,10 +2072,15 @@
       "wind_force": 0,
       "ambient_temperature": 0,
       "precipitation": 0,
-      "sky_color": null
+      "sky_color": {
+        "r": 12,
+        "g": 20,
+        "b": 48
+      }
     },
     "global_effects": [],
     "particles": [],
+    "players": [],
     "crew_selection": {},
     "crew_roles": {},
     "known_crew_owners": [],
@@ -1987,7 +2282,58 @@
         {
           "segments": []
         }
-      ]
+      ],
+      "solid_materials": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "default_solid_material": null
     },
     "rng": {
       "seed": [
@@ -2029,14 +2375,16 @@
     },
     "surfaces": [],
     "hud": {
-      "players": []
+      "players": [],
+      "messages": []
     },
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Helper": 1,
-      "Commander": 1
+      "Commander": 1,
+      "Helper": 1
     },
-    "transfer_zones": []
+    "transfer_zones": [],
+    "audio": []
   }
 ]
