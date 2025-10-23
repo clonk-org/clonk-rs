@@ -1,6 +1,6 @@
 use std::mem;
 
-use crate::Vector2;
+use crate::{MaterialId, Vector2};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -29,6 +29,10 @@ pub struct Landscape {
     surface: Vec<i32>,
     #[serde(default)]
     liquids: Vec<LiquidColumn>,
+    #[serde(default)]
+    solid_materials: Vec<Option<MaterialId>>,
+    #[serde(default)]
+    default_solid_material: Option<MaterialId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,25 +53,49 @@ pub enum LandscapeCommand {
 
 impl Landscape {
     pub fn new(width: u32, surface: Vec<i32>) -> Result<Self, LandscapeError> {
+        Self::with_default_material(width, surface, None)
+    }
+
+    pub fn new_with_material(
+        width: u32,
+        surface: Vec<i32>,
+        default_material: Option<MaterialId>,
+    ) -> Result<Self, LandscapeError> {
+        Self::with_default_material(width, surface, default_material)
+    }
+
+    pub fn flat(width: u32, height: i32) -> Self {
+        Self::flat_with_material(width, height, None)
+    }
+
+    pub fn flat_with_material(
+        width: u32,
+        height: i32,
+        default_material: Option<MaterialId>,
+    ) -> Self {
+        Self::with_default_material(width, vec![height; width as usize], default_material)
+            .expect("flat landscape constructs")
+    }
+
+    fn with_default_material(
+        width: u32,
+        surface: Vec<i32>,
+        default_material: Option<MaterialId>,
+    ) -> Result<Self, LandscapeError> {
         if width as usize != surface.len() {
             return Err(LandscapeError::InvalidHeightMap {
                 width,
                 found: surface.len(),
             });
         }
+        let size = width as usize;
         Ok(Self {
             width,
             surface,
-            liquids: vec![LiquidColumn::default(); width as usize],
+            liquids: vec![LiquidColumn::default(); size],
+            solid_materials: vec![default_material; size],
+            default_solid_material: default_material,
         })
-    }
-
-    pub fn flat(width: u32, height: i32) -> Self {
-        Self {
-            width,
-            surface: vec![height; width as usize],
-            liquids: vec![LiquidColumn::default(); width as usize],
-        }
     }
 
     pub fn width(&self) -> u32 {
@@ -102,6 +130,70 @@ impl Landscape {
         if let Some(column) = self.liquids.get_mut(x as usize) {
             column.clear();
         }
+    }
+
+    pub fn set_solid_material(&mut self, column: u32, material: Option<MaterialId>) {
+        self.ensure_material_capacity();
+        if let Some(slot) = self.solid_materials.get_mut(column as usize) {
+            *slot = material;
+        }
+    }
+
+    pub fn fill_solid_material(&mut self, material: Option<MaterialId>) {
+        self.default_solid_material = material;
+        let desired_len = self.surface.len();
+        if self.solid_materials.len() != desired_len {
+            self.solid_materials = vec![material; desired_len];
+        } else {
+            for slot in &mut self.solid_materials {
+                *slot = material;
+            }
+        }
+    }
+
+    pub fn set_default_solid_material(&mut self, material: Option<MaterialId>) {
+        self.default_solid_material = material;
+        self.ensure_material_capacity();
+        if let Some(material) = material {
+            for slot in &mut self.solid_materials {
+                if slot.is_none() {
+                    *slot = Some(material);
+                }
+            }
+        }
+    }
+
+    pub fn default_solid_material(&self) -> Option<MaterialId> {
+        self.default_solid_material
+    }
+
+    pub fn solid_material_at(&self, x: i32) -> Option<MaterialId> {
+        if self.surface.is_empty() {
+            return None;
+        }
+        if x < 0 {
+            return self.default_solid_material;
+        }
+        let index = usize::try_from(x).ok()?;
+        if index >= self.surface.len() {
+            return None;
+        }
+        self.column_material(index)
+    }
+
+    fn ensure_material_capacity(&mut self) {
+        if self.solid_materials.len() != self.surface.len() {
+            self.solid_materials
+                .resize(self.surface.len(), self.default_solid_material);
+        }
+    }
+
+    fn column_material(&self, index: usize) -> Option<MaterialId> {
+        self.solid_materials
+            .get(index)
+            .copied()
+            .flatten()
+            .or(self.default_solid_material)
     }
 
     pub fn lower_range(&mut self, start: i32, end: i32, height: i32) {
@@ -229,16 +321,19 @@ impl Landscape {
                 if new_velocity.y > 0 {
                     new_velocity.y = 0;
                 }
+                let material = self.solid_material_at(position.x);
                 CollisionResolution {
                     position: new_position,
                     velocity: new_velocity,
                     collided: true,
+                    material,
                 }
             }
             _ => CollisionResolution {
                 position,
                 velocity,
                 collided: false,
+                material: None,
             },
         }
     }
@@ -342,6 +437,10 @@ impl<'de> Deserialize<'de> for Landscape {
             surface: Vec<i32>,
             #[serde(default)]
             liquids: Vec<LiquidColumn>,
+            #[serde(default)]
+            solid_materials: Vec<Option<MaterialId>>,
+            #[serde(default)]
+            default_solid_material: Option<MaterialId>,
         }
 
         let mut data = LandscapeData::deserialize(deserializer)?;
@@ -363,11 +462,19 @@ impl<'de> Deserialize<'de> for Landscape {
             column.normalize();
         }
 
-        Ok(Landscape {
-            width: data.width,
-            surface: data.surface,
-            liquids: data.liquids,
-        })
+        if data.solid_materials.len() < expected {
+            data.solid_materials
+                .resize(expected, data.default_solid_material);
+        } else if data.solid_materials.len() > expected {
+            data.solid_materials.truncate(expected);
+        }
+
+        let mut landscape =
+            Landscape::with_default_material(data.width, data.surface, data.default_solid_material)
+                .map_err(|error| D::Error::custom(error.to_string()))?;
+        landscape.liquids = data.liquids;
+        landscape.solid_materials = data.solid_materials;
+        Ok(landscape)
     }
 }
 
@@ -376,6 +483,7 @@ pub struct CollisionResolution {
     pub position: Vector2,
     pub velocity: Vector2,
     pub collided: bool,
+    pub material: Option<MaterialId>,
 }
 
 #[cfg(test)]
@@ -391,6 +499,7 @@ mod tests {
         assert!(resolution.collided);
         assert_eq!(resolution.position, Vector2::new(3, 5));
         assert_eq!(resolution.velocity, Vector2::new(0, 0));
+        assert_eq!(resolution.material, None);
     }
 
     #[test]
@@ -402,6 +511,33 @@ mod tests {
         assert!(!resolution.collided);
         assert_eq!(resolution.position, position);
         assert_eq!(resolution.velocity, velocity);
+        assert_eq!(resolution.material, None);
+    }
+
+    #[test]
+    fn resolves_material_with_default() {
+        let material = MaterialId::new(0).expect("material id");
+        let landscape = Landscape::flat_with_material(8, 12, Some(material));
+        let position = Vector2::new(2, 20);
+        let velocity = Vector2::new(0, 6);
+        let resolution = landscape.resolve_collision(position, velocity);
+        assert!(resolution.collided);
+        assert_eq!(resolution.material, Some(material));
+    }
+
+    #[test]
+    fn solid_material_accessors() {
+        let material_a = MaterialId::new(0).unwrap();
+        let material_b = MaterialId::new(1).unwrap();
+        let mut landscape = Landscape::flat_with_material(4, 6, Some(material_a));
+        assert_eq!(landscape.solid_material_at(0), Some(material_a));
+        landscape.set_solid_material(1, Some(material_b));
+        assert_eq!(landscape.solid_material_at(1), Some(material_b));
+        landscape.fill_solid_material(None);
+        assert_eq!(landscape.solid_material_at(2), None);
+        landscape.set_default_solid_material(Some(material_a));
+        assert_eq!(landscape.default_solid_material(), Some(material_a));
+        assert_eq!(landscape.solid_material_at(3), Some(material_a));
     }
 
     #[test]

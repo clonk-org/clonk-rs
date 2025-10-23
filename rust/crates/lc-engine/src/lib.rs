@@ -33,7 +33,7 @@ pub use input::PlayerInputState;
 pub use landscape::{
     CollisionResolution, Landscape, LandscapeCommand, LandscapeError, LiquidColumn, LiquidSegment,
 };
-pub use material::{Material, MaterialSet};
+pub use material::{Material, MaterialId, MaterialSet};
 pub use message::{
     MessageKind, MessageSnapshot, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_RIGHT, FLAG_TOP,
     FLAG_VCENTER, FLAG_X_REL, FLAG_Y_REL,
@@ -1925,6 +1925,16 @@ impl Object {
         events
     }
 
+    fn apply_material_interaction(&mut self, material: &Material) {
+        let friction = material.friction();
+        if friction != 0 {
+            self.state.velocity.x = apply_horizontal_friction(self.state.velocity.x, friction);
+            for vertex in &mut self.state.vertices {
+                vertex.friction = friction;
+            }
+        }
+    }
+
     fn insert_effect(&mut self, mut effect: EffectState) -> (EffectState, Option<EffectState>) {
         if effect.interval <= 0 {
             effect.interval = 1;
@@ -2012,6 +2022,7 @@ impl Object {
     fn execute_command_queue(
         &mut self,
         physics: &PhysicsSettings,
+        materials: &MaterialSet,
         mut landscape: Option<&mut Landscape>,
         action_library: &ActionLibrary,
     ) -> CommandQueueOutcome {
@@ -2080,6 +2091,11 @@ impl Object {
                 if resolution.collided {
                     self.state.position = resolution.position;
                     self.state.velocity = resolution.velocity;
+                    if let Some(material_id) = resolution.material {
+                        if let Some(material) = materials.get_by_id(material_id) {
+                            self.apply_material_interaction(material);
+                        }
+                    }
                 }
             }
 
@@ -4002,6 +4018,28 @@ fn fight_distance_threshold(
     fighter_span.max(target_span).max(MIN_THRESHOLD)
 }
 
+fn apply_horizontal_friction(value: i32, friction: i32) -> i32 {
+    if value == 0 || friction == 0 {
+        return value;
+    }
+    let friction = friction.max(0).min(100);
+    if friction == 0 {
+        return value;
+    }
+    let magnitude = value.abs();
+    let mut retained = magnitude.saturating_mul(100 - friction) / 100;
+    if retained == magnitude && friction > 0 {
+        retained = magnitude.saturating_sub(1);
+    }
+    if retained == 0 {
+        0
+    } else if value > 0 {
+        retained
+    } else {
+        -retained
+    }
+}
+
 fn apply_float_command_movement(
     velocity: &mut Vector2,
     command_direction: CommandDirection,
@@ -4464,6 +4502,10 @@ impl Engine {
 
     pub fn set_materials(&mut self, materials: MaterialSet) {
         self.materials = materials;
+        if let Some(landscape) = self.landscape.as_mut() {
+            let default = self.materials.default_ground_material();
+            landscape.set_default_solid_material(default);
+        }
     }
 
     pub fn materials(&self) -> &MaterialSet {
@@ -4482,7 +4524,11 @@ impl Engine {
         self.frame
     }
 
-    pub fn set_landscape(&mut self, landscape: Landscape) {
+    pub fn set_landscape(&mut self, mut landscape: Landscape) {
+        let default = self.materials.default_ground_material();
+        if default.is_some() {
+            landscape.set_default_solid_material(default);
+        }
         self.landscape = Some(landscape);
     }
 
@@ -5229,6 +5275,7 @@ impl Engine {
                 let previous_owner = object.state.owner;
                 let outcome = object.execute_command_queue(
                     &self.physics,
+                    &self.materials,
                     landscape_slot.as_mut(),
                     &action_library,
                 );
@@ -5719,6 +5766,11 @@ impl Engine {
                 if resolution.collided {
                     object.state.position = resolution.position;
                     object.state.velocity = resolution.velocity;
+                    if let Some(material_id) = resolution.material {
+                        if let Some(material) = self.materials.get_by_id(material_id) {
+                            object.apply_material_interaction(material);
+                        }
+                    }
                 }
             }
 
@@ -6593,6 +6645,18 @@ impl Engine {
             if resolution.collided {
                 state.position = resolution.position;
                 state.velocity = resolution.velocity;
+                if let Some(material_id) = resolution.material {
+                    if let Some(material) = self.materials.get_by_id(material_id) {
+                        let friction = material.friction();
+                        if friction != 0 {
+                            state.velocity.x =
+                                apply_horizontal_friction(state.velocity.x, friction);
+                            for vertex in &mut state.vertices {
+                                vertex.friction = friction;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -7704,6 +7768,11 @@ impl Engine {
         let object = &mut self.objects[idx];
         object.state.position = resolution.position;
         object.state.velocity = resolution.velocity;
+        if let Some(material_id) = resolution.material {
+            if let Some(material) = self.materials.get_by_id(material_id) {
+                object.apply_material_interaction(material);
+            }
+        }
     }
 
     fn next_random_i32(&mut self) -> i32 {

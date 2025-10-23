@@ -57,11 +57,10 @@
   - Per-player filtering matches C++ semantics
   - Remaining polish: frame decorations/portraits not yet drawn
 
-- ⚠️ **Material System** (C4Material.cpp 🔗 lc-engine missing materials)
-  - Terrain materials (earth, rock, gold, water, lava, acid, etc.)
-  - Material physics (density, friction, temperature reactions)
-  - Material conversion and reactions
-  - ✅ Definitions now load from install groups; runtime behaviour still missing
+- ⚠️ **Material System** (C4Material.cpp 🔗 runtime parity incomplete)
+  - ✅ Material definitions now populate the Rust `MaterialSet` with density/friction metadata and canonical lookup
+  - ✅ Landscapes retain per-column material ids and collisions now apply material friction to object velocity/vertex data
+  - ⚠️ Conversion/reaction logic and temperature-driven behaviour still pending
 
 - ❌ **Weather & Sky** (C4Weather.cpp, C4Sky.cpp 🔗 Not ported)
   - Dynamic weather (rain, snow, wind, lightning)
@@ -172,7 +171,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Startup menu renders Graphics.c4g backgrounds and buttons with Endeavour.ttf fonts (no longer flat placeholders)
 - ✅ Scenario loader resolves legacy definition paths from packed install groups before falling back to the sandbox preview
 - ✅ Sandbox fallback auto-loads install object definitions when install data is available (spawns real Clonks instead of the synthetic Walker)
-- ✅ Material definitions load from install archives (lc-resources::material + Engine MaterialSet)
+- ✅ Material definitions load from install archives (lc-resources::material + Engine MaterialSet) and collisions now consume material friction metadata
 - ✅ Player registry + HUD overlay surface real player metadata (names, wealth, cursor) sourced from engine snapshots
 - ✅ Cursor cycling and selection toggles now respect classic COM_Single/COM_Double timing with network serialization parity
 - ✅ Team home-base rule produces and syncs materials between teammates (C4Player::ExecHomeBaseProduction)
@@ -187,7 +186,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ❌ No real audio (synthetic tones for missing sounds)
 - ⚠️ Message frames/portraits still missing (text-only rendering today)
-- ❌ Materials still unused at runtime (no terrain types, no mining, no reactions despite definitions loading)
+- ⚠️ Material runtime still lacks conversions/reactions (no terrain types, mining, or temperature behaviour beyond friction)
 - ❌ No multiplayer lobby (transport exists but no game coordination)
 
 ---
