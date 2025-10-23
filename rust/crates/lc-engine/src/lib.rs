@@ -2661,6 +2661,9 @@ impl Definition {
         if action.no_other_action {
             spec = spec.with_no_other_action(true);
         }
+        if let Some(dig_free) = action.dig_free {
+            spec = spec.with_dig_free(dig_free);
+        }
         spec
     }
 
@@ -6910,6 +6913,10 @@ impl Engine {
             }
         };
 
+        if matches!(procedure, ActionProcedure::Dig) {
+            self.apply_dig_procedure(idx, &definition_id);
+        }
+
         if matches!(procedure, ActionProcedure::Bridge) {
             if !self.apply_bridge_procedure(idx, command_direction, &definition_id) {
                 return;
@@ -7128,6 +7135,96 @@ impl Engine {
         }
 
         true
+    }
+
+    fn apply_dig_procedure(&mut self, idx: usize, definition_id: &DefinitionId) {
+        let materials = &self.materials;
+        let landscape = match self.landscape.as_mut() {
+            Some(landscape) if landscape.width() > 0 => landscape,
+            _ => return,
+        };
+
+        let action_name = {
+            let object = &self.objects[idx];
+            object.state.action.name.clone()
+        };
+
+        let dig_free_value = match self.definitions.get(definition_id).and_then(|definition| {
+            definition
+                .action_library()
+                .dig_free_for_action(&action_name)
+        }) {
+            Some(value) => value,
+            None => return,
+        };
+
+        if dig_free_value <= 0 {
+            return;
+        }
+
+        let (position, (half_width, half_height)) = {
+            let object = &self.objects[idx];
+            (object.state.position, Self::object_half_extents(object))
+        };
+
+        if dig_free_value == 1 {
+            let effective_half_width = half_width.max(1);
+            let effective_half_height = half_height.max(1);
+            let left = position.x - effective_half_width;
+            let right = position.x + effective_half_width;
+            let bottom = position.y + effective_half_height;
+            for column in left..=right {
+                Self::dig_column(materials, landscape, column, bottom);
+            }
+        } else {
+            let radius = dig_free_value.max(1);
+            let center_x = position.x;
+            let center_y = position.y.saturating_sub(1);
+            let radius_sq = i64::from(radius) * i64::from(radius);
+            for offset in -radius..=radius {
+                let column = center_x + offset;
+                let dx_sq = i64::from(offset) * i64::from(offset);
+                if dx_sq > radius_sq {
+                    continue;
+                }
+                let remaining = radius_sq - dx_sq;
+                if remaining < 0 {
+                    continue;
+                }
+                let vertical = (remaining as f64).sqrt().floor() as i32;
+                let target = center_y.saturating_add(vertical);
+                Self::dig_column(materials, landscape, column, target);
+            }
+        }
+    }
+
+    fn dig_column(
+        materials: &MaterialSet,
+        landscape: &mut Landscape,
+        column: i32,
+        target_height: i32,
+    ) {
+        let width = landscape.width() as i32;
+        if column < 0 || width == 0 || column >= width {
+            return;
+        }
+
+        if materials.is_empty() {
+            landscape.ensure_surface_at_least(column, target_height);
+            return;
+        }
+
+        let Some(material_id) = landscape.solid_material_at(column) else {
+            return;
+        };
+        let Some(material) = materials.get_by_id(material_id) else {
+            return;
+        };
+        if !material.dig_free() {
+            return;
+        }
+
+        landscape.ensure_surface_at_least(column, target_height);
     }
 
     fn apply_bridge_procedure(
@@ -11558,6 +11655,59 @@ global func MenuCommand(state, kind, selection)
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity, Vector2::ZERO);
+    }
+
+    #[test]
+    fn dig_procedure_carves_diggable_material() {
+        let mut definition = Definition::from_script("Digger", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
+            .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Dig".to_string(),
+            ActionSpec::default().with_procedure("dig").with_dig_free(6),
+        );
+        definition.configure_actions(Some("Dig".to_string()), actions);
+
+        let material_source = r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            Friction=25
+            DigFree=1
+        "#;
+        let library =
+            lc_resources::MaterialLibrary::parse(material_source).expect("material parses");
+        let mut materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(32, 6, Some(earth)));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Digger")
+                    .with_position(Vector2::new(12, 8))
+                    .with_action(ActionState::new("Dig")),
+            )
+            .expect("spawn succeeds");
+
+        let mut snapshot = engine.tick().expect("tick succeeds");
+        for _ in 0..5 {
+            snapshot = engine.tick().expect("tick succeeds");
+        }
+
+        let landscape = snapshot.landscape.as_ref().expect("landscape present");
+        let center_height = landscape.surface()[12];
+        let edge_height = landscape.surface()[2];
+        assert!(center_height > 6);
+        assert_eq!(edge_height, 6);
+
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Dig");
     }
 
     #[test]

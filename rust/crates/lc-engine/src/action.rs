@@ -28,6 +28,8 @@ pub struct ActionSpec {
     pub abort_call: Option<String>,
     #[serde(default)]
     pub no_other_action: bool,
+    #[serde(default)]
+    pub dig_free: Option<i32>,
 }
 
 impl ActionSpec {
@@ -43,6 +45,7 @@ impl ActionSpec {
             end_call: None,
             abort_call: None,
             no_other_action: false,
+            dig_free: None,
         }
     }
 
@@ -95,6 +98,11 @@ impl ActionSpec {
         self.no_other_action = enabled;
         self
     }
+
+    pub fn with_dig_free(mut self, dig_free: i32) -> Self {
+        self.dig_free = Some(dig_free);
+        self
+    }
 }
 
 impl Default for ActionSpec {
@@ -110,6 +118,7 @@ impl Default for ActionSpec {
             end_call: None,
             abort_call: None,
             no_other_action: false,
+            dig_free: None,
         }
     }
 }
@@ -336,6 +345,10 @@ impl ActionLibrary {
         self.specs
             .get(action)
             .and_then(|spec| spec.procedure.as_deref())
+    }
+
+    pub fn dig_free_for_action(&self, action: &str) -> Option<i32> {
+        self.specs.get(action).and_then(|spec| spec.dig_free)
     }
 
     fn advance_with_spec(

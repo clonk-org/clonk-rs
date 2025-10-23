@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 use std::mem;
 
 use crate::material::TemperatureDirection;
@@ -268,6 +269,25 @@ impl Landscape {
                 if target_height > *slot {
                     *slot = target_height;
                 }
+            }
+        }
+    }
+
+    pub fn ensure_surface_at_least(&mut self, column: i32, height: i32) {
+        if column < 0 {
+            return;
+        }
+        let index = match usize::try_from(column) {
+            Ok(index) => index,
+            Err(_) => return,
+        };
+        if index >= self.surface.len() {
+            return;
+        }
+        let target_height = height.max(0);
+        if let Some(slot) = self.surface.get_mut(index) {
+            if *slot < target_height {
+                *slot = target_height;
             }
         }
     }

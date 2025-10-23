@@ -109,6 +109,7 @@ pub struct ActionDefinition {
     pub end_call: Option<String>,
     pub abort_call: Option<String>,
     pub no_other_action: bool,
+    pub dig_free: Option<i32>,
 }
 
 #[derive(Debug, Error)]
@@ -369,6 +370,9 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
             "nootheraction" => {
                 current_definition.no_other_action = parse_bool(value);
             }
+            "digfree" => {
+                current_definition.dig_free = parse_i32(value);
+            }
             _ => {}
         }
     }
@@ -575,6 +579,19 @@ EndCall=OnIdleEnd
         assert_eq!(idle.next_action.as_deref(), Some("Idle"));
         assert_eq!(idle.start_call.as_deref(), Some("OnIdleStart"));
         assert_eq!(idle.end_call.as_deref(), Some("OnIdleEnd"));
+    }
+
+    #[test]
+    fn parse_act_map_records_dig_free() {
+        let data = br#"
+[Action]
+Name=Dig
+Procedure=Dig
+DigFree=24
+"#;
+        let map = parse_act_map(data).expect("act map parsed");
+        let dig = map.actions.get("Dig").expect("dig action present");
+        assert_eq!(dig.dig_free, Some(24));
     }
 
     #[test]
