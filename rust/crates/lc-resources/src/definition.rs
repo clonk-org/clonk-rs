@@ -1,4 +1,4 @@
-use crate::{Group, GroupError};
+use crate::{GraphicsImage, Group, GroupError};
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,6 +11,7 @@ pub struct Definition {
     pub core: DefCore,
     pub script: DefinitionScript,
     pub action_map: Option<ActionMap>,
+    pub picture_image: Option<GraphicsImage>,
 }
 
 impl Definition {
@@ -26,10 +27,13 @@ impl Definition {
             Err(error) => return Err(DefinitionError::Resources(error)),
         };
 
+        let picture_image = load_definition_picture(group, &core);
+
         Ok(Self {
             core,
             script,
             action_map,
+            picture_image,
         })
     }
 }
@@ -391,6 +395,118 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
         default_action,
         actions,
     })
+}
+
+fn load_definition_picture(group: &Group, core: &DefCore) -> Option<GraphicsImage> {
+    let path = find_picture_entry(group).ok().flatten()?;
+    let data = group.read_file(&path).ok()?;
+    let image = image::load_from_memory(&data).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let (crop_x, crop_y, crop_w, crop_h) = match core.picture {
+        Some(rect) => normalize_crop(rect, width, height).unwrap_or((0, 0, width, height)),
+        None => (0, 0, width, height),
+    };
+
+    let pixels = extract_rgba_region(&image, crop_x, crop_y, crop_w, crop_h);
+    Some(GraphicsImage::new(crop_w, crop_h, pixels))
+}
+
+fn find_picture_entry(group: &Group) -> Result<Option<PathBuf>, GroupError> {
+    const PRIORITY_FILES: [&str; 4] = ["Graphics32.png", "Graphics.png", "Picture.png", "Icon.png"];
+    for candidate in PRIORITY_FILES {
+        if group.exists(candidate) {
+            return Ok(Some(PathBuf::from(candidate)));
+        }
+    }
+
+    const PRIORITY_GROUPS: [&str; 3] = ["Graphics.ocg", "Graphics.c4d", "Graphics.c4g"];
+    for candidate in PRIORITY_GROUPS {
+        if let Ok(child) = group.open_child(candidate) {
+            if let Some(found) = find_picture_entry(&child)? {
+                let mut combined = PathBuf::from(candidate);
+                combined.push(found);
+                return Ok(Some(combined));
+            }
+        }
+    }
+
+    find_picture_entry_recursive(group, PathBuf::new())
+}
+
+fn find_picture_entry_recursive(
+    group: &Group,
+    base: PathBuf,
+) -> Result<Option<PathBuf>, GroupError> {
+    for entry in group.entries()? {
+        let mut combined = base.clone();
+        combined.push(&entry.relative_path);
+        if entry.is_directory {
+            let child = group.open_child(&entry.relative_path)?;
+            if let Some(found) = find_picture_entry_recursive(&child, combined.clone())? {
+                return Ok(Some(found));
+            }
+        } else if is_image_path(&entry.relative_path) {
+            return Ok(Some(combined));
+        }
+    }
+    Ok(None)
+}
+
+fn is_image_path(path: &Path) -> bool {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) => matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "png" | "bmp" | "jpg" | "jpeg" | "tga"
+        ),
+        None => false,
+    }
+}
+
+fn normalize_crop(
+    rect: PictureRect,
+    image_width: u32,
+    image_height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let width = rect.width.max(0) as u32;
+    let height = rect.height.max(0) as u32;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut x = rect.x.max(0) as u32;
+    let mut y = rect.y.max(0) as u32;
+    if x >= image_width || y >= image_height {
+        return None;
+    }
+    if x + width > image_width {
+        x = x.min(image_width.saturating_sub(1));
+    }
+    if y + height > image_height {
+        y = y.min(image_height.saturating_sub(1));
+    }
+    let crop_width = width.min(image_width - x);
+    let crop_height = height.min(image_height - y);
+    Some((x, y, crop_width.max(1), crop_height.max(1)))
+}
+
+fn extract_rgba_region(
+    image: &image::RgbaImage,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let stride = image.width();
+    let mut output = Vec::with_capacity((width * height * 4) as usize);
+    for row in y..(y + height) {
+        let row_start = ((row * stride) + x) as usize * 4;
+        let row_end = row_start + (width as usize * 4);
+        output.extend_from_slice(&image.as_raw()[row_start..row_end]);
+    }
+    output
 }
 
 fn parse_category(value: &str) -> Result<i32, DefinitionError> {

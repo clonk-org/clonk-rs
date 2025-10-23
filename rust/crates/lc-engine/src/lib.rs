@@ -91,6 +91,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::ops::AddAssign;
 use std::path::Path;
+use std::sync::Arc;
 
 use lc_resources::{
     ActionDefinition as ResourceActionDefinition, PictureRect as ResourcePictureRect,
@@ -2784,6 +2785,39 @@ impl From<ResourcePictureRect> for DefinitionPicture {
     }
 }
 
+#[derive(Clone)]
+pub struct DefinitionPictureImage {
+    width: u32,
+    height: u32,
+    pixels: Arc<[u8]>,
+}
+
+impl DefinitionPictureImage {
+    fn from_resource(image: &lc_resources::GraphicsImage) -> Self {
+        Self {
+            width: image.width(),
+            height: image.height(),
+            pixels: image.clone_pixels(),
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn pixels(&self) -> Arc<[u8]> {
+        Arc::clone(&self.pixels)
+    }
+
+    pub fn into_pixels(self) -> Arc<[u8]> {
+        self.pixels
+    }
+}
+
 pub struct Definition {
     id: DefinitionId,
     name: String,
@@ -2798,6 +2832,7 @@ pub struct Definition {
     value: i32,
     mass: i32,
     picture: Option<DefinitionPicture>,
+    picture_image: Option<DefinitionPictureImage>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2852,6 +2887,7 @@ impl Definition {
             value: 0,
             mass: 0,
             picture: None,
+            picture_image: None,
         })
     }
 
@@ -2896,6 +2932,9 @@ impl Definition {
         definition.set_value(resource.core.value);
         definition.set_mass(resource.core.mass);
         definition.set_picture(resource.core.picture.map(DefinitionPicture::from));
+        if let Some(image) = resource.picture_image.as_ref() {
+            definition.set_picture_image(Some(DefinitionPictureImage::from_resource(image)));
+        }
         Ok(definition)
     }
 
@@ -3021,6 +3060,14 @@ impl Definition {
 
     pub fn set_picture(&mut self, picture: Option<DefinitionPicture>) {
         self.picture = picture;
+    }
+
+    pub fn picture_image(&self) -> Option<&DefinitionPictureImage> {
+        self.picture_image.as_ref()
+    }
+
+    pub fn set_picture_image(&mut self, image: Option<DefinitionPictureImage>) {
+        self.picture_image = image;
     }
 
     fn call_initialize(
@@ -5460,6 +5507,16 @@ impl Engine {
             .and_then(|definition| definition.picture())
     }
 
+    pub fn definition_picture_image(&self, definition_id: &str) -> Option<DefinitionPictureImage> {
+        self.definitions
+            .get(definition_id)
+            .and_then(|definition| definition.picture_image().cloned())
+    }
+
+    pub fn definition_ids(&self) -> impl Iterator<Item = &str> {
+        self.definitions.keys().map(|id| id.as_str())
+    }
+
     pub fn spawn_object(&mut self, config: SpawnConfig) -> Result<ObjectId, EngineError> {
         let (id, additional) = self.spawn_single(config)?;
         self.process_spawn_queue(additional)?;
@@ -6713,11 +6770,7 @@ impl Engine {
         self.particles.clear();
         self.material_particles.clear();
         for snapshot in &state.particles {
-            if snapshot
-                .definition_id
-                .starts_with("material/pxs/")
-                && snapshot.parameter_b >= 0
-            {
+            if snapshot.definition_id.starts_with("material/pxs/") && snapshot.parameter_b >= 0 {
                 if let Some(material) = MaterialId::new(snapshot.parameter_b as usize) {
                     self.material_particles.push(MaterialParticle::new(
                         material,
@@ -10687,10 +10740,7 @@ mod tests {
             "expected blast to emit particles"
         );
         assert_eq!(snapshot.particles[0].definition_id, "material/pxs/earth");
-        assert_eq!(
-            snapshot.particles[0].parameter_b,
-            earth.index() as i32
-        );
+        assert_eq!(snapshot.particles[0].parameter_b, earth.index() as i32);
         Ok(())
     }
 

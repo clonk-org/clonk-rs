@@ -15,6 +15,7 @@ use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -30,13 +31,13 @@ use lc_engine::{
     ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, Landscape,
     MaterialSet, MenuCommandKind, MenuCommandSelection, MessageKind, MovementProfile, ObjectId,
     ObjectSnapshot, ObjectUpdate, PlayerStatus, Scenario, ScenarioError, SimulationSnapshot,
-    SpawnConfig, Vector2, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER,
-    FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
+    SkyConfig, SpawnConfig, Vector2, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_RIGHT, FLAG_TOP,
+    FLAG_VCENTER, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
     draw_image, CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData, InputDispatcher,
-    KeyCode, PlayerOverlay, ScenarioEntry, ScenarioKind, StartupMenu, StartupMenuAction,
-    ViewportInput,
+    KeyCode, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMenu,
+    StartupMenuAction, ViewportInput,
 };
 use lc_graphics::{BitmapFont, Color, TextFont, TrueTypeFont};
 use lc_gui::ButtonTextures;
@@ -100,7 +101,7 @@ struct FrontendAssets {
     font: Arc<dyn TextFont>,
     menu_background: Option<ImageData>,
     button_textures: Option<ButtonTextures>,
-    object_sprites: Arc<HashMap<String, ImageData>>,
+    base_sprites: HashMap<String, ImageData>,
 }
 
 impl FrontendAssets {
@@ -137,7 +138,7 @@ impl FrontendAssets {
             font,
             menu_background,
             button_textures,
-            object_sprites: Arc::new(sprites),
+            base_sprites: sprites,
         }
     }
 
@@ -183,8 +184,8 @@ impl FrontendAssets {
         self.button_textures.clone()
     }
 
-    fn sprite_map(&self) -> Arc<HashMap<String, ImageData>> {
-        self.object_sprites.clone()
+    fn base_sprite_map(&self) -> &HashMap<String, ImageData> {
+        &self.base_sprites
     }
 
     fn load_button_textures(graphics: &GraphicsResource) -> Option<ButtonTextures> {
@@ -570,6 +571,13 @@ impl AudioContext {
         }
     }
 
+    fn register_definition_sounds(&mut self, definition_id: &str, group: &Group) {
+        self.resolver
+            .register_definition_group(definition_id, group);
+        self.loaded_sounds.clear();
+        self.missing_sounds.clear();
+    }
+
     fn music_enabled(&self) -> bool {
         self.options.music_enabled
     }
@@ -807,6 +815,7 @@ struct SoundResolver {
     global: Vec<SoundLibrary>,
     scenario: Vec<SoundLibrary>,
     scenario_root: Option<PathBuf>,
+    registered_definitions: HashSet<String>,
 }
 
 impl SoundResolver {
@@ -816,6 +825,7 @@ impl SoundResolver {
             global,
             scenario: Vec::new(),
             scenario_root: None,
+            registered_definitions: HashSet::new(),
         }
     }
 
@@ -849,6 +859,22 @@ impl SoundResolver {
             }
         }
         None
+    }
+
+    fn register_definition_group(&mut self, definition_id: &str, group: &Group) {
+        let key = format!(
+            "{}::{}",
+            definition_id.to_ascii_lowercase(),
+            group.root().to_string_lossy().to_ascii_lowercase()
+        );
+        if !self.registered_definitions.insert(key) {
+            return;
+        }
+        let label = format!("definition::{}", definition_id);
+        let mut libs = collect_sound_libraries_from_group(group, label);
+        if !libs.is_empty() {
+            self.global.extend(libs);
+        }
     }
 }
 
@@ -1218,6 +1244,7 @@ fn extension_rank(ext: Option<&str>) -> usize {
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
+    sky: Option<SkyRenderState>,
     input: InputDispatcher,
     bindings: KeyboardBindings,
     gamepads: GamepadManager,
@@ -1241,6 +1268,8 @@ struct GameApp {
     network: Option<NetworkManager>,
     local_owner: i32,
     last_save_path: Option<PathBuf>,
+    object_sprites: HashMap<String, ImageData>,
+    sprite_cache: Arc<HashMap<String, ImageData>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2079,6 +2108,14 @@ fn try_materials_from_path(path: &Path) -> Result<MaterialSet, lc_resources::Mat
     Ok(MaterialSet::from_resource_library(&library))
 }
 
+fn sky_render_state_from_config(config: &SkyConfig) -> SkyRenderState {
+    let image = config
+        .surface
+        .as_ref()
+        .map(|image| ImageData::from_arc(image.width(), image.height(), image.clone_pixels()));
+    SkyRenderState::new(config.settings.clone(), image)
+}
+
 fn current_unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2100,6 +2137,8 @@ impl GameApp {
         };
         let assets = Arc::new(FrontendAssets::load(paths));
         let material_library = load_install_material_library(paths);
+        let base_sprites = assets.base_sprite_map().clone();
+        let sprite_cache = Arc::new(base_sprites.clone());
 
         let mut engine = Engine::new();
         if let Some(library) = material_library.as_ref() {
@@ -2113,7 +2152,7 @@ impl GameApp {
             DEFAULT_GROUND_HEIGHT,
             &scenario_label,
             assets.font_arc(),
-            assets.sprite_map(),
+            Arc::clone(&sprite_cache),
         );
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
 
@@ -2136,6 +2175,7 @@ impl GameApp {
         let mut app = Self {
             engine,
             graphics,
+            sky: None,
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
             gamepads: GamepadManager::new(),
@@ -2159,6 +2199,8 @@ impl GameApp {
             last_save_path: None,
             network,
             local_owner: runtime.player_owner,
+            object_sprites: base_sprites,
+            sprite_cache: Arc::clone(&sprite_cache),
         };
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);
@@ -2174,10 +2216,11 @@ impl GameApp {
             self.fallback_ground,
             &self.scenario_label,
             self.assets.font_arc(),
-            self.assets.sprite_map(),
+            Arc::clone(&self.sprite_cache),
         );
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics = graphics;
+        self.graphics.set_sky(self.sky.clone());
 
         if self.mode == AppMode::Menu {
             self.menu_state.menu().resize(width as f32, height as f32);
@@ -2191,6 +2234,26 @@ impl GameApp {
             self.engine.set_materials((**materials).clone());
         } else {
             self.engine.set_materials(MaterialSet::default());
+        }
+    }
+
+    fn update_sprite_cache(&mut self) {
+        self.sprite_cache = Arc::new(self.object_sprites.clone());
+        self.graphics
+            .set_object_sprites(Arc::clone(&self.sprite_cache));
+    }
+
+    fn rebuild_definition_sprites(&mut self) {
+        let mut sprites = self.assets.base_sprite_map().clone();
+        for definition_id in self.engine.definition_ids() {
+            if let Some(image) = self.engine.definition_picture_image(definition_id) {
+                let data = ImageData::from_arc(image.width(), image.height(), image.into_pixels());
+                sprites.insert(definition_id.to_string(), data);
+            }
+        }
+        if sprites != self.object_sprites {
+            self.object_sprites = sprites;
+            self.update_sprite_cache();
         }
     }
 
@@ -3204,6 +3267,7 @@ impl GameApp {
         self.engine = Engine::new();
         self.apply_material_library();
         self.input = InputDispatcher::new();
+        self.sky = None;
         self.snapshot = self.engine.snapshot();
         self.refresh_object_menu();
         self.focus_id = None;
@@ -3220,6 +3284,8 @@ impl GameApp {
 
         self.fallback_ground = DEFAULT_GROUND_HEIGHT;
         self.scenario_label = self.menu_state.label_path();
+        self.object_sprites = self.assets.base_sprite_map().clone();
+        self.sprite_cache = Arc::new(self.object_sprites.clone());
 
         let width = self.graphics.surface().width();
         let height = self.graphics.surface().height();
@@ -3229,9 +3295,10 @@ impl GameApp {
             self.fallback_ground,
             &self.scenario_label,
             self.assets.font_arc(),
-            self.assets.sprite_map(),
+            Arc::clone(&self.sprite_cache),
         );
         self.graphics.surface_mut().fill(Color::opaque(16, 28, 52));
+        self.graphics.set_sky(self.sky.clone());
 
         self.menu_state.set_pointer_position(None);
         self.menu_state.refresh_menu_entries();
@@ -3314,7 +3381,9 @@ impl GameApp {
             return Ok(false);
         }
 
+        self.sky = scenario_data.sky().map(sky_render_state_from_config);
         self.snapshot = self.engine.snapshot();
+        self.rebuild_definition_sprites();
 
         let label = scenario_data
             .name()
@@ -3344,12 +3413,16 @@ impl GameApp {
         self.engine = Engine::new();
         self.apply_material_library();
         self.input = InputDispatcher::new();
+        self.sky = None;
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(None);
             audio.reset_sfx();
         }
 
-        let spawn_definition = configure_sandbox_engine(&mut self.engine)?;
+        let spawn_definition = match self.audio.as_mut() {
+            Some(audio) => configure_sandbox_engine(&mut self.engine, Some(audio))?,
+            None => configure_sandbox_engine(&mut self.engine, None)?,
+        };
 
         let spawn = SpawnConfig::new(spawn_definition)
             .with_owner(self.local_owner)
@@ -3360,6 +3433,7 @@ impl GameApp {
         self.engine.spawn_object(spawn)?;
 
         self.snapshot = self.engine.snapshot();
+        self.rebuild_definition_sprites();
         self.configure_running_state(scenario.title.clone(), DEFAULT_GROUND_HEIGHT);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
@@ -3446,8 +3520,12 @@ impl GameApp {
         self.input = InputDispatcher::new();
 
         if scenario_info.sandbox {
-            let _ = configure_sandbox_engine(&mut self.engine)
-                .context("failed to prepare sandbox engine for saved game")?;
+            match self.audio.as_mut() {
+                Some(audio) => configure_sandbox_engine(&mut self.engine, Some(audio))
+                    .context("failed to prepare sandbox engine for saved game")?,
+                None => configure_sandbox_engine(&mut self.engine, None)
+                    .context("failed to prepare sandbox engine for saved game")?,
+            };
         } else {
             let path = frontend.path.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -3470,6 +3548,8 @@ impl GameApp {
                 )
             })?;
         }
+
+        self.rebuild_definition_sprites();
 
         self.configure_running_state(scenario_info.label.clone(), scenario_info.fallback_ground);
         self.active_scenario = Some(frontend.clone());
@@ -3557,9 +3637,10 @@ impl GameApp {
             self.fallback_ground,
             &self.scenario_label,
             self.assets.font_arc(),
-            self.assets.sprite_map(),
+            Arc::clone(&self.sprite_cache),
         );
         self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
+        self.graphics.set_sky(self.sky.clone());
         self.frame_text.clear();
         self.status_text.clear();
         self.energy_fraction = 0.0;
@@ -3943,6 +4024,7 @@ fn editor_binary_candidates(base: &Path) -> Vec<PathBuf> {
 fn load_install_definitions(
     engine: &mut Engine,
     paths: &AppPaths,
+    audio: Option<&mut AudioContext>,
 ) -> Result<Option<String>, EngineError> {
     let objects_path = paths.planet_dir().join("Objects.ocd");
     let group = match Group::open(&objects_path) {
@@ -3959,16 +4041,19 @@ fn load_install_definitions(
 
     let mut seen = HashSet::new();
     let mut spawn_candidate = None;
-    load_definitions_from_group(engine, &group, &mut seen, &mut spawn_candidate)?;
+    let audio_ptr = audio.map(NonNull::from);
+    let _ =
+        load_definitions_from_group(engine, &group, audio_ptr, &mut seen, &mut spawn_candidate)?;
     Ok(spawn_candidate)
 }
 
 fn load_definitions_from_group(
     engine: &mut Engine,
     group: &Group,
+    mut audio: Option<NonNull<AudioContext>>,
     seen: &mut HashSet<String>,
     spawn_candidate: &mut Option<String>,
-) -> Result<(), EngineError> {
+) -> Result<Option<NonNull<AudioContext>>, EngineError> {
     if group.exists("DefCore.txt") {
         match ResourceDefinitionData::load(group) {
             Ok(resource) => {
@@ -4008,6 +4093,12 @@ fn load_definitions_from_group(
                             );
                         }
                     }
+                    if let Some(mut ptr) = audio {
+                        unsafe {
+                            ptr.as_mut()
+                                .register_definition_sounds(&resource.core.id, group);
+                        }
+                    }
                 }
             }
             Err(error) => {
@@ -4028,7 +4119,7 @@ fn load_definitions_from_group(
                 group = %group.root().display(),
                 "unable to list definition contents"
             );
-            return Ok(());
+            return Ok(audio);
         }
     };
 
@@ -4037,7 +4128,9 @@ fn load_definitions_from_group(
             continue;
         }
         match group.open_child(&entry.relative_path) {
-            Ok(child) => load_definitions_from_group(engine, &child, seen, spawn_candidate)?,
+            Ok(child) => {
+                audio = load_definitions_from_group(engine, &child, audio, seen, spawn_candidate)?;
+            }
             Err(err) => {
                 tracing::warn!(
                     error = %err,
@@ -4048,12 +4141,15 @@ fn load_definitions_from_group(
         }
     }
 
-    Ok(())
+    Ok(audio)
 }
 
-fn configure_sandbox_engine(engine: &mut Engine) -> Result<String, EngineError> {
+fn configure_sandbox_engine(
+    engine: &mut Engine,
+    audio: Option<&mut AudioContext>,
+) -> Result<String, EngineError> {
     if let Ok(paths) = cached_app_paths() {
-        match load_install_definitions(engine, &paths) {
+        match load_install_definitions(engine, &paths, audio) {
             Ok(Some(spawn_definition)) => {
                 engine.set_environment(EnvironmentSettings::default());
                 engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
@@ -4492,6 +4588,8 @@ mod tests {
             physics: None,
             objects,
             environment: EnvironmentFrame::default(),
+            sky: None,
+            weather_events: Vec::new(),
             global_effects: Vec::new(),
             particles: Vec::new(),
             players: Vec::new(),
@@ -4792,6 +4890,8 @@ mod tests {
             physics: None,
             objects,
             environment: EnvironmentFrame::default(),
+            sky: None,
+            weather_events: Vec::new(),
             global_effects: Vec::new(),
             particles: Vec::new(),
             players: Vec::new(),

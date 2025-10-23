@@ -2,8 +2,9 @@ mod input;
 mod startup_menu;
 
 use lc_engine::{
-    EnvironmentSettings, Landscape, ObjectId, ObjectSnapshot, SimulationSnapshot,
-    SurfaceSnapshot as EngineSurfaceSnapshot, Vector2,
+    EnvironmentFrame, EnvironmentSettings, Landscape, ObjectId, ObjectSnapshot, RgbColor,
+    SimulationSnapshot, SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot, Vector2,
+    WeatherEvent,
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
@@ -85,6 +86,26 @@ fn smooth_value(current: f32, target: f32) -> f32 {
         target
     } else {
         current + delta * CAMERA_SMOOTHING_ALPHA
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkyRenderState {
+    settings: SkySettings,
+    image: Option<ImageData>,
+}
+
+impl SkyRenderState {
+    pub fn new(settings: SkySettings, image: Option<ImageData>) -> Self {
+        Self { settings, image }
+    }
+
+    pub fn settings(&self) -> &SkySettings {
+        &self.settings
+    }
+
+    pub fn image(&self) -> Option<&ImageData> {
+        self.image.as_ref()
     }
 }
 
@@ -187,6 +208,7 @@ pub struct GraphicsSystem {
     object_sprites: Arc<HashMap<String, ImageData>>,
     active_viewports: Vec<ActiveViewport>,
     camera_states: HashMap<CameraKey, CameraState>,
+    sky: Option<SkyRenderState>,
 }
 
 impl GraphicsSystem {
@@ -237,7 +259,12 @@ impl GraphicsSystem {
             object_sprites,
             active_viewports: Vec::new(),
             camera_states: HashMap::new(),
+            sky: None,
         }
+    }
+
+    pub fn set_object_sprites(&mut self, sprites: Arc<HashMap<String, ImageData>>) {
+        self.object_sprites = sprites;
     }
 
     pub fn set_world_width(&mut self, world_width: i32) {
@@ -251,6 +278,10 @@ impl GraphicsSystem {
     pub fn set_world_dimensions(&mut self, world_width: i32, world_height: i32) {
         self.set_world_width(world_width);
         self.set_world_height(world_height);
+    }
+
+    pub fn set_sky(&mut self, sky: Option<SkyRenderState>) {
+        self.sky = sky;
     }
 
     pub fn surface(&self) -> &Surface {
@@ -480,15 +511,16 @@ impl GraphicsSystem {
         let main_surface = std::mem::replace(&mut self.surface, content_surface);
 
         let environment = &snapshot.environment;
+        let events = &snapshot.weather_events;
         let lighting = Self::lighting_factor(environment.settings.time_of_day);
-        let sky = environment
-            .sky_color
-            .map(|color| Color::opaque(color.r, color.g, color.b))
-            .unwrap_or_else(|| Self::sky_color_for_temperature(environment.ambient_temperature));
-        let sky = Self::apply_lighting(sky, lighting);
 
-        self.surface.fill(sky);
-        self.draw_precipitation(environment.precipitation, snapshot.frame, lighting);
+        self.draw_sky(snapshot.sky.as_ref(), environment, events, lighting);
+        self.draw_precipitation(
+            environment.precipitation,
+            environment.ambient_temperature,
+            snapshot.frame,
+            lighting,
+        );
         self.draw_ground(
             environment.ambient_temperature,
             snapshot.landscape.as_ref(),
@@ -636,25 +668,308 @@ impl GraphicsSystem {
         }
     }
 
-    fn draw_precipitation(&mut self, precipitation: i32, frame: u64, lighting: f32) {
+    fn draw_sky(
+        &mut self,
+        frame: Option<&SkyFrame>,
+        environment: &EnvironmentFrame,
+        events: &[WeatherEvent],
+        lighting: f32,
+    ) {
+        if let Some(state) = self.sky.clone() {
+            self.render_configured_sky(&state, frame, environment, events, lighting);
+        } else {
+            let base = environment
+                .sky_color
+                .map(|color| Color::opaque(color.r, color.g, color.b))
+                .unwrap_or_else(|| {
+                    Self::sky_color_for_temperature(environment.ambient_temperature)
+                });
+            let tinted = Self::apply_lighting(base, lighting);
+            self.surface.fill(tinted);
+        }
+    }
+
+    fn render_configured_sky(
+        &mut self,
+        state: &SkyRenderState,
+        frame: Option<&SkyFrame>,
+        environment: &EnvironmentFrame,
+        events: &[WeatherEvent],
+        lighting: f32,
+    ) {
+        let settings = frame
+            .map(|frame| &frame.settings)
+            .unwrap_or(&state.settings);
+
+        if let Some(color) = settings.back_color {
+            let base = Self::bgr_to_color(color);
+            let tinted = Self::apply_lighting(base, lighting);
+            self.surface.fill(tinted);
+        } else if !settings.has_surface {
+            self.fill_sky_gradient(settings, environment, lighting);
+        } else {
+            self.surface.fill(Color::opaque(0, 0, 0));
+        }
+
+        if settings.has_surface {
+            if let Some(image) = state.image() {
+                self.tile_sky_image(image, settings, frame, lighting);
+            } else {
+                self.fill_sky_gradient(settings, environment, lighting);
+            }
+        } else if settings.back_color.is_none() {
+            self.fill_sky_gradient(settings, environment, lighting);
+        }
+
+        if events
+            .iter()
+            .any(|event| matches!(event, WeatherEvent::Lightning { .. }))
+        {
+            self.overlay_lightning_flash();
+        }
+    }
+
+    fn fill_sky_gradient(
+        &mut self,
+        settings: &SkySettings,
+        environment: &EnvironmentFrame,
+        lighting: f32,
+    ) {
+        let gamma = environment.settings.season_gamma();
+        let top_gamma = gamma.map(|(_, _, high)| high);
+        let bottom_gamma = gamma.map(|(low, _, _)| low);
+        let top = Self::mix_color_with_gamma(settings.fade_top, top_gamma);
+        let bottom = Self::mix_color_with_gamma(settings.fade_bottom, bottom_gamma);
+        self.fill_vertical_gradient(top, bottom, lighting);
+    }
+
+    fn fill_vertical_gradient(&mut self, top: Color, bottom: Color, lighting: f32) {
+        if self.surface_width == 0 || self.surface_height == 0 {
+            return;
+        }
+        let height = self.surface_height.saturating_sub(1).max(1);
+        for y in 0..self.surface_height {
+            let t = if height == 0 {
+                0.0
+            } else {
+                y as f32 / height as f32
+            };
+            let blended = Self::lerp_color(bottom, top, t);
+            let tinted = Self::apply_lighting(blended, lighting);
+            for x in 0..self.surface_width {
+                let _ = self.surface.set_pixel(x, y, tinted);
+            }
+        }
+    }
+
+    fn tile_sky_image(
+        &mut self,
+        image: &ImageData,
+        settings: &SkySettings,
+        frame: Option<&SkyFrame>,
+        lighting: f32,
+    ) {
+        let width = image.width();
+        let height = image.height();
+        if width == 0 || height == 0 {
+            return;
+        }
+        let width_f = width as f32;
+        let height_f = height as f32;
+        let runtime_x = frame.map(|frame| frame.offset_x).unwrap_or(0.0);
+        let runtime_y = frame.map(|frame| frame.offset_y).unwrap_or(0.0);
+        let parallax_x = if settings.parallax_x == 0 {
+            10
+        } else {
+            settings.parallax_x
+        };
+        let parallax_y = if settings.parallax_y == 0 {
+            10
+        } else {
+            settings.parallax_y
+        };
+        let source_x = (self.viewport_x * 10.0 / parallax_x as f32) - runtime_x;
+        let source_y = (self.viewport_y * 10.0 / parallax_y as f32) - runtime_y;
+        let offset_x = Self::normalize_offset(source_x, width_f);
+        let offset_y = Self::normalize_offset(source_y, height_f);
+        let modulation = settings.modulation;
+
+        let mut y = -offset_y;
+        while y < self.surface_height as f32 {
+            let mut x = -offset_x;
+            while x < self.surface_width as f32 {
+                self.blit_sky_tile(
+                    image,
+                    x.round() as i32,
+                    y.round() as i32,
+                    modulation,
+                    lighting,
+                );
+                x += width_f;
+            }
+            y += height_f;
+        }
+    }
+
+    fn blit_sky_tile(
+        &mut self,
+        image: &ImageData,
+        dest_x: i32,
+        dest_y: i32,
+        modulation: Option<u32>,
+        lighting: f32,
+    ) {
+        let width = image.width();
+        let height = image.height();
+        let pixels = image.pixels();
+        for y in 0..height {
+            let target_y = dest_y + y as i32;
+            if target_y < 0 || target_y >= self.surface_height as i32 {
+                continue;
+            }
+            for x in 0..width {
+                let target_x = dest_x + x as i32;
+                if target_x < 0 || target_x >= self.surface_width as i32 {
+                    continue;
+                }
+                let idx = ((y * width + x) * 4) as usize;
+                if idx + 3 >= pixels.len() {
+                    continue;
+                }
+                let mut color = Color::new(
+                    pixels[idx],
+                    pixels[idx + 1],
+                    pixels[idx + 2],
+                    pixels[idx + 3],
+                );
+                if color.a == 0 {
+                    continue;
+                }
+                if let Some(modulation) = modulation {
+                    color = Self::apply_modulation(color, modulation);
+                }
+                color = color.modulate(lighting);
+                if color.a == 255 {
+                    let _ = self
+                        .surface
+                        .set_pixel(target_x as u32, target_y as u32, color);
+                } else {
+                    let background = self
+                        .surface
+                        .get_pixel(target_x as u32, target_y as u32)
+                        .unwrap_or_default();
+                    let blended = blend_color_over(color, background);
+                    let _ = self
+                        .surface
+                        .set_pixel(target_x as u32, target_y as u32, blended);
+                }
+            }
+        }
+    }
+
+    fn normalize_offset(offset: f32, dimension: f32) -> f32 {
+        if dimension <= 0.0 {
+            return 0.0;
+        }
+        let mut wrapped = offset % dimension;
+        if wrapped < 0.0 {
+            wrapped += dimension;
+        }
+        wrapped
+    }
+
+    fn mix_color_with_gamma(base: RgbColor, gamma: Option<RgbColor>) -> Color {
+        if let Some(gamma) = gamma {
+            let r = ((base.r as u16 + gamma.r as u16) / 2) as u8;
+            let g = ((base.g as u16 + gamma.g as u16) / 2) as u8;
+            let b = ((base.b as u16 + gamma.b as u16) / 2) as u8;
+            Color::opaque(r, g, b)
+        } else {
+            Color::opaque(base.r, base.g, base.b)
+        }
+    }
+
+    fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+        let clamped = t.clamp(0.0, 1.0);
+        let lerp_channel = |start: u8, end: u8| -> u8 {
+            let start = start as f32;
+            let end = end as f32;
+            (start + (end - start) * clamped).round().clamp(0.0, 255.0) as u8
+        };
+        Color::new(
+            lerp_channel(a.r, b.r),
+            lerp_channel(a.g, b.g),
+            lerp_channel(a.b, b.b),
+            255,
+        )
+    }
+
+    fn bgr_to_color(value: u32) -> Color {
+        let r = ((value >> 16) & 0xff) as u8;
+        let g = ((value >> 8) & 0xff) as u8;
+        let b = (value & 0xff) as u8;
+        Color::opaque(r, g, b)
+    }
+
+    fn apply_modulation(color: Color, modulation: u32) -> Color {
+        let mod_r = ((modulation >> 16) & 0xff) as u8;
+        let mod_g = ((modulation >> 8) & 0xff) as u8;
+        let mod_b = (modulation & 0xff) as u8;
+        let r = ((color.r as u16 * mod_r as u16) / 255) as u8;
+        let g = ((color.g as u16 * mod_g as u16) / 255) as u8;
+        let b = ((color.b as u16 * mod_b as u16) / 255) as u8;
+        Color::new(r, g, b, color.a)
+    }
+
+    fn overlay_lightning_flash(&mut self) {
+        let pixels = self.surface.pixels_mut();
+        for chunk in pixels.chunks_exact_mut(4) {
+            chunk[0] = chunk[0].saturating_add(96).min(255);
+            chunk[1] = chunk[1].saturating_add(96).min(255);
+            chunk[2] = chunk[2].saturating_add(144).min(255);
+        }
+    }
+
+    fn draw_precipitation(
+        &mut self,
+        precipitation: i32,
+        ambient_temperature: i32,
+        frame: u64,
+        lighting: f32,
+    ) {
         if precipitation == 0 {
             return;
         }
 
         if precipitation > 0 {
-            let intensity = precipitation.clamp(0, 100) as usize;
-            let streaks = intensity.saturating_mul(3).max(12);
-            for idx in 0..streaks {
-                let offset = frame as usize * 11 + idx * 17;
-                let x = ((idx * 53 + offset) % self.surface_width as usize) as u32;
-                let base_y = (offset % self.surface_height as usize) as i32;
-                for step in 0..4 {
-                    let y = base_y - step;
-                    if y < 0 {
-                        continue;
+            if ambient_temperature <= 0 {
+                let intensity = precipitation.clamp(0, 100) as usize;
+                let flakes = intensity.saturating_mul(2).max(16);
+                for idx in 0..flakes {
+                    let offset = frame as usize * 7 + idx * 19;
+                    let x = ((idx * 41 + offset) % self.surface_width as usize) as u32;
+                    let y = (offset % self.surface_height as usize) as u32;
+                    let color = Color::new(236, 236, 252, 220).modulate(lighting);
+                    let _ = self.surface.set_pixel(x, y, color);
+                    if y + 1 < self.surface_height {
+                        let _ = self.surface.set_pixel(x, y + 1, color);
                     }
-                    let color = Color::new(148, 176, 220, 160).modulate(lighting);
-                    let _ = self.surface.set_pixel(x, y as u32, color);
+                }
+            } else {
+                let intensity = precipitation.clamp(0, 100) as usize;
+                let streaks = intensity.saturating_mul(3).max(12);
+                for idx in 0..streaks {
+                    let offset = frame as usize * 11 + idx * 17;
+                    let x = ((idx * 53 + offset) % self.surface_width as usize) as u32;
+                    let base_y = (offset % self.surface_height as usize) as i32;
+                    for step in 0..4 {
+                        let y = base_y - step;
+                        if y < 0 {
+                            continue;
+                        }
+                        let color = Color::new(148, 176, 220, 160).modulate(lighting);
+                        let _ = self.surface.set_pixel(x, y as u32, color);
+                    }
                 }
             }
         } else {
@@ -1532,6 +1847,8 @@ mod tests {
                 alive: true,
             }],
             environment: EnvironmentFrame::default(),
+            sky: None,
+            weather_events: Vec::new(),
             global_effects: Vec::new(),
             particles: Vec::new(),
             players: Vec::new(),

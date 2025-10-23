@@ -80,7 +80,8 @@
 - ⚠️  **Definition System** (partial - C4Def.cpp)
   - ✅ Sandbox fallback now loads install definitions (Clonk et al.) instead of the synthetic Walker
   - ✅ DefCore now surfaces value/mass data (and picture rect metadata) to the engine; inventory UI shows per-item stats
-  - ⚠️ Missing definition graphics pipeline and sound wiring; ActMap is parsed but not visualised
+  - ✅ Definition graphics pipeline now decodes `Graphics*.png` assets, caches picture sprites in the engine, and feeds the frontend sprite map so objects render with real icons
+  - ⚠️ Definition sound library registration still pending; missing samples continue to fall back to synthetic tones
 
 - ⚠️  **Graphics Resources** (C4GraphicsResource.cpp 🔗 Minimal)
   - Progress: Fonts, startup backgrounds, and button textures now sourced from Graphics.c4g; walker sprite mapped from crew assets
