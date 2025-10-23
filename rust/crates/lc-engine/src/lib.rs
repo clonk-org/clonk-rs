@@ -31,7 +31,8 @@ pub use control::{
 pub use effect::EffectState;
 pub use input::PlayerInputState;
 pub use landscape::{
-    CollisionResolution, Landscape, LandscapeCommand, LandscapeError, LiquidColumn, LiquidSegment,
+    BlastResult, CollisionResolution, Landscape, LandscapeCommand, LandscapeError, LiquidColumn,
+    LiquidSegment,
 };
 pub use material::{Material, MaterialId, MaterialSet};
 pub use message::{
@@ -93,7 +94,7 @@ use lc_resources::{
     ResourceDefinition as ResourceDefinitionData,
 };
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, ScriptError, Value};
-use rand::{Rng, SeedableRng};
+use rand::{seq::SliceRandom, Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -4568,6 +4569,23 @@ impl Engine {
         self.landscape = Some(landscape);
     }
 
+    pub fn blast_circle(
+        &mut self,
+        center: Vector2,
+        radius: i32,
+        controller: Option<i32>,
+    ) -> Option<BlastResult> {
+        if radius <= 0 {
+            return None;
+        }
+        let landscape = self.landscape.as_mut()?;
+        let result = landscape.blast_circle(center, radius, &self.materials);
+        if !result.removed_by_material.is_empty() {
+            self.process_blast_reactions(center, controller, &result);
+        }
+        Some(result)
+    }
+
     pub fn clear_landscape(&mut self) {
         self.landscape = None;
     }
@@ -8054,6 +8072,125 @@ impl Engine {
         apply_effect_commands_to_stack(&mut self.global_effects, commands);
     }
 
+    fn process_blast_reactions(
+        &mut self,
+        center: Vector2,
+        controller: Option<i32>,
+        result: &BlastResult,
+    ) {
+        let mut particles = Vec::new();
+        let mut spawn_requests = Vec::new();
+
+        for (material_id, removed) in &result.removed_by_material {
+            if *removed <= 0 {
+                continue;
+            }
+
+            let Some(material) = self.materials.get_by_id(*material_id) else {
+                continue;
+            };
+            let normalized_name = material.normalized_name().to_string();
+            let splash_rate = material.splash_rate();
+            let material_index = material.id().index() as i32;
+            let blast_to_pxs_ratio = material.blast_to_pxs_ratio();
+            let blast_to_object_name = material.blast_to_object_name().map(|name| name.to_string());
+            let blast_to_object_ratio = material.blast_to_object_ratio();
+
+            if let Some(ratio) = blast_to_pxs_ratio {
+                if ratio > 0 {
+                    let pxs_count = (*removed / ratio).max(0);
+                    for _ in 0..pxs_count {
+                        particles.push(ParticleCommand::Create(
+                            self.build_material_particle_config(
+                                &normalized_name,
+                                material_index,
+                                splash_rate,
+                                center,
+                                &result.affected_columns,
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            if let (Some(definition_id), Some(ratio)) =
+                (blast_to_object_name.as_ref(), blast_to_object_ratio)
+            {
+                if ratio <= 0 {
+                    continue;
+                }
+                if !self.definitions.contains_key(definition_id) {
+                    continue;
+                }
+                let spawn_count = (*removed / ratio).max(0);
+                if spawn_count <= 0 {
+                    continue;
+                }
+                let owner = controller.unwrap_or(OWNER_NONE);
+                for _ in 0..spawn_count {
+                    let velocity =
+                        Vector2::new(self.rng.gen_range(-3..=3), self.rng.gen_range(-7..=-1));
+                    spawn_requests.push(
+                        SpawnConfig::new(definition_id.clone())
+                            .with_position(center)
+                            .with_velocity(velocity)
+                            .with_owner(owner),
+                    );
+                }
+            }
+        }
+
+        if !particles.is_empty() {
+            self.apply_particle_commands(particles);
+        }
+
+        if !spawn_requests.is_empty() {
+            for config in spawn_requests {
+                if let Err(err) = self.spawn_object(config) {
+                    let _ = err;
+                }
+            }
+        }
+    }
+
+    fn build_material_particle_config(
+        &mut self,
+        normalized_name: &str,
+        material_index: i32,
+        splash_rate: i32,
+        center: Vector2,
+        affected_columns: &[(i32, i32)],
+    ) -> ParticleConfig {
+        const LEVEL: i32 = 60;
+        let position = if let Some(&(column, height)) = affected_columns.choose(&mut self.rng) {
+            FloatVector2::new(
+                column as f32 + self.rng.gen_range(-0.5..=0.5),
+                height as f32 + self.rng.gen_range(-0.5..=0.5),
+            )
+        } else {
+            FloatVector2::new(
+                center.x as f32 + self.rng.gen_range(-0.5..=0.5),
+                center.y as f32 + self.rng.gen_range(-0.5..=0.5),
+            )
+        };
+        let velocity = {
+            let x_offset = self.rng.gen_range(0..=LEVEL) as f32 - (LEVEL as f32 / 2.0);
+            let y_offset = self.rng.gen_range(0..=LEVEL) as f32 - LEVEL as f32;
+            FloatVector2::new(x_offset / 10.0, y_offset / 10.0)
+        };
+        let base_life = splash_rate.max(1);
+        let life = (base_life * 4).clamp(20, 240);
+        ParticleConfig {
+            definition_id: format!("material/pxs/{}", normalized_name),
+            position,
+            velocity,
+            life,
+            parameter_a: 0.0,
+            parameter_b: material_index,
+            layer: ParticleLayer::Global,
+        }
+    }
+
     fn apply_particle_commands(&mut self, commands: Vec<ParticleCommand>) {
         if commands.is_empty() {
             return;
@@ -9999,6 +10136,87 @@ mod tests {
         };
     }
     "#;
+
+    #[test]
+    fn blast_circle_emits_particles_for_blastable_materials() -> Result<(), EngineError> {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+            BlastFree=1
+            Blast2PXSRatio=2
+            SplashRate=15
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(7);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(17, 40, Some(earth)));
+
+        let result = engine
+            .blast_circle(Vector2::new(8, 40), 4, None)
+            .expect("blast applies");
+        let removed = result
+            .removed_by_material
+            .get(&earth)
+            .copied()
+            .unwrap_or_default();
+        assert!(removed > 0, "expected blast to remove material");
+
+        let snapshot = engine.snapshot();
+        assert!(
+            !snapshot.particles.is_empty(),
+            "expected blast to emit particles"
+        );
+        assert_eq!(snapshot.particles[0].definition_id, "material/pxs/earth");
+        Ok(())
+    }
+
+    #[test]
+    fn blast_circle_spawns_objects_for_material_reactions() -> Result<(), EngineError> {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Rock]
+            Name=Rock
+            Density=110
+            Friction=35
+            BlastFree=1
+            Blast2Object=GEM0
+            Blast2ObjectRatio=2
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let rock = materials.id_of("Rock").expect("rock exists");
+        let mut engine = Engine::with_seed(11);
+        engine.set_materials(materials);
+        engine
+            .register_definition(simple_definition("GEM0"))
+            .expect("gem definition registers");
+        engine.set_landscape(Landscape::flat_with_material(17, 40, Some(rock)));
+
+        let before = engine.snapshot().objects.len();
+        let result = engine
+            .blast_circle(Vector2::new(8, 40), 4, Some(1))
+            .expect("blast applies");
+        let removed = result
+            .removed_by_material
+            .get(&rock)
+            .copied()
+            .unwrap_or_default();
+        assert!(removed > 0, "expected blast to remove rock material");
+
+        let after = engine.snapshot().objects.len();
+        assert!(
+            after > before,
+            "expected blast to spawn objects for blast reaction"
+        );
+        Ok(())
+    }
 
     const PASSIVE_PLAYER_SCRIPT: &str = r#"
 global func Initialize(state, random)

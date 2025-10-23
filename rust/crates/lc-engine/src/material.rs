@@ -174,6 +174,9 @@ pub struct MaterialProperties {
     splash_rate: i32,
     dig_free: bool,
     blast_free: bool,
+    blast_to_object: Option<String>,
+    blast_to_object_ratio: Option<i32>,
+    blast_to_pxs_ratio: Option<i32>,
     wind_drift: i32,
     inflammable: i32,
     incindiary: i32,
@@ -216,6 +219,18 @@ impl MaterialProperties {
         let corrosive = definition.int("corrosive").unwrap_or(0);
         let corrode = definition.int("corrode").unwrap_or(0);
         let temp_conv_strength = definition.int("tempconvstrength").unwrap_or(0);
+        let blast_to_object = definition.value("blast2object").and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_ascii_uppercase())
+            }
+        });
+        let blast_to_object_ratio = definition
+            .int("blast2objectratio")
+            .filter(|ratio| *ratio > 0);
+        let blast_to_pxs_ratio = definition.int("blast2pxsratio").filter(|ratio| *ratio > 0);
         let in_mat_convert = definition.value("inmatconvert").and_then(|value| {
             let trimmed = value.trim();
             if trimmed.is_empty() {
@@ -257,6 +272,9 @@ impl MaterialProperties {
             splash_rate,
             dig_free,
             blast_free,
+            blast_to_object,
+            blast_to_object_ratio,
+            blast_to_pxs_ratio,
             wind_drift,
             inflammable,
             incindiary,
@@ -361,6 +379,18 @@ impl Material {
 
     pub fn inflammable(&self) -> i32 {
         self.properties.inflammable
+    }
+
+    pub fn blast_to_object_name(&self) -> Option<&str> {
+        self.properties.blast_to_object.as_deref()
+    }
+
+    pub fn blast_to_object_ratio(&self) -> Option<i32> {
+        self.properties.blast_to_object_ratio
+    }
+
+    pub fn blast_to_pxs_ratio(&self) -> Option<i32> {
+        self.properties.blast_to_pxs_ratio
     }
 
     pub fn color(&self) -> &[i32] {

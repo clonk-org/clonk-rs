@@ -148,7 +148,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 4. ✅ Port C4GameMessage for mission text and objectives — HUD now renders script-driven messages; decorative frames/portraits pending future polish
 
 ### Phase 3: Game Content & Polish
-1. ⚠️ Port full C4Landscape material modification system — DigFree terrain carving plus BlastFree/incineration parity landed; scenario scripts now drive landscape deformation via queued commands; PXS/particle emission still pending
+1. ✅ Port full C4Landscape material modification system — DigFree terrain carving plus BlastFree/incineration parity landed; Blast2Object + Blast2PXS reactions now emit definition-driven spawns and particles alongside scripted landscape commands
 2. Port C4Weather and C4Sky for atmosphere
 3. Port C4PXS particle system for effects
 4. Integrate real game assets (objects, scenarios, graphics, sounds)
@@ -190,7 +190,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ❌ No real audio (synthetic tones for missing sounds)
 - ⚠️ Message frames/portraits still missing (text-only rendering today)
-- ⚠️ Material runtime still misses mining reactions beyond DigFree and the Blast2Object/PXS pipelines — removal stats exist, but no particles or object spawns yet
+- ⚠️ Material runtime still misses mining reactions such as BlastShiftTo shifts, Dig2Object conversions, and particle-to-terrain feedback despite Blast2Object/PXS reactions now firing
 - ❌ No multiplayer lobby (transport exists but no game coordination)
 
 ---
