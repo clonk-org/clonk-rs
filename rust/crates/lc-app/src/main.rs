@@ -3369,6 +3369,9 @@ impl GameApp {
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(Some(path));
             audio.reset_sfx();
+            scenario_data.visit_definition_groups(|id, group| {
+                audio.register_definition_sounds(id, group);
+            });
         }
 
         if let Err(err) = scenario_data.apply(&mut self.engine) {
@@ -3540,6 +3543,13 @@ impl GameApp {
                     path.display()
                 )
             })?;
+            if let Some(audio) = self.audio.as_mut() {
+                audio.configure_scenario(Some(path));
+                audio.reset_sfx();
+                scenario_data.visit_definition_groups(|id, group| {
+                    audio.register_definition_sounds(id, group);
+                });
+            }
             scenario_data.apply(&mut self.engine).with_context(|| {
                 format!(
                     "failed to apply scenario `{}` from {}",

@@ -52,7 +52,7 @@
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 18,
+        "temperature": 17,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
@@ -64,10 +64,20 @@
           "r": 24,
           "g": 48,
           "b": 96
-        }
+        },
+        "season": 0,
+        "year_speed": 0,
+        "season_delay": 0,
+        "temperature_range": 30,
+        "lightning": 0,
+        "meteorite": 0,
+        "volcano": 0,
+        "earthquake": 0,
+        "precipitation_strength": 0,
+        "no_gamma": true
       },
       "wind_force": 9,
-      "ambient_temperature": 27,
+      "ambient_temperature": 26,
       "precipitation": 42,
       "sky_color": {
         "r": 24,
@@ -75,6 +85,8 @@
         "b": 96
       }
     },
+    "sky": null,
+    "weather_events": [],
     "global_effects": [],
     "particles": [],
     "players": [],
@@ -676,7 +688,7 @@
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 18,
+        "temperature": 16,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
@@ -688,10 +700,20 @@
           "r": 24,
           "g": 48,
           "b": 96
-        }
+        },
+        "season": 0,
+        "year_speed": 0,
+        "season_delay": 0,
+        "temperature_range": 30,
+        "lightning": 0,
+        "meteorite": 0,
+        "volcano": 0,
+        "earthquake": 0,
+        "precipitation_strength": 0,
+        "no_gamma": true
       },
       "wind_force": 10,
-      "ambient_temperature": 29,
+      "ambient_temperature": 27,
       "precipitation": 42,
       "sky_color": {
         "r": 24,
@@ -699,6 +721,8 @@
         "b": 96
       }
     },
+    "sky": null,
+    "weather_events": [],
     "global_effects": [],
     "particles": [],
     "players": [],
@@ -1300,7 +1324,7 @@
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 18,
+        "temperature": 15,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
@@ -1312,10 +1336,20 @@
           "r": 24,
           "g": 48,
           "b": 96
-        }
+        },
+        "season": 0,
+        "year_speed": 0,
+        "season_delay": 0,
+        "temperature_range": 30,
+        "lightning": 0,
+        "meteorite": 0,
+        "volcano": 0,
+        "earthquake": 0,
+        "precipitation_strength": 0,
+        "no_gamma": true
       },
       "wind_force": 9,
-      "ambient_temperature": 30,
+      "ambient_temperature": 27,
       "precipitation": 42,
       "sky_color": {
         "r": 24,
@@ -1323,6 +1357,8 @@
         "b": 96
       }
     },
+    "sky": null,
+    "weather_events": [],
     "global_effects": [],
     "particles": [],
     "players": [],
@@ -1924,7 +1960,7 @@
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 18,
+        "temperature": 14,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
@@ -1936,10 +1972,20 @@
           "r": 24,
           "g": 48,
           "b": 96
-        }
+        },
+        "season": 0,
+        "year_speed": 0,
+        "season_delay": 0,
+        "temperature_range": 30,
+        "lightning": 0,
+        "meteorite": 0,
+        "volcano": 0,
+        "earthquake": 0,
+        "precipitation_strength": 0,
+        "no_gamma": true
       },
       "wind_force": 7,
-      "ambient_temperature": 29,
+      "ambient_temperature": 25,
       "precipitation": 42,
       "sky_color": {
         "r": 24,
@@ -1947,6 +1993,8 @@
         "b": 96
       }
     },
+    "sky": null,
+    "weather_events": [],
     "global_effects": [],
     "particles": [],
     "players": [],
@@ -2548,7 +2596,7 @@
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 18,
+        "temperature": 13,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
@@ -2560,10 +2608,20 @@
           "r": 24,
           "g": 48,
           "b": 96
-        }
+        },
+        "season": 0,
+        "year_speed": 0,
+        "season_delay": 0,
+        "temperature_range": 30,
+        "lightning": 0,
+        "meteorite": 0,
+        "volcano": 0,
+        "earthquake": 0,
+        "precipitation_strength": 0,
+        "no_gamma": true
       },
       "wind_force": 6,
-      "ambient_temperature": 27,
+      "ambient_temperature": 22,
       "precipitation": 42,
       "sky_color": {
         "r": 24,
@@ -2571,6 +2629,8 @@
         "b": 96
       }
     },
+    "sky": null,
+    "weather_events": [],
     "global_effects": [],
     "particles": [],
     "players": [],
@@ -3172,7 +3232,7 @@
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 18,
+        "temperature": 12,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
@@ -3184,10 +3244,20 @@
           "r": 24,
           "g": 48,
           "b": 96
-        }
+        },
+        "season": 0,
+        "year_speed": 0,
+        "season_delay": 0,
+        "temperature_range": 30,
+        "lightning": 0,
+        "meteorite": 0,
+        "volcano": 0,
+        "earthquake": 0,
+        "precipitation_strength": 0,
+        "no_gamma": true
       },
       "wind_force": 5,
-      "ambient_temperature": 24,
+      "ambient_temperature": 18,
       "precipitation": 42,
       "sky_color": {
         "r": 24,
@@ -3195,6 +3265,8 @@
         "b": 96
       }
     },
+    "sky": null,
+    "weather_events": [],
     "global_effects": [],
     "particles": [],
     "players": [],
@@ -3796,7 +3868,7 @@
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 18,
+        "temperature": 11,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
@@ -3808,10 +3880,20 @@
           "r": 24,
           "g": 48,
           "b": 96
-        }
+        },
+        "season": 0,
+        "year_speed": 0,
+        "season_delay": 0,
+        "temperature_range": 30,
+        "lightning": 0,
+        "meteorite": 0,
+        "volcano": 0,
+        "earthquake": 0,
+        "precipitation_strength": 0,
+        "no_gamma": true
       },
       "wind_force": 4,
-      "ambient_temperature": 20,
+      "ambient_temperature": 13,
       "precipitation": 42,
       "sky_color": {
         "r": 24,
@@ -3819,6 +3901,8 @@
         "b": 96
       }
     },
+    "sky": null,
+    "weather_events": [],
     "global_effects": [],
     "particles": [],
     "players": [],
@@ -4420,7 +4504,7 @@
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 18,
+        "temperature": 10,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
@@ -4432,10 +4516,20 @@
           "r": 24,
           "g": 48,
           "b": 96
-        }
+        },
+        "season": 0,
+        "year_speed": 0,
+        "season_delay": 0,
+        "temperature_range": 30,
+        "lightning": 0,
+        "meteorite": 0,
+        "volcano": 0,
+        "earthquake": 0,
+        "precipitation_strength": 0,
+        "no_gamma": true
       },
       "wind_force": 5,
-      "ambient_temperature": 16,
+      "ambient_temperature": 8,
       "precipitation": 42,
       "sky_color": {
         "r": 24,
@@ -4443,6 +4537,8 @@
         "b": 96
       }
     },
+    "sky": null,
+    "weather_events": [],
     "global_effects": [],
     "particles": [],
     "players": [],

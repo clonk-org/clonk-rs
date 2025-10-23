@@ -3,10 +3,12 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use image::{load_from_memory, ImageError};
 use lc_resources::{
     ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap,
-    DefinitionError as ResourceDefinitionError, Group, GroupError,
+    DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
     ResourceDefinition as ResourceDefinitionData,
 };
 use serde::de::Error as _;
@@ -16,7 +18,7 @@ use serde::Deserialize;
 use crate::{
     action::ActionSpec, ActionState, Definition, EffectState, Engine, EngineError,
     EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings,
-    RgbColor, SpawnConfig, Vector2,
+    RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, Vector2,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +61,16 @@ pub enum ScenarioError {
     InvalidPhysics(String),
     #[error("definition `{id}` has invalid movement settings: {detail}")]
     InvalidMovement { id: String, detail: String },
+    #[error("sky surface `{path}` is missing from the scenario")]
+    SkySurfaceMissing { path: PathBuf },
+    #[error("failed to decode sky surface `{path}`: {source}")]
+    SkySurfaceDecode {
+        path: PathBuf,
+        #[source]
+        source: ImageError,
+    },
+    #[error("invalid sky configuration: {0}")]
+    InvalidSky(String),
     #[error("engine error while applying scenario: {0}")]
     Engine(#[from] EngineError),
 }
@@ -72,6 +84,13 @@ struct ScenarioDefinition {
     crew_member: bool,
     movement: MovementProfile,
     category: i32,
+    resource_group: Option<Group>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkyConfig {
+    pub settings: SkySettings,
+    pub surface: Option<Arc<GraphicsImage>>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +122,7 @@ pub struct Scenario {
     landscape: Option<Landscape>,
     physics: Option<PhysicsSettings>,
     environment: Option<EnvironmentSettings>,
+    sky: Option<SkyConfig>,
     script: Option<ScenarioScriptSource>,
 }
 
@@ -187,6 +207,7 @@ impl Scenario {
             landscape: None,
             physics: None,
             environment: None,
+            sky: None,
             script,
         })
     }
@@ -203,6 +224,17 @@ impl Scenario {
         self.ground_height_hint
     }
 
+    pub fn visit_definition_groups<F>(&self, mut f: F)
+    where
+        F: FnMut(&str, &Group),
+    {
+        for definition in &self.definitions {
+            if let Some(group) = &definition.resource_group {
+                f(&definition.id, group);
+            }
+        }
+    }
+
     pub fn has_initial_objects(&self) -> bool {
         !self.initial_spawns.is_empty()
     }
@@ -213,6 +245,10 @@ impl Scenario {
 
     pub fn environment(&self) -> Option<EnvironmentSettings> {
         self.environment
+    }
+
+    pub fn sky(&self) -> Option<&SkyConfig> {
+        self.sky.as_ref()
     }
 
     pub fn apply(&self, engine: &mut Engine) -> Result<Vec<ObjectId>, ScenarioError> {
@@ -228,6 +264,11 @@ impl Scenario {
         }
 
         engine.set_environment(self.environment.unwrap_or_default());
+        if let Some(sky) = &self.sky {
+            engine.set_sky(sky.settings.clone());
+        } else {
+            engine.clear_sky();
+        }
 
         for definition in &self.definitions {
             let name = definition.name.as_deref().unwrap_or(&definition.id);
@@ -353,6 +394,7 @@ impl Scenario {
                 crew_member,
                 movement: movement_profile,
                 category: normalized_category,
+                resource_group: None,
             });
         }
 
@@ -486,6 +528,10 @@ impl Scenario {
             None => None,
         };
         let environment = manifest.environment.map(EnvironmentManifest::into_settings);
+        let sky = match manifest.sky {
+            Some(spec) => Some(spec.into_config(group)?),
+            None => None,
+        };
         let ground_height_hint = manifest.ground_height.or_else(|| {
             landscape
                 .as_ref()
@@ -501,6 +547,7 @@ impl Scenario {
             landscape,
             physics,
             environment,
+            sky,
             script,
         })
     }
@@ -685,7 +732,10 @@ fn collect_definitions_from_group(
         let resource = ResourceDefinitionData::load(group)?;
         let id = resource.core.id.clone();
         if seen_ids.insert(id.clone()) {
-            output.push(scenario_definition_from_resource(resource));
+            output.push(scenario_definition_from_resource(
+                resource,
+                Some(group.clone()),
+            ));
         }
     }
 
@@ -699,7 +749,10 @@ fn collect_definitions_from_group(
     Ok(())
 }
 
-fn scenario_definition_from_resource(resource: ResourceDefinitionData) -> ScenarioDefinition {
+fn scenario_definition_from_resource(
+    resource: ResourceDefinitionData,
+    source_group: Option<Group>,
+) -> ScenarioDefinition {
     let core = resource.core;
     let script = resource.script;
     let actions = resource.action_map.map(|map| convert_action_map(&map));
@@ -712,6 +765,7 @@ fn scenario_definition_from_resource(resource: ResourceDefinitionData) -> Scenar
         crew_member: core.crew_member,
         movement: MovementProfile::default(),
         category: core.category,
+        resource_group: source_group,
     }
 }
 
@@ -797,6 +851,8 @@ struct ScenarioManifest {
     physics: Option<PhysicsManifest>,
     #[serde(default)]
     environment: Option<EnvironmentManifest>,
+    #[serde(default)]
+    sky: Option<SkyManifest>,
     #[serde(default)]
     script: Option<String>,
 }
@@ -1244,6 +1300,48 @@ struct EnvironmentManifest {
     precipitation: Option<i32>,
     #[serde(default)]
     sky_color: Option<ColorSpec>,
+    #[serde(default)]
+    season: Option<i32>,
+    #[serde(default)]
+    year_speed: Option<i32>,
+    #[serde(default)]
+    temperature_range: Option<i32>,
+    #[serde(default)]
+    lightning: Option<i32>,
+    #[serde(default)]
+    meteorite: Option<i32>,
+    #[serde(default)]
+    volcano: Option<i32>,
+    #[serde(default)]
+    earthquake: Option<i32>,
+    #[serde(default)]
+    precipitation_strength: Option<i32>,
+    #[serde(default)]
+    gamma_enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkyManifest {
+    #[serde(default)]
+    surface: Option<String>,
+    #[serde(default)]
+    fade_top: Option<ColorSpec>,
+    #[serde(default)]
+    fade_bottom: Option<ColorSpec>,
+    #[serde(default)]
+    scroll_mode: Option<String>,
+    #[serde(default)]
+    parallax_x: Option<i32>,
+    #[serde(default)]
+    parallax_y: Option<i32>,
+    #[serde(default)]
+    xdir: Option<f32>,
+    #[serde(default)]
+    ydir: Option<f32>,
+    #[serde(default)]
+    modulation: Option<ColorSpec>,
+    #[serde(default)]
+    back_color: Option<ColorSpec>,
 }
 
 #[derive(Debug)]
@@ -1367,12 +1465,140 @@ impl EnvironmentManifest {
         }
         if let Some(precipitation) = self.precipitation {
             settings = settings.with_precipitation(precipitation);
+            if self.precipitation_strength.is_none() {
+                settings = settings.with_precipitation_strength(precipitation);
+            }
         }
         if let Some(color) = self.sky_color {
             settings = settings.with_sky_color(color.into_color());
         }
+        if let Some(season) = self.season {
+            settings = settings.with_season(season);
+        }
+        if let Some(year_speed) = self.year_speed {
+            settings = settings.with_year_speed(year_speed);
+        }
+        if let Some(range) = self.temperature_range {
+            settings = settings.with_temperature_range(range);
+        }
+        if let Some(lightning) = self.lightning {
+            settings = settings.with_lightning(lightning);
+        }
+        if let Some(meteorite) = self.meteorite {
+            settings = settings.with_meteorite(meteorite);
+        }
+        if let Some(volcano) = self.volcano {
+            settings = settings.with_volcano(volcano);
+        }
+        if let Some(earthquake) = self.earthquake {
+            settings = settings.with_earthquake(earthquake);
+        }
+        if let Some(strength) = self.precipitation_strength {
+            settings = settings.with_precipitation_strength(strength);
+        }
+        if let Some(enabled) = self.gamma_enabled {
+            settings = if enabled {
+                settings.with_gamma_enabled()
+            } else {
+                settings.with_gamma_disabled()
+            };
+        }
         settings
     }
+}
+
+impl SkyManifest {
+    fn into_config(self, group: &Group) -> Result<SkyConfig, ScenarioError> {
+        let mut settings = SkySettings::default();
+        let mut surface_image = None;
+
+        if let Some(surface_name) = self.surface {
+            let path = PathBuf::from(&surface_name);
+            let bytes = match group.read_file(&path) {
+                Ok(bytes) => bytes,
+                Err(GroupError::EntryNotFound(_)) => {
+                    return Err(ScenarioError::SkySurfaceMissing { path })
+                }
+                Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(ScenarioError::SkySurfaceMissing { path })
+                }
+                Err(error) => return Err(ScenarioError::Resources(error)),
+            };
+
+            let decoded =
+                load_from_memory(&bytes).map_err(|source| ScenarioError::SkySurfaceDecode {
+                    path: path.clone(),
+                    source,
+                })?;
+            let rgba = decoded.to_rgba8();
+            let (width, height) = rgba.dimensions();
+            let pixels = rgba.into_raw();
+            settings = settings.with_surface(width, height);
+            surface_image = Some(Arc::new(GraphicsImage::new(width, height, pixels)));
+        }
+
+        if let Some(color) = self.fade_top {
+            settings.fade_top = color.into_color();
+        }
+        if let Some(color) = self.fade_bottom {
+            settings.fade_bottom = color.into_color();
+        }
+        if let Some(mode) = self.scroll_mode {
+            settings.parallax_mode = parse_scroll_mode(&mode)?;
+        }
+        if let Some(value) = self.parallax_x {
+            settings.parallax_x = value;
+        }
+        if let Some(value) = self.parallax_y {
+            settings.parallax_y = value;
+        }
+        if let Some(value) = self.xdir {
+            settings.base_xdir = value;
+        }
+        if let Some(value) = self.ydir {
+            settings.base_ydir = value;
+        }
+        if let Some(color) = self.modulation {
+            settings.modulation = Some(rgb_to_bgr_u32(color.into_color()));
+        }
+        if let Some(color) = self.back_color {
+            settings.back_color = Some(rgb_to_bgr_u32(color.into_color()));
+        }
+
+        Ok(SkyConfig {
+            settings,
+            surface: surface_image,
+        })
+    }
+}
+
+fn parse_scroll_mode(value: &str) -> Result<SkyParallaxMode, ScenarioError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(SkyParallaxMode::Fixed);
+    }
+    if let Ok(code) = trimmed.parse::<i32>() {
+        return match code {
+            0 => Ok(SkyParallaxMode::Fixed),
+            1 => Ok(SkyParallaxMode::Wind),
+            2 => Ok(SkyParallaxMode::Parallax),
+            other => Err(ScenarioError::InvalidSky(format!(
+                "unknown sky scroll mode code {other}"
+            ))),
+        };
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "fixed" => Ok(SkyParallaxMode::Fixed),
+        "wind" => Ok(SkyParallaxMode::Wind),
+        "parallax" => Ok(SkyParallaxMode::Parallax),
+        other => Err(ScenarioError::InvalidSky(format!(
+            "unknown sky scroll mode `{other}`"
+        ))),
+    }
+}
+
+fn rgb_to_bgr_u32(color: RgbColor) -> u32 {
+    u32::from(color.b) | (u32::from(color.g) << 8) | (u32::from(color.r) << 16)
 }
 
 #[cfg(test)]
@@ -2106,6 +2332,7 @@ global func Step(state, frame, random)
                 crew_member: false,
                 movement: MovementProfile::default(),
                 category: crate::DEFAULT_CATEGORY,
+                resource_group: None,
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
@@ -2115,6 +2342,7 @@ global func Step(state, frame, random)
             landscape: None,
             physics: None,
             environment: None,
+            sky: None,
             script: Some(ScenarioScriptSource {
                 name: "Script.c".into(),
                 source: scenario_script.to_string(),
@@ -2169,6 +2397,7 @@ global func Step(state, frame, random)
                 crew_member: false,
                 movement: MovementProfile::default(),
                 category: crate::DEFAULT_CATEGORY,
+                resource_group: None,
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
@@ -2178,6 +2407,7 @@ global func Step(state, frame, random)
             landscape: None,
             physics: None,
             environment: None,
+            sky: None,
             script: Some(ScenarioScriptSource {
                 name: "Script.c".into(),
                 source: scenario_script.to_string(),

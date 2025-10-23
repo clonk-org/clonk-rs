@@ -81,7 +81,7 @@
   - ✅ Sandbox fallback now loads install definitions (Clonk et al.) instead of the synthetic Walker
   - ✅ DefCore now surfaces value/mass data (and picture rect metadata) to the engine; inventory UI shows per-item stats
   - ✅ Definition graphics pipeline now decodes `Graphics*.png` assets, caches picture sprites in the engine, and feeds the frontend sprite map so objects render with real icons
-  - ⚠️ Definition sound library registration still pending; missing samples continue to fall back to synthetic tones
+  - ✅ Definition sound library registration now feeds definition groups into the audio resolver so real samples play instead of synthetic tone fallbacks
 
 - ⚠️  **Graphics Resources** (C4GraphicsResource.cpp 🔗 Minimal)
   - Progress: Fonts, startup backgrounds, and button textures now sourced from Graphics.c4g; walker sprite mapped from crew assets
@@ -187,7 +187,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ❌ `cargo run` shows **demo only** (window title: "LegacyClonk (Rust preview)")
 - ⚠️ Definition runtime still incomplete (no scripted context menus, limited metadata, missing graphics/sound wiring)
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
-- ❌ No real audio (synthetic tones for missing sounds)
+- ⚠️ Audio assets still incomplete (missing samples fall back to synthesized tones even though definition libraries now register)
 - ⚠️ Message frames/portraits still missing (text-only rendering today)
 - ⚠️ Material runtime still misses mining reactions such as BlastShiftTo shifts, Dig2Object conversions, and particle-to-terrain feedback despite Blast2Object/PXS reactions now firing
 - ❌ No multiplayer lobby (transport exists but no game coordination)
