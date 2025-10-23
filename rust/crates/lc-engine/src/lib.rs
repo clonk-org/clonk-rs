@@ -15,6 +15,7 @@ mod pathfinder;
 mod player;
 mod record;
 pub mod scenario;
+mod sky;
 mod transfer;
 
 pub use action::{
@@ -42,7 +43,8 @@ pub use message::{
 pub use pathfinder::{PathFinder, PathWaypoint};
 pub use player::{Player, PlayerConfig, PlayerState, PlayerStatus, PlayerViewport};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
-pub use scenario::{Scenario, ScenarioError};
+pub use scenario::{Scenario, ScenarioError, SkyConfig};
+pub use sky::{SkyFrame, SkyParallaxMode, SkySettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuCommandKind {
@@ -80,6 +82,7 @@ use compat::{
     HostWorldObject, PhysicsDelta,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
+use material::MaterialReactionKind;
 use message::{MessageCommand, MessageManager, PersistedMessage};
 use ocf::NORMAL as OCF_NORMAL;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -97,6 +100,7 @@ use lc_script::{DebuggerHooks, Engine as ScriptEngine, ScriptError, Value};
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sky::SkyState;
 use thiserror::Error;
 use transfer::{TransferZoneCommand, TransferZoneRect, TransferZoneState, TransferZoneTable};
 
@@ -346,6 +350,11 @@ impl RgbColor {
     pub const fn new(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum WeatherEvent {
+    Lightning { position: i32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -611,6 +620,39 @@ impl ActiveParticle {
 
     fn snapshot(&self) -> ParticleSnapshot {
         self.snapshot.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MaterialParticle {
+    material: MaterialId,
+    position: FloatVector2,
+    velocity: FloatVector2,
+}
+
+impl MaterialParticle {
+    fn new(material: MaterialId, position: FloatVector2, velocity: FloatVector2) -> Self {
+        Self {
+            material,
+            position,
+            velocity,
+        }
+    }
+
+    fn snapshot(&self, materials: &MaterialSet) -> ParticleSnapshot {
+        let definition_id = materials
+            .get_by_id(self.material)
+            .map(|material| format!("material/pxs/{}", material.normalized_name()))
+            .unwrap_or_else(|| "material/pxs/unknown".to_string());
+        ParticleSnapshot {
+            definition_id,
+            position: self.position,
+            velocity: self.velocity,
+            life: 0,
+            parameter_a: 0.0,
+            parameter_b: self.material.index() as i32,
+            layer: ParticleLayer::Global,
+        }
     }
 }
 
@@ -986,11 +1028,39 @@ pub struct EnvironmentSettings {
     pub precipitation: i32,
     #[serde(default)]
     pub sky_color: Option<RgbColor>,
+    #[serde(default)]
+    pub season: i32,
+    #[serde(default)]
+    pub year_speed: i32,
+    #[serde(default)]
+    pub season_delay: i32,
+    #[serde(default = "EnvironmentSettings::default_temperature_range")]
+    pub temperature_range: i32,
+    #[serde(default)]
+    pub lightning: i32,
+    #[serde(default)]
+    pub meteorite: i32,
+    #[serde(default)]
+    pub volcano: i32,
+    #[serde(default)]
+    pub earthquake: i32,
+    #[serde(default)]
+    pub precipitation_strength: i32,
+    #[serde(default = "EnvironmentSettings::default_no_gamma")]
+    pub no_gamma: bool,
 }
 
 impl EnvironmentSettings {
     pub const TIME_CYCLE: u16 = 2400;
     const MAX_TIME_SPEED: i16 = 120;
+
+    const fn default_temperature_range() -> i32 {
+        30
+    }
+
+    const fn default_no_gamma() -> bool {
+        true
+    }
 
     pub const fn new(wind: i32) -> Self {
         Self {
@@ -1010,6 +1080,16 @@ impl EnvironmentSettings {
             time_speed: 0,
             precipitation: 0,
             sky_color: None,
+            season: 0,
+            year_speed: 0,
+            season_delay: 0,
+            temperature_range: Self::default_temperature_range(),
+            lightning: 0,
+            meteorite: 0,
+            volcano: 0,
+            earthquake: 0,
+            precipitation_strength: 0,
+            no_gamma: Self::default_no_gamma(),
         }
     }
 
@@ -1082,6 +1162,56 @@ impl EnvironmentSettings {
         self
     }
 
+    pub fn with_season(mut self, season: i32) -> Self {
+        self.season = season.clamp(0, 100);
+        self
+    }
+
+    pub fn with_year_speed(mut self, year_speed: i32) -> Self {
+        self.year_speed = year_speed;
+        self
+    }
+
+    pub fn with_temperature_range(mut self, range: i32) -> Self {
+        self.temperature_range = range.clamp(0, 100);
+        self
+    }
+
+    pub fn with_lightning(mut self, level: i32) -> Self {
+        self.lightning = level.clamp(0, 100);
+        self
+    }
+
+    pub fn with_meteorite(mut self, level: i32) -> Self {
+        self.meteorite = level.clamp(0, 100);
+        self
+    }
+
+    pub fn with_volcano(mut self, level: i32) -> Self {
+        self.volcano = level.clamp(0, 100);
+        self
+    }
+
+    pub fn with_earthquake(mut self, level: i32) -> Self {
+        self.earthquake = level.clamp(0, 100);
+        self
+    }
+
+    pub fn with_precipitation_strength(mut self, strength: i32) -> Self {
+        self.precipitation_strength = strength.clamp(-100, 100);
+        self
+    }
+
+    pub fn with_gamma_enabled(mut self) -> Self {
+        self.no_gamma = false;
+        self
+    }
+
+    pub fn with_gamma_disabled(mut self) -> Self {
+        self.no_gamma = true;
+        self
+    }
+
     fn default_wind_update_interval(period: u32) -> u16 {
         if period == 0 {
             return 60;
@@ -1106,6 +1236,14 @@ impl EnvironmentSettings {
     pub fn resolved_sky_color(&self, ambient_temperature: i32) -> RgbColor {
         self.sky_color
             .unwrap_or_else(|| Self::dynamic_sky_color(self.time_of_day, ambient_temperature))
+    }
+
+    pub fn season_gamma(&self) -> Option<(RgbColor, RgbColor, RgbColor)> {
+        if self.no_gamma {
+            None
+        } else {
+            Some(Self::compute_season_gamma(self.season, self.temperature))
+        }
     }
 
     fn dynamic_sky_color(time_of_day: u16, ambient_temperature: i32) -> RgbColor {
@@ -1135,6 +1273,60 @@ impl EnvironmentSettings {
         RgbColor::new(channel[0], channel[1], channel[2])
     }
 
+    fn compute_season_gamma(season: i32, temperature: i32) -> (RgbColor, RgbColor, RgbColor) {
+        const SEASON_COLORS: [[u32; 3]; 4] = [
+            [0x000000, 0x7f7f90, 0xefefff],
+            [0x070f00, 0x90a07f, 0xffffdf],
+            [0x000000, 0x808080, 0xffffff],
+            [0x0f0700, 0xa08067, 0xffffdf],
+        ];
+
+        let mut season_index = season.rem_euclid(100);
+        if season_index < 0 {
+            season_index += 100;
+        }
+        let primary = ((season_index / 25) % 4) as usize;
+        let secondary = (primary + 1) % 4;
+
+        let mut offset = season_index % 25;
+        offset = offset.clamp(5, 19);
+        let offset_primary = offset - 5;
+        let offset_secondary = 15 - offset_primary;
+
+        let mut ramp = [0u32; 3];
+        for (idx, color) in ramp.iter_mut().enumerate() {
+            let mut accumulated = 0u32;
+            for channel_shift in [0usize, 8, 16] {
+                let c1 = ((SEASON_COLORS[primary][idx] >> channel_shift) & 0xff) as i32;
+                let c2 = ((SEASON_COLORS[secondary][idx] >> channel_shift) & 0xff) as i32;
+                let mut value = (c1 * offset_secondary + c2 * offset_primary) / 15;
+                if temperature < 0 {
+                    if channel_shift == 0 {
+                        value -= temperature / 2;
+                    } else {
+                        value += temperature / 2;
+                    }
+                }
+                let value = value.clamp(0, 255) as u32;
+                accumulated |= value << channel_shift;
+            }
+            *color = accumulated;
+        }
+
+        (
+            Self::color_from_bgr(ramp[0]),
+            Self::color_from_bgr(ramp[1]),
+            Self::color_from_bgr(ramp[2]),
+        )
+    }
+
+    fn color_from_bgr(value: u32) -> RgbColor {
+        let r = ((value >> 16) & 0xff) as u8;
+        let g = ((value >> 8) & 0xff) as u8;
+        let b = (value & 0xff) as u8;
+        RgbColor::new(r, g, b)
+    }
+
     pub fn ambient_temperature(&self, frame: u64) -> i32 {
         let base = self.temperature.saturating_add(self.climate);
         if self.temperature_variation == 0 || self.temperature_period == 0 {
@@ -1156,8 +1348,11 @@ impl EnvironmentSettings {
 
     pub fn advance_frame(&mut self, rng: &mut ChaCha8Rng) {
         self.refresh_runtime_fields();
+        self.update_season();
+        self.update_temperature_from_season();
         self.update_wind(rng);
         self.advance_time_of_day();
+        self.update_precipitation_runtime();
     }
 
     pub fn time_of_day(&self) -> u16 {
@@ -1208,6 +1403,44 @@ impl EnvironmentSettings {
         let next = (i32::from(self.time_of_day) + i32::from(self.time_speed))
             .rem_euclid(i32::from(Self::TIME_CYCLE));
         self.time_of_day = next as u16;
+    }
+
+    fn update_season(&mut self) {
+        if self.year_speed == 0 {
+            return;
+        }
+        self.season_delay = self.season_delay.saturating_add(self.year_speed);
+        while self.season_delay >= 200 {
+            self.season_delay -= 200;
+            self.season = (self.season + 1).rem_euclid(100);
+        }
+        while self.season_delay <= -200 {
+            self.season_delay += 200;
+            self.season = (self.season - 1).rem_euclid(100);
+        }
+        if self.season < 0 {
+            self.season += 100;
+        }
+    }
+
+    fn update_temperature_from_season(&mut self) {
+        if self.temperature_range <= 0 {
+            return;
+        }
+        let season_angle = (self.season.rem_euclid(100) as f32 / 100.0) * core::f32::consts::TAU;
+        let delta = (self.temperature_range as f32 * season_angle.cos()).round() as i32;
+        let target = self.climate.saturating_sub(delta);
+        if self.temperature < target {
+            self.temperature = self.temperature.saturating_add(1);
+        } else if self.temperature > target {
+            self.temperature = self.temperature.saturating_sub(1);
+        }
+    }
+
+    fn update_precipitation_runtime(&mut self) {
+        if self.precipitation_strength != 0 {
+            self.precipitation = self.precipitation_strength;
+        }
     }
 
     fn update_wind(&mut self, rng: &mut ChaCha8Rng) {
@@ -2367,6 +2600,10 @@ pub struct SimulationSnapshot {
     pub objects: Vec<ObjectSnapshot>,
     #[serde(default)]
     pub environment: EnvironmentFrame,
+    #[serde(default)]
+    pub sky: Option<SkyFrame>,
+    #[serde(default)]
+    pub weather_events: Vec<WeatherEvent>,
     #[serde(default)]
     pub global_effects: Vec<EffectState>,
     #[serde(default)]
@@ -3991,8 +4228,11 @@ pub struct Engine {
     landscape: Option<Landscape>,
     physics: PhysicsSettings,
     environment: EnvironmentSettings,
+    sky: Option<SkyState>,
     global_effects: Vec<EffectState>,
     particles: Vec<ActiveParticle>,
+    material_particles: Vec<MaterialParticle>,
+    weather_events: Vec<WeatherEvent>,
     scenario_script: Option<ScenarioScript>,
     players: HashMap<i32, Player>,
     crew_selection: HashMap<i32, CrewSelection>,
@@ -4338,8 +4578,11 @@ impl Engine {
             landscape: None,
             physics: PhysicsSettings::default(),
             environment: EnvironmentSettings::default(),
+            sky: None,
             global_effects: Vec::new(),
             particles: Vec::new(),
+            material_particles: Vec::new(),
+            weather_events: Vec::new(),
             scenario_script: None,
             players: HashMap::new(),
             crew_selection: HashMap::new(),
@@ -4588,6 +4831,7 @@ impl Engine {
 
     pub fn clear_landscape(&mut self) {
         self.landscape = None;
+        self.material_particles.clear();
     }
 
     pub fn landscape(&self) -> Option<&Landscape> {
@@ -4628,6 +4872,18 @@ impl Engine {
         let mut environment = environment;
         environment.refresh_runtime_fields();
         self.environment = environment;
+    }
+
+    pub fn set_sky(&mut self, settings: SkySettings) {
+        self.sky = Some(SkyState::new(settings));
+    }
+
+    pub fn clear_sky(&mut self) {
+        self.sky = None;
+    }
+
+    pub fn sky_settings(&self) -> Option<&SkySettings> {
+        self.sky.as_ref().map(SkyState::settings)
     }
 
     pub fn team_home_base_rule(&self) -> bool {
@@ -5282,11 +5538,39 @@ impl Engine {
         }
     }
 
+    fn tick_weather_events(&mut self, frame: u64) {
+        if frame % 10 != 0 {
+            return;
+        }
+
+        if self.environment.lightning > 0
+            && self.rng.gen_range(0..35) == 0
+            && self.rng.gen_range(0..100) < self.environment.lightning
+        {
+            if let Some(width) = self
+                .landscape
+                .as_ref()
+                .map(|landscape| landscape.width() as i32)
+            {
+                if width > 0 {
+                    let position = self.rng.gen_range(0..width);
+                    self.weather_events
+                        .push(WeatherEvent::Lightning { position });
+                }
+            }
+        }
+    }
+
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
         self.frame += 1;
         let frame = self.frame;
+        self.tick_material_particles();
         self.tick_particles();
+        self.weather_events.clear();
         self.environment.advance_frame(&mut self.rng);
+        if let Some(sky) = &mut self.sky {
+            sky.advance(&self.environment);
+        }
         let ambient_temperature = self.environment.ambient_temperature(self.frame);
         self.apply_landscape_temperature_conversions(ambient_temperature);
         self.tick_player_systems();
@@ -5318,6 +5602,7 @@ impl Engine {
         }
         let mut spawn_requests = Vec::new();
         self.tick_global_effects();
+        self.tick_weather_events(frame);
         for idx in 0..self.objects.len() {
             let definition_id = self.objects[idx].definition_id.clone();
             let previous_action_state = self.objects[idx].state.action.clone();
@@ -6187,11 +6472,16 @@ impl Engine {
             objects.push(object.snapshot(library));
         }
         objects.sort_by_key(|object| object.id);
-        let particles: Vec<_> = self
+        let mut particles: Vec<_> = self
             .particles
             .iter()
             .map(ActiveParticle::snapshot)
             .collect();
+        particles.extend(
+            self.material_particles
+                .iter()
+                .map(|particle| particle.snapshot(&self.materials)),
+        );
         let crew_selection = self
             .crew_selection
             .iter()
@@ -6212,6 +6502,8 @@ impl Engine {
             precipitation: self.environment.precipitation(),
             sky_color: Some(sky_color),
         };
+        let sky_snapshot = self.sky.as_ref().map(SkyState::snapshot);
+        let weather_events = self.weather_events.clone();
         let mut owners: Vec<_> = self
             .players
             .keys()
@@ -6308,6 +6600,8 @@ impl Engine {
             physics: Some(self.physics),
             objects,
             environment,
+            sky: sky_snapshot,
+            weather_events,
             global_effects: self.global_effects.clone(),
             particles,
             players: player_states,
@@ -6363,11 +6657,16 @@ impl Engine {
         let mut eliminated_crew_owners: Vec<_> =
             self.eliminated_crew_owners.iter().cloned().collect();
         eliminated_crew_owners.sort_unstable();
-        let particles: Vec<_> = self
+        let mut particles: Vec<_> = self
             .particles
             .iter()
             .map(ActiveParticle::snapshot)
             .collect();
+        particles.extend(
+            self.material_particles
+                .iter()
+                .map(|particle| particle.snapshot(&self.materials)),
+        );
         let mut players: Vec<_> = self.players.values().map(Player::to_state).collect();
         players.sort_unstable_by_key(|player| player.id);
 
@@ -6411,12 +6710,26 @@ impl Engine {
         self.rng = state.rng.clone();
         self.objects.clear();
         self.global_effects = state.global_effects.clone();
-        self.particles = state
-            .particles
-            .iter()
-            .cloned()
-            .map(ActiveParticle::from_snapshot)
-            .collect();
+        self.particles.clear();
+        self.material_particles.clear();
+        for snapshot in &state.particles {
+            if snapshot
+                .definition_id
+                .starts_with("material/pxs/")
+                && snapshot.parameter_b >= 0
+            {
+                if let Some(material) = MaterialId::new(snapshot.parameter_b as usize) {
+                    self.material_particles.push(MaterialParticle::new(
+                        material,
+                        snapshot.position,
+                        snapshot.velocity,
+                    ));
+                }
+                continue;
+            }
+            self.particles
+                .push(ActiveParticle::from_snapshot(snapshot.clone()));
+        }
         self.transfer_zones = TransferZoneTable::from_states(&state.transfer_zones);
         self.messages.restore(state.messages.clone());
         self.crew_selection = state
@@ -8078,7 +8391,6 @@ impl Engine {
         controller: Option<i32>,
         result: &BlastResult,
     ) {
-        let mut particles = Vec::new();
         let mut spawn_requests = Vec::new();
 
         for (material_id, removed) in &result.removed_by_material {
@@ -8086,29 +8398,34 @@ impl Engine {
                 continue;
             }
 
-            let Some(material) = self.materials.get_by_id(*material_id) else {
-                continue;
+            let (
+                material_id_value,
+                splash_rate,
+                blast_to_pxs_ratio,
+                blast_to_object_name,
+                blast_to_object_ratio,
+            ) = match self.materials.get_by_id(*material_id) {
+                Some(material) => (
+                    material.id(),
+                    material.splash_rate(),
+                    material.blast_to_pxs_ratio(),
+                    material.blast_to_object_name().map(|name| name.to_string()),
+                    material.blast_to_object_ratio(),
+                ),
+                None => continue,
             };
-            let normalized_name = material.normalized_name().to_string();
-            let splash_rate = material.splash_rate();
-            let material_index = material.id().index() as i32;
-            let blast_to_pxs_ratio = material.blast_to_pxs_ratio();
-            let blast_to_object_name = material.blast_to_object_name().map(|name| name.to_string());
-            let blast_to_object_ratio = material.blast_to_object_ratio();
 
             if let Some(ratio) = blast_to_pxs_ratio {
                 if ratio > 0 {
                     let pxs_count = (*removed / ratio).max(0);
                     for _ in 0..pxs_count {
-                        particles.push(ParticleCommand::Create(
-                            self.build_material_particle_config(
-                                &normalized_name,
-                                material_index,
-                                splash_rate,
-                                center,
-                                &result.affected_columns,
-                            ),
-                        ));
+                        let particle = self.build_material_particle(
+                            material_id_value,
+                            splash_rate,
+                            center,
+                            &result.affected_columns,
+                        );
+                        self.material_particles.push(particle);
                     }
                 }
             }
@@ -8140,10 +8457,6 @@ impl Engine {
             }
         }
 
-        if !particles.is_empty() {
-            self.apply_particle_commands(particles);
-        }
-
         if !spawn_requests.is_empty() {
             for config in spawn_requests {
                 if let Err(err) = self.spawn_object(config) {
@@ -8153,14 +8466,13 @@ impl Engine {
         }
     }
 
-    fn build_material_particle_config(
+    fn build_material_particle(
         &mut self,
-        normalized_name: &str,
-        material_index: i32,
-        splash_rate: i32,
+        material: MaterialId,
+        _splash_rate: i32,
         center: Vector2,
         affected_columns: &[(i32, i32)],
-    ) -> ParticleConfig {
+    ) -> MaterialParticle {
         const LEVEL: i32 = 60;
         let position = if let Some(&(column, height)) = affected_columns.choose(&mut self.rng) {
             FloatVector2::new(
@@ -8178,17 +8490,7 @@ impl Engine {
             let y_offset = self.rng.gen_range(0..=LEVEL) as f32 - LEVEL as f32;
             FloatVector2::new(x_offset / 10.0, y_offset / 10.0)
         };
-        let base_life = splash_rate.max(1);
-        let life = (base_life * 4).clamp(20, 240);
-        ParticleConfig {
-            definition_id: format!("material/pxs/{}", normalized_name),
-            position,
-            velocity,
-            life,
-            parameter_a: 0.0,
-            parameter_b: material_index,
-            layer: ParticleLayer::Global,
-        }
+        MaterialParticle::new(material, position, velocity)
     }
 
     fn apply_particle_commands(&mut self, commands: Vec<ParticleCommand>) {
@@ -8237,6 +8539,218 @@ impl Engine {
                 }
             }
         }
+    }
+
+    fn tick_material_particles(&mut self) {
+        if self.material_particles.is_empty() {
+            return;
+        }
+        let Some(width) = self
+            .landscape
+            .as_ref()
+            .map(|landscape| landscape.width() as i32)
+        else {
+            self.material_particles.clear();
+            return;
+        };
+        if width <= 0 {
+            self.material_particles.clear();
+            return;
+        }
+        let max_height = self
+            .landscape
+            .as_ref()
+            .map(|landscape| landscape.surface().iter().copied().max().unwrap_or(0) + 20)
+            .unwrap_or(20);
+        let top_limit = -10;
+        let wind_force = self.environment.wind_force(self.frame) as f32;
+        let gravity = self.physics.gravity as f32;
+        let mut survivors = Vec::with_capacity(self.material_particles.len());
+        let pending_particles = std::mem::take(&mut self.material_particles);
+        for mut particle in pending_particles.into_iter() {
+            let Some(material) = self.materials.get_by_id(particle.material) else {
+                continue;
+            };
+
+            particle.velocity.y += gravity / 10.0;
+
+            let drift = material.wind_drift();
+            if drift != 0 {
+                let drift_factor = drift as f32 / 100.0;
+                particle.velocity.x += (wind_force / 10.0) * drift_factor;
+            }
+
+            let jitter_scale = (material.splash_rate().max(1) as f32).sqrt();
+            let jitter_x = self.rng.gen_range(-0.5..=0.5) * 0.1 * jitter_scale;
+            let jitter_y = self.rng.gen_range(-0.5..=0.5) * 0.05 * jitter_scale;
+            particle.velocity.x = (particle.velocity.x + jitter_x).clamp(-8.0, 8.0);
+            particle.velocity.y = (particle.velocity.y + jitter_y).clamp(-12.0, 12.0);
+
+            let new_position = FloatVector2::new(
+                particle.position.x + particle.velocity.x,
+                particle.position.y + particle.velocity.y,
+            );
+
+            let new_x = new_position.x.floor() as i32;
+            let new_y = new_position.y.floor() as i32;
+            if new_x < 0 || new_x >= width || new_y < top_limit || new_y > max_height {
+                continue;
+            }
+
+            let start = Vector2::new(
+                particle.position.x.floor() as i32,
+                particle.position.y.floor() as i32,
+            );
+            let end = Vector2::new(new_x, new_y);
+
+            let collision = self
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.first_collision_on_line(start, end));
+
+            let keep = if let Some(hit) = collision {
+                let Some(landscape_mut) = self.landscape.as_mut() else {
+                    continue;
+                };
+                let materials = &self.materials;
+                let rng = &mut self.rng;
+                Self::resolve_material_particle_collision(
+                    materials,
+                    rng,
+                    &mut particle,
+                    hit,
+                    new_position,
+                    landscape_mut,
+                )
+            } else {
+                particle.position = new_position;
+                true
+            };
+
+            if keep {
+                if self.handle_particle_object_collisions(&particle) {
+                    survivors.push(particle);
+                }
+            }
+        }
+
+        self.material_particles = survivors;
+    }
+
+    fn resolve_material_particle_collision(
+        materials: &MaterialSet,
+        rng: &mut ChaCha8Rng,
+        particle: &mut MaterialParticle,
+        hit: Vector2,
+        target: FloatVector2,
+        landscape: &mut Landscape,
+    ) -> bool {
+        let landscape_material = landscape.solid_material_at(hit.x);
+        let reaction = materials.reaction(Some(particle.material), landscape_material);
+        match reaction {
+            MaterialReactionKind::None => {
+                particle.position = FloatVector2::new(hit.x as f32, (hit.y - 1) as f32);
+                particle.velocity.y = 0.0;
+                particle.velocity.x *= 0.5;
+                true
+            }
+            MaterialReactionKind::Convert {
+                target: Some(target_material),
+                ..
+            } => {
+                particle.material = target_material;
+                particle.position = target;
+                particle.velocity = FloatVector2::new(0.0, 0.0);
+                true
+            }
+            MaterialReactionKind::Convert { target: None, .. } => false,
+            MaterialReactionKind::Poof => {
+                landscape.remove_material_at(hit.x, hit.y);
+                false
+            }
+            MaterialReactionKind::Incinerate => {
+                let _ = landscape.incinerate_at(hit.x, hit.y, materials);
+                false
+            }
+            MaterialReactionKind::Corrode {
+                corrosive_strength,
+                corrode_resistance,
+            } => {
+                let resistance = corrode_resistance.max(1);
+                let success = rng.gen_range(0..=resistance) < corrosive_strength.max(1);
+                if success {
+                    landscape.remove_material_at(hit.x, hit.y);
+                } else {
+                    landscape.insert_material_at(hit.x, hit.y, particle.material);
+                }
+                false
+            }
+            MaterialReactionKind::Insert => {
+                landscape.insert_material_at(hit.x, hit.y, particle.material);
+                false
+            }
+        }
+    }
+
+    fn handle_particle_object_collisions(&mut self, particle: &MaterialParticle) -> bool {
+        let friction = match self.materials.get_by_id(particle.material) {
+            Some(material) => material.friction(),
+            None => return true,
+        };
+        if self.objects.is_empty() {
+            return true;
+        }
+        let px = particle.position.x;
+        let py = particle.position.y;
+        let mut collided = false;
+        for object in &mut self.objects {
+            if object.destroyed {
+                continue;
+            }
+            if Self::particle_intersects_object(px, py, object) {
+                if friction != 0 {
+                    object.state.velocity.x =
+                        apply_horizontal_friction(object.state.velocity.x, friction);
+                    for vertex in &mut object.state.vertices {
+                        vertex.friction = friction;
+                    }
+                }
+                collided = true;
+            }
+        }
+        !collided
+    }
+
+    fn particle_intersects_object(px: f32, py: f32, object: &Object) -> bool {
+        let ox = object.state.position.x as f32;
+        let oy = object.state.position.y as f32;
+        let (mut half_width, mut half_height) = (4.0f32, 6.0f32);
+        if !object.state.vertices.is_empty() {
+            let mut min_x = object.state.vertices[0].x;
+            let mut max_x = min_x;
+            let mut min_y = object.state.vertices[0].y;
+            let mut max_y = min_y;
+            for vertex in &object.state.vertices {
+                if vertex.x < min_x {
+                    min_x = vertex.x;
+                }
+                if vertex.x > max_x {
+                    max_x = vertex.x;
+                }
+                if vertex.y < min_y {
+                    min_y = vertex.y;
+                }
+                if vertex.y > max_y {
+                    max_y = vertex.y;
+                }
+            }
+            half_width = ((max_x - min_x).abs() as f32 / 2.0).max(2.0);
+            half_height = ((max_y - min_y).abs() as f32 / 2.0).max(2.0);
+        }
+        px >= ox - half_width
+            && px <= ox + half_width
+            && py >= oy - half_height
+            && py <= oy + half_height
     }
 
     fn apply_transfer_zone_commands(
@@ -10173,6 +10687,10 @@ mod tests {
             "expected blast to emit particles"
         );
         assert_eq!(snapshot.particles[0].definition_id, "material/pxs/earth");
+        assert_eq!(
+            snapshot.particles[0].parameter_b,
+            earth.index() as i32
+        );
         Ok(())
     }
 
@@ -10215,6 +10733,95 @@ mod tests {
             after > before,
             "expected blast to spawn objects for blast reaction"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn material_particles_settle_into_landscape() -> Result<(), EngineError> {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+            BlastFree=1
+            Blast2PXSRatio=1
+            SplashRate=15
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(19);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(12, 30, Some(earth)));
+
+        engine
+            .blast_circle(Vector2::new(6, 30), 3, None)
+            .expect("blast applies");
+
+        for _ in 0..24 {
+            engine.tick().expect("tick succeeds");
+        }
+
+        let snapshot = engine.snapshot();
+        let landscape = snapshot.landscape.expect("landscape present");
+        assert!(
+            landscape.surface()[6] > 30,
+            "expected particles to raise the landscape surface"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn material_particles_apply_friction_to_objects() -> Result<(), EngineError> {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=45
+            BlastFree=1
+            Blast2PXSRatio=1
+            SplashRate=10
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(20, 24, Some(earth)));
+        engine
+            .register_definition(simple_definition("Crate"))
+            .expect("definition registers");
+
+        let crate_id = engine
+            .spawn_object(
+                SpawnConfig::new("Crate")
+                    .with_position(Vector2::new(8, 24))
+                    .with_velocity(Vector2::new(8, 0)),
+            )
+            .expect("spawn succeeds");
+
+        engine
+            .blast_circle(Vector2::new(8, 24), 2, None)
+            .expect("blast applies");
+
+        for _ in 0..20 {
+            engine.tick().expect("tick succeeds");
+        }
+
+        let object = engine
+            .object_snapshot(crate_id)
+            .expect("crate still present");
+        assert!(
+            object.velocity.x.abs() < 8,
+            "expected particle collision to reduce horizontal velocity"
+        );
+
+        let snapshot = engine.snapshot();
+        assert!(snapshot.particles.is_empty(), "particles dissipated");
         Ok(())
     }
 

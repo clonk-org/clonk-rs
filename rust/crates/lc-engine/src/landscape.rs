@@ -427,6 +427,61 @@ impl Landscape {
         }
     }
 
+    pub fn insert_material_at(&mut self, x: i32, y: i32, material: MaterialId) -> bool {
+        if x < 0 {
+            return false;
+        }
+        let index = match usize::try_from(x) {
+            Ok(index) => index,
+            Err(_) => return false,
+        };
+        if index >= self.surface.len() {
+            return false;
+        }
+        self.ensure_material_capacity();
+        let height = self.surface[index].max(0);
+        let target = y.saturating_add(1).max(height);
+        if target == height {
+            self.solid_materials[index] = Some(material);
+            return true;
+        }
+        self.surface[index] = target;
+        self.solid_materials[index] = Some(material);
+        true
+    }
+
+    pub fn remove_material_at(&mut self, x: i32, _y: i32) -> bool {
+        if x < 0 {
+            return false;
+        }
+        let index = match usize::try_from(x) {
+            Ok(index) => index,
+            Err(_) => return false,
+        };
+        if let Some(height) = self.surface.get_mut(index) {
+            if *height <= 0 {
+                return false;
+            }
+            let target = (*height - 1).max(0);
+            *height = target;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn incinerate_at(
+        &mut self,
+        x: i32,
+        y: i32,
+        materials: &MaterialSet,
+    ) -> bool {
+        if !self.can_incinerate(x, y, materials) {
+            return false;
+        }
+        self.remove_material_at(x, y)
+    }
+
     pub fn path_is_clear(&self, start: Vector2, end: Vector2) -> bool {
         self.first_collision_on_line(start, end).is_none()
     }
