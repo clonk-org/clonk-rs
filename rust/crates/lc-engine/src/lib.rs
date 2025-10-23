@@ -3973,6 +3973,7 @@ struct ScenarioBatch {
     global_effects: Vec<EffectCommand>,
     environment: Option<EnvironmentDelta>,
     physics: Option<PhysicsDelta>,
+    landscape: Vec<LandscapeCommand>,
     particles: Vec<ParticleCommand>,
     transfer_zones: Vec<TransferZoneCommand>,
     audio: Vec<AudioCommand>,
@@ -4733,6 +4734,7 @@ impl Engine {
             global_effects,
             environment,
             physics,
+            landscape,
             particles,
             transfer_zones,
             audio,
@@ -4747,6 +4749,15 @@ impl Engine {
         }
         if !global_effects.is_empty() {
             self.apply_global_effect_commands(&global_effects);
+        }
+        if !landscape.is_empty() {
+            let mut landscape_slot = self.landscape.take();
+            if let Some(landscape_ref) = landscape_slot.as_mut() {
+                for command in landscape {
+                    command.apply(landscape_ref);
+                }
+            }
+            self.landscape = landscape_slot;
         }
         self.apply_particle_commands(particles);
         if !transfer_zones.is_empty() {
@@ -8816,6 +8827,11 @@ fn parse_scenario_command(
                                 batch.physics = Some(delta);
                             }
                         }
+                    }
+                    "landscape" => {
+                        batch
+                            .landscape
+                            .extend(value_to_landscape_commands(definition, function, value)?);
                     }
                     other => {
                         return Err(EngineError::InvalidScriptOutput {
@@ -14220,6 +14236,58 @@ global func MenuCommand(state, kind, selection)
 
         // Ensure object persistence unaffected by landscape edits
         assert!(engine.object_snapshot(diver_id).is_some());
+    }
+
+    #[test]
+    fn scenario_script_applies_landscape_commands() -> Result<(), EngineError> {
+        const SCRIPT: &str = r#"
+        global func Initialize(state, random)
+        {
+            return {
+                landscape = [
+                    { op = "lower", start = 2, width = 2, height = 12 }
+                ]
+            };
+        }
+
+        global func Step(state, frame, random)
+        {
+            if (frame == 1)
+            {
+                return {
+                    landscape = [
+                        { op = "lower", start = 5, width = 2, height = 16 }
+                    ]
+                };
+            }
+            return nil;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(11);
+        engine.set_landscape(Landscape::flat(12, 8));
+
+        engine
+            .install_scenario_script("Scenario", SCRIPT)
+            .expect("scenario script installs");
+
+        let surface = engine
+            .landscape()
+            .expect("landscape present after install")
+            .surface()
+            .to_vec();
+        assert_eq!(&surface[0..2], &[8, 8]);
+        assert_eq!(&surface[2..4], &[12, 12]);
+
+        let _snapshot = engine.tick()?;
+        let surface = engine
+            .landscape()
+            .expect("landscape present after tick")
+            .surface()
+            .to_vec();
+        assert_eq!(&surface[5..7], &[16, 16]);
+
+        Ok(())
     }
 
     fn simple_definition(id: &str) -> Definition {

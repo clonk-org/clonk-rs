@@ -148,7 +148,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 4. ✅ Port C4GameMessage for mission text and objectives — HUD now renders script-driven messages; decorative frames/portraits pending future polish
 
 ### Phase 3: Game Content & Polish
-1. ⚠️ Port full C4Landscape material modification system — DigFree terrain carving plus BlastFree/incineration parity landed; PXS/particle emission and scripted deformation still pending
+1. ⚠️ Port full C4Landscape material modification system — DigFree terrain carving plus BlastFree/incineration parity landed; scenario scripts now drive landscape deformation via queued commands; PXS/particle emission still pending
 2. Port C4Weather and C4Sky for atmosphere
 3. Port C4PXS particle system for effects
 4. Integrate real game assets (objects, scenarios, graphics, sounds)
