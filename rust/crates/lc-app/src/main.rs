@@ -31,7 +31,7 @@ use lc_engine::{
     MaterialSet, MenuCommandKind, MenuCommandSelection, MessageKind, MovementProfile, ObjectId,
     ObjectSnapshot, ObjectUpdate, PlayerStatus, Scenario, ScenarioError, SimulationSnapshot,
     SpawnConfig, Vector2, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER,
-    FLAG_X_REL, FLAG_Y_REL,
+    FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
     draw_image, CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData, InputDispatcher,
@@ -2464,6 +2464,91 @@ impl GameApp {
                     self.drop_inventory_selection(&selection)?;
                 }
             },
+            ObjectMenuAction::Build { selection, amount } => {
+                if selection.owner == OWNER_NONE {
+                    self.status_text = "Cannot construct without a player owner".to_string();
+                    return Ok(());
+                }
+                let Some(crew_snapshot) = self.snapshot.object(selection.crew_id).cloned() else {
+                    self.status_text = "Crew no longer available".to_string();
+                    self.object_menu = None;
+                    return Ok(());
+                };
+                let available = self
+                    .engine
+                    .player(selection.owner)
+                    .and_then(|player| {
+                        player
+                            .home_base_material()
+                            .get(&selection.definition_id)
+                            .copied()
+                    })
+                    .unwrap_or(0);
+                if available == 0 {
+                    self.status_text = format!("No {} available", selection.label);
+                    self.refresh_object_menu();
+                    return Ok(());
+                }
+                let requested = amount.min(available);
+                if requested == 0 {
+                    self.status_text = format!("No {} available", selection.label);
+                    self.refresh_object_menu();
+                    return Ok(());
+                }
+
+                let definition_id = selection.definition_id.clone();
+                let label = selection.label.clone();
+                let owner = selection.owner;
+                let crew_id = selection.crew_id;
+                let mut delivered = 0u32;
+
+                for _ in 0..requested {
+                    self.engine.adjust_player_home_base_material(
+                        owner,
+                        definition_id.clone(),
+                        -1,
+                    )?;
+                    match self.engine.spawn_object(
+                        SpawnConfig::new(definition_id.clone())
+                            .with_owner(owner)
+                            .with_position(crew_snapshot.position)
+                            .with_container(crew_id),
+                    ) {
+                        Ok(_) => delivered += 1,
+                        Err(err) => {
+                            self.engine.adjust_player_home_base_material(
+                                owner,
+                                definition_id.clone(),
+                                1,
+                            )?;
+                            self.status_text = format!("Failed to deliver {}: {}", label, err);
+                            break;
+                        }
+                    }
+                }
+
+                self.snapshot = self.engine.snapshot();
+                self.refresh_object_menu();
+                self.refresh_focus();
+
+                if delivered > 0 {
+                    let remaining = self
+                        .engine
+                        .player(owner)
+                        .and_then(|player| player.home_base_material().get(&definition_id).copied())
+                        .unwrap_or(0);
+                    self.status_text = if remaining > 0 {
+                        format!(
+                            "Received {} (x{}), {} remaining",
+                            label, delivered, remaining
+                        )
+                    } else {
+                        format!("Received {} (x{})", label, delivered)
+                    };
+                } else if self.status_text.is_empty() {
+                    self.status_text = format!("Unable to deliver {}", label);
+                }
+            }
         }
         Ok(())
     }
