@@ -4,9 +4,123 @@ use std::collections::HashMap;
 
 const C4M_SOLID: i32 = 50;
 const C4M_LIQUID: i32 = 25;
+const SKY_KEY: &str = "sky";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemperatureDirection {
+    Downwards,
+    Upwards,
+}
+
+impl TemperatureDirection {
+    fn from_raw(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Downwards),
+            1 => Some(Self::Upwards),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemperatureTarget {
+    Material(MaterialId),
+    MaterialName(String),
+}
+
+impl TemperatureTarget {
+    fn resolve_with(&mut self, lookup: &HashMap<String, MaterialId>) {
+        if let TemperatureTarget::MaterialName(name) = self {
+            if let Some(id) = lookup.get(name) {
+                *self = TemperatureTarget::Material(*id);
+            }
+        }
+    }
+
+    fn resolved(&self, lookup: &HashMap<String, MaterialId>) -> TemperatureTarget {
+        match self {
+            TemperatureTarget::Material(id) => TemperatureTarget::Material(*id),
+            TemperatureTarget::MaterialName(name) => lookup
+                .get(name)
+                .copied()
+                .map(TemperatureTarget::Material)
+                .unwrap_or_else(|| TemperatureTarget::MaterialName(name.clone())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemperatureConversion {
+    threshold: i32,
+    direction: TemperatureDirection,
+    target: TemperatureTarget,
+}
+
+impl TemperatureConversion {
+    fn resolve_target(&mut self, lookup: &HashMap<String, MaterialId>) {
+        self.target.resolve_with(lookup);
+    }
+
+    fn applies(&self, ambient_temperature: i32, direction: TemperatureDirection) -> bool {
+        if self.direction != direction {
+            return false;
+        }
+        match self.direction {
+            TemperatureDirection::Downwards => ambient_temperature < self.threshold,
+            TemperatureDirection::Upwards => ambient_temperature > self.threshold,
+        }
+    }
+
+    fn target(&self) -> &TemperatureTarget {
+        &self.target
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemperatureConversionOutcome {
+    pub target: TemperatureTarget,
+    pub strength: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterialReactionKind {
+    None,
+    Convert {
+        target: Option<MaterialId>,
+        depth: Option<i32>,
+    },
+    Poof,
+    Incinerate,
+    Corrode {
+        corrosive_strength: i32,
+        corrode_resistance: i32,
+    },
+    Insert,
+}
 
 fn normalize_key(name: &str) -> String {
     name.trim().to_ascii_lowercase()
+}
+
+fn parse_temperature_conversion(
+    definition: &ResourceMaterialDefinition,
+    threshold_key: &str,
+    direction_key: &str,
+    target_key: &str,
+) -> Option<TemperatureConversion> {
+    let threshold = definition.int(threshold_key)?;
+    let direction_raw = definition.int(direction_key)?;
+    let direction = TemperatureDirection::from_raw(direction_raw)?;
+    let target_value = definition.value(target_key)?;
+    let trimmed = target_value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(TemperatureConversion {
+        threshold,
+        direction,
+        target: TemperatureTarget::MaterialName(normalize_key(trimmed)),
+    })
 }
 
 #[inline]
@@ -40,6 +154,7 @@ pub struct Material {
     properties: MaterialProperties,
     color: Vec<i32>,
     alpha: Vec<i32>,
+    normalized_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +167,17 @@ pub struct MaterialProperties {
     blast_free: bool,
     wind_drift: i32,
     inflammable: i32,
+    incindiary: i32,
+    extinguisher: i32,
+    corrosive: i32,
+    corrode: i32,
+    temp_conv_strength: i32,
+    in_mat_convert: Option<String>,
+    in_mat_convert_to: Option<String>,
+    in_mat_convert_target: Option<MaterialId>,
+    in_mat_convert_depth: Option<i32>,
+    above_temperature: Option<TemperatureConversion>,
+    below_temperature: Option<TemperatureConversion>,
 }
 
 impl MaterialProperties {
@@ -76,6 +202,43 @@ impl MaterialProperties {
         let splash_rate = definition.int("splashrate").unwrap_or(10).max(0);
         let wind_drift = definition.int("winddrift").unwrap_or(0);
         let inflammable = definition.int("inflammable").unwrap_or(0);
+        let incindiary = definition.int("incindiary").unwrap_or(0);
+        let extinguisher = definition.int("extinguisher").unwrap_or(0);
+        let corrosive = definition.int("corrosive").unwrap_or(0);
+        let corrode = definition.int("corrode").unwrap_or(0);
+        let temp_conv_strength = definition.int("tempconvstrength").unwrap_or(0);
+        let in_mat_convert = definition.value("inmatconvert").and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(normalize_key(trimmed))
+            }
+        });
+        let in_mat_convert_to = definition.value("inmatconvertto").and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(normalize_key(trimmed))
+            }
+        });
+        let in_mat_convert_depth = match definition.int("inmatconvertdepth") {
+            Some(value) if value > 0 => Some(value),
+            _ => None,
+        };
+        let above_temperature = parse_temperature_conversion(
+            definition,
+            "abovetempconvert",
+            "abovetempconvertdir",
+            "abovetempconvertto",
+        );
+        let below_temperature = parse_temperature_conversion(
+            definition,
+            "belowtempconvert",
+            "belowtempconvertdir",
+            "belowtempconvertto",
+        );
         Self {
             density,
             friction,
@@ -85,6 +248,17 @@ impl MaterialProperties {
             blast_free,
             wind_drift,
             inflammable,
+            incindiary,
+            extinguisher,
+            corrosive,
+            corrode,
+            temp_conv_strength,
+            in_mat_convert,
+            in_mat_convert_to,
+            in_mat_convert_target: None,
+            in_mat_convert_depth,
+            above_temperature,
+            below_temperature,
         }
     }
 
@@ -119,12 +293,14 @@ impl Material {
         let properties = MaterialProperties::from_definition(&definition);
         let color = definition.int_list("color").unwrap_or_default();
         let alpha = definition.int_list("alpha").unwrap_or_default();
+        let normalized_name = normalize_key(definition.name());
         Self {
             id,
             definition,
             properties,
             color,
             alpha,
+            normalized_name,
         }
     }
 
@@ -191,6 +367,86 @@ impl Material {
     pub fn is_liquid(&self) -> bool {
         density_is_liquid(self.density())
     }
+
+    pub fn normalized_name(&self) -> &str {
+        &self.normalized_name
+    }
+
+    pub fn incindiary(&self) -> i32 {
+        self.properties.incindiary
+    }
+
+    pub fn extinguisher(&self) -> i32 {
+        self.properties.extinguisher
+    }
+
+    pub fn corrosive(&self) -> i32 {
+        self.properties.corrosive
+    }
+
+    pub fn corrode(&self) -> i32 {
+        self.properties.corrode
+    }
+
+    pub fn temp_conv_strength(&self) -> i32 {
+        self.properties.temp_conv_strength
+    }
+
+    pub fn in_mat_convert_target(&self) -> Option<MaterialId> {
+        self.properties.in_mat_convert_target
+    }
+
+    pub fn in_mat_convert_to_name(&self) -> Option<&str> {
+        self.properties.in_mat_convert_to.as_deref()
+    }
+
+    pub fn in_mat_convert_depth(&self) -> Option<i32> {
+        self.properties.in_mat_convert_depth
+    }
+
+    pub fn evaluate_temperature_conversion(
+        &self,
+        direction: TemperatureDirection,
+        ambient_temperature: i32,
+    ) -> Option<TemperatureConversionOutcome> {
+        let candidates = [
+            self.properties.below_temperature.as_ref(),
+            self.properties.above_temperature.as_ref(),
+        ];
+        for conversion in candidates.into_iter().flatten() {
+            if conversion.applies(ambient_temperature, direction) {
+                return Some(TemperatureConversionOutcome {
+                    target: conversion.target().clone(),
+                    strength: self.properties.temp_conv_strength,
+                });
+            }
+        }
+        None
+    }
+
+    fn matches_in_mat_conversion(&self, landscape: Option<&Material>) -> bool {
+        let Some(trigger) = self.properties.in_mat_convert.as_deref() else {
+            return false;
+        };
+        match landscape {
+            Some(material) => trigger == material.normalized_name(),
+            None => trigger == SKY_KEY,
+        }
+    }
+
+    fn resolve_relations(&mut self, lookup: &HashMap<String, MaterialId>) {
+        if let Some(name) = &self.properties.in_mat_convert_to {
+            if let Some(id) = lookup.get(name) {
+                self.properties.in_mat_convert_target = Some(*id);
+            }
+        }
+        if let Some(conversion) = self.properties.above_temperature.as_mut() {
+            conversion.resolve_target(lookup);
+        }
+        if let Some(conversion) = self.properties.below_temperature.as_mut() {
+            conversion.resolve_target(lookup);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -220,6 +476,9 @@ impl MaterialSet {
             by_name.insert(key, id);
             materials.push(material);
         }
+        for material in &mut materials {
+            material.resolve_relations(&by_name);
+        }
         Self { materials, by_name }
     }
 
@@ -231,6 +490,7 @@ impl MaterialSet {
         if let Some(id) = MaterialId::new(self.materials.len()) {
             material.set_id(id);
             self.by_name.insert(key, id);
+            material.resolve_relations(&self.by_name);
             self.materials.push(material);
         }
     }
@@ -276,7 +536,195 @@ impl MaterialSet {
             .map(|material| material.id())
     }
 
+    pub fn reaction(
+        &self,
+        pxs_material: Option<MaterialId>,
+        landscape_material: Option<MaterialId>,
+    ) -> MaterialReactionKind {
+        let Some(pxs_id) = pxs_material else {
+            return MaterialReactionKind::None;
+        };
+        let Some(pxs_mat) = self.get_by_id(pxs_id) else {
+            return MaterialReactionKind::None;
+        };
+        let landscape_mat = landscape_material.and_then(|id| self.get_by_id(id));
+        if pxs_mat.matches_in_mat_conversion(landscape_mat) {
+            return MaterialReactionKind::Convert {
+                target: pxs_mat.in_mat_convert_target(),
+                depth: pxs_mat.in_mat_convert_depth(),
+            };
+        }
+        let Some(landscape) = landscape_mat else {
+            return MaterialReactionKind::None;
+        };
+        if pxs_mat.density() > landscape.density() {
+            return MaterialReactionKind::None;
+        }
+        if (pxs_mat.incindiary() > 0 && landscape.extinguisher() > 0)
+            || (pxs_mat.extinguisher() > 0 && landscape.incindiary() > 0)
+        {
+            return MaterialReactionKind::Poof;
+        }
+        if (pxs_mat.incindiary() > 0 && landscape.inflammable() > 0)
+            || (pxs_mat.inflammable() > 0 && landscape.incindiary() > 0)
+        {
+            return MaterialReactionKind::Incinerate;
+        }
+        if pxs_mat.corrosive() > 0 && landscape.corrode() > 0 {
+            return MaterialReactionKind::Corrode {
+                corrosive_strength: pxs_mat.corrosive(),
+                corrode_resistance: landscape.corrode(),
+            };
+        }
+        MaterialReactionKind::Insert
+    }
+
+    pub fn evaluate_temperature_conversion(
+        &self,
+        material: MaterialId,
+        direction: TemperatureDirection,
+        ambient_temperature: i32,
+    ) -> Option<TemperatureConversionOutcome> {
+        let material = self.get_by_id(material)?;
+        let mut outcome =
+            material.evaluate_temperature_conversion(direction, ambient_temperature)?;
+        outcome.target = outcome.target.resolved(&self.by_name);
+        Some(outcome)
+    }
+
     pub fn materials(&self) -> &[Material] {
         &self.materials
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_material_set(source: &str) -> MaterialSet {
+        let library = MaterialLibrary::parse(source).expect("material library parses");
+        MaterialSet::from_resource_library(&library)
+    }
+
+    #[test]
+    fn reaction_returns_convert_for_matching_in_mat_trigger() {
+        let set = build_material_set(
+            r#"
+            [Material Snow]
+            Name=Snow
+            Density=10
+            Friction=5
+            InMatConvert=Water
+            InMatConvertTo=Water
+            InMatConvertDepth=2
+
+            [Material Water]
+            Name=Water
+            Density=60
+            Friction=0
+        "#,
+        );
+        let snow = set.id_of("Snow").expect("snow exists");
+        let water = set.id_of("Water").expect("water exists");
+        let reaction = set.reaction(Some(snow), Some(water));
+        assert_eq!(
+            reaction,
+            MaterialReactionKind::Convert {
+                target: Some(water),
+                depth: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn reaction_returns_poof_for_incindiary_vs_extinguisher() {
+        let set = build_material_set(
+            r#"
+            [Material Fire]
+            Name=Fire
+            Density=20
+            Friction=1
+            Incindiary=100
+
+            [Material Water]
+            Name=Water
+            Density=60
+            Friction=0
+            Extinguisher=1
+        "#,
+        );
+        let fire = set.id_of("Fire").expect("fire exists");
+        let water = set.id_of("Water").expect("water exists");
+        assert_eq!(
+            set.reaction(Some(fire), Some(water)),
+            MaterialReactionKind::Poof
+        );
+    }
+
+    #[test]
+    fn reaction_returns_corrode_for_corrosive_pairing() {
+        let set = build_material_set(
+            r#"
+            [Material Acid]
+            Name=Acid
+            Density=30
+            Friction=0
+            Corrosive=75
+
+            [Material Rock]
+            Name=Rock
+            Density=80
+            Friction=10
+            Corrode=50
+        "#,
+        );
+        let acid = set.id_of("Acid").expect("acid exists");
+        let rock = set.id_of("Rock").expect("rock exists");
+        assert_eq!(
+            set.reaction(Some(acid), Some(rock)),
+            MaterialReactionKind::Corrode {
+                corrosive_strength: 75,
+                corrode_resistance: 50,
+            }
+        );
+    }
+
+    #[test]
+    fn temperature_conversion_resolves_target_material() {
+        let set = build_material_set(
+            r#"
+            [Material Ice]
+            Name=Ice
+            Density=80
+            Friction=15
+            AboveTempConvert=0
+            AboveTempConvertDir=0
+            AboveTempConvertTo=Water
+            TempConvStrength=4
+
+            [Material Water]
+            Name=Water
+            Density=60
+            Friction=0
+        "#,
+        );
+        let ice = set.id_of("Ice").expect("ice exists");
+        let water = set.id_of("Water").expect("water exists");
+
+        let outcome = set
+            .evaluate_temperature_conversion(ice, TemperatureDirection::Downwards, 5)
+            .expect("conversion triggered");
+        assert_eq!(
+            outcome.target,
+            TemperatureTarget::Material(water),
+            "expected conversion target to resolve to Water material id"
+        );
+        assert_eq!(outcome.strength, 4);
+
+        assert!(
+            set.evaluate_temperature_conversion(ice, TemperatureDirection::Downwards, -10)
+                .is_none(),
+            "temperature below threshold should not trigger conversion"
+        );
     }
 }

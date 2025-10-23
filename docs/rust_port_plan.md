@@ -60,7 +60,7 @@
 - ⚠️ **Material System** (C4Material.cpp 🔗 runtime parity incomplete)
   - ✅ Material definitions now populate the Rust `MaterialSet` with density/friction metadata and canonical lookup
   - ✅ Landscapes retain per-column material ids and collisions now apply material friction to object velocity/vertex data
-  - ⚠️ Conversion/reaction logic and temperature-driven behaviour still pending
+  - ✅ Conversion/reaction logic and temperature-driven evaluation mirrored in `MaterialSet::reaction` / `evaluate_temperature_conversion` (landscape integration next)
 
 - ❌ **Weather & Sky** (C4Weather.cpp, C4Sky.cpp 🔗 Not ported)
   - Dynamic weather (rain, snow, wind, lightning)
