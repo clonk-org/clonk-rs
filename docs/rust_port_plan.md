@@ -79,9 +79,9 @@
   - Sandbox preview remains only as safety net when required assets are missing
 
 - ⚠️  **Definition System** (partial - C4Def.cpp)
-  - Can load object definitions but limited to hardcoded Walker
-  - Missing definition graphics, sounds, ActMap integration
-  - No DefCore.txt parsing for real game objects
+  - ✅ Sandbox fallback now loads install definitions (Clonk et al.) instead of the synthetic Walker
+  - ⚠️ Definition metadata beyond id/name/category still minimal; DefCore fields like value/mass/pictures unused
+  - ⚠️ Missing definition graphics pipeline and sound wiring; ActMap is parsed but not visualised
 
 - ⚠️  **Graphics Resources** (C4GraphicsResource.cpp 🔗 Minimal)
   - Progress: Fonts, startup backgrounds, and button textures now sourced from Graphics.c4g; walker sprite mapped from crew assets
@@ -171,6 +171,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Window creation and basic input handling
 - ✅ Startup menu renders Graphics.c4g backgrounds and buttons with Endeavour.ttf fonts (no longer flat placeholders)
 - ✅ Scenario loader resolves legacy definition paths from packed install groups before falling back to the sandbox preview
+- ✅ Sandbox fallback auto-loads install object definitions when install data is available (spawns real Clonks instead of the synthetic Walker)
 - ✅ Material definitions load from install archives (lc-resources::material + Engine MaterialSet)
 - ✅ Player registry + HUD overlay surface real player metadata (names, wealth, cursor) sourced from engine snapshots
 - ✅ Cursor cycling and selection toggles now respect classic COM_Single/COM_Double timing with network serialization parity
@@ -182,7 +183,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 
 **What Doesn't Work (Real Game Requirements):**
 - ❌ `cargo run` shows **demo only** (window title: "LegacyClonk (Rust preview)")
-- ❌ No real object definitions (only synthetic Walker)
+- ⚠️ Definition runtime still incomplete (no build menus, limited metadata, missing graphics/sound wiring)
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ❌ No real audio (synthetic tones for missing sounds)
 - ⚠️ Message frames/portraits still missing (text-only rendering today)

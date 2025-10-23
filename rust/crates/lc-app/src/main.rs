@@ -1607,11 +1607,8 @@ impl InstallDefinitionResolver {
     fn should_ignore_error(err: &GroupError) -> bool {
         matches!(
             err,
-            GroupError::Missing(_)
-                | GroupError::NotDirectory(_)
-                | GroupError::EntryNotFound(_)
-        )
-            || matches!(err, GroupError::Io(io_err) if io_err.kind() == io::ErrorKind::NotFound)
+            GroupError::Missing(_) | GroupError::NotDirectory(_) | GroupError::EntryNotFound(_)
+        ) || matches!(err, GroupError::Io(io_err) if io_err.kind() == io::ErrorKind::NotFound)
     }
 }
 
@@ -3800,7 +3797,137 @@ fn editor_binary_candidates(base: &Path) -> Vec<PathBuf> {
     candidates
 }
 
+fn load_install_definitions(
+    engine: &mut Engine,
+    paths: &AppPaths,
+) -> Result<Option<String>, EngineError> {
+    let objects_path = paths.planet_dir().join("Objects.ocd");
+    let group = match Group::open(&objects_path) {
+        Ok(group) => group,
+        Err(err) => {
+            tracing::debug!(
+                path = %objects_path.display(),
+                error = %err,
+                "failed to open Objects.ocd; continuing with sandbox fallback"
+            );
+            return Ok(None);
+        }
+    };
+
+    let mut seen = HashSet::new();
+    let mut spawn_candidate = None;
+    load_definitions_from_group(engine, &group, &mut seen, &mut spawn_candidate)?;
+    Ok(spawn_candidate)
+}
+
+fn load_definitions_from_group(
+    engine: &mut Engine,
+    group: &Group,
+    seen: &mut HashSet<String>,
+    spawn_candidate: &mut Option<String>,
+) -> Result<(), EngineError> {
+    if group.exists("DefCore.txt") {
+        match ResourceDefinitionData::load(group) {
+            Ok(resource) => {
+                let id_normalized = resource.core.id.to_ascii_lowercase();
+                if seen.insert(id_normalized) {
+                    match Definition::from_resource(&resource) {
+                        Ok(definition) => match engine.register_definition(definition) {
+                            Ok(()) => {
+                                if resource.core.crew_member {
+                                    if spawn_candidate
+                                        .as_ref()
+                                        .map(|existing| existing.eq_ignore_ascii_case("Clonk"))
+                                        .unwrap_or(false)
+                                    {
+                                        // Clonk already selected; keep it.
+                                    } else if resource.core.id.eq_ignore_ascii_case("Clonk")
+                                        || spawn_candidate.is_none()
+                                    {
+                                        *spawn_candidate = Some(resource.core.id.clone());
+                                    }
+                                }
+                            }
+                            Err(EngineError::DefinitionAlreadyExists(_)) => {}
+                            Err(error) => {
+                                tracing::warn!(
+                                    definition = %resource.core.id,
+                                    error = ?error,
+                                    "failed to register install definition"
+                                );
+                            }
+                        },
+                        Err(error) => {
+                            tracing::warn!(
+                                definition = %resource.core.id,
+                                error = ?error,
+                                "failed to compile install definition script"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    group = %group.root().display(),
+                    "failed to load definition resources"
+                );
+            }
+        }
+    }
+
+    let entries = match group.entries() {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                group = %group.root().display(),
+                "unable to list definition contents"
+            );
+            return Ok(());
+        }
+    };
+
+    for entry in entries {
+        if !entry.is_directory {
+            continue;
+        }
+        match group.open_child(&entry.relative_path) {
+            Ok(child) => load_definitions_from_group(engine, &child, seen, spawn_candidate)?,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %entry.relative_path.display(),
+                    "failed to inspect nested definition group"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn configure_sandbox_engine(engine: &mut Engine) -> Result<String, EngineError> {
+    if let Ok(paths) = cached_app_paths() {
+        match load_install_definitions(engine, &paths) {
+            Ok(Some(spawn_definition)) => {
+                engine.set_environment(EnvironmentSettings::default());
+                engine.set_landscape(Landscape::flat(2048, DEFAULT_GROUND_HEIGHT));
+                return Ok(spawn_definition);
+            }
+            Ok(None) => {
+                // No install definitions found; fall back to targeted loader.
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    "encountered error while loading install definitions; falling back to sandbox walker"
+                );
+            }
+        }
+    }
+
     let install_definition_id = "Clonk";
     if let Some(resource_def) = try_load_install_definition(install_definition_id) {
         match Definition::from_resource(&resource_def) {
