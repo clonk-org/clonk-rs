@@ -89,7 +89,7 @@
   - Has: Basic surface rendering only
 
 - ⚠️  **Landscape Features** (C4Landscape.cpp is 88KB, lc-engine has basics only)
-  - Progress: Digging now raises surface depths using DigFree radii; blasting, incineration, and scripted deformation still outstanding
+  - Progress: Digging raises surface depths (DigFree); blasting now carves heightmap craters honoring BlastFree and tracking removal stats; incineration hooks respect Inflammable. Scripted deformation still outstanding.
   - Missing: Pixel-perfect material queries
   - Missing: Landscape script integration (Earthquake, Incinerate, etc.)
   - Has: Basic heightmap collision only
@@ -147,7 +147,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 4. ✅ Port C4GameMessage for mission text and objectives — HUD now renders script-driven messages; decorative frames/portraits pending future polish
 
 ### Phase 3: Game Content & Polish
-1. Port full C4Landscape material modification system — DigFree-driven terrain carving landed; blasting, incineration, and PXS integration still pending
+1. ⚠️ Port full C4Landscape material modification system — DigFree terrain carving plus BlastFree/incineration parity landed; PXS/particle emission and scripted deformation still pending
 2. Port C4Weather and C4Sky for atmosphere
 3. Port C4PXS particle system for effects
 4. Integrate real game assets (objects, scenarios, graphics, sounds)
@@ -173,6 +173,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Scenario loader resolves legacy definition paths from packed install groups before falling back to the sandbox preview
 - ✅ Sandbox fallback auto-loads install object definitions when install data is available (spawns real Clonks instead of the synthetic Walker)
 - ✅ Material definitions load from install archives (lc-resources::material + Engine MaterialSet) and collisions now consume material friction metadata
+- ✅ Landscape blast operations carve heightmap craters respecting BlastFree and expose per-material removal totals for follow-up effects
 - ✅ Player registry + HUD overlay surface real player metadata (names, wealth, cursor) sourced from engine snapshots
 - ✅ Cursor cycling and selection toggles now respect classic COM_Single/COM_Double timing with network serialization parity
 - ✅ Team home-base rule produces and syncs materials between teammates (C4Player::ExecHomeBaseProduction)
@@ -187,7 +188,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ❌ No real audio (synthetic tones for missing sounds)
 - ⚠️ Message frames/portraits still missing (text-only rendering today)
-- ⚠️ Material runtime still lacks blasting/incineration handling and mining reactions beyond DigFree; PXS-driven interactions remain TODO even with temperature conversions active
+- ⚠️ Material runtime still misses mining reactions beyond DigFree and the Blast2Object/PXS pipelines — removal stats exist, but no particles or object spawns yet
 - ❌ No multiplayer lobby (transport exists but no game coordination)
 
 ---

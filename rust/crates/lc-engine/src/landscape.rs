@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::mem;
 
@@ -35,6 +36,12 @@ pub struct Landscape {
     solid_materials: Vec<Option<MaterialId>>,
     #[serde(default)]
     default_solid_material: Option<MaterialId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BlastResult {
+    pub removed_by_material: HashMap<MaterialId, i32>,
+    pub affected_columns: Vec<(i32, i32)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,6 +297,99 @@ impl Landscape {
                 *slot = target_height;
             }
         }
+    }
+
+    pub fn blast_circle(
+        &mut self,
+        center: Vector2,
+        radius: i32,
+        materials: &MaterialSet,
+    ) -> BlastResult {
+        let mut result = BlastResult::default();
+        if radius <= 0 || self.surface.is_empty() || materials.is_empty() {
+            return result;
+        }
+
+        self.ensure_material_capacity();
+
+        let width = self.width as i32;
+        let radius_sq = i64::from(radius) * i64::from(radius);
+
+        for dx in -radius..=radius {
+            let column = center.x.saturating_add(dx);
+            if column < 0 || column >= width {
+                continue;
+            }
+
+            let dx_sq = i64::from(dx) * i64::from(dx);
+            if dx_sq > radius_sq {
+                continue;
+            }
+
+            let remaining = radius_sq - dx_sq;
+            if remaining < 0 {
+                continue;
+            }
+
+            let vertical = (remaining as f64).sqrt().floor() as i32;
+            let target_height = center.y.saturating_add(vertical).max(0);
+            let index = column as usize;
+
+            let current_height = match self.surface.get(index) {
+                Some(&height) => height,
+                None => continue,
+            };
+
+            if target_height <= current_height {
+                continue;
+            }
+
+            let Some(material_id) = self.column_material(index) else {
+                continue;
+            };
+            let Some(material) = materials.get_by_id(material_id) else {
+                continue;
+            };
+
+            if !material.blast_free() {
+                continue;
+            }
+
+            self.surface[index] = target_height;
+            let removed_height = target_height - current_height;
+            if removed_height > 0 {
+                result
+                    .removed_by_material
+                    .entry(material_id)
+                    .and_modify(|count| *count += removed_height)
+                    .or_insert(removed_height);
+                result.affected_columns.push((column, target_height));
+            }
+        }
+
+        result
+    }
+
+    pub fn can_incinerate(&self, x: i32, y: i32, materials: &MaterialSet) -> bool {
+        if self.surface.is_empty() || materials.is_empty() {
+            return false;
+        }
+
+        let Some(surface_y) = self.surface_height(x) else {
+            return false;
+        };
+        if y < surface_y {
+            return false;
+        }
+
+        let Some(material_id) = self.solid_material_at(x) else {
+            return false;
+        };
+        let Some(material) = materials.get_by_id(material_id) else {
+            return false;
+        };
+
+        material.inflammable() > 0
     }
 
     pub fn surface_height(&self, x: i32) -> Option<i32> {
@@ -751,5 +851,116 @@ mod tests {
         assert_eq!(landscape.solid_material_at(0), Some(water));
         assert_eq!(landscape.solid_material_at(1), Some(water));
         assert_eq!(landscape.default_solid_material(), Some(water));
+    }
+
+    #[test]
+    fn blast_circle_raises_surface_for_blastable_materials() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+            BlastFree=1
+            Inflammable=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut landscape = Landscape::flat_with_material(11, 40, Some(earth));
+        let center = Vector2::new(5, 40);
+        let radius = 3;
+
+        let result = landscape.blast_circle(center, radius, &materials);
+
+        let mut expected_removed = 0;
+        let radius_sq = (radius * radius) as i64;
+        for dx in -radius..=radius {
+            let column = center.x + dx;
+            if column < 0 || column >= landscape.width() as i32 {
+                continue;
+            }
+            let dx_sq = (dx * dx) as i64;
+            if dx_sq > radius_sq {
+                continue;
+            }
+            let remaining = radius_sq - dx_sq;
+            let vertical = (remaining as f64).sqrt().floor() as i32;
+            let expected_height = (center.y + vertical).max(40);
+            let index = column as usize;
+            assert_eq!(landscape.surface()[index], expected_height);
+            expected_removed += (expected_height - 40).max(0);
+        }
+
+        assert_eq!(
+            result
+                .removed_by_material
+                .get(&earth)
+                .copied()
+                .unwrap_or_default(),
+            expected_removed
+        );
+        assert!(result
+            .affected_columns
+            .iter()
+            .all(|(column, height)| *height == landscape.surface()[*column as usize]));
+    }
+
+    #[test]
+    fn blast_circle_does_not_change_non_blastable_materials() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Steel]
+            Name=Steel
+            Density=120
+            Friction=60
+            BlastFree=0
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let steel = materials.id_of("Steel").expect("steel exists");
+
+        let mut landscape = Landscape::flat_with_material(7, 50, Some(steel));
+        let before = landscape.surface().to_vec();
+        let result = landscape.blast_circle(Vector2::new(3, 50), 4, &materials);
+
+        assert_eq!(landscape.surface(), before.as_slice());
+        assert!(result.removed_by_material.is_empty());
+        assert!(result.affected_columns.is_empty());
+    }
+
+    #[test]
+    fn can_incinerate_respects_inflammable_materials() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Wood]
+            Name=Wood
+            Density=90
+            Friction=15
+            BlastFree=1
+            Inflammable=50
+
+            [Material Stone]
+            Name=Stone
+            Density=120
+            Friction=50
+            BlastFree=0
+            Inflammable=0
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let wood = materials.id_of("Wood").expect("wood exists");
+        let stone = materials.id_of("Stone").expect("stone exists");
+
+        let landscape_flammable = Landscape::flat_with_material(5, 60, Some(wood));
+        assert!(landscape_flammable.can_incinerate(2, 65, &materials));
+        assert!(!landscape_flammable.can_incinerate(2, 55, &materials));
+
+        let landscape_non_flammable = Landscape::flat_with_material(5, 60, Some(stone));
+        assert!(!landscape_non_flammable.can_incinerate(2, 65, &materials));
     }
 }
