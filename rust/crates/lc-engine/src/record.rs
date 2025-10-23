@@ -354,6 +354,8 @@ mod tests {
                 alive: true,
             }],
             environment: EnvironmentFrame::default(),
+            sky: None,
+            weather_events: Vec::new(),
             global_effects: Vec::new(),
             particles: Vec::new(),
             players: Vec::new(),

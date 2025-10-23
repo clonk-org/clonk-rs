@@ -888,6 +888,8 @@ mod tests {
             physics: None,
             objects,
             environment: Default::default(),
+            sky: None,
+            weather_events: Vec::new(),
             global_effects: Vec::new(),
             particles: Vec::new(),
             players,

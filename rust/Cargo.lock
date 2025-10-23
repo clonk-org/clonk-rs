@@ -1893,6 +1893,7 @@ name = "lc-engine"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "image 0.24.9",
  "lc-resources",
  "lc-script",
  "proptest",

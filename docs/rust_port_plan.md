@@ -62,6 +62,7 @@
   - ✅ Landscapes retain per-column material ids and collisions now apply material friction to object velocity/vertex data
   - ✅ Conversion/reaction logic and temperature-driven evaluation mirrored in `MaterialSet::reaction` / `evaluate_temperature_conversion`, and landscapes now apply temperature-driven conversions each tick
   - ✅ ActMap `DigFree` values feed the Rust runtime; dig procedures now carve landscape columns when materials permit excavation
+  - ✅ Dig2Object conversions track per-material dig output and spawn definition objects once configured ratios are met
 
 - ✅ **Weather & Sky** (C4Weather.cpp, C4Sky.cpp 🔗 Ported)
   - ✅ Dynamic precipitation honors scenario settings (rain vs. snow), wind variation, and emits lightning events for HUD feedback
@@ -189,7 +190,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ⚠️ Audio assets still incomplete (missing samples fall back to synthesized tones even though definition libraries now register)
 - ⚠️ Message frames/portraits still missing (text-only rendering today)
-- ⚠️ Material runtime still misses mining reactions such as BlastShiftTo shifts, Dig2Object conversions, and particle-to-terrain feedback despite Blast2Object/PXS reactions now firing
+- ⚠️ Material runtime still misses mining reactions such as BlastShiftTo shifts and particle-to-terrain feedback despite Blast2Object/PXS reactions now firing
 - ❌ No multiplayer lobby (transport exists but no game coordination)
 
 ---

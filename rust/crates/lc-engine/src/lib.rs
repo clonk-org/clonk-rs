@@ -2088,6 +2088,7 @@ struct Object {
     destroyed: bool,
     command_queue: VecDeque<QueuedCommand>,
     pending_action_events: VecDeque<ActionTransitionEvent>,
+    material_contents: Vec<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2127,6 +2128,7 @@ impl Object {
             state,
             command_queue: VecDeque::new(),
             pending_action_events: VecDeque::new(),
+            material_contents: Vec::new(),
         }
     }
 
@@ -2190,6 +2192,37 @@ impl Object {
             }
         }
         events
+    }
+
+    fn ensure_material_capacity(&mut self, count: usize) {
+        if self.material_contents.len() < count {
+            self.material_contents.resize(count, 0);
+        }
+    }
+
+    fn material_content(&self, material: MaterialId) -> i32 {
+        let index = material.index();
+        self.material_contents.get(index).copied().unwrap_or(0)
+    }
+
+    fn set_material_content(&mut self, material: MaterialId, amount: i32) {
+        let index = material.index();
+        if self.material_contents.len() <= index {
+            self.material_contents.resize(index + 1, 0);
+        }
+        self.material_contents[index] = amount.max(0);
+    }
+
+    fn add_material_content(&mut self, material: MaterialId, amount: i32) {
+        if amount <= 0 {
+            return;
+        }
+        let index = material.index();
+        if self.material_contents.len() <= index {
+            self.material_contents.resize(index + 1, 0);
+        }
+        let slot = &mut self.material_contents[index];
+        *slot = slot.saturating_add(amount);
     }
 
     fn apply_material_interaction(&mut self, material: &Material) {
@@ -4829,6 +4862,10 @@ impl Engine {
 
     pub fn set_materials(&mut self, materials: MaterialSet) {
         self.materials = materials;
+        let capacity = self.materials.len();
+        for object in &mut self.objects {
+            object.ensure_material_capacity(capacity);
+        }
         if let Some(landscape) = self.landscape.as_mut() {
             let default = self.materials.default_ground_material();
             landscape.set_default_solid_material(default);
@@ -4845,6 +4882,10 @@ impl Engine {
 
     pub fn configure_materials_from_library(&mut self, library: &lc_resources::MaterialLibrary) {
         self.materials = MaterialSet::from_resource_library(library);
+        let capacity = self.materials.len();
+        for object in &mut self.objects {
+            object.ensure_material_capacity(capacity);
+        }
     }
 
     pub fn frame(&self) -> u64 {
@@ -7573,9 +7614,12 @@ impl Engine {
             _ => return,
         };
 
-        let action_name = {
+        let (action_name, requested) = {
             let object = &self.objects[idx];
-            object.state.action.name.clone()
+            (
+                object.state.action.name.clone(),
+                object.state.action.data != 0,
+            )
         };
 
         let dig_free_value = match self.definitions.get(definition_id).and_then(|definition| {
@@ -7591,6 +7635,8 @@ impl Engine {
             return;
         }
 
+        let mut removal_counts: HashMap<MaterialId, i32> = HashMap::new();
+
         let (position, (half_width, half_height)) = {
             let object = &self.objects[idx];
             (object.state.position, Self::object_half_extents(object))
@@ -7603,7 +7649,14 @@ impl Engine {
             let right = position.x + effective_half_width;
             let bottom = position.y + effective_half_height;
             for column in left..=right {
-                Self::dig_column(materials, landscape, column, bottom);
+                if let Some((material_id, removed)) =
+                    Self::dig_column(materials, landscape, column, bottom)
+                {
+                    removal_counts
+                        .entry(material_id)
+                        .and_modify(|value| *value = value.saturating_add(removed))
+                        .or_insert(removed);
+                }
             }
         } else {
             let radius = dig_free_value.max(1);
@@ -7622,9 +7675,30 @@ impl Engine {
                 }
                 let vertical = (remaining as f64).sqrt().floor() as i32;
                 let target = center_y.saturating_add(vertical);
-                Self::dig_column(materials, landscape, column, target);
+                if let Some((material_id, removed)) =
+                    Self::dig_column(materials, landscape, column, target)
+                {
+                    removal_counts
+                        .entry(material_id)
+                        .and_modify(|value| *value = value.saturating_add(removed))
+                        .or_insert(removed);
+                }
             }
         }
+
+        if removal_counts.is_empty() {
+            return;
+        }
+
+        {
+            let object = &mut self.objects[idx];
+            object.ensure_material_capacity(self.materials.len());
+            for (material_id, removed) in &removal_counts {
+                object.add_material_content(*material_id, *removed);
+            }
+        }
+
+        self.process_dig_material_conversions(idx, requested);
     }
 
     fn dig_column(
@@ -7632,28 +7706,40 @@ impl Engine {
         landscape: &mut Landscape,
         column: i32,
         target_height: i32,
-    ) {
+    ) -> Option<(MaterialId, i32)> {
         let width = landscape.width() as i32;
         if column < 0 || width == 0 || column >= width {
-            return;
+            return None;
         }
 
         if materials.is_empty() {
             landscape.ensure_surface_at_least(column, target_height);
-            return;
+            return None;
         }
 
+        let previous_height = landscape.surface_height(column).unwrap_or(0);
         let Some(material_id) = landscape.solid_material_at(column) else {
-            return;
+            return None;
         };
         let Some(material) = materials.get_by_id(material_id) else {
-            return;
+            return None;
         };
         if !material.dig_free() {
-            return;
+            return None;
+        }
+        let clamped_target = target_height.max(0);
+        if clamped_target <= previous_height {
+            return None;
         }
 
-        landscape.ensure_surface_at_least(column, target_height);
+        landscape.ensure_surface_at_least(column, clamped_target);
+        let new_height = landscape.surface_height(column).unwrap_or(previous_height);
+        let removed = new_height.saturating_sub(previous_height);
+        if removed <= 0 {
+            return None;
+        }
+
+        Some((material_id, removed))
     }
 
     fn apply_bridge_procedure(
@@ -8438,6 +8524,71 @@ impl Engine {
         apply_effect_commands_to_stack(&mut self.global_effects, commands);
     }
 
+    fn process_dig_material_conversions(&mut self, idx: usize, requested: bool) {
+        if idx >= self.objects.len() || self.materials.is_empty() {
+            return;
+        }
+
+        let (position, bottom, owner) = {
+            let object = &self.objects[idx];
+            let (_, half_height) = Self::object_half_extents(object);
+            (
+                object.state.position,
+                object.state.position.y.saturating_add(half_height),
+                object.state.owner,
+            )
+        };
+
+        let mut spawn_requests = Vec::new();
+
+        {
+            let object = &mut self.objects[idx];
+            object.ensure_material_capacity(self.materials.len());
+            for material in self.materials.iter() {
+                let Some(definition_id) = material.dig_to_object_name() else {
+                    continue;
+                };
+                let Some(ratio) = material.dig_to_object_ratio() else {
+                    continue;
+                };
+                if ratio <= 0 {
+                    continue;
+                }
+                if material.dig_to_object_on_request_only() && !requested {
+                    continue;
+                }
+                let current = object.material_content(material.id());
+                if current < ratio {
+                    continue;
+                }
+                let spawn_count = current / ratio;
+                let remainder = current % ratio;
+                object.set_material_content(material.id(), remainder);
+                if spawn_count <= 0 {
+                    continue;
+                }
+                if !self.definitions.contains_key(definition_id) {
+                    continue;
+                }
+                let spawn_definition = definition_id.to_string();
+                let spawn_position = Vector2::new(position.x, bottom);
+                for _ in 0..spawn_count {
+                    spawn_requests.push(
+                        SpawnConfig::new(spawn_definition.clone())
+                            .with_position(spawn_position)
+                            .with_owner(owner),
+                    );
+                }
+            }
+        }
+
+        for config in spawn_requests {
+            if let Err(err) = self.spawn_object(config) {
+                let _ = err;
+            }
+        }
+    }
+
     fn process_blast_reactions(
         &mut self,
         center: Vector2,
@@ -8932,6 +9083,7 @@ impl Engine {
                 alive: alive.unwrap_or(true),
             },
         );
+        object.ensure_material_capacity(self.materials.len());
         let mut container_changes = Vec::new();
         if let Some(container_id) = container {
             object.state.container = Some(container_id);
@@ -12633,6 +12785,69 @@ global func MenuCommand(state, kind, selection)
 
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.action.name, "Dig");
+    }
+
+    #[test]
+    fn dig_procedure_spawns_dig2object_when_ratio_reached() {
+        let mut digger = Definition::from_script("DGRR", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
+            .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Dig".to_string(),
+            ActionSpec::default().with_procedure("dig").with_dig_free(6),
+        );
+        digger.configure_actions(Some("Dig".to_string()), actions);
+
+        let gem = Definition::from_script("GEM_", "Gem", "func Initialize() { }\n")
+            .expect("script compiles");
+
+        let material_source = r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            Friction=25
+            DigFree=1
+            Dig2Object=GEM_
+            Dig2ObjectRatio=3
+        "#;
+        let library =
+            lc_resources::MaterialLibrary::parse(material_source).expect("material parses");
+        let mut materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(digger)
+            .expect("digger registers");
+        engine.register_definition(gem).expect("gem registers");
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(32, 6, Some(earth)));
+
+        engine
+            .spawn_object(
+                SpawnConfig::new("DGRR")
+                    .with_position(Vector2::new(12, 8))
+                    .with_action(ActionState::new("Dig")),
+            )
+            .expect("spawn succeeds");
+
+        let mut spawned = false;
+        for _ in 0..20 {
+            let snapshot = engine.tick().expect("tick succeeds");
+            if snapshot
+                .objects
+                .iter()
+                .any(|object| object.definition_id == "GEM_")
+            {
+                spawned = true;
+                break;
+            }
+        }
+
+        assert!(
+            spawned,
+            "expected Dig2Object conversion to spawn target definition"
+        );
     }
 
     #[test]

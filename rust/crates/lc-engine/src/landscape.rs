@@ -470,12 +470,7 @@ impl Landscape {
         }
     }
 
-    pub fn incinerate_at(
-        &mut self,
-        x: i32,
-        y: i32,
-        materials: &MaterialSet,
-    ) -> bool {
+    pub fn incinerate_at(&mut self, x: i32, y: i32, materials: &MaterialSet) -> bool {
         if !self.can_incinerate(x, y, materials) {
             return false;
         }

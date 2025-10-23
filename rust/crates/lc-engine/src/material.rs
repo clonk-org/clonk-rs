@@ -177,6 +177,9 @@ pub struct MaterialProperties {
     blast_to_object: Option<String>,
     blast_to_object_ratio: Option<i32>,
     blast_to_pxs_ratio: Option<i32>,
+    dig_to_object: Option<String>,
+    dig_to_object_ratio: Option<i32>,
+    dig_to_object_on_request_only: bool,
     wind_drift: i32,
     inflammable: i32,
     incindiary: i32,
@@ -231,6 +234,15 @@ impl MaterialProperties {
             .int("blast2objectratio")
             .filter(|ratio| *ratio > 0);
         let blast_to_pxs_ratio = definition.int("blast2pxsratio").filter(|ratio| *ratio > 0);
+        let dig_to_object = definition.value("dig2object").and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_ascii_uppercase())
+            }
+        });
+        let dig_to_object_ratio = definition.int("dig2objectratio").filter(|ratio| *ratio > 0);
         let in_mat_convert = definition.value("inmatconvert").and_then(|value| {
             let trimmed = value.trim();
             if trimmed.is_empty() {
@@ -275,6 +287,9 @@ impl MaterialProperties {
             blast_to_object,
             blast_to_object_ratio,
             blast_to_pxs_ratio,
+            dig_to_object,
+            dig_to_object_ratio,
+            dig_to_object_on_request_only,
             wind_drift,
             inflammable,
             incindiary,
@@ -391,6 +406,18 @@ impl Material {
 
     pub fn blast_to_pxs_ratio(&self) -> Option<i32> {
         self.properties.blast_to_pxs_ratio
+    }
+
+    pub fn dig_to_object_name(&self) -> Option<&str> {
+        self.properties.dig_to_object.as_deref()
+    }
+
+    pub fn dig_to_object_ratio(&self) -> Option<i32> {
+        self.properties.dig_to_object_ratio
+    }
+
+    pub fn dig_to_object_on_request_only(&self) -> bool {
+        self.properties.dig_to_object_on_request_only
     }
 
     pub fn color(&self) -> &[i32] {

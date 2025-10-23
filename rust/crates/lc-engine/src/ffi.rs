@@ -947,6 +947,8 @@ unsafe fn make_snapshot(
         physics: None,
         objects: snapshots,
         environment: EnvironmentFrame::default(),
+        sky: None,
+        weather_events: Vec::new(),
         global_effects: global_effects_vec,
         particles: particle_snapshots,
         players: Vec::new(),
