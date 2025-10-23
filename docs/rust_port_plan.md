@@ -49,7 +49,8 @@
 
 - ⚠️ **Menu System** (C4Menu.h 🔗 Partial — player pause menu implemented)
   - ✅ Player pause/main menu ported in Rust frontend (resume, quick save/load, abort)
-  - ❌ Context menus, build/inventory menus, and script-driven callbacks still unported
+  - ⚠️ Player inventory/context menu now renders crew contents with selectable entries; selection focuses targets and surfaces feedback (no scripted commands yet)
+  - ❌ Build menus, inventory command execution, and script-driven callbacks still unported
 
 - ❌ **Message System** (C4GameMessage.cpp 🔗 No message display)
   - In-game messages, tutorials, mission objectives
@@ -175,6 +176,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Cursor cycling and selection toggles now respect classic COM_Single/COM_Double timing with network serialization parity
 - ✅ Team home-base rule produces and syncs materials between teammates (C4Player::ExecHomeBaseProduction)
 - ⚠️ In-game pause menu implemented (resume, quick save/load, abort) while gameplay continues; object/build menus still pending
+- ⚠️ Player inventory menu mirrors crew contents with navigation/selection feedback; scripted command execution still missing
 - ⚠️ Experimental: `.c4s` scenarios boot with real definitions and scripts when install data is available (lands in running state, but full player UX still limited)
 
 **What Doesn't Work (Real Game Requirements):**

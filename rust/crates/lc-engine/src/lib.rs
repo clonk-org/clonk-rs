@@ -4399,6 +4399,12 @@ impl Engine {
         Ok(())
     }
 
+    pub fn definition_name(&self, definition_id: &str) -> Option<&str> {
+        self.definitions
+            .get(definition_id)
+            .map(|definition| definition.name())
+    }
+
     pub fn spawn_object(&mut self, config: SpawnConfig) -> Result<ObjectId, EngineError> {
         let (id, additional) = self.spawn_single(config)?;
         self.process_spawn_queue(additional)?;

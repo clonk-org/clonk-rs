@@ -2,6 +2,7 @@ mod gamepad;
 mod ingame_menu;
 mod input;
 mod network;
+mod object_menu;
 mod settings;
 
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
@@ -44,6 +45,7 @@ use lc_resources::{
     ResourceDefinition as ResourceDefinitionData,
 };
 use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, NetworkMode};
+use object_menu::{ObjectMenuAction, ObjectMenuState};
 use pixels::{Pixels, SurfaceTexture};
 use serde::{
     de::{self, Unexpected, Visitor},
@@ -1226,6 +1228,7 @@ struct GameApp {
     scenario_label: String,
     fallback_ground: i32,
     menu_state: MenuState,
+    object_menu: Option<ObjectMenuState>,
     ingame_menu: Option<IngameMenuState>,
     mode: AppMode,
     scenario_catalog: HashMap<String, FrontendScenario>,
@@ -2123,6 +2126,7 @@ impl GameApp {
             scenario_label,
             fallback_ground: DEFAULT_GROUND_HEIGHT,
             menu_state,
+            object_menu: None,
             ingame_menu: None,
             mode: AppMode::Menu,
             scenario_catalog,
@@ -2203,7 +2207,9 @@ impl GameApp {
 
         if self.mode == AppMode::Running {
             if key == VirtualKeyCode::Escape && state == ElementState::Pressed {
-                if self.ingame_menu.is_some() {
+                if self.object_menu.is_some() {
+                    self.close_object_menu();
+                } else if self.ingame_menu.is_some() {
                     self.close_ingame_menu();
                 } else {
                     self.open_ingame_menu();
@@ -2228,12 +2234,15 @@ impl GameApp {
 
     fn dispatch_control_event(&mut self, event: ControlEvent) -> Result<(), EngineError> {
         if self.mode == AppMode::Running {
-            if let ControlEvent::Command { command, kind } = event {
-                if self.handle_ingame_menu_command(command, kind)? {
-                    return Ok(());
-                }
+            let consumed = if let ControlEvent::Command { command, kind } = event {
+                self.handle_menu_command(command, kind)?
+            } else {
+                false
+            };
+            if consumed {
+                return Ok(());
             }
-            if self.ingame_menu.is_some() {
+            if self.object_menu.is_some() || self.ingame_menu.is_some() {
                 return Ok(());
             }
         }
@@ -2250,11 +2259,15 @@ impl GameApp {
         owner: i32,
         event: ControlEvent,
     ) -> Result<(), EngineError> {
-        if owner == self.local_owner && self.ingame_menu.is_some() {
+        if owner == self.local_owner {
             if let ControlEvent::Command { command, kind } = event {
-                let _ = self.handle_ingame_menu_command(command, kind)?;
+                if self.handle_menu_command(command, kind)? {
+                    return Ok(());
+                }
             }
-            return Ok(());
+            if self.object_menu.is_some() || self.ingame_menu.is_some() {
+                return Ok(());
+            }
         }
         let _ = self.input.handle_event(&mut self.engine, owner, event)?;
         Ok(())
@@ -2264,6 +2277,7 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) || self.ingame_menu.is_some() {
             return;
         }
+        self.close_object_menu();
         let has_quick_save = self
             .last_save_path
             .as_ref()
@@ -2282,7 +2296,38 @@ impl GameApp {
         }
     }
 
-    fn handle_ingame_menu_command(
+    fn open_object_menu(&mut self) -> bool {
+        if !matches!(self.mode, AppMode::Running) || self.object_menu.is_some() {
+            return false;
+        }
+        match ObjectMenuState::for_player(self.local_owner, &self.engine, &self.snapshot) {
+            Some(menu) => {
+                self.object_menu = Some(menu);
+                self.ingame_menu = None;
+                if self.status_text.is_empty() {
+                    self.status_text = "Inventory open".to_string();
+                }
+                true
+            }
+            None => {
+                if self.status_text.is_empty() {
+                    self.status_text = "No crew inventory available".to_string();
+                }
+                false
+            }
+        }
+    }
+
+    fn close_object_menu(&mut self) {
+        if self.object_menu.is_some() {
+            self.object_menu = None;
+            if self.status_text == "Inventory open" {
+                self.status_text.clear();
+            }
+        }
+    }
+
+    fn handle_menu_command(
         &mut self,
         command: ControlCommand,
         kind: CommandKind,
@@ -2291,7 +2336,7 @@ impl GameApp {
             return Ok(false);
         }
 
-        if matches!(
+        let menu_command = matches!(
             command,
             ControlCommand::MenuEnter
                 | ControlCommand::MenuEnterAll
@@ -2302,8 +2347,9 @@ impl GameApp {
                 | ControlCommand::MenuSelect
                 | ControlCommand::MenuShowText
                 | ControlCommand::MenuUp
-        ) && self.ingame_menu.is_none()
-        {
+        );
+
+        if menu_command && self.object_menu.is_none() && self.ingame_menu.is_none() {
             return Ok(false);
         }
 
@@ -2312,23 +2358,53 @@ impl GameApp {
                 kind,
                 CommandKind::Press | CommandKind::Single | CommandKind::Double
             ) {
-                if self.ingame_menu.is_some() {
-                    self.close_ingame_menu();
-                } else {
+                if self.object_menu.is_some() {
+                    self.close_object_menu();
+                } else if !self.open_object_menu() {
                     self.open_ingame_menu();
                 }
             }
             return Ok(true);
         }
 
+        if let Some(menu) = self.object_menu.as_mut() {
+            if let Some(action) = menu.handle_command(command, kind) {
+                self.execute_object_menu_action(action)?;
+            }
+            return Ok(true);
+        }
+
         let Some(menu) = self.ingame_menu.as_mut() else {
-            return Ok(false);
+            return Ok(menu_command);
         };
 
         if let Some(action) = menu.handle_command(command, kind) {
             self.execute_ingame_menu_action(action)?;
         }
         Ok(true)
+    }
+
+    fn execute_object_menu_action(&mut self, action: ObjectMenuAction) -> Result<(), EngineError> {
+        match action {
+            ObjectMenuAction::Close => {
+                self.close_object_menu();
+            }
+            ObjectMenuAction::Select(selection) => {
+                self.object_menu = None;
+                self.focus_id = Some(selection.object_id);
+                self.focus_snapshot = self.snapshot.object(selection.object_id).cloned();
+                self.status_text = format!("Selected {} (x{})", selection.label, selection.count);
+            }
+        }
+        Ok(())
+    }
+
+    fn refresh_object_menu(&mut self) {
+        if let Some(menu) = self.object_menu.as_mut() {
+            if !menu.refresh(&self.engine, &self.snapshot) {
+                self.object_menu = None;
+            }
+        }
     }
 
     fn execute_ingame_menu_action(&mut self, action: IngameMenuAction) -> Result<(), EngineError> {
@@ -2685,6 +2761,7 @@ impl GameApp {
         self.process_network_events()?;
         if matches!(self.mode, AppMode::Running) {
             self.snapshot = self.engine.tick()?;
+            self.refresh_object_menu();
             self.refresh_focus();
             self.update_audio();
         }
@@ -2784,7 +2861,13 @@ impl GameApp {
             self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
         }
 
-        if let Some(menu) = self.ingame_menu.as_ref() {
+        if let Some(menu) = self.object_menu.as_ref() {
+            let font = self.assets.font_arc();
+            {
+                let surface = self.graphics.surface_mut();
+                menu.render(surface, font.as_ref());
+            }
+        } else if let Some(menu) = self.ingame_menu.as_ref() {
             let font = self.assets.font_arc();
             {
                 let surface = self.graphics.surface_mut();
@@ -2804,10 +2887,12 @@ impl GameApp {
 
     fn return_to_menu(&mut self) {
         self.close_ingame_menu();
+        self.object_menu = None;
         self.engine = Engine::new();
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.snapshot = self.engine.snapshot();
+        self.refresh_object_menu();
         self.focus_id = None;
         self.focus_snapshot = None;
         self.frame_text.clear();
@@ -2930,6 +3015,7 @@ impl GameApp {
         self.configure_running_state(label, ground);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
+        self.refresh_object_menu();
         self.refresh_focus();
         self.active_scenario = Some(scenario.clone());
         self.play_scenario_audio(path);
@@ -2964,6 +3050,7 @@ impl GameApp {
         self.configure_running_state(scenario.title.clone(), DEFAULT_GROUND_HEIGHT);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
+        self.refresh_object_menu();
         self.refresh_focus();
         self.active_scenario = Some(scenario);
         self.play_sandbox_audio();
@@ -3164,6 +3251,7 @@ impl GameApp {
         self.status_text.clear();
         self.energy_fraction = 0.0;
         self.menu_state.set_pointer_position(None);
+        self.object_menu = None;
         self.ingame_menu = None;
         self.mode = AppMode::Running;
     }
