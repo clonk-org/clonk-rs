@@ -60,17 +60,33 @@ impl ObjectMenuItem {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct ObjectMenuSelection {
-    pub object_id: ObjectId,
-    pub label: String,
-    pub count: usize,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectMenuCommand {
+    Focus,
+    DropAll,
 }
 
 #[derive(Clone, Debug)]
 pub enum ObjectMenuAction {
     Close,
-    Select(ObjectMenuSelection),
+    Execute {
+        command: ObjectMenuCommand,
+        selection: ObjectMenuSelection,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct ObjectMenuSelection {
+    pub crew_id: ObjectId,
+    pub primary_id: ObjectId,
+    pub instances: Vec<ObjectId>,
+    pub label: String,
+}
+
+impl ObjectMenuSelection {
+    pub fn count(&self) -> usize {
+        self.instances.len()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -150,11 +166,10 @@ impl ObjectMenuState {
                 self.advance_selection(1);
                 None
             }
-            ControlCommand::MenuSelect | ControlCommand::MenuEnter => self.activate_selected(),
-            ControlCommand::MenuEnterAll => {
-                // Treat EnterAll as Enter for now.
-                self.activate_selected()
+            ControlCommand::MenuSelect | ControlCommand::MenuEnter => {
+                self.activation_action(ObjectMenuCommand::Focus)
             }
+            ControlCommand::MenuEnterAll => self.activation_action(ObjectMenuCommand::DropAll),
             ControlCommand::MenuClose => Some(ObjectMenuAction::Close),
             ControlCommand::MenuShowText => None,
             _ => None,
@@ -282,15 +297,19 @@ impl ObjectMenuState {
         self.selected = Some(next as usize);
     }
 
-    fn activate_selected(&self) -> Option<ObjectMenuAction> {
+    fn activation_action(&self, command: ObjectMenuCommand) -> Option<ObjectMenuAction> {
         let index = self.selected?;
         let item = self.items.get(index)?;
-        let object_id = item.primary_object()?;
-        Some(ObjectMenuAction::Select(ObjectMenuSelection {
-            object_id,
-            label: item.label.clone(),
-            count: item.count(),
-        }))
+        let primary_id = item.primary_object()?;
+        Some(ObjectMenuAction::Execute {
+            command,
+            selection: ObjectMenuSelection {
+                crew_id: self.crew_id,
+                primary_id,
+                instances: item.instances.clone(),
+                label: item.label.clone(),
+            },
+        })
     }
 }
 
@@ -453,5 +472,33 @@ mod tests {
         assert!(menu.refresh(&engine, &snapshot_updated));
         assert_eq!(menu.items.len(), 1);
         assert_eq!(menu.items[0].count(), 2);
+    }
+
+    #[test]
+    fn menu_enter_all_emits_drop_action() {
+        let engine = Engine::new();
+        let crew = make_object(1, "Clonk");
+        let contents = vec![
+            make_object(2, "Shovel"),
+            make_object(3, "Shovel"),
+            make_object(4, "Hammer"),
+        ];
+        let snapshot = make_snapshot(crew.clone(), contents);
+        let mut menu =
+            ObjectMenuState::new(&engine, &snapshot, crew.id).expect("menu should exist");
+        let action = menu
+            .handle_command(ControlCommand::MenuEnterAll, CommandKind::Press)
+            .expect("drop action");
+        match action {
+            ObjectMenuAction::Execute { command, selection } => {
+                assert_eq!(command, ObjectMenuCommand::DropAll);
+                assert_eq!(selection.crew_id, crew.id);
+                assert_eq!(selection.label, "Shovel");
+                assert_eq!(selection.count(), 2);
+                assert_eq!(selection.instances.len(), 2);
+                assert_eq!(selection.primary_id, ObjectId::new(2));
+            }
+            _ => panic!("expected execute action"),
+        }
     }
 }

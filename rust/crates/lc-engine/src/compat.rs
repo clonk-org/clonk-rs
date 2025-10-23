@@ -5,6 +5,10 @@ use std::rc::Rc;
 
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::math::integer_distance;
+use crate::message::{
+    MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, HORIZONTAL_POSITION_FLAGS,
+    VERTICAL_POSITION_FLAGS,
+};
 use crate::ocf;
 #[cfg(test)]
 use crate::LiquidSegment;
@@ -356,6 +360,20 @@ fn truncate_to_i32(value: u64) -> i32 {
     } else {
         value as i32
     }
+}
+
+fn invert_rgba_alpha(color: u32) -> u32 {
+    let alpha = (color >> 24) & 0xff;
+    let rgb = color & 0x00ff_ffff;
+    ((255 - alpha) << 24) | rgb
+}
+
+fn ensure_single_flag(flags: u32, mask: u32, error: &str) -> Result<(), RuntimeError> {
+    let masked = flags & mask;
+    if masked != 0 && (masked & (masked - 1)) != 0 {
+        return Err(RuntimeError::new(error));
+    }
+    Ok(())
 }
 
 fn object_reference_value(id: ObjectId) -> Value {
@@ -866,6 +884,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CreateObject", create_object);
     script.register_host_function("CreateParticle", create_particle);
     script.register_host_function("ClearParticles", clear_particles);
+    script.register_host_function("CustomMessage", custom_message);
     script.register_host_function("Contained", contained);
     script.register_host_function("GetCategory", get_category);
     script.register_host_function("SetCategory", set_category);
@@ -906,6 +925,138 @@ pub(crate) fn enter_random_context(rng: ChaCha8Rng) -> RandomContextGuard {
         RandomContextGuard {
             context: Some(context),
         }
+    })
+}
+
+fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Ok(Value::Bool(false));
+    }
+
+    let message = match &args[0] {
+        Value::String(text) if !text.is_empty() => text.clone(),
+        Value::String(_) | Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "CustomMessage: expected string for message, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let target = if let Some(arg) = args.get(1) {
+        parse_object_reference_argument(arg, "CustomMessage", "target")?
+    } else {
+        None
+    };
+
+    let owner = match args.get(2) {
+        Some(Value::Nil) | None => OWNER_NONE,
+        Some(value) => value_to_i32(value, "CustomMessage", "owner")?,
+    };
+
+    let offset_x = match args.get(3) {
+        Some(Value::Nil) | None => 0,
+        Some(value) => value_to_i32(value, "CustomMessage", "x")?,
+    };
+
+    let offset_y = match args.get(4) {
+        Some(Value::Nil) | None => 0,
+        Some(value) => value_to_i32(value, "CustomMessage", "y")?,
+    };
+
+    let raw_color = match args.get(5) {
+        Some(Value::Nil) | None => None,
+        Some(value) => Some(value_to_i32(value, "CustomMessage", "color")? as u32),
+    };
+
+    let decoration = match args.get(6) {
+        Some(Value::Nil) | None => None,
+        Some(Value::String(id)) if !id.is_empty() => Some(id.clone()),
+        Some(other) => {
+            return Err(RuntimeError::new(format!(
+                "CustomMessage: expected string or nil for decoration, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let portrait = match args.get(7) {
+        Some(Value::Nil) | None => None,
+        Some(Value::String(name)) if !name.is_empty() => Some(name.clone()),
+        Some(other) => {
+            return Err(RuntimeError::new(format!(
+                "CustomMessage: expected string or nil for portrait, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let flags = match args.get(8) {
+        Some(Value::Nil) | None => 0,
+        Some(value) => value_to_i32(value, "CustomMessage", "flags")? as u32,
+    };
+
+    ensure_single_flag(
+        flags,
+        HORIZONTAL_POSITION_FLAGS,
+        "CustomMessage: Only one horizontal positioning flag allowed!",
+    )?;
+    ensure_single_flag(
+        flags,
+        VERTICAL_POSITION_FLAGS,
+        "CustomMessage: Only one vertical positioning flag allowed!",
+    )?;
+    ensure_single_flag(
+        flags,
+        ALIGNMENT_FLAGS,
+        "CustomMessage: Only one text alignment flag allowed!",
+    )?;
+
+    let width = match args.get(9) {
+        Some(Value::Nil) | None => None,
+        Some(value) => Some(value_to_i32(value, "CustomMessage", "width")?),
+    };
+
+    let color = invert_rgba_alpha(raw_color.unwrap_or(0x00ff_ffff));
+    let kind = if target.is_some() {
+        if owner != OWNER_NONE {
+            MessageKind::TargetPlayer
+        } else {
+            MessageKind::Target
+        }
+    } else if owner != OWNER_NONE {
+        MessageKind::GlobalPlayer
+    } else {
+        MessageKind::Global
+    };
+
+    let player = if owner == OWNER_NONE {
+        None
+    } else {
+        Some(owner)
+    };
+
+    let spec = MessageSpec {
+        kind,
+        text: message,
+        target,
+        player,
+        offset: Vector2::new(offset_x, offset_y),
+        color,
+        flags,
+        width,
+        decoration,
+        portrait,
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("CustomMessage requires an active engine context"))?;
+        context.register_message(MessageCommand::Add(spec));
+        Ok(Value::Bool(true))
     })
 }
 
@@ -1326,6 +1477,7 @@ pub(crate) struct EffectContextOutcome {
     pub spawns: Vec<SpawnConfig>,
     pub particles: Vec<ParticleCommand>,
     pub transfer_zones: Vec<TransferZoneCommand>,
+    pub messages: Vec<MessageCommand>,
     pub audio: AudioOutcome,
     pub next_object_id: u64,
 }
@@ -1341,6 +1493,7 @@ impl EffectContextOutcome {
         physics: Option<PhysicsDelta>,
         spawns: Vec<SpawnConfig>,
         transfer_zones: Vec<TransferZoneCommand>,
+        messages: Vec<MessageCommand>,
         audio: AudioOutcome,
         next_object_id: u64,
     ) -> Self {
@@ -1355,6 +1508,7 @@ impl EffectContextOutcome {
             spawns,
             particles: Vec::new(),
             transfer_zones,
+            messages,
             audio,
             next_object_id,
         }
@@ -1372,6 +1526,7 @@ impl EffectContextOutcome {
             spawns: Vec::new(),
             particles: Vec::new(),
             transfer_zones: Vec::new(),
+            messages: Vec::new(),
             audio: AudioOutcome {
                 state: audio,
                 events: Vec::new(),
@@ -5840,6 +5995,7 @@ struct EffectHostContext {
     pending_order: Vec<ObjectId>,
     pending_particles: Vec<ParticleCommand>,
     transfer_zone_commands: Vec<TransferZoneCommand>,
+    pending_messages: Vec<MessageCommand>,
     audio: AudioRegistry,
     next_object_id: u64,
 }
@@ -5913,6 +6069,7 @@ impl EffectHostContext {
             pending_order: Vec::new(),
             pending_particles: Vec::new(),
             transfer_zone_commands: Vec::new(),
+            pending_messages: Vec::new(),
             audio,
             next_object_id,
         }
@@ -5957,6 +6114,10 @@ impl EffectHostContext {
 
     fn register_transfer_zone_command(&mut self, command: TransferZoneCommand) {
         self.transfer_zone_commands.push(command);
+    }
+
+    fn register_message(&mut self, command: MessageCommand) {
+        self.pending_messages.push(command);
     }
 
     fn get_world_object(&self, id: ObjectId) -> Option<HostWorldObject> {
@@ -6042,6 +6203,7 @@ impl EffectHostContext {
             None,
             self.pending_spawns,
             self.transfer_zone_commands,
+            self.pending_messages,
             AudioOutcome {
                 state: self.audio,
                 events: audio_events,

@@ -261,6 +261,19 @@ impl GraphicsSystem {
         &mut self.surface
     }
 
+    pub fn world_to_screen(&self, owner: i32, position: Vector2) -> Option<(f32, f32)> {
+        self.active_viewports
+            .iter()
+            .find(|viewport| viewport.owner == owner)
+            .map(|viewport| {
+                let screen_x = (position.x as f32 - viewport.viewport_x) * viewport.zoom
+                    + viewport.content_rect.x as f32;
+                let screen_y = (position.y as f32 - viewport.viewport_y) * viewport.zoom
+                    + viewport.content_rect.y as f32;
+                (screen_x, screen_y)
+            })
+    }
+
     pub fn update_overlay(&mut self, overlay: &GraphicsOverlay<'_>) -> GuiResult<()> {
         self.ensure_player_widgets(&overlay.players)?;
         self.gui

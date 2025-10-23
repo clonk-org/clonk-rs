@@ -28,8 +28,9 @@ use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
     ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, Landscape,
-    MaterialSet, MovementProfile, ObjectId, ObjectSnapshot, PlayerStatus, Scenario, ScenarioError,
-    SimulationSnapshot, SpawnConfig, Vector2,
+    MaterialSet, MessageKind, MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate,
+    PlayerStatus, Scenario, ScenarioError, SimulationSnapshot, SpawnConfig, Vector2, FLAG_BOTTOM,
+    FLAG_HCENTER, FLAG_LEFT, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_X_REL, FLAG_Y_REL,
 };
 use lc_frontend::{
     draw_image, CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData, InputDispatcher,
@@ -45,7 +46,7 @@ use lc_resources::{
     ResourceDefinition as ResourceDefinitionData,
 };
 use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, NetworkMode};
-use object_menu::{ObjectMenuAction, ObjectMenuState};
+use object_menu::{ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState};
 use pixels::{Pixels, SurfaceTexture};
 use serde::{
     de::{self, Unexpected, Visitor},
@@ -2389,13 +2390,61 @@ impl GameApp {
             ObjectMenuAction::Close => {
                 self.close_object_menu();
             }
-            ObjectMenuAction::Select(selection) => {
-                self.object_menu = None;
-                self.focus_id = Some(selection.object_id);
-                self.focus_snapshot = self.snapshot.object(selection.object_id).cloned();
-                self.status_text = format!("Selected {} (x{})", selection.label, selection.count);
+            ObjectMenuAction::Execute { command, selection } => match command {
+                ObjectMenuCommand::Focus => {
+                    self.object_menu = None;
+                    self.focus_id = Some(selection.primary_id);
+                    self.focus_snapshot = self.snapshot.object(selection.primary_id).cloned();
+                    self.status_text =
+                        format!("Selected {} (x{})", selection.label, selection.count());
+                }
+                ObjectMenuCommand::DropAll => {
+                    self.drop_inventory_selection(&selection)?;
+                }
+            },
+        }
+        Ok(())
+    }
+
+    fn drop_inventory_selection(
+        &mut self,
+        selection: &ObjectMenuSelection,
+    ) -> Result<(), EngineError> {
+        let Some(crew) = self.snapshot.object(selection.crew_id).cloned() else {
+            self.status_text = "Crew no longer available".to_string();
+            self.object_menu = None;
+            return Ok(());
+        };
+
+        let mut dropped = 0usize;
+        for object_id in &selection.instances {
+            match self.engine.apply_object_update(
+                *object_id,
+                ObjectUpdate::new()
+                    .clear_container()
+                    .with_position(crew.position)
+                    .with_velocity(Vector2::ZERO),
+            ) {
+                Ok(()) => dropped += 1,
+                Err(EngineError::UnknownObject(_)) => {
+                    tracing::warn!(
+                        object = %object_id,
+                        "inventory item missing while dropping"
+                    );
+                }
+                Err(err) => return Err(err),
             }
         }
+
+        if dropped == 0 {
+            self.status_text = format!("No {} to drop", selection.label);
+            return Ok(());
+        }
+
+        self.snapshot = self.engine.snapshot();
+        self.refresh_object_menu();
+        self.refresh_focus();
+        self.status_text = format!("Dropped {} (x{})", selection.label, dropped);
         Ok(())
     }
 
@@ -2875,6 +2924,8 @@ impl GameApp {
             }
         }
 
+        self.draw_messages();
+
         let surface = self.graphics.surface();
         let pixels = surface.pixels();
         if pixels.len() == frame.len() {
@@ -2883,6 +2934,105 @@ impl GameApp {
             copy_surface(pixels, surface.width(), surface.height(), frame);
         }
         Ok(())
+    }
+
+    fn draw_messages(&mut self) {
+        if self.snapshot.hud.messages.is_empty() {
+            return;
+        }
+
+        let surface_width = self.graphics.surface().width() as f32;
+        let surface_height = self.graphics.surface().height() as f32;
+        let mut prepared: Vec<((f32, f32), Vec<String>, Color)> = Vec::new();
+
+        for message in &self.snapshot.hud.messages {
+            if let Some(player) = message.player {
+                if player != self.local_owner {
+                    continue;
+                }
+            }
+
+            let color = Color::new(
+                ((message.color >> 16) & 0xff) as u8,
+                ((message.color >> 8) & 0xff) as u8,
+                (message.color & 0xff) as u8,
+                ((message.color >> 24) & 0xff) as u8,
+            );
+
+            match message.kind {
+                MessageKind::Global | MessageKind::GlobalPlayer => {
+                    let mut x = if (message.flags & FLAG_X_REL) != 0 {
+                        surface_width * (message.offset.x as f32 / 100.0)
+                    } else if message.offset.x >= 0 {
+                        message.offset.x as f32
+                    } else {
+                        surface_width * 0.5
+                    };
+                    let mut y = if (message.flags & FLAG_Y_REL) != 0 {
+                        surface_height * (message.offset.y as f32 / 100.0)
+                    } else if message.offset.y >= 0 {
+                        message.offset.y as f32
+                    } else {
+                        surface_height * 0.66
+                    };
+
+                    if (message.flags & FLAG_HCENTER) != 0 {
+                        x = surface_width * 0.5;
+                    } else if (message.flags & FLAG_LEFT) != 0 {
+                        x = 32.0;
+                    } else if (message.flags & FLAG_RIGHT) != 0 {
+                        x = surface_width - 196.0;
+                    }
+
+                    if (message.flags & FLAG_VCENTER) != 0 {
+                        y = surface_height * 0.5;
+                    } else if (message.flags & FLAG_TOP) != 0 {
+                        y = 48.0;
+                    } else if (message.flags & FLAG_BOTTOM) != 0 {
+                        y = surface_height - 160.0;
+                    }
+
+                    prepared.push(((x, y), message.lines.clone(), color));
+                }
+                MessageKind::Target | MessageKind::TargetPlayer => {
+                    let target_id = match message.target {
+                        Some(id) => id,
+                        None => continue,
+                    };
+                    let Some(target) = self.snapshot.object(target_id) else {
+                        continue;
+                    };
+                    let base_position = Vector2::new(
+                        target.position.x + message.offset.x,
+                        target.position.y + message.offset.y,
+                    );
+                    let owner = message.player.unwrap_or(self.local_owner);
+                    let Some((screen_x, screen_y)) =
+                        self.graphics.world_to_screen(owner, base_position)
+                    else {
+                        continue;
+                    };
+                    prepared.push(((screen_x, screen_y), message.lines.clone(), color));
+                }
+            }
+        }
+
+        if prepared.is_empty() {
+            return;
+        }
+
+        let font = self.assets.font_arc();
+        let line_height = 20.0;
+        {
+            let surface = self.graphics.surface_mut();
+            for (position, lines, color) in prepared {
+                let mut y = position.1;
+                for line in lines {
+                    font.draw_text(surface, position.0, y, &line, 18.0, color);
+                    y += line_height;
+                }
+            }
+        }
     }
 
     fn return_to_menu(&mut self) {
@@ -4061,6 +4211,7 @@ mod tests {
             surfaces: Vec::new(),
             hud: HudSnapshot {
                 players: hud_players,
+                messages: Vec::new(),
             },
             controls: Vec::new(),
             network_packets: Vec::new(),
@@ -4365,6 +4516,7 @@ mod tests {
                     focus: Some(focus),
                     eliminated: false,
                 }],
+                messages: Vec::new(),
             },
             controls: Vec::new(),
             network_packets: Vec::new(),
