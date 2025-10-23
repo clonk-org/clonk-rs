@@ -28,9 +28,10 @@ use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
     ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, Landscape,
-    MaterialSet, MessageKind, MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate,
-    PlayerStatus, Scenario, ScenarioError, SimulationSnapshot, SpawnConfig, Vector2, FLAG_BOTTOM,
-    FLAG_HCENTER, FLAG_LEFT, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_X_REL, FLAG_Y_REL,
+    MaterialSet, MenuCommandKind, MenuCommandSelection, MessageKind, MovementProfile, ObjectId,
+    ObjectSnapshot, ObjectUpdate, PlayerStatus, Scenario, ScenarioError, SimulationSnapshot,
+    SpawnConfig, Vector2, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER,
+    FLAG_X_REL, FLAG_Y_REL,
 };
 use lc_frontend::{
     draw_image, CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData, InputDispatcher,
@@ -2412,6 +2413,25 @@ impl GameApp {
             }
             ObjectMenuAction::Execute { command, selection } => match command {
                 ObjectMenuCommand::Focus => {
+                    let menu_selection = MenuCommandSelection {
+                        primary_id: selection.primary_id,
+                        instances: selection.instances.clone(),
+                        definition_id: selection.definition_id.clone(),
+                        label: selection.label.clone(),
+                    };
+                    let handled = self.engine.menu_command(
+                        selection.crew_id,
+                        MenuCommandKind::Focus,
+                        menu_selection,
+                    )?;
+                    self.snapshot = self.engine.snapshot();
+                    if handled {
+                        self.refresh_object_menu();
+                        self.refresh_focus();
+                        self.object_menu = None;
+                        self.status_text = format!("Executed {} via script", selection.label);
+                        return Ok(());
+                    }
                     self.object_menu = None;
                     self.focus_id = Some(selection.primary_id);
                     self.focus_snapshot = self.snapshot.object(selection.primary_id).cloned();
@@ -2419,6 +2439,28 @@ impl GameApp {
                         format!("Selected {} (x{})", selection.label, selection.count());
                 }
                 ObjectMenuCommand::DropAll => {
+                    let menu_selection = MenuCommandSelection {
+                        primary_id: selection.primary_id,
+                        instances: selection.instances.clone(),
+                        definition_id: selection.definition_id.clone(),
+                        label: selection.label.clone(),
+                    };
+                    let handled = self.engine.menu_command(
+                        selection.crew_id,
+                        MenuCommandKind::DropAll,
+                        menu_selection,
+                    )?;
+                    self.snapshot = self.engine.snapshot();
+                    if handled {
+                        self.refresh_object_menu();
+                        self.refresh_focus();
+                        self.status_text = format!(
+                            "Executed {} (x{}) via script",
+                            selection.label,
+                            selection.count()
+                        );
+                        return Ok(());
+                    }
                     self.drop_inventory_selection(&selection)?;
                 }
             },

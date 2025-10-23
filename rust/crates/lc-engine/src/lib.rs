@@ -43,6 +43,29 @@ pub use player::{Player, PlayerConfig, PlayerState, PlayerStatus, PlayerViewport
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use scenario::{Scenario, ScenarioError};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuCommandKind {
+    Focus,
+    DropAll,
+}
+
+impl MenuCommandKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            MenuCommandKind::Focus => "focus",
+            MenuCommandKind::DropAll => "drop_all",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuCommandSelection {
+    pub primary_id: ObjectId,
+    pub instances: Vec<ObjectId>,
+    pub definition_id: DefinitionId,
+    pub label: String,
+}
+
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
     AudioRegistry, DefinitionMetadata, EffectContextOutcome, EnvironmentDelta, HostWorldContext,
@@ -3060,6 +3083,111 @@ impl Definition {
         Ok((host_effects, audio_state, rng))
     }
 
+    fn call_menu_command(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        kind: MenuCommandKind,
+        selection: &MenuCommandSelection,
+        rng: ChaCha8Rng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        audio: AudioRegistry,
+    ) -> Result<
+        (
+            bool,
+            compat::EffectContextOutcome,
+            AudioRegistry,
+            ChaCha8Rng,
+        ),
+        EngineError,
+    > {
+        if !self.script.has_function("MenuCommand") {
+            let next_object_id = world.next_object_id();
+            return Ok((
+                false,
+                compat::EffectContextOutcome::empty(next_object_id, audio.clone()),
+                audio,
+                rng,
+            ));
+        }
+
+        let args = [
+            build_state_value(&self.id, object_id, state, &self.action_library),
+            Value::String(kind.as_str().to_string()),
+            build_menu_selection_value(selection),
+        ];
+        let physics_guard = enter_physics_context(physics);
+        let env_guard = enter_environment_context(environment, frame);
+        let guard = enter_random_context(rng);
+        let next_object_id = world.next_object_id();
+        let audio_guard = enter_audio_context(audio);
+        let object_context = compat::HostObjectContext::with_category(
+            object_id,
+            state.container,
+            state.status,
+            state.energy,
+            state.damage,
+            state.owner,
+            state.position,
+            state.velocity,
+            &state.effects,
+            state.action.name.clone(),
+            state.action.ticks,
+            state.action.data,
+            self.action_library.clone(),
+            state.direction,
+            state.command_direction,
+            state.action.target,
+            state.action.target2,
+            &state.vertices,
+            state.category,
+            self.ocf_base,
+            self.crew_member,
+        )
+        .with_alive(state.alive)
+        .with_ocf(self.compute_ocf(state));
+        let (result, mut host_effects) = compat::with_effect_context(
+            Some(object_context),
+            global_effects,
+            world,
+            next_object_id,
+            || self.script.call("MenuCommand", &args),
+        );
+        let rng = guard.finish();
+        let physics_delta = physics_guard.finish();
+        let environment_delta = env_guard.finish();
+        let value = result.map_err(|source| EngineError::Script {
+            definition: self.id.clone(),
+            function: "MenuCommand",
+            source,
+        })?;
+        let handled = match value {
+            Value::Nil => false,
+            Value::Bool(flag) => flag,
+            other => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: self.id.clone(),
+                    function: "MenuCommand",
+                    detail: format!("expected bool or nil (got {})", other.type_name()),
+                })
+            }
+        };
+
+        if !environment_delta.is_empty() {
+            host_effects.environment = Some(environment_delta);
+        }
+        if !physics_delta.is_empty() {
+            host_effects.physics = Some(physics_delta);
+        }
+
+        let audio_state = audio_guard.finish();
+        Ok((handled, host_effects, audio_state, rng))
+    }
+
     fn call_effect_start(
         &self,
         state: &ObjectState,
@@ -4391,6 +4519,52 @@ impl Engine {
 
         self.sync_player_cursor(owner);
         Ok(())
+    }
+
+    pub fn menu_command(
+        &mut self,
+        crew_id: ObjectId,
+        kind: MenuCommandKind,
+        selection: MenuCommandSelection,
+    ) -> Result<bool, EngineError> {
+        let index = self
+            .objects
+            .iter()
+            .position(|object| object.id == crew_id)
+            .ok_or(EngineError::UnknownObject(crew_id))?;
+        let definition_id = self.objects[index].definition_id.clone();
+        let state_snapshot = self.objects[index].state.clone();
+        let definition = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let action_library = definition.action_library().clone();
+        let rng_state = self.rng.clone();
+        let global_view = self.global_effects.clone();
+        let world = self.host_world_context();
+        let (handled, outcome, audio_state, new_rng) = definition.call_menu_command(
+            &state_snapshot,
+            crew_id,
+            kind,
+            &selection,
+            rng_state,
+            &global_view,
+            self.physics,
+            self.environment,
+            self.frame,
+            world,
+            self.audio_registry.clone(),
+        )?;
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        self.apply_action_callback_outcome(
+            index,
+            outcome,
+            &action_library,
+            crew_id,
+            &definition_id,
+        )?;
+        Ok(handled)
     }
 
     pub fn set_crew_role(
@@ -7722,6 +7896,26 @@ fn build_state_value(
     Value::Proplist(map)
 }
 
+fn build_menu_selection_value(selection: &MenuCommandSelection) -> Value {
+    let mut map = HashMap::with_capacity(4);
+    map.insert(
+        "primary".into(),
+        Value::Int(truncate_to_i32(selection.primary_id.as_u64())),
+    );
+    let instances: Vec<_> = selection
+        .instances
+        .iter()
+        .map(|id| Value::Int(truncate_to_i32(id.as_u64())))
+        .collect();
+    map.insert("instances".into(), Value::Array(instances));
+    map.insert(
+        "definition".into(),
+        Value::String(selection.definition_id.clone()),
+    );
+    map.insert("label".into(), Value::String(selection.label.clone()));
+    Value::Proplist(map)
+}
+
 fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
     let mut map = HashMap::with_capacity(11);
     map.insert(
@@ -9273,6 +9467,23 @@ global func Step(state, frame, random)
     }
     "#;
 
+    const MENU_COMMAND_SCRIPT: &str = r#"
+global func Initialize(state, random)
+{
+    return nil;
+}
+
+global func MenuCommand(state, kind, selection)
+{
+    if (kind == "focus")
+    {
+        SetOwner(42);
+        return true;
+    }
+    return false;
+}
+"#;
+
     const PROCEDURE_STATE_SCRIPT: &str = r#"
     global func Initialize(state, random)
     {
@@ -9611,6 +9822,45 @@ global func Step(state, frame, random)
         assert_eq!(object.action.name, "Idle");
         assert_eq!(object.action.phase, 0);
         assert_eq!(object.action.ticks, 0);
+    }
+
+    #[test]
+    fn menu_command_invokes_definition_script() {
+        let mut definition =
+            Definition::from_script("Crew", "Crew", MENU_COMMAND_SCRIPT).expect("script compiles");
+        definition.set_crew_member(true);
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Crew").with_owner(1))
+            .expect("spawn succeeds");
+
+        let selection = MenuCommandSelection {
+            primary_id: id,
+            instances: vec![id],
+            definition_id: "Crew".to_string(),
+            label: "Crew".to_string(),
+        };
+
+        let handled = engine
+            .menu_command(id, MenuCommandKind::Focus, selection)
+            .expect("menu command succeeds");
+        assert!(handled, "script should report handled command");
+
+        let snapshot = engine
+            .object_snapshot(id)
+            .expect("object snapshot available");
+        assert_eq!(
+            snapshot.owner, 42,
+            "script should update object owner via SetOwner"
+        );
     }
 
     #[test]

@@ -49,7 +49,7 @@
 
 - ⚠️ **Menu System** (C4Menu.h 🔗 Partial — player pause menu implemented)
   - ✅ Player pause/main menu ported in Rust frontend (resume, quick save/load, abort)
-  - ⚠️ Player inventory/context menu renders crew contents, supports dropping stacked inventory via MenuEnterAll, and surfaces selection feedback; scripted command execution still pending
+  - ⚠️ Player inventory/context menu renders crew contents, surfaces selection feedback, and now dispatches Focus/DropAll to definition `MenuCommand`; build/context submenus still to port
   - ❌ Build menus, inventory command execution, and script-driven callbacks still unported
 
 - ✅ **Message System** (C4GameMessage.cpp 🔗 Implemented)
@@ -143,7 +143,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 ### Phase 2: Essential Gameplay Systems
 1. Port C4Player for real player management — ✅ Teams/home-base parity, ✅ control UX including PlayerMenu pause toggle (object/build menus still depend on C4Menu)
 2. ✅ Port C4Viewport for proper camera, zoom, split-screen — smooth camera easing, zoom scaling, and letterboxing now mirror the C++ behaviour
-3. Port C4Menu for object interaction menus — ⚠️ player pause menu landed; context/object menus now drop inventory stacks but still need scripted command integration
+3. Port C4Menu for object interaction menus — ⚠️ player pause menu landed; context/object menus now drop inventory stacks and call definition `MenuCommand` for Focus/DropAll (build menus still pending)
 4. ✅ Port C4GameMessage for mission text and objectives — HUD now renders script-driven messages; decorative frames/portraits pending future polish
 
 ### Phase 3: Game Content & Polish
@@ -177,7 +177,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Cursor cycling and selection toggles now respect classic COM_Single/COM_Double timing with network serialization parity
 - ✅ Team home-base rule produces and syncs materials between teammates (C4Player::ExecHomeBaseProduction)
 - ⚠️ In-game pause menu implemented (resume, quick save/load, abort) while gameplay continues; object/build menus still pending
-- ⚠️ Player inventory menu mirrors crew contents with navigation/selection feedback, shows value/mass stats, and MenuEnterAll drop actions; scripted command execution still missing
+- ⚠️ Player inventory menu mirrors crew contents with navigation/selection feedback, shows value/mass stats, and now routes Focus/DropAll through definition `MenuCommand`; build menus still missing
 - ⚠️ Experimental: `.c4s` scenarios boot with real definitions and scripts when install data is available (lands in running state, but full player UX still limited)
 - ✅ HUD renders global and object-attached messages using script `CustomMessage` calls with legacy timeouts
 

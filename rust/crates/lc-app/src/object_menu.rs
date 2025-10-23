@@ -80,6 +80,7 @@ pub struct ObjectMenuSelection {
     pub crew_id: ObjectId,
     pub primary_id: ObjectId,
     pub instances: Vec<ObjectId>,
+    pub definition_id: String,
     pub label: String,
 }
 
@@ -307,6 +308,7 @@ impl ObjectMenuState {
                 crew_id: self.crew_id,
                 primary_id,
                 instances: item.instances.clone(),
+                definition_id: item.definition_id.clone(),
                 label: item.label.clone(),
             },
         })
@@ -514,6 +516,7 @@ mod tests {
                 assert_eq!(command, ObjectMenuCommand::DropAll);
                 assert_eq!(selection.crew_id, crew.id);
                 assert_eq!(selection.label, "Shovel");
+                assert_eq!(selection.definition_id, "Shovel");
                 assert_eq!(selection.count(), 2);
                 assert_eq!(selection.instances.len(), 2);
                 assert_eq!(selection.primary_id, ObjectId::new(2));
