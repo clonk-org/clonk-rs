@@ -40,17 +40,17 @@
   - ✅ Simulation snapshots + HUD now surface player names/wealth/cursor for overlays
   - ✅ Team rule + home-base production synced across players (C4RULE_TeamHomebase parity)
   - ✅ Advanced control UX landed: Rust input dispatcher now drives cursor cycling, selection toggles, and serializes player menu commands like the C++ runtime
-  - ✅ PlayerMenu command now toggles the Rust pause menu; inventory/build menus now handled by the Rust UI (context submenus still pending)
+  - ✅ PlayerMenu command now toggles the Rust pause menu; inventory/build menus and scripted context submenus handled by the Rust UI
 
 - ✅ **Viewport System** (C4Viewport.cpp 🔗 Camera parity improved)
   - ✅ Multiple simultaneous viewports per player with dynamic split-screen layout
   - ✅ Split-screen multiplayer rendering fed by engine player viewports
   - ✅ Zoom scaling, camera smoothing, and automatic letterboxing for aspect mismatches
 
-- ⚠️ **Menu System** (C4Menu.h 🔗 Partial — player pause menu implemented)
+- ✅ **Menu System** (C4Menu.h 🔗 Pause, inventory, and context menus implemented)
   - ✅ Player pause/main menu ported in Rust frontend (resume, quick save/load, abort)
-  - ✅ Player inventory menu renders crew contents, surfaces selection feedback, and now dispatches Focus/DropAll through definition `MenuCommand`
-  - ⚠️ Build menu consumes home base stock and hands items to crew; scripted context menus and callbacks still to port
+  - ✅ Player inventory menu renders crew contents, surfaces selection feedback, and dispatches Focus/DropAll through definition `MenuCommand`
+  - ✅ Build menu consumes home base stock, hands items to crew, and scripted context menus now flow through definition `MenuEntries` callbacks
 
 - ✅ **Message System** (C4GameMessage.cpp 🔗 Implemented)
   - Global and target-attached messages render in the HUD with legacy lifetimes and per-player visibility
@@ -141,9 +141,9 @@ The documentation previously focused on "removing fallbacks." **This is backward
 4. ✅ Make real scenarios load with install definitions (gameplay still limited until player/viewport/menu systems land)
 
 ### Phase 2: Essential Gameplay Systems
-1. Port C4Player for real player management — ✅ Teams/home-base parity, ✅ control UX including PlayerMenu pause toggle, ✅ inventory/build menus handled in Rust UI (scripted context menus still waiting on full C4Menu)
+1. Port C4Player for real player management — ✅ Teams/home-base parity, ✅ control UX including PlayerMenu pause toggle, ✅ inventory/build menus and scripted context menus handled in Rust UI via C4Menu
 2. ✅ Port C4Viewport for proper camera, zoom, split-screen — smooth camera easing, zoom scaling, and letterboxing now mirror the C++ behaviour
-3. Port C4Menu for object interaction menus — ⚠️ player pause menu landed; inventory/build flows now wired through Rust UI (scripted context/object menus still pending)
+3. Port C4Menu for object interaction menus — ✅ player pause menu landed; inventory/build flows now wired through Rust UI; scripted context/object menus run via definition callbacks
 4. ✅ Port C4GameMessage for mission text and objectives — HUD now renders script-driven messages; decorative frames/portraits pending future polish
 
 ### Phase 3: Game Content & Polish
@@ -176,7 +176,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Player registry + HUD overlay surface real player metadata (names, wealth, cursor) sourced from engine snapshots
 - ✅ Cursor cycling and selection toggles now respect classic COM_Single/COM_Double timing with network serialization parity
 - ✅ Team home-base rule produces and syncs materials between teammates (C4Player::ExecHomeBaseProduction)
-- ⚠️ In-game pause menu implemented (resume, quick save/load, abort) while gameplay continues; scripted context menus still pending
+- ✅ In-game pause menu implemented (resume, quick save/load, abort) while gameplay continues; scripted context menus now surface definition-driven actions
 - ⚠️ Player inventory menu mirrors crew contents with navigation/selection feedback, shows value/mass stats, and now routes Focus/DropAll/build deliveries through definition `MenuCommand`
 - ⚠️ Experimental: `.c4s` scenarios boot with real definitions and scripts when install data is available (lands in running state, but full player UX still limited)
 - ✅ HUD renders global and object-attached messages using script `CustomMessage` calls with legacy timeouts
@@ -187,7 +187,6 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ❌ No real audio (synthetic tones for missing sounds)
 - ⚠️ Message frames/portraits still missing (text-only rendering today)
-- ⚠️ In-game menus still lack scripted context/object layers (pause + inventory/build only)
 - ❌ Materials still unused at runtime (no terrain types, no mining, no reactions despite definitions loading)
 - ❌ No multiplayer lobby (transport exists but no game coordination)
 

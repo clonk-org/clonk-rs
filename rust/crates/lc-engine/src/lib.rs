@@ -66,6 +66,13 @@ pub struct MenuCommandSelection {
     pub label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextMenuEntry {
+    pub function: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
     AudioRegistry, DefinitionMetadata, EffectContextOutcome, EnvironmentDelta, HostWorldContext,
@@ -2570,6 +2577,10 @@ impl Definition {
         &self.name
     }
 
+    pub fn has_function(&self, name: &str) -> bool {
+        self.script.has_function(name)
+    }
+
     pub fn from_resource(resource: &ResourceDefinitionData) -> Result<Self, EngineError> {
         let name = resource
             .core
@@ -3083,6 +3094,106 @@ impl Definition {
         Ok((host_effects, audio_state, rng))
     }
 
+    fn call_menu_entries(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        rng: ChaCha8Rng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        audio: AudioRegistry,
+    ) -> Result<(Vec<ContextMenuEntry>, AudioRegistry, ChaCha8Rng), EngineError> {
+        if !self.script.has_function("MenuEntries") {
+            return Ok((Vec::new(), audio, rng));
+        }
+
+        let args = [build_state_value(
+            &self.id,
+            object_id,
+            state,
+            &self.action_library,
+        )];
+        let physics_guard = enter_physics_context(physics);
+        let env_guard = enter_environment_context(environment, frame);
+        let guard = enter_random_context(rng);
+        let next_object_id = world.next_object_id();
+        let audio_guard = enter_audio_context(audio);
+        let object_context = compat::HostObjectContext::with_category(
+            object_id,
+            state.container,
+            state.status,
+            state.energy,
+            state.damage,
+            state.owner,
+            state.position,
+            state.velocity,
+            &state.effects,
+            state.action.name.clone(),
+            state.action.ticks,
+            state.action.data,
+            self.action_library.clone(),
+            state.direction,
+            state.command_direction,
+            state.action.target,
+            state.action.target2,
+            &state.vertices,
+            state.category,
+            self.ocf_base,
+            self.crew_member,
+        )
+        .with_alive(state.alive)
+        .with_ocf(self.compute_ocf(state));
+        let (result, outcome) = compat::with_effect_context(
+            Some(object_context),
+            global_effects,
+            world,
+            next_object_id,
+            || self.script.call("MenuEntries", &args),
+        );
+        let rng = guard.finish();
+        let physics_delta = physics_guard.finish();
+        let environment_delta = env_guard.finish();
+        let value = result.map_err(|source| EngineError::Script {
+            definition: self.id.clone(),
+            function: "MenuEntries",
+            source,
+        })?;
+        let entries = self.parse_context_menu_entries(value)?;
+
+        if !outcome.object.is_empty()
+            || !outcome.global.is_empty()
+            || outcome.object_update.is_some()
+            || !outcome.object_commands.is_empty()
+            || outcome.destroy_object
+            || outcome.environment.is_some()
+            || outcome.physics.is_some()
+            || !outcome.spawns.is_empty()
+            || !outcome.particles.is_empty()
+            || !outcome.transfer_zones.is_empty()
+            || !outcome.messages.is_empty()
+            || !outcome.audio.events.is_empty()
+        {
+            return Err(EngineError::InvalidScriptOutput {
+                definition: self.id.clone(),
+                function: "MenuEntries",
+                detail: "callback must not modify game state".to_string(),
+            });
+        }
+        if !environment_delta.is_empty() || !physics_delta.is_empty() {
+            return Err(EngineError::InvalidScriptOutput {
+                definition: self.id.clone(),
+                function: "MenuEntries",
+                detail: "callback must not modify global state".to_string(),
+            });
+        }
+
+        let audio_state = audio_guard.finish();
+        Ok((entries, audio_state, rng))
+    }
+
     fn call_menu_command(
         &self,
         state: &ObjectState,
@@ -3186,6 +3297,211 @@ impl Definition {
 
         let audio_state = audio_guard.finish();
         Ok((handled, host_effects, audio_state, rng))
+    }
+
+    fn call_menu_callback(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        function: &str,
+        rng: ChaCha8Rng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        audio: AudioRegistry,
+    ) -> Result<
+        (
+            bool,
+            compat::EffectContextOutcome,
+            AudioRegistry,
+            ChaCha8Rng,
+        ),
+        EngineError,
+    > {
+        if !self.script.has_function(function) {
+            let next_object_id = world.next_object_id();
+            return Ok((
+                false,
+                compat::EffectContextOutcome::empty(next_object_id, audio.clone()),
+                audio,
+                rng,
+            ));
+        }
+
+        let args = [build_state_value(
+            &self.id,
+            object_id,
+            state,
+            &self.action_library,
+        )];
+        let args_call = args.clone();
+        let function_name = function.to_string();
+        let function_call = function_name.clone();
+        let physics_guard = enter_physics_context(physics);
+        let env_guard = enter_environment_context(environment, frame);
+        let guard = enter_random_context(rng);
+        let next_object_id = world.next_object_id();
+        let audio_guard = enter_audio_context(audio);
+        let object_context = compat::HostObjectContext::with_category(
+            object_id,
+            state.container,
+            state.status,
+            state.energy,
+            state.damage,
+            state.owner,
+            state.position,
+            state.velocity,
+            &state.effects,
+            state.action.name.clone(),
+            state.action.ticks,
+            state.action.data,
+            self.action_library.clone(),
+            state.direction,
+            state.command_direction,
+            state.action.target,
+            state.action.target2,
+            &state.vertices,
+            state.category,
+            self.ocf_base,
+            self.crew_member,
+        )
+        .with_alive(state.alive)
+        .with_ocf(self.compute_ocf(state));
+        let (result, mut host_effects) = compat::with_effect_context(
+            Some(object_context),
+            global_effects,
+            world,
+            next_object_id,
+            move || self.script.call(&function_call, &args_call),
+        );
+        let rng = guard.finish();
+        let physics_delta = physics_guard.finish();
+        let environment_delta = env_guard.finish();
+        let value = result.map_err(|source| EngineError::Script {
+            definition: format!("{}::{}", self.id, function),
+            function: "MenuCallback",
+            source,
+        })?;
+        let handled = match value {
+            Value::Nil => false,
+            Value::Bool(flag) => flag,
+            other => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: self.id.clone(),
+                    function: "MenuCallback",
+                    detail: format!(
+                        "callback `{}` must return bool or nil (got {})",
+                        function_name,
+                        other.type_name()
+                    ),
+                })
+            }
+        };
+
+        if !environment_delta.is_empty() {
+            host_effects.environment = Some(environment_delta);
+        }
+        if !physics_delta.is_empty() {
+            host_effects.physics = Some(physics_delta);
+        }
+
+        let audio_state = audio_guard.finish();
+        Ok((handled, host_effects, audio_state, rng))
+    }
+
+    fn parse_context_menu_entries(
+        &self,
+        value: Value,
+    ) -> Result<Vec<ContextMenuEntry>, EngineError> {
+        let Value::Array(entries) = value else {
+            return Err(EngineError::InvalidScriptOutput {
+                definition: self.id.clone(),
+                function: "MenuEntries",
+                detail: format!("expected array (got {})", value.type_name()),
+            });
+        };
+
+        let mut result = Vec::with_capacity(entries.len());
+        for (index, entry) in entries.into_iter().enumerate() {
+            let Value::Proplist(props) = entry else {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: self.id.clone(),
+                    function: "MenuEntries",
+                    detail: format!(
+                        "entry {index} must be a proplist (got {})",
+                        entry.type_name()
+                    ),
+                });
+            };
+
+            let label = match props.get("label") {
+                Some(Value::String(text)) if !text.is_empty() => text.clone(),
+                Some(other) => {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: self.id.clone(),
+                        function: "MenuEntries",
+                        detail: format!(
+                            "entry {index} field `label` must be non-empty string (got {})",
+                            other.type_name()
+                        ),
+                    })
+                }
+                None => {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: self.id.clone(),
+                        function: "MenuEntries",
+                        detail: format!("entry {index} missing required field `label`"),
+                    })
+                }
+            };
+
+            let function = match props.get("callback") {
+                Some(Value::String(name)) if !name.is_empty() => name.clone(),
+                Some(other) => {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: self.id.clone(),
+                        function: "MenuEntries",
+                        detail: format!(
+                            "entry {index} field `callback` must be non-empty string (got {})",
+                            other.type_name()
+                        ),
+                    })
+                }
+                None => {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: self.id.clone(),
+                        function: "MenuEntries",
+                        detail: format!("entry {index} missing required field `callback`"),
+                    })
+                }
+            };
+
+            let description = match props.get("description") {
+                Some(Value::String(text)) if text.is_empty() => None,
+                Some(Value::String(text)) => Some(text.clone()),
+                Some(other) => {
+                    return Err(EngineError::InvalidScriptOutput {
+                        definition: self.id.clone(),
+                        function: "MenuEntries",
+                        detail: format!(
+                            "entry {index} field `description` must be string (got {})",
+                            other.type_name()
+                        ),
+                    })
+                }
+                None => None,
+            };
+
+            result.push(ContextMenuEntry {
+                function,
+                label,
+                description,
+            });
+        }
+
+        Ok(result)
     }
 
     fn call_effect_start(
@@ -3371,8 +3687,8 @@ impl Definition {
                 (commands, audio_state, rng)
             })
             .map_err(|source| EngineError::Script {
-                definition: format!("{}::{}", self.id, effect.name),
-                function: function_label,
+                definition: format!("{}::{}::{}", self.id, effect.name, function_label),
+                function: "EffectCallback",
                 source,
             })
     }
@@ -4521,6 +4837,40 @@ impl Engine {
         Ok(())
     }
 
+    pub fn context_menu_entries(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<Vec<ContextMenuEntry>, EngineError> {
+        let index = self
+            .objects
+            .iter()
+            .position(|object| object.id == object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
+        let definition_id = self.objects[index].definition_id.clone();
+        let state_snapshot = self.objects[index].state.clone();
+        let definition = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let rng_state = self.rng.clone();
+        let global_view = self.global_effects.clone();
+        let world = self.host_world_context();
+        let (entries, audio_state, new_rng) = definition.call_menu_entries(
+            &state_snapshot,
+            object_id,
+            rng_state,
+            &global_view,
+            self.physics,
+            self.environment,
+            self.frame,
+            world,
+            self.audio_registry.clone(),
+        )?;
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        Ok(entries)
+    }
+
     pub fn menu_command(
         &mut self,
         crew_id: ObjectId,
@@ -4562,6 +4912,50 @@ impl Engine {
             outcome,
             &action_library,
             crew_id,
+            &definition_id,
+        )?;
+        Ok(handled)
+    }
+
+    pub fn execute_context_menu(
+        &mut self,
+        object_id: ObjectId,
+        function: &str,
+    ) -> Result<bool, EngineError> {
+        let index = self
+            .objects
+            .iter()
+            .position(|object| object.id == object_id)
+            .ok_or(EngineError::UnknownObject(object_id))?;
+        let definition_id = self.objects[index].definition_id.clone();
+        let state_snapshot = self.objects[index].state.clone();
+        let definition = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let action_library = definition.action_library().clone();
+        let rng_state = self.rng.clone();
+        let global_view = self.global_effects.clone();
+        let world = self.host_world_context();
+        let (handled, outcome, audio_state, new_rng) = definition.call_menu_callback(
+            &state_snapshot,
+            object_id,
+            function,
+            rng_state,
+            &global_view,
+            self.physics,
+            self.environment,
+            self.frame,
+            world,
+            self.audio_registry.clone(),
+        )?;
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        self.apply_action_callback_outcome(
+            index,
+            outcome,
+            &action_library,
+            object_id,
             &definition_id,
         )?;
         Ok(handled)

@@ -2322,7 +2322,7 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) || self.object_menu.is_some() {
             return false;
         }
-        match ObjectMenuState::for_player(self.local_owner, &self.engine, &self.snapshot) {
+        match ObjectMenuState::for_player(self.local_owner, &mut self.engine, &self.snapshot) {
             Some(menu) => {
                 self.object_menu = Some(menu);
                 self.ingame_menu = None;
@@ -2464,6 +2464,22 @@ impl GameApp {
                     self.drop_inventory_selection(&selection)?;
                 }
             },
+            ObjectMenuAction::Context { selection } => {
+                let handled = self
+                    .engine
+                    .execute_context_menu(selection.crew_id, &selection.function)?;
+                self.snapshot = self.engine.snapshot();
+                self.refresh_object_menu();
+                self.refresh_focus();
+                if handled {
+                    self.object_menu = None;
+                    self.status_text = format!("Executed {}", selection.label);
+                } else if let Some(description) = selection.description.as_deref() {
+                    self.status_text = description.to_string();
+                } else if self.status_text.is_empty() {
+                    self.status_text = format!("No scripted action for {}", selection.label);
+                }
+            }
             ObjectMenuAction::Build { selection, amount } => {
                 if selection.owner == OWNER_NONE {
                     self.status_text = "Cannot construct without a player owner".to_string();
@@ -2597,7 +2613,7 @@ impl GameApp {
 
     fn refresh_object_menu(&mut self) {
         if let Some(menu) = self.object_menu.as_mut() {
-            if !menu.refresh(&self.engine, &self.snapshot) {
+            if !menu.refresh(&mut self.engine, &self.snapshot) {
                 self.object_menu = None;
             }
         }
