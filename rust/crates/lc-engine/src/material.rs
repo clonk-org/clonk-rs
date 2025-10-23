@@ -132,6 +132,37 @@ fn parse_temperature_conversion(
     })
 }
 
+fn parse_blast_shift_to(value: Option<&str>) -> (Option<String>, bool) {
+    let Some(raw_value) = value else {
+        return (None, false);
+    };
+    let trimmed = raw_value.trim();
+    if trimmed.is_empty() {
+        return (None, false);
+    }
+
+    let normalized_full = normalize_key(trimmed);
+    if normalized_full == SKY_KEY {
+        return (None, true);
+    }
+
+    let material_part = trimmed
+        .split(|c| matches!(c, '-' | '+' | '\\' | '/' | '.'))
+        .next()
+        .unwrap_or(trimmed)
+        .trim();
+    if material_part.is_empty() {
+        return (None, false);
+    }
+
+    let normalized = normalize_key(material_part);
+    if normalized == SKY_KEY {
+        (None, true)
+    } else {
+        (Some(normalized), false)
+    }
+}
+
 #[inline]
 fn density_is_solid(density: i32) -> bool {
     density >= C4M_SOLID
@@ -177,6 +208,9 @@ pub struct MaterialProperties {
     blast_to_object: Option<String>,
     blast_to_object_ratio: Option<i32>,
     blast_to_pxs_ratio: Option<i32>,
+    blast_shift_to: Option<String>,
+    blast_shift_to_target: Option<MaterialId>,
+    blast_shift_to_clears: bool,
     dig_to_object: Option<String>,
     dig_to_object_ratio: Option<i32>,
     dig_to_object_on_request_only: bool,
@@ -234,6 +268,8 @@ impl MaterialProperties {
             .int("blast2objectratio")
             .filter(|ratio| *ratio > 0);
         let blast_to_pxs_ratio = definition.int("blast2pxsratio").filter(|ratio| *ratio > 0);
+        let (blast_shift_to, blast_shift_to_clears) =
+            parse_blast_shift_to(definition.value("blastshiftto"));
         let dig_to_object = definition.value("dig2object").and_then(|value| {
             let trimmed = value.trim();
             if trimmed.is_empty() {
@@ -287,6 +323,9 @@ impl MaterialProperties {
             blast_to_object,
             blast_to_object_ratio,
             blast_to_pxs_ratio,
+            blast_shift_to,
+            blast_shift_to_target: None,
+            blast_shift_to_clears,
             dig_to_object,
             dig_to_object_ratio,
             dig_to_object_on_request_only,
@@ -408,6 +447,14 @@ impl Material {
         self.properties.blast_to_pxs_ratio
     }
 
+    pub fn blast_shift_to_target(&self) -> Option<MaterialId> {
+        self.properties.blast_shift_to_target
+    }
+
+    pub fn blast_shift_to_clears(&self) -> bool {
+        self.properties.blast_shift_to_clears
+    }
+
     pub fn dig_to_object_name(&self) -> Option<&str> {
         self.properties.dig_to_object.as_deref()
     }
@@ -503,6 +550,11 @@ impl Material {
     }
 
     fn resolve_relations(&mut self, lookup: &HashMap<String, MaterialId>) {
+        if let Some(name) = &self.properties.blast_shift_to {
+            if let Some(id) = lookup.get(name) {
+                self.properties.blast_shift_to_target = Some(*id);
+            }
+        }
         if let Some(name) = &self.properties.in_mat_convert_to {
             if let Some(id) = lookup.get(name) {
                 self.properties.in_mat_convert_target = Some(*id);

@@ -42,6 +42,16 @@ pub struct Landscape {
 pub struct BlastResult {
     pub removed_by_material: HashMap<MaterialId, i32>,
     pub affected_columns: Vec<(i32, i32)>,
+    pub pixel_count_by_material: HashMap<MaterialId, i32>,
+    pub shift_candidates: Vec<BlastShiftCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlastShiftCandidate {
+    pub column: i32,
+    pub material: MaterialId,
+    pub target: MaterialId,
+    pub pixel_count: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,25 +361,41 @@ impl Landscape {
                 continue;
             };
 
+            let removed_height = target_height - current_height;
+            if removed_height <= 0 {
+                continue;
+            }
+
             if !material.blast_free() {
+                if let Some(target) = material.blast_shift_to_target() {
+                    if target != material_id {
+                        result
+                            .pixel_count_by_material
+                            .entry(material_id)
+                            .and_modify(|count| *count += removed_height)
+                            .or_insert(removed_height);
+                        result.shift_candidates.push(BlastShiftCandidate {
+                            column,
+                            material: material_id,
+                            target,
+                            pixel_count: removed_height,
+                        });
+                    }
+                }
                 continue;
             }
 
             self.surface[index] = target_height;
-            let removed_height = target_height - current_height;
-            if removed_height > 0 {
-                result
-                    .removed_by_material
-                    .entry(material_id)
-                    .and_modify(|count| *count += removed_height)
-                    .or_insert(removed_height);
-                result.affected_columns.push((column, target_height));
-            }
+            result
+                .removed_by_material
+                .entry(material_id)
+                .and_modify(|count| *count += removed_height)
+                .or_insert(removed_height);
+            result.affected_columns.push((column, target_height));
         }
 
         result
     }
-
     pub fn can_incinerate(&self, x: i32, y: i32, materials: &MaterialSet) -> bool {
         if self.surface.is_empty() || materials.is_empty() {
             return false;

@@ -86,6 +86,7 @@ use material::MaterialReactionKind;
 use message::{MessageCommand, MessageManager, PersistedMessage};
 use ocf::NORMAL as OCF_NORMAL;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::convert::TryFrom;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -132,6 +133,17 @@ pub const DEFAULT_CATEGORY: i32 = CATEGORY_STATIC_BACK;
 
 fn default_rng() -> ChaCha8Rng {
     ChaCha8Rng::seed_from_u64(0)
+}
+
+fn compute_blast_size(radius: i32) -> i64 {
+    let r = i64::from(radius.max(0));
+    (r * r * 6283) / 2000
+}
+
+fn compute_blast_grade(radius: i32) -> i64 {
+    let level = radius.max(0);
+    let raw = (level / 10) - 1;
+    i64::from(raw.clamp(1, 3))
 }
 
 pub(crate) fn normalize_category(raw: i32, fallback: i32) -> i32 {
@@ -4909,8 +4921,13 @@ impl Engine {
         if radius <= 0 {
             return None;
         }
-        let landscape = self.landscape.as_mut()?;
-        let result = landscape.blast_circle(center, radius, &self.materials);
+        let result = {
+            let landscape = self.landscape.as_mut()?;
+            landscape.blast_circle(center, radius, &self.materials)
+        };
+        if !result.shift_candidates.is_empty() {
+            self.apply_blast_shifts(radius, &result);
+        }
         if !result.removed_by_material.is_empty() {
             self.process_blast_reactions(center, controller, &result);
         }
@@ -8670,6 +8687,75 @@ impl Engine {
         }
     }
 
+    fn apply_blast_shifts(&mut self, radius: i32, result: &BlastResult) {
+        if result.shift_candidates.is_empty() {
+            return;
+        }
+        let Some(landscape) = self.landscape.as_mut() else {
+            return;
+        };
+
+        let blast_size = compute_blast_size(radius);
+        if blast_size <= 0 {
+            return;
+        }
+        let grade = compute_blast_grade(radius);
+        if grade <= 0 {
+            return;
+        }
+        let threshold = (blast_size * grade) / 6;
+        if threshold <= 0 {
+            return;
+        }
+        let limit = threshold as u64;
+
+        for candidate in &result.shift_candidates {
+            let total_pixels = match result.pixel_count_by_material.get(&candidate.material) {
+                Some(value) => *value,
+                None => continue,
+            };
+            if total_pixels <= 0 {
+                continue;
+            }
+            let pixel_count = candidate.pixel_count.max(0);
+            if pixel_count <= 0 {
+                continue;
+            }
+            let total_pixels_u64 = match u64::try_from(total_pixels) {
+                Ok(value) if value > 0 => value,
+                _ => continue,
+            };
+            let pixel_count_u64 = match u64::try_from(pixel_count) {
+                Ok(value) if value > 0 => value,
+                _ => continue,
+            };
+
+            let should_shift = if limit >= total_pixels_u64 {
+                true
+            } else if limit == 0 {
+                false
+            } else {
+                let mut success = false;
+                for _ in 0..pixel_count_u64 {
+                    if self.rng.gen_range(0..total_pixels_u64) < limit {
+                        success = true;
+                        break;
+                    }
+                }
+                success
+            };
+
+            if !should_shift {
+                continue;
+            }
+            if candidate.column < 0 {
+                continue;
+            }
+            let column = candidate.column as u32;
+            landscape.set_solid_material(column, Some(candidate.target));
+        }
+    }
+
     fn build_material_particle(
         &mut self,
         material: MaterialId,
@@ -10934,6 +11020,48 @@ mod tests {
         assert!(
             after > before,
             "expected blast to spawn objects for blast reaction"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn blast_circle_shifts_materials_with_blast_shift_to() -> Result<(), EngineError> {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Granite]
+            Name=Granite
+            Density=110
+            Friction=35
+            BlastShiftTo=Earth
+
+            [Material Earth]
+            Name=Earth
+            Density=90
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let granite = materials.id_of("Granite").expect("granite exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(29);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(25, 40, Some(granite)));
+
+        engine
+            .blast_circle(Vector2::new(12, 40), 10, None)
+            .expect("blast applies");
+
+        let landscape = engine.landscape().expect("landscape present");
+        let mut shifted_columns = 0;
+        for x in 0..landscape.width() as i32 {
+            if landscape.solid_material_at(x) == Some(earth) {
+                shifted_columns += 1;
+            }
+        }
+        assert!(
+            shifted_columns > 0,
+            "expected blast to shift some columns to target material"
         );
         Ok(())
     }
