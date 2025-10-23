@@ -60,7 +60,7 @@
 - ⚠️ **Material System** (C4Material.cpp 🔗 runtime parity incomplete)
   - ✅ Material definitions now populate the Rust `MaterialSet` with density/friction metadata and canonical lookup
   - ✅ Landscapes retain per-column material ids and collisions now apply material friction to object velocity/vertex data
-  - ✅ Conversion/reaction logic and temperature-driven evaluation mirrored in `MaterialSet::reaction` / `evaluate_temperature_conversion` (landscape integration next)
+  - ✅ Conversion/reaction logic and temperature-driven evaluation mirrored in `MaterialSet::reaction` / `evaluate_temperature_conversion`, and landscapes now apply temperature-driven conversions each tick
 
 - ❌ **Weather & Sky** (C4Weather.cpp, C4Sky.cpp 🔗 Not ported)
   - Dynamic weather (rain, snow, wind, lightning)
@@ -146,7 +146,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 4. ✅ Port C4GameMessage for mission text and objectives — HUD now renders script-driven messages; decorative frames/portraits pending future polish
 
 ### Phase 3: Game Content & Polish
-1. Port full C4Landscape material modification system
+1. Port full C4Landscape material modification system — landscape temperature conversions now active; terrain carving & PXS integration pending
 2. Port C4Weather and C4Sky for atmosphere
 3. Port C4PXS particle system for effects
 4. Integrate real game assets (objects, scenarios, graphics, sounds)
@@ -186,7 +186,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ❌ No real audio (synthetic tones for missing sounds)
 - ⚠️ Message frames/portraits still missing (text-only rendering today)
-- ⚠️ Material runtime still lacks conversions/reactions (no terrain types, mining, or temperature behaviour beyond friction)
+- ⚠️ Material runtime still lacks terrain deformation and mining reactions; PXS-driven interactions remain TODO even with temperature conversions active
 - ❌ No multiplayer lobby (transport exists but no game coordination)
 
 ---

@@ -1,6 +1,7 @@
 use std::mem;
 
-use crate::{MaterialId, Vector2};
+use crate::material::TemperatureDirection;
+use crate::{MaterialId, MaterialSet, Vector2};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -186,6 +187,61 @@ impl Landscape {
             self.solid_materials
                 .resize(self.surface.len(), self.default_solid_material);
         }
+    }
+
+    pub fn apply_temperature_conversions(
+        &mut self,
+        materials: &MaterialSet,
+        ambient_temperature: i32,
+    ) {
+        if self.surface.is_empty() || materials.is_empty() {
+            return;
+        }
+        self.ensure_material_capacity();
+        let original_default = self.default_solid_material;
+
+        let evaluate_conversion = |material_id: MaterialId| -> Option<MaterialId> {
+            for direction in [
+                TemperatureDirection::Downwards,
+                TemperatureDirection::Upwards,
+            ] {
+                if let Some(outcome) = materials.evaluate_temperature_conversion(
+                    material_id,
+                    direction,
+                    ambient_temperature,
+                ) {
+                    if let crate::material::TemperatureTarget::Material(target_id) = outcome.target
+                    {
+                        if target_id != material_id {
+                            return Some(target_id);
+                        }
+                    }
+                }
+            }
+            None
+        };
+
+        let mut new_default = original_default;
+        if let Some(default_id) = original_default {
+            if let Some(converted) = evaluate_conversion(default_id) {
+                new_default = Some(converted);
+            }
+        }
+
+        for slot in &mut self.solid_materials {
+            let current = match (*slot, original_default) {
+                (Some(id), _) => Some(id),
+                (None, Some(default_id)) => Some(default_id),
+                (None, None) => None,
+            };
+            if let Some(material_id) = current {
+                if let Some(converted) = evaluate_conversion(material_id) {
+                    *slot = Some(converted);
+                }
+            }
+        }
+
+        self.default_solid_material = new_default;
     }
 
     fn column_material(&self, index: usize) -> Option<MaterialId> {
@@ -489,6 +545,7 @@ pub struct CollisionResolution {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lc_resources::MaterialLibrary;
 
     #[test]
     fn resolves_vertical_collision() {
@@ -642,5 +699,37 @@ mod tests {
         landscape.set_liquid_column(3, vec![LiquidSegment::new(4, 6)]);
         LandscapeCommand::ClearLiquidColumn { column: 3 }.apply(&mut landscape);
         assert!(landscape.liquids()[3].segments().is_empty());
+    }
+
+    #[test]
+    fn apply_temperature_conversions_updates_materials() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Ice]
+            Name=Ice
+            Density=80
+            Friction=15
+            AboveTempConvert=0
+            AboveTempConvertDir=0
+            AboveTempConvertTo=Water
+            TempConvStrength=4
+
+            [Material Water]
+            Name=Water
+            Density=60
+            Friction=0
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let ice = materials.id_of("Ice").expect("ice exists");
+        let water = materials.id_of("Water").expect("water exists");
+
+        let mut landscape = Landscape::flat_with_material(3, 12, Some(ice));
+        landscape.apply_temperature_conversions(&materials, 10);
+
+        assert_eq!(landscape.solid_material_at(0), Some(water));
+        assert_eq!(landscape.solid_material_at(1), Some(water));
+        assert_eq!(landscape.default_solid_material(), Some(water));
     }
 }

@@ -5223,6 +5223,8 @@ impl Engine {
         let frame = self.frame;
         self.tick_particles();
         self.environment.advance_frame(&mut self.rng);
+        let ambient_temperature = self.environment.ambient_temperature(self.frame);
+        self.apply_landscape_temperature_conversions(ambient_temperature);
         self.tick_player_systems();
         if self.scenario_script.is_some() {
             let snapshot = self.snapshot();
@@ -7775,6 +7777,15 @@ impl Engine {
         }
     }
 
+    fn apply_landscape_temperature_conversions(&mut self, ambient_temperature: i32) {
+        if self.materials.is_empty() {
+            return;
+        }
+        if let Some(landscape) = self.landscape.as_mut() {
+            landscape.apply_temperature_conversions(&self.materials, ambient_temperature);
+        }
+    }
+
     fn next_random_i32(&mut self) -> i32 {
         self.rng.gen()
     }
@@ -9807,6 +9818,7 @@ fn value_to_liquid_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lc_resources::MaterialLibrary;
     use lc_script::Value;
     use rand::Rng;
     use rand_chacha::ChaCha8Rng;
@@ -14301,6 +14313,49 @@ global func MenuCommand(state, kind, selection)
         let spawn_original = engine.tick()?;
         let spawn_restored = restored.tick()?;
         assert_eq!(spawn_original, spawn_restored);
+
+        Ok(())
+    }
+
+    #[test]
+    fn tick_applies_temperature_conversions_to_landscape() -> Result<(), EngineError> {
+        let mut engine = Engine::with_seed(0xC0);
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Ice]
+            Name=Ice
+            Density=80
+            Friction=15
+            AboveTempConvert=0
+            AboveTempConvertDir=0
+            AboveTempConvertTo=Water
+            TempConvStrength=4
+
+            [Material Water]
+            Name=Water
+            Density=60
+            Friction=0
+        "#,
+        )
+        .expect("material library parses");
+        engine.configure_materials_from_library(&library);
+        let ice = engine
+            .materials()
+            .id_of("Ice")
+            .expect("ice material id available");
+        engine.set_landscape(Landscape::flat_with_material(4, 10, Some(ice)));
+        let environment = EnvironmentSettings::new(0).with_temperature(10);
+        engine.set_environment(environment);
+
+        let _ = engine.tick()?;
+
+        let water = engine
+            .materials()
+            .id_of("Water")
+            .expect("water material id available");
+        let landscape = engine.landscape().expect("landscape present after tick");
+        assert_eq!(landscape.solid_material_at(0), Some(water));
+        assert_eq!(landscape.default_solid_material(), Some(water));
 
         Ok(())
     }

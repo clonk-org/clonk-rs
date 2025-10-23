@@ -12,6 +12,12 @@ pub enum TemperatureDirection {
     Upwards,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemperatureConversionKind {
+    Below,
+    Above,
+}
+
 impl TemperatureDirection {
     fn from_raw(value: i32) -> Option<Self> {
         match value {
@@ -54,6 +60,7 @@ pub struct TemperatureConversion {
     threshold: i32,
     direction: TemperatureDirection,
     target: TemperatureTarget,
+    kind: TemperatureConversionKind,
 }
 
 impl TemperatureConversion {
@@ -65,9 +72,9 @@ impl TemperatureConversion {
         if self.direction != direction {
             return false;
         }
-        match self.direction {
-            TemperatureDirection::Downwards => ambient_temperature < self.threshold,
-            TemperatureDirection::Upwards => ambient_temperature > self.threshold,
+        match self.kind {
+            TemperatureConversionKind::Below => ambient_temperature < self.threshold,
+            TemperatureConversionKind::Above => ambient_temperature > self.threshold,
         }
     }
 
@@ -107,6 +114,7 @@ fn parse_temperature_conversion(
     threshold_key: &str,
     direction_key: &str,
     target_key: &str,
+    kind: TemperatureConversionKind,
 ) -> Option<TemperatureConversion> {
     let threshold = definition.int(threshold_key)?;
     let direction_raw = definition.int(direction_key)?;
@@ -120,6 +128,7 @@ fn parse_temperature_conversion(
         threshold,
         direction,
         target: TemperatureTarget::MaterialName(normalize_key(trimmed)),
+        kind,
     })
 }
 
@@ -232,12 +241,14 @@ impl MaterialProperties {
             "abovetempconvert",
             "abovetempconvertdir",
             "abovetempconvertto",
+            TemperatureConversionKind::Above,
         );
         let below_temperature = parse_temperature_conversion(
             definition,
             "belowtempconvert",
             "belowtempconvertdir",
             "belowtempconvertto",
+            TemperatureConversionKind::Below,
         );
         Self {
             density,
@@ -725,6 +736,37 @@ mod tests {
             set.evaluate_temperature_conversion(ice, TemperatureDirection::Downwards, -10)
                 .is_none(),
             "temperature below threshold should not trigger conversion"
+        );
+    }
+
+    #[test]
+    fn temperature_conversion_handles_below_threshold() {
+        let set = build_material_set(
+            r#"
+            [Material Steam]
+            Name=Steam
+            Density=10
+            Friction=1
+            BelowTempConvert=30
+            BelowTempConvertDir=1
+            BelowTempConvertTo=Water
+
+            [Material Water]
+            Name=Water
+            Density=60
+            Friction=0
+        "#,
+        );
+        let steam = set.id_of("Steam").expect("steam exists");
+        let water = set.id_of("Water").expect("water exists");
+        let outcome = set
+            .evaluate_temperature_conversion(steam, TemperatureDirection::Upwards, 5)
+            .expect("conversion triggered when temperature below threshold");
+        assert_eq!(outcome.target, TemperatureTarget::Material(water));
+        assert!(
+            set.evaluate_temperature_conversion(steam, TemperatureDirection::Upwards, 40)
+                .is_none(),
+            "temperature above threshold should not trigger below conversion"
         );
     }
 }
