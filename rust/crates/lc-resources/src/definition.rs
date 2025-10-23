@@ -234,22 +234,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
 
 fn load_scripts(group: &Group) -> Result<DefinitionScript, DefinitionError> {
     let mut files: Vec<DefinitionScriptFile> = Vec::new();
-    for entry in group.entries()? {
-        if entry.is_directory {
-            continue;
-        }
-        let path = entry.relative_path;
-        if !is_script_file(&path) {
-            continue;
-        }
-        let data = group.read_file(&path)?;
-        let contents = String::from_utf8(data).map_err(|err| DefinitionError::ScriptEncoding {
-            path: path.clone(),
-            source: err,
-        })?;
-        files.push(DefinitionScriptFile { path, contents });
-    }
-
+    collect_script_files(group, Path::new(""), &mut files)?;
     if files.is_empty() {
         return Err(DefinitionError::ScriptMissing);
     }
@@ -271,6 +256,43 @@ fn load_scripts(group: &Group) -> Result<DefinitionScript, DefinitionError> {
     }
 
     Ok(DefinitionScript { files, combined })
+}
+
+fn collect_script_files(
+    group: &Group,
+    prefix: &Path,
+    files: &mut Vec<DefinitionScriptFile>,
+) -> Result<(), DefinitionError> {
+    let entries = group.entries().map_err(DefinitionError::Resources)?;
+    for entry in entries {
+        let mut relative_path = PathBuf::from(prefix);
+        relative_path.push(&entry.relative_path);
+        if entry.is_directory {
+            let child = group
+                .open_child(&entry.relative_path)
+                .map_err(DefinitionError::Resources)?;
+            if child.exists("DefCore.txt") {
+                continue;
+            }
+            collect_script_files(&child, &relative_path, files)?;
+            continue;
+        }
+        if !is_script_file(&entry.relative_path) {
+            continue;
+        }
+        let data = group
+            .read_file(&entry.relative_path)
+            .map_err(DefinitionError::Resources)?;
+        let contents = String::from_utf8(data).map_err(|err| DefinitionError::ScriptEncoding {
+            path: relative_path.clone(),
+            source: err,
+        })?;
+        files.push(DefinitionScriptFile {
+            path: relative_path,
+            contents,
+        });
+    }
+    Ok(())
 }
 
 fn is_script_file(path: &Path) -> bool {
@@ -631,6 +653,7 @@ const CATEGORY_FLAGS: &[(&str, i32)] = &[
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
     #[test]
@@ -732,5 +755,74 @@ DigFree=24
                 height: 24
             })
         );
+    }
+
+    #[test]
+    fn load_definition_collects_scripts_from_nested_groups() {
+        let temp = tempdir().unwrap();
+        let def_dir = temp.path().join("Nested.ocd");
+        fs::create_dir(&def_dir).unwrap();
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            br#"[DefCore]
+id=NNNN
+Name=Nested
+Category=C4D_Object
+"#,
+        )
+        .unwrap();
+        let script_dir = def_dir.join("Script.c4d");
+        fs::create_dir(&script_dir).unwrap();
+        fs::write(script_dir.join("Main.c"), b"func Main() {}\n").unwrap();
+        let helpers_dir = script_dir.join("Helpers");
+        fs::create_dir(&helpers_dir).unwrap();
+        fs::write(helpers_dir.join("Util.c"), b"func Util() {}\n").unwrap();
+
+        let group = Group::open(&def_dir).unwrap();
+        let definition = Definition::load(&group).expect("definition load succeeds");
+        assert!(definition
+            .script
+            .files()
+            .iter()
+            .any(|file| file.path == Path::new("Script.c4d").join("Main.c")));
+        assert!(definition
+            .script
+            .files()
+            .iter()
+            .any(|file| file.path == Path::new("Script.c4d").join("Helpers").join("Util.c")));
+    }
+
+    #[test]
+    fn load_definition_ignores_nested_definitions() {
+        let temp = tempdir().unwrap();
+        let def_dir = temp.path().join("Parent.ocd");
+        fs::create_dir(&def_dir).unwrap();
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            br#"[DefCore]
+id=PARA
+Name=Parent
+Category=C4D_Object
+"#,
+        )
+        .unwrap();
+        fs::write(def_dir.join("Script.c"), b"func Parent() {}\n").unwrap();
+        let nested = def_dir.join("Child.ocd");
+        fs::create_dir(&nested).unwrap();
+        fs::write(
+            nested.join("DefCore.txt"),
+            br#"[DefCore]
+id=CHLD
+Name=Child
+Category=C4D_Object
+"#,
+        )
+        .unwrap();
+        fs::write(nested.join("Script.c"), b"func Child() {}\n").unwrap();
+
+        let group = Group::open(&def_dir).unwrap();
+        let definition = Definition::load(&group).expect("definition load succeeds");
+        assert_eq!(definition.script.files.len(), 1);
+        assert_eq!(definition.script.files[0].path, PathBuf::from("Script.c"));
     }
 }

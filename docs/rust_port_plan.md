@@ -86,6 +86,7 @@
   - ✅ DefCore now surfaces value/mass data (and picture rect metadata) to the engine; inventory UI shows per-item stats
   - ✅ Definition graphics pipeline now decodes `Graphics*.png` assets, caches picture sprites in the engine, and feeds the frontend sprite map so objects render with real icons
   - ✅ Definition sound library registration now feeds definition groups into the audio resolver so real samples play instead of synthetic tone fallbacks
+  - ✅ Script loader descends into `Script.c4d` folders (skipping embedded `DefCore` groups) so complex definitions compile all their sources
 
 - ⚠️  **Graphics Resources** (C4GraphicsResource.cpp 🔗 Minimal)
   - Progress: Fonts, startup backgrounds, and button textures now sourced from Graphics.c4g; walker sprite mapped from crew assets
