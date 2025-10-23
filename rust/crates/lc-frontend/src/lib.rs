@@ -3,7 +3,7 @@ mod startup_menu;
 
 use lc_engine::{
     EnvironmentSettings, Landscape, ObjectId, ObjectSnapshot, SimulationSnapshot,
-    SurfaceSnapshot as EngineSurfaceSnapshot,
+    SurfaceSnapshot as EngineSurfaceSnapshot, Vector2,
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
@@ -62,6 +62,43 @@ struct CrewWidgets {
     gauge: WidgetId,
 }
 
+#[derive(Debug)]
+pub struct ViewportInput<'a> {
+    pub owner: i32,
+    pub center: Vector2,
+    pub zoom: f32,
+    pub focus: &'a ObjectSnapshot,
+}
+
+impl<'a> ViewportInput<'a> {
+    pub fn new(owner: i32, center: Vector2, zoom: f32, focus: &'a ObjectSnapshot) -> Self {
+        Self {
+            owner,
+            center,
+            zoom,
+            focus,
+        }
+    }
+
+    pub fn from_focus(focus: &'a ObjectSnapshot) -> Self {
+        Self {
+            owner: focus.owner,
+            center: Vector2::new(focus.position.x, focus.position.y),
+            zoom: 1.0,
+            focus,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ActiveViewport {
+    owner: i32,
+    focus: ObjectId,
+    rect: SurfaceRect,
+    viewport_x: i32,
+    viewport_y: i32,
+}
+
 pub struct GraphicsSystem {
     surface: Surface,
     gui: Gui,
@@ -81,6 +118,7 @@ pub struct GraphicsSystem {
     world_width: i32,
     world_height: i32,
     object_sprites: Arc<HashMap<String, ImageData>>,
+    active_viewports: Vec<ActiveViewport>,
 }
 
 impl GraphicsSystem {
@@ -128,6 +166,7 @@ impl GraphicsSystem {
             world_width: surface_width as i32,
             world_height: fallback_ground_height.max(surface_height as i32).max(0),
             object_sprites,
+            active_viewports: Vec::new(),
         }
     }
 
@@ -215,10 +254,61 @@ impl GraphicsSystem {
     pub fn render_frame(
         &mut self,
         snapshot: &SimulationSnapshot,
-        focus: &ObjectSnapshot,
+        viewports: &[ViewportInput<'_>],
     ) -> Vec<EngineSurfaceSnapshot> {
+        self.active_viewports.clear();
+        self.surface.fill(Color::opaque(8, 12, 24)); // base fill before compositing viewports
+
+        self.render_viewports(snapshot, viewports);
+        self.draw_gui_overlay();
+
+        self.collect_sprite_atlas(snapshot)
+    }
+
+    fn render_viewports(&mut self, snapshot: &SimulationSnapshot, viewports: &[ViewportInput<'_>]) {
+        if viewports.is_empty() {
+            if let Some(object) = snapshot.objects.first() {
+                let default = ViewportInput::from_focus(object);
+                self.render_viewport(
+                    snapshot,
+                    &default,
+                    SurfaceRect::new(0, 0, self.surface_width, self.surface_height),
+                );
+            }
+            return;
+        }
+
+        let layout = self.layout_viewports(viewports.len());
+        for (input, rect) in viewports.iter().zip(layout.into_iter()) {
+            self.render_viewport(snapshot, input, rect);
+        }
+    }
+
+    fn render_viewport(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        input: &ViewportInput<'_>,
+        rect: SurfaceRect,
+    ) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+
+        let format = self.surface.format();
+        let viewport_surface = Surface::new(rect.width, rect.height, format);
+        let main_surface = std::mem::replace(&mut self.surface, viewport_surface);
+
+        let saved_surface_width = self.surface_width;
+        let saved_surface_height = self.surface_height;
+        let saved_viewport_x = self.viewport_x;
+        let saved_viewport_y = self.viewport_y;
+        let saved_world_width = self.world_width;
+        let saved_world_height = self.world_height;
+
+        self.surface_width = rect.width;
+        self.surface_height = rect.height;
         self.update_world_dimensions(snapshot.landscape.as_ref());
-        self.update_viewport(focus);
+        self.update_viewport(input.focus, Some(input.center));
 
         let environment = &snapshot.environment;
         let lighting = Self::lighting_factor(environment.settings.time_of_day);
@@ -241,9 +331,90 @@ impl GraphicsSystem {
             lighting,
         );
         self.draw_objects(&snapshot.objects, lighting);
-        self.draw_gui_overlay();
 
-        self.collect_sprite_atlas(snapshot, focus)
+        let viewport_x = self.viewport_x;
+        let viewport_y = self.viewport_y;
+
+        let rendered_surface = std::mem::replace(&mut self.surface, main_surface);
+        self.surface_width = saved_surface_width;
+        self.surface_height = saved_surface_height;
+        self.viewport_x = saved_viewport_x;
+        self.viewport_y = saved_viewport_y;
+        self.world_width = saved_world_width;
+        self.world_height = saved_world_height;
+
+        blit_surface(&mut self.surface, &rendered_surface, rect.x, rect.y);
+
+        self.active_viewports.push(ActiveViewport {
+            owner: input.owner,
+            focus: input.focus.id,
+            rect,
+            viewport_x,
+            viewport_y,
+        });
+    }
+
+    fn layout_viewports(&self, count: usize) -> Vec<SurfaceRect> {
+        if count == 0 {
+            return Vec::new();
+        }
+
+        let overlay_height = (OVERLAY_HEIGHT.round() as i32).clamp(0, self.surface_height as i32);
+        let available_height = (self.surface_height as i32).saturating_sub(overlay_height);
+        if available_height <= 0 {
+            return vec![SurfaceRect::new(0, overlay_height, self.surface_width, 0)];
+        }
+
+        let columns = match count {
+            1 => 1,
+            2 => 1,
+            _ => (count as f32).sqrt().ceil() as usize,
+        }
+        .max(1);
+        let rows = ((count + columns - 1) / columns).max(1);
+
+        let available_width = self.surface_width;
+        let base_width = available_width / columns as u32;
+        let leftover_width = available_width % columns as u32;
+        let base_height = (available_height as u32) / rows as u32;
+        let leftover_height = (available_height as u32) % rows as u32;
+
+        let mut rects = Vec::with_capacity(count);
+        let mut viewport_index = 0usize;
+        let mut y = overlay_height.max(0) as u32;
+        for row in 0..rows {
+            let mut x = 0u32;
+            let row_height = base_height + if row < leftover_height as usize { 1 } else { 0 };
+            for col in 0..columns {
+                if viewport_index >= count {
+                    break;
+                }
+                let col_width = base_width + if col < leftover_width as usize { 1 } else { 0 };
+                if col_width == 0 || row_height == 0 {
+                    rects.push(SurfaceRect::new(x as i32, y as i32, col_width, row_height));
+                } else {
+                    let margin = 2i32;
+                    let mut rect_x = x as i32 + margin;
+                    let mut rect_y = y as i32 + margin;
+                    let mut rect_width = col_width.saturating_sub((margin * 2).max(0) as u32);
+                    let mut rect_height = row_height.saturating_sub((margin * 2).max(0) as u32);
+                    if rect_width == 0 {
+                        rect_width = col_width;
+                        rect_x = x as i32;
+                    }
+                    if rect_height == 0 {
+                        rect_height = row_height;
+                        rect_y = y as i32;
+                    }
+                    rects.push(SurfaceRect::new(rect_x, rect_y, rect_width, rect_height));
+                }
+                x += col_width;
+                viewport_index += 1;
+            }
+            y += row_height;
+        }
+
+        rects
     }
 
     pub fn ground_height_at(&self, landscape: Option<&Landscape>, x: i32) -> i32 {
@@ -251,15 +422,16 @@ impl GraphicsSystem {
             .unwrap_or(self.fallback_ground_height)
     }
 
-    fn update_viewport(&mut self, focus: &ObjectSnapshot) {
+    fn update_viewport(&mut self, focus: &ObjectSnapshot, center: Option<Vector2>) {
+        let target = center.unwrap_or_else(|| focus.position);
         let half_width = (self.surface_width / 2) as i32;
         let half_height = (self.surface_height / 2) as i32;
 
         let max_offset_x = (self.world_width - self.surface_width as i32).max(0);
         let max_offset_y = (self.world_height - self.surface_height as i32).max(0);
 
-        let desired_x = (focus.position.x - half_width).clamp(0, max_offset_x);
-        let desired_y = (focus.position.y - half_height).clamp(0, max_offset_y);
+        let desired_x = (target.x - half_width).clamp(0, max_offset_x);
+        let desired_y = (target.y - half_height).clamp(0, max_offset_y);
 
         self.viewport_x = desired_x;
         self.viewport_y = desired_y;
@@ -562,7 +734,10 @@ impl GraphicsSystem {
 
     #[cfg(test)]
     pub fn viewport(&self) -> (i32, i32) {
-        (self.viewport_x, self.viewport_y)
+        self.active_viewports
+            .first()
+            .map(|viewport| (viewport.viewport_x, viewport.viewport_y))
+            .unwrap_or((self.viewport_x, self.viewport_y))
     }
 
     fn surface_height_at(&self, landscape: Option<&Landscape>, x: i32) -> Option<i32> {
@@ -591,16 +766,12 @@ impl GraphicsSystem {
         color.modulate(lighting)
     }
 
-    fn collect_sprite_atlas(
-        &self,
-        snapshot: &SimulationSnapshot,
-        focus: &ObjectSnapshot,
-    ) -> Vec<EngineSurfaceSnapshot> {
+    fn collect_sprite_atlas(&self, snapshot: &SimulationSnapshot) -> Vec<EngineSurfaceSnapshot> {
         let mut atlas = Vec::with_capacity(
             2 + snapshot
                 .objects
                 .len()
-                .saturating_add(snapshot.hud.players.len()),
+                .saturating_add(self.active_viewports.len()),
         );
 
         let full_snapshot = self.surface.snapshot();
@@ -609,13 +780,17 @@ impl GraphicsSystem {
             full_snapshot,
         ));
 
-        let player_label = if focus.owner < 0 {
-            "none".to_string()
-        } else {
-            focus.owner.to_string()
-        };
-        let viewport_label = format!("viewport#0:player={player_label}");
-        atlas.push(Self::make_engine_surface(viewport_label, full_snapshot));
+        for (index, viewport) in self.active_viewports.iter().enumerate() {
+            if let Some(region) = self.surface.snapshot_region(viewport.rect) {
+                let owner_label = if viewport.owner < 0 {
+                    "none".to_string()
+                } else {
+                    viewport.owner.to_string()
+                };
+                let label = format!("viewport#{index}:player={owner_label}");
+                atlas.push(Self::make_engine_surface(label, region));
+            }
+        }
 
         let overlay_height =
             (OVERLAY_HEIGHT.round() as i32).clamp(0, self.surface_height as i32) as u32;
@@ -633,29 +808,24 @@ impl GraphicsSystem {
             }
         }
 
-        for player in &snapshot.hud.players {
-            if player.eliminated {
-                continue;
-            }
-            if let Some(focus_object) = player.focus {
-                if let Some(object) = snapshot
-                    .objects
-                    .iter()
-                    .find(|object| object.id == focus_object)
-                {
-                    if let Some(rect) = self.object_screen_rect(object) {
-                        if let Some(snap) = self.surface.snapshot_region(rect) {
-                            let label =
-                                format!("focus#{}:player={}", object.id.as_u64(), player.owner);
-                            atlas.push(Self::make_engine_surface(label, snap));
-                        }
+        for viewport in &self.active_viewports {
+            if let Some(object) = snapshot.object(viewport.focus) {
+                if let Some(rect) = self.object_screen_rect_for_viewport(object, viewport) {
+                    if let Some(snap) = self.surface.snapshot_region(rect) {
+                        let label =
+                            format!("focus#{}:player={}", object.id.as_u64(), viewport.owner);
+                        atlas.push(Self::make_engine_surface(label, snap));
                     }
                 }
             }
         }
 
         for object in &snapshot.objects {
-            if let Some(rect) = self.object_screen_rect(object) {
+            if let Some(rect) = self
+                .active_viewports
+                .iter()
+                .find_map(|viewport| self.object_screen_rect_for_viewport(object, viewport))
+            {
                 if let Some(snap) = self.surface.snapshot_region(rect) {
                     let label =
                         format!("object#{}:def={}", object.id.as_u64(), object.definition_id);
@@ -681,22 +851,22 @@ impl GraphicsSystem {
         }
     }
 
-    fn object_screen_rect(&self, object: &ObjectSnapshot) -> Option<SurfaceRect> {
+    fn object_screen_rect_for_viewport(
+        &self,
+        object: &ObjectSnapshot,
+        viewport: &ActiveViewport,
+    ) -> Option<SurfaceRect> {
         if !object.status.is_active() || !object.alive {
             return None;
         }
 
         if object.vertices.is_empty() {
-            let screen_x = object.position.x - self.viewport_x;
-            let screen_y = object.position.y - self.viewport_y;
+            let screen_x = object.position.x - viewport.viewport_x + viewport.rect.x;
+            let screen_y = object.position.y - viewport.viewport_y + viewport.rect.y;
             let size = 6;
             let half = size / 2;
-            return Some(SurfaceRect::new(
-                screen_x - half,
-                screen_y - half,
-                size as u32,
-                size as u32,
-            ));
+            let rect = SurfaceRect::new(screen_x - half, screen_y - half, size as u32, size as u32);
+            return rect.intersection(viewport.rect);
         }
 
         let mut min_x = i32::MAX;
@@ -704,8 +874,8 @@ impl GraphicsSystem {
         let mut min_y = i32::MAX;
         let mut max_y = i32::MIN;
         for vertex in &object.vertices {
-            let x = object.position.x + vertex.x - self.viewport_x;
-            let y = object.position.y + vertex.y - self.viewport_y;
+            let x = object.position.x + vertex.x - viewport.viewport_x + viewport.rect.x;
+            let y = object.position.y + vertex.y - viewport.viewport_y + viewport.rect.y;
             min_x = min_x.min(x);
             max_x = max_x.max(x);
             min_y = min_y.min(y);
@@ -728,8 +898,7 @@ impl GraphicsSystem {
 
         let width = (right - left + 1).max(1) as u32;
         let height = (bottom - top + 1).max(1) as u32;
-
-        Some(SurfaceRect::new(left as i32, top as i32, width, height))
+        SurfaceRect::new(left as i32, top as i32, width, height).intersection(viewport.rect)
     }
 
     fn sky_color_for_temperature(temperature: i32) -> Color {
@@ -777,6 +946,59 @@ impl GraphicsSystem {
         let warm = warm as f32;
         let value = cold + (warm - cold) * factor;
         value.round().clamp(0.0, 255.0) as u8
+    }
+}
+
+fn blit_surface(dst: &mut Surface, src: &Surface, offset_x: i32, offset_y: i32) {
+    if src.width() == 0 || src.height() == 0 {
+        return;
+    }
+    if dst.format() != src.format() {
+        return;
+    }
+    if offset_x >= dst.width() as i32 || offset_y >= dst.height() as i32 {
+        return;
+    }
+
+    let start_x = offset_x.max(0) as u32;
+    let start_y = offset_y.max(0) as u32;
+    if start_x >= dst.width() || start_y >= dst.height() {
+        return;
+    }
+
+    let max_width = dst.width().saturating_sub(start_x);
+    let max_height = dst.height().saturating_sub(start_y);
+    let copy_width = src.width().min(max_width);
+    let copy_height = src.height().min(max_height);
+    if copy_width == 0 || copy_height == 0 {
+        return;
+    }
+
+    let dst_stride = dst.stride();
+    let src_stride = src.stride();
+    if src.width() == 0 {
+        return;
+    }
+    let bpp = src_stride / src.width() as usize;
+    if bpp == 0 {
+        return;
+    }
+
+    let dst_pixels = dst.pixels_mut();
+    let src_pixels = src.pixels();
+
+    for row in 0..copy_height {
+        let dst_row = (start_y + row) as usize;
+        let dst_offset = dst_row
+            .saturating_mul(dst_stride)
+            .saturating_add(start_x as usize * bpp);
+        let src_offset = row as usize * src_stride;
+        let len = copy_width as usize * bpp;
+        if dst_offset + len > dst_pixels.len() || src_offset + len > src_pixels.len() {
+            break;
+        }
+        dst_pixels[dst_offset..dst_offset + len]
+            .copy_from_slice(&src_pixels[src_offset..src_offset + len]);
     }
 }
 
@@ -1118,12 +1340,13 @@ mod tests {
     #[test]
     fn graphics_system_draws_ground() {
         let snapshot = make_snapshot();
-        let focus = snapshot.objects[0].clone();
+        let focus = &snapshot.objects[0];
         let mut graphics =
             GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
         graphics.set_world_width(256);
 
-        let atlas = graphics.render_frame(&snapshot, &focus);
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        let atlas = graphics.render_frame(&snapshot, &viewports);
         assert!(!atlas.is_empty());
 
         let ground = graphics.surface().get_pixel(0, 179).unwrap();
@@ -1133,7 +1356,7 @@ mod tests {
     #[test]
     fn overlay_updates_clamp_energy() {
         let snapshot = make_snapshot();
-        let focus = snapshot.objects[0].clone();
+        let focus = &snapshot.objects[0];
         let mut graphics =
             GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
         graphics
@@ -1144,7 +1367,8 @@ mod tests {
                 players: Vec::new(),
             })
             .expect("overlay updates");
-        graphics.render_frame(&snapshot, &focus);
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
         // if gauge update panicked the test would fail; no additional assertion needed here
     }
 
@@ -1157,11 +1381,12 @@ mod tests {
             ObjectVertex::new(4, 4),
             ObjectVertex::new(-4, 4),
         ];
-        let focus = snapshot.objects[0].clone();
+        let focus = &snapshot.objects[0];
         let mut graphics =
             GraphicsSystem::new(120, 80, 60, "Atlas Scenario", test_font(), empty_sprites());
 
-        let atlas = graphics.render_frame(&snapshot, &focus);
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        let atlas = graphics.render_frame(&snapshot, &viewports);
 
         assert!(atlas.iter().any(|entry| entry.label == "back_buffer"));
         let object_label = format!("object#{}:def={}", focus.id.as_u64(), focus.definition_id);
@@ -1179,8 +1404,9 @@ mod tests {
         snapshot.landscape = Some(Landscape::flat(256, 280));
         let mut graphics =
             GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
-        let focus = snapshot.objects[0].clone();
-        graphics.render_frame(&snapshot, &focus);
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
 
         let (_, viewport_y) = graphics.viewport();
         assert!(viewport_y > 0);
@@ -1193,8 +1419,9 @@ mod tests {
         snapshot.landscape = Some(Landscape::flat(256, 200));
         let mut graphics =
             GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
-        let focus = snapshot.objects[0].clone();
-        graphics.render_frame(&snapshot, &focus);
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
         let (_, top_view) = graphics.viewport();
         assert_eq!(top_view, 0);
 
@@ -1203,8 +1430,9 @@ mod tests {
         snapshot.landscape = Some(Landscape::flat(256, 360));
         let mut graphics =
             GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
-        let focus = snapshot.objects[0].clone();
-        graphics.render_frame(&snapshot, &focus);
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
         let (_, bottom_view) = graphics.viewport();
         assert_eq!(bottom_view, 360 - 180);
     }
@@ -1251,8 +1479,9 @@ mod tests {
 
         let mut graphics =
             GraphicsSystem::new(80, 60, 60, "Polygon Scenario", test_font(), empty_sprites());
-        let focus = snapshot.objects[0].clone();
-        graphics.render_frame(&snapshot, &focus);
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
 
         let lighting = GraphicsSystem::lighting_factor(snapshot.environment.settings.time_of_day);
         let expected = GraphicsSystem::apply_lighting(object_color(&snapshot.objects[0]), lighting);
@@ -1273,17 +1502,19 @@ mod tests {
         daytime.environment.sky_color = Some(RgbColor::new(160, 160, 160));
         daytime.environment.settings.time_of_day = EnvironmentSettings::TIME_CYCLE / 2;
 
-        let focus = daytime.objects[0].clone();
+        let focus = &daytime.objects[0];
         let mut day_view = GraphicsSystem::new(120, 80, 60, "Day", test_font(), empty_sprites());
-        day_view.render_frame(&daytime, &focus);
+        let day_viewports = vec![ViewportInput::from_focus(focus)];
+        day_view.render_frame(&daytime, &day_viewports);
         let day_pixel = day_view.surface().get_pixel(0, 0).unwrap();
 
         let mut nighttime = daytime.clone();
         nighttime.environment.settings.time_of_day = 0;
         let mut night_view =
             GraphicsSystem::new(120, 80, 60, "Night", test_font(), empty_sprites());
-        let night_focus = nighttime.objects[0].clone();
-        night_view.render_frame(&nighttime, &night_focus);
+        let night_focus = &nighttime.objects[0];
+        let night_viewports = vec![ViewportInput::from_focus(night_focus)];
+        night_view.render_frame(&nighttime, &night_viewports);
         let night_pixel = night_view.surface().get_pixel(0, 0).unwrap();
 
         let base_color = Color::opaque(160, 160, 160);
@@ -1306,8 +1537,9 @@ mod tests {
 
         let mut day_view =
             GraphicsSystem::new(200, 150, 150, "Day Object", test_font(), empty_sprites());
-        let day_focus = daytime.objects[0].clone();
-        day_view.render_frame(&daytime, &day_focus);
+        let day_focus = &daytime.objects[0];
+        let day_viewports = vec![ViewportInput::from_focus(day_focus)];
+        day_view.render_frame(&daytime, &day_viewports);
         let (day_viewport_x, day_viewport_y) = day_view.viewport();
         let day_screen_x = (daytime.objects[0].position.x - day_viewport_x) as u32;
         let day_screen_y = (daytime.objects[0].position.y - day_viewport_y) as u32;
@@ -1320,8 +1552,9 @@ mod tests {
         nighttime.environment.settings.time_of_day = 0;
         let mut night_view =
             GraphicsSystem::new(200, 150, 150, "Night Object", test_font(), empty_sprites());
-        let night_focus = nighttime.objects[0].clone();
-        night_view.render_frame(&nighttime, &night_focus);
+        let night_focus = &nighttime.objects[0];
+        let night_viewports = vec![ViewportInput::from_focus(night_focus)];
+        night_view.render_frame(&nighttime, &night_viewports);
         let (night_viewport_x, night_viewport_y) = night_view.viewport();
         let night_screen_x = (nighttime.objects[0].position.x - night_viewport_x) as u32;
         let night_screen_y = (nighttime.objects[0].position.y - night_viewport_y) as u32;
@@ -1353,10 +1586,11 @@ mod tests {
         if let Some(landscape) = snapshot.landscape.as_mut() {
             landscape.set_liquid_column(30, vec![LiquidSegment::new(40, 60)]);
         }
-        let focus = snapshot.objects[0].clone();
+        let focus = &snapshot.objects[0];
         let mut graphics =
             GraphicsSystem::new(120, 80, 80, "Liquid Scenario", test_font(), empty_sprites());
-        graphics.render_frame(&snapshot, &focus);
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
 
         let (viewport_x, viewport_y) = graphics.viewport();
         let screen_x = (30 - viewport_x) as u32;

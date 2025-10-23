@@ -5403,6 +5403,29 @@ impl Engine {
                 } else if state.status == PlayerStatus::Eliminated {
                     state.status = PlayerStatus::Active;
                 }
+                if state.viewports.is_empty() {
+                    let focus_id = state
+                        .cursor
+                        .or_else(|| state.crew.first().copied())
+                        .or_else(|| {
+                            self.objects
+                                .iter()
+                                .find(|object| object.state.owner == owner)
+                                .map(|object| object.id)
+                        })
+                        .or_else(|| self.objects.first().map(|object| object.id));
+                    let mut center = Vector2::ZERO;
+                    if let Some(focus) =
+                        focus_id.and_then(|id| self.objects.iter().find(|object| object.id == id))
+                    {
+                        center = focus.state.position;
+                        state
+                            .viewports
+                            .push(PlayerViewport::new(center).with_focus(Some(focus.id)));
+                    } else {
+                        state.viewports.push(PlayerViewport::new(center));
+                    }
+                }
                 state
             })
             .collect();

@@ -25,11 +25,13 @@ use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, ControlButton, ControlEvent, Definition, Engine,
     EngineError, EngineState, EnvironmentSettings, Landscape, MaterialSet, MovementProfile,
-    ObjectId, ObjectSnapshot, Scenario, ScenarioError, SimulationSnapshot, SpawnConfig, Vector2,
+    ObjectId, ObjectSnapshot, PlayerStatus, Scenario, ScenarioError, SimulationSnapshot,
+    SpawnConfig, Vector2,
 };
 use lc_frontend::{
     draw_image, CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData, InputDispatcher,
     KeyCode, PlayerOverlay, ScenarioEntry, ScenarioKind, StartupMenu, StartupMenuAction,
+    ViewportInput,
 };
 use lc_graphics::{BitmapFont, Color, TextFont, TrueTypeFont};
 use lc_gui::ButtonTextures;
@@ -2631,7 +2633,8 @@ impl GameApp {
     }
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
-        if let Some(focus) = self.focus_snapshot.as_ref() {
+        let viewports = collect_viewport_inputs(&self.snapshot, self.local_owner, self.focus_id);
+        if let Some(_focus) = self.focus_snapshot.as_ref() {
             let players = collect_player_overlays(&self.snapshot, self.focus_id);
             let overlay = GraphicsOverlay {
                 frame_text: &self.frame_text,
@@ -2642,7 +2645,9 @@ impl GameApp {
             self.graphics
                 .update_overlay(&overlay)
                 .context("failed to update overlay")?;
-            self.graphics.render_frame(&self.snapshot, focus);
+            self.graphics.render_frame(&self.snapshot, &viewports);
+        } else if !viewports.is_empty() {
+            self.graphics.render_frame(&self.snapshot, &viewports);
         } else {
             self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
         }
@@ -3092,6 +3097,63 @@ fn copy_surface(src: &[u8], width: u32, height: u32, dest: &mut [u8]) {
             dest[dest_offset..dest_offset + stride].copy_from_slice(&src[src_offset..end]);
         }
     }
+}
+
+fn collect_viewport_inputs<'a>(
+    snapshot: &'a SimulationSnapshot,
+    local_owner: i32,
+    fallback_focus: Option<ObjectId>,
+) -> Vec<ViewportInput<'a>> {
+    let mut seen = HashSet::new();
+    let mut inputs = Vec::new();
+
+    for state in &snapshot.players {
+        if state.status == PlayerStatus::Eliminated {
+            continue;
+        }
+        for viewport in &state.viewports {
+            let focus_id = viewport
+                .focus
+                .or(state.cursor)
+                .or_else(|| state.crew.first().copied());
+            let Some(focus_id) = focus_id else {
+                continue;
+            };
+            if !seen.insert(focus_id) {
+                continue;
+            }
+            if let Some(object) = snapshot.object(focus_id) {
+                let center = Vector2::new(viewport.center.x, viewport.center.y);
+                inputs.push(ViewportInput::new(state.id, center, viewport.zoom, object));
+            }
+        }
+    }
+
+    if inputs.is_empty() {
+        if let Some(focus_id) = fallback_focus {
+            if let Some(object) = snapshot.object(focus_id) {
+                let center = Vector2::new(object.position.x, object.position.y);
+                if seen.insert(object.id) {
+                    inputs.push(ViewportInput::new(object.owner, center, 1.0, object));
+                }
+            }
+        }
+    }
+
+    if inputs.is_empty() {
+        if let Some(object) = snapshot.objects.first() {
+            let center = Vector2::new(object.position.x, object.position.y);
+            inputs.push(ViewportInput::new(object.owner, center, 1.0, object));
+        }
+    }
+
+    inputs.sort_by(|a, b| {
+        let a_key = (a.owner != local_owner, a.owner);
+        let b_key = (b.owner != local_owner, b.owner);
+        a_key.cmp(&b_key)
+    });
+
+    inputs
 }
 
 fn collect_player_overlays(
