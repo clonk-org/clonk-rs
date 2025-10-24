@@ -86,6 +86,7 @@
   - ✅ Sandbox fallback now loads install definitions (Clonk et al.) instead of the synthetic Walker
   - ✅ DefCore now surfaces value/mass data (and picture rect metadata) to the engine; inventory UI shows per-item stats
   - ✅ Definition graphics pipeline now decodes `Graphics*.png` assets, caches picture sprites in the engine, and feeds the frontend sprite map so objects render with real icons
+  - ✅ Scenario loader now applies DefCore value/mass/picture metadata (including cropped picture images) when registering definitions, so real scenarios expose the same data without relying on the sandbox fallback loader
   - ✅ Definition sound library registration now feeds definition groups into the audio resolver so real samples play instead of synthetic tone fallbacks
   - ✅ Script loader descends into `Script.c4d` folders (skipping embedded `DefCore` groups) so complex definitions compile all their sources
 

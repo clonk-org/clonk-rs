@@ -16,9 +16,9 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::Deserialize;
 
 use crate::{
-    action::ActionSpec, ActionState, Definition, EffectState, Engine, EngineError,
-    EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings,
-    RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, Vector2,
+    action::ActionSpec, ActionState, Definition, DefinitionPicture, DefinitionPictureImage,
+    EffectState, Engine, EngineError, EnvironmentSettings, Landscape, MovementProfile, ObjectId,
+    ObjectStatus, PhysicsSettings, RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, Vector2,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -84,6 +84,10 @@ struct ScenarioDefinition {
     crew_member: bool,
     movement: MovementProfile,
     category: i32,
+    value: i32,
+    mass: i32,
+    picture: Option<DefinitionPicture>,
+    picture_image: Option<GraphicsImage>,
     resource_group: Option<Group>,
 }
 
@@ -279,6 +283,14 @@ impl Scenario {
             compiled.set_crew_member(definition.crew_member);
             compiled.set_movement_profile(definition.movement);
             compiled.set_category(definition.category);
+            compiled.set_value(definition.value);
+            compiled.set_mass(definition.mass);
+            compiled.set_picture(definition.picture);
+            let picture_image = definition
+                .picture_image
+                .as_ref()
+                .map(DefinitionPictureImage::from_resource);
+            compiled.set_picture_image(picture_image);
             engine.register_definition(compiled)?;
         }
 
@@ -394,6 +406,10 @@ impl Scenario {
                 crew_member,
                 movement: movement_profile,
                 category: normalized_category,
+                value: 0,
+                mass: 0,
+                picture: None,
+                picture_image: None,
                 resource_group: None,
             });
         }
@@ -765,6 +781,10 @@ fn scenario_definition_from_resource(
         crew_member: core.crew_member,
         movement: MovementProfile::default(),
         category: core.category,
+        value: core.value,
+        mass: core.mass,
+        picture: core.picture.map(DefinitionPicture::from),
+        picture_image: resource.picture_image,
         resource_group: source_group,
     }
 }
@@ -2332,6 +2352,10 @@ global func Step(state, frame, random)
                 crew_member: false,
                 movement: MovementProfile::default(),
                 category: crate::DEFAULT_CATEGORY,
+                value: 0,
+                mass: 0,
+                picture: None,
+                picture_image: None,
                 resource_group: None,
             }],
             initial_spawns: vec![ScenarioSpawn {
@@ -2397,6 +2421,10 @@ global func Step(state, frame, random)
                 crew_member: false,
                 movement: MovementProfile::default(),
                 category: crate::DEFAULT_CATEGORY,
+                value: 0,
+                mass: 0,
+                picture: None,
+                picture_image: None,
                 resource_group: None,
             }],
             initial_spawns: vec![ScenarioSpawn {
