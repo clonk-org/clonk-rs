@@ -218,6 +218,8 @@ impl Scenario {
         let mut initial_spawns = collect_initial_spawns(&manifest.sections, &collected)?;
         let mut object_spawns = collect_legacy_objects(group, &collected)?;
         initial_spawns.append(&mut object_spawns);
+        let physics = derive_legacy_physics(&manifest)?;
+        let environment = derive_legacy_environment(&manifest)?;
 
         Ok(Self {
             name: manifest.title,
@@ -226,8 +228,8 @@ impl Scenario {
             definitions: collected,
             initial_spawns,
             landscape,
-            physics: None,
-            environment: None,
+            physics,
+            environment: Some(environment),
             sky: None,
             script,
         })
@@ -744,6 +746,42 @@ fn parse_c4sval_std(value: &str) -> Option<i32> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LegacyC4SVal {
+    std: i32,
+    rnd: i32,
+    min: i32,
+    max: i32,
+}
+
+impl LegacyC4SVal {
+    const fn new(std: i32, rnd: i32, min: i32, max: i32) -> Self {
+        Self { std, rnd, min, max }
+    }
+
+    fn base(self) -> i32 {
+        let (min, max) = ordered_bounds(self.min, self.max);
+        self.std.clamp(min, max)
+    }
+
+    fn variation_extent(self) -> i32 {
+        let base = self.base();
+        let (min, max) = ordered_bounds(self.min, self.max);
+        let positive = max.saturating_sub(base).max(0);
+        let negative = base.saturating_sub(min).max(0);
+        let range = positive.max(negative);
+        range.min(self.rnd.abs())
+    }
+}
+
+const fn ordered_bounds(a: i32, b: i32) -> (i32, i32) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
 fn parse_legacy_bool(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -929,6 +967,120 @@ fn load_legacy_landscape(
         .max(1);
     let landscape = Landscape::flat(width_u32, fallback_height);
     Ok(Some(landscape))
+}
+
+fn parse_legacy_c4s_value(
+    field: &str,
+    raw: &str,
+    defaults: LegacyC4SVal,
+) -> Result<LegacyC4SVal, ScenarioError> {
+    let mut result = defaults;
+    for (index, fragment) in raw.split(',').enumerate() {
+        let trimmed = fragment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parsed = parse_i32(trimmed).map_err(|err| {
+            ScenarioError::LegacyParse(format!(
+                "invalid value `{trimmed}` for `{field}` component {index}: {err}"
+            ))
+        })?;
+
+        match index {
+            0 => result.std = parsed,
+            1 => result.rnd = parsed,
+            2 => result.min = parsed,
+            3 => result.max = parsed,
+            _ => break,
+        }
+    }
+    Ok(result)
+}
+
+fn legacy_c4s_value(
+    entries: Option<&Vec<(String, String)>>,
+    key: &str,
+    defaults: LegacyC4SVal,
+) -> Result<LegacyC4SVal, ScenarioError> {
+    match entries.and_then(|entries| find_entry(entries, key)) {
+        Some(raw) => parse_legacy_c4s_value(key, &raw, defaults),
+        None => Ok(defaults),
+    }
+}
+
+fn derive_legacy_physics(
+    manifest: &LegacyScenarioManifest,
+) -> Result<Option<PhysicsSettings>, ScenarioError> {
+    let entries = manifest.sections.get("landscape");
+    if entries.is_none() {
+        return Ok(None);
+    }
+    let gravity_defaults = LegacyC4SVal::new(100, 0, 10, 200);
+    let gravity = legacy_c4s_value(entries, "gravity", gravity_defaults)?;
+    let mut physics = PhysicsSettings::default();
+    physics.gravity = gravity.base();
+    Ok(Some(physics))
+}
+
+fn derive_legacy_environment(
+    manifest: &LegacyScenarioManifest,
+) -> Result<EnvironmentSettings, ScenarioError> {
+    let weather_entries = manifest.sections.get("weather");
+    let disasters_entries = manifest.sections.get("disasters");
+
+    let wind_defaults = LegacyC4SVal::new(0, 70, -100, 100);
+    let wind = legacy_c4s_value(weather_entries, "wind", wind_defaults)?;
+    let base_wind = wind.base();
+    let wind_variation = wind.variation_extent();
+
+    let mut environment = EnvironmentSettings::new(base_wind);
+    if wind_variation > 0 {
+        environment = environment.with_wind_variation(wind_variation, 2000);
+    }
+
+    let climate_defaults = LegacyC4SVal::new(50, 10, 0, 100);
+    let climate_value = legacy_c4s_value(weather_entries, "climate", climate_defaults)?;
+    let climate = 100 - climate_value.base() - 50;
+    environment = environment.with_climate(climate);
+    environment = environment.with_temperature(climate);
+
+    let season_defaults = LegacyC4SVal::new(50, 50, 0, 100);
+    let season_value = legacy_c4s_value(weather_entries, "startseason", season_defaults)?;
+    environment = environment.with_season(season_value.base().clamp(0, 100));
+
+    let year_defaults = LegacyC4SVal::new(50, 0, 0, 100);
+    let year_speed = legacy_c4s_value(weather_entries, "yearspeed", year_defaults)?.base();
+    environment = environment.with_year_speed(year_speed);
+
+    let rain_defaults = LegacyC4SVal::new(0, 0, 0, 100);
+    let rain_value = legacy_c4s_value(weather_entries, "rain", rain_defaults)?.base();
+    environment = environment.with_precipitation(rain_value);
+    environment = environment.with_precipitation_strength(rain_value);
+
+    let lightning_defaults = LegacyC4SVal::new(0, 0, 0, 100);
+    let lightning = legacy_c4s_value(weather_entries, "lightning", lightning_defaults)?.base();
+    environment = environment.with_lightning(lightning);
+
+    let no_gamma = weather_entries
+        .and_then(|entries| find_entry(entries, "nogamma"))
+        .and_then(|value| parse_legacy_bool(&value))
+        .unwrap_or(true);
+    environment = if no_gamma {
+        environment.with_gamma_disabled()
+    } else {
+        environment.with_gamma_enabled()
+    };
+
+    let disaster_defaults = LegacyC4SVal::new(0, 0, 0, 100);
+    let meteorite = legacy_c4s_value(disasters_entries, "meteorite", disaster_defaults)?.base();
+    let volcano = legacy_c4s_value(disasters_entries, "volcano", disaster_defaults)?.base();
+    let earthquake = legacy_c4s_value(disasters_entries, "earthquake", disaster_defaults)?.base();
+    environment = environment
+        .with_meteorite(meteorite)
+        .with_volcano(volcano)
+        .with_earthquake(earthquake);
+
+    Ok(environment)
 }
 
 fn collect_legacy_objects(
@@ -3536,6 +3688,154 @@ global func Step(state, frame, random)
             landscape.surface(),
             vec![6; 8].as_slice(),
             "expected map zoom to scale surface heights"
+        );
+    }
+
+    #[test]
+    fn legacy_scenario_populates_physics_and_environment() {
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let crew_core = defs_root.join("Crew.c4d");
+        std::fs::create_dir_all(&crew_core).expect("crew definition dir");
+        std::fs::write(
+            crew_core.join("DefCore.txt"),
+            "[DefCore]\nid=CLNK\nName=Clonk\nCategory=0\nCrewMember=1\n",
+        )
+        .expect("write crew defcore");
+        std::fs::write(crew_core.join("Script.c"), "// crew script\n").expect("crew script");
+
+        let scenario_dir = dir.path().join("LegacyEnvironment.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            r#"
+            [Head]
+            Title=Legacy Environment
+
+            [Definitions]
+            Definition1=Defs.c4d
+
+            [Player1]
+            Crew=CLNK=1
+            Position=20,40
+
+            [Landscape]
+            Gravity=120
+
+            [Weather]
+            Wind=10,5,-20,20
+            Climate=60
+            Rain=35
+            Lightning=12
+            StartSeason=30,10,0,100
+            YearSpeed=45
+            NoGamma=0
+
+            [Disasters]
+            Meteorite=25
+            Volcano=15
+            Earthquake=5
+            "#,
+        )
+        .expect("write scenario core");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("legacy scenario loads");
+
+        let physics = scenario.physics().expect("physics present");
+        assert_eq!(
+            physics.gravity, 120,
+            "expected gravity parsed from Scenario.txt"
+        );
+
+        let environment = scenario.environment().expect("environment present");
+        assert_eq!(environment.wind, 10, "expected wind base from Scenario.txt");
+        assert_eq!(
+            environment.wind_variation, 5,
+            "expected wind variation from Scenario.txt"
+        );
+        assert_eq!(
+            environment.climate, -10,
+            "expected climate transformed value"
+        );
+        assert_eq!(
+            environment.temperature, -10,
+            "temperature should match initial climate"
+        );
+        assert_eq!(environment.season, 30, "StartSeason should map to season");
+        assert_eq!(environment.year_speed, 45, "YearSpeed should be retained");
+        assert_eq!(
+            environment.precipitation, 35,
+            "rain should map to precipitation"
+        );
+        assert_eq!(
+            environment.precipitation_strength, 35,
+            "rain should map to precipitation strength"
+        );
+        assert_eq!(
+            environment.lightning, 12,
+            "lightning level should be parsed"
+        );
+        assert_eq!(
+            environment.meteorite, 25,
+            "meteorite level should be parsed"
+        );
+        assert_eq!(environment.volcano, 15, "volcano level should be parsed");
+        assert_eq!(
+            environment.earthquake, 5,
+            "earthquake level should be parsed"
+        );
+        assert!(
+            !environment.no_gamma,
+            "NoGamma=0 should enable gamma correction"
+        );
+
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let configured_physics = engine.physics();
+        assert_eq!(
+            configured_physics.gravity, 120,
+            "engine should receive legacy gravity"
+        );
+
+        let configured_environment = engine.environment();
+        assert_eq!(
+            configured_environment.wind, 10,
+            "engine should receive wind base"
+        );
+        assert_eq!(
+            configured_environment.wind_variation, 5,
+            "engine should receive wind variation"
+        );
+        assert_eq!(
+            configured_environment.year_speed, 45,
+            "engine should receive year speed"
+        );
+        assert_eq!(
+            configured_environment.lightning, 12,
+            "engine should receive lightning level"
+        );
+        assert_eq!(
+            configured_environment.meteorite, 25,
+            "engine should receive meteorite level"
+        );
+        assert_eq!(
+            configured_environment.volcano, 15,
+            "engine should receive volcano level"
+        );
+        assert_eq!(
+            configured_environment.earthquake, 5,
+            "engine should receive earthquake level"
+        );
+        assert!(
+            !configured_environment.no_gamma,
+            "engine should reflect gamma enabled flag"
         );
     }
 
