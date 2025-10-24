@@ -1,5 +1,6 @@
 mod control;
 mod legacy;
+mod league;
 mod lobby;
 mod resync;
 mod session;
@@ -13,6 +14,7 @@ pub use legacy::{
     decode_control_packet, decode_control_payload, encode_control_packet, encode_control_payload,
     LegacyControlError, LegacyControlFrame, LegacyEncodeError,
 };
+pub use league::LeagueFbidRegistry;
 pub use lobby::{Lobby, LobbyError, LobbyParticipant, LobbySettings, ParticipantKind};
 pub use resync::{ControlBacklog, ResyncRequest, ResyncScheduler};
 pub use session::{

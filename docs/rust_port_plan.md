@@ -112,10 +112,12 @@
   - Client authentication and permissions
   - Client-specific state tracking
 
-- ❌ **League/Ranking** (C4League.h 🔗 Not ported)
+- ⚠️ **League/Ranking** (C4League.h 🔗 Partial)
   - Online matchmaking, account system
   - Game statistics and player rankings
   - League game recording
+  - ✅ FBID registry ported (`LeagueFbidRegistry` in lc-network) to mirror account ↔ FBID tracking used in disconnect reports
+  - ⚠️ Remaining: league HTTP request/response flow, checksum handling, authentication dialogs
 
 ### Category 4: Editor & Development (NOT PORTED)
 - ❌ **In-Game Console** (C4Console.cpp 🔗 Not ported)

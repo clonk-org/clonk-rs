@@ -2863,6 +2863,39 @@ impl DefinitionPictureImage {
     }
 }
 
+#[derive(Clone)]
+pub struct DefinitionSpriteImage {
+    width: u32,
+    height: u32,
+    pixels: Arc<[u8]>,
+}
+
+impl DefinitionSpriteImage {
+    fn from_resource(image: &lc_resources::GraphicsImage) -> Self {
+        Self {
+            width: image.width(),
+            height: image.height(),
+            pixels: image.clone_pixels(),
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn pixels(&self) -> Arc<[u8]> {
+        Arc::clone(&self.pixels)
+    }
+
+    pub fn into_pixels(self) -> Arc<[u8]> {
+        self.pixels
+    }
+}
+
 pub struct Definition {
     id: DefinitionId,
     name: String,
@@ -2878,6 +2911,7 @@ pub struct Definition {
     mass: i32,
     picture: Option<DefinitionPicture>,
     picture_image: Option<DefinitionPictureImage>,
+    sprite_image: Option<DefinitionSpriteImage>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2933,6 +2967,7 @@ impl Definition {
             mass: 0,
             picture: None,
             picture_image: None,
+            sprite_image: None,
         })
     }
 
@@ -2979,6 +3014,9 @@ impl Definition {
         definition.set_picture(resource.core.picture.map(DefinitionPicture::from));
         if let Some(image) = resource.picture_image.as_ref() {
             definition.set_picture_image(Some(DefinitionPictureImage::from_resource(image)));
+        }
+        if let Some(image) = resource.graphics_image.as_ref() {
+            definition.set_sprite_image(Some(DefinitionSpriteImage::from_resource(image)));
         }
         Ok(definition)
     }
@@ -3113,6 +3151,14 @@ impl Definition {
 
     pub fn set_picture_image(&mut self, image: Option<DefinitionPictureImage>) {
         self.picture_image = image;
+    }
+
+    pub fn sprite_image(&self) -> Option<&DefinitionSpriteImage> {
+        self.sprite_image.as_ref()
+    }
+
+    pub fn set_sprite_image(&mut self, image: Option<DefinitionSpriteImage>) {
+        self.sprite_image = image;
     }
 
     fn call_initialize(
@@ -5575,6 +5621,12 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .and_then(|definition| definition.picture_image().cloned())
+    }
+
+    pub fn definition_sprite_image(&self, definition_id: &str) -> Option<DefinitionSpriteImage> {
+        self.definitions
+            .get(definition_id)
+            .and_then(|definition| definition.sprite_image().cloned())
     }
 
     pub fn definition_ids(&self) -> impl Iterator<Item = &str> {

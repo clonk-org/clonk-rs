@@ -7471,6 +7471,7 @@ mod tests {
             None,
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             1,
         );
         let (result, outcome) = with_object_host_context_with_world(world, || {

@@ -17,8 +17,9 @@ use serde::Deserialize;
 
 use crate::{
     action::ActionSpec, ActionState, Definition, DefinitionPicture, DefinitionPictureImage,
-    EffectState, Engine, EngineError, EnvironmentSettings, Landscape, MovementProfile, ObjectId,
-    ObjectStatus, PhysicsSettings, RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, Vector2,
+    DefinitionSpriteImage, EffectState, Engine, EngineError, EnvironmentSettings, Landscape,
+    MovementProfile, ObjectId, ObjectStatus, PhysicsSettings, RgbColor, SkyParallaxMode,
+    SkySettings, SpawnConfig, Vector2,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -88,6 +89,7 @@ struct ScenarioDefinition {
     mass: i32,
     picture: Option<DefinitionPicture>,
     picture_image: Option<GraphicsImage>,
+    graphics_image: Option<GraphicsImage>,
     resource_group: Option<Group>,
 }
 
@@ -291,6 +293,11 @@ impl Scenario {
                 .as_ref()
                 .map(DefinitionPictureImage::from_resource);
             compiled.set_picture_image(picture_image);
+            let sprite_image = definition
+                .graphics_image
+                .as_ref()
+                .map(DefinitionSpriteImage::from_resource);
+            compiled.set_sprite_image(sprite_image);
             engine.register_definition(compiled)?;
         }
 
@@ -410,6 +417,7 @@ impl Scenario {
                 mass: 0,
                 picture: None,
                 picture_image: None,
+                graphics_image: None,
                 resource_group: None,
             });
         }
@@ -769,9 +777,14 @@ fn scenario_definition_from_resource(
     resource: ResourceDefinitionData,
     source_group: Option<Group>,
 ) -> ScenarioDefinition {
-    let core = resource.core;
-    let script = resource.script;
-    let actions = resource.action_map.map(|map| convert_action_map(&map));
+    let ResourceDefinitionData {
+        core,
+        script,
+        action_map,
+        picture_image,
+        graphics_image,
+    } = resource;
+    let actions = action_map.map(|map| convert_action_map(&map));
 
     ScenarioDefinition {
         id: core.id,
@@ -784,7 +797,8 @@ fn scenario_definition_from_resource(
         value: core.value,
         mass: core.mass,
         picture: core.picture.map(DefinitionPicture::from),
-        picture_image: resource.picture_image,
+        picture_image,
+        graphics_image,
         resource_group: source_group,
     }
 }
@@ -2356,6 +2370,7 @@ global func Step(state, frame, random)
                 mass: 0,
                 picture: None,
                 picture_image: None,
+                graphics_image: None,
                 resource_group: None,
             }],
             initial_spawns: vec![ScenarioSpawn {
@@ -2425,6 +2440,7 @@ global func Step(state, frame, random)
                 mass: 0,
                 picture: None,
                 picture_image: None,
+                graphics_image: None,
                 resource_group: None,
             }],
             initial_spawns: vec![ScenarioSpawn {

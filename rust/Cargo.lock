@@ -1850,6 +1850,7 @@ dependencies = [
  "lc-network",
  "lc-platform",
  "lc-resources",
+ "parking_lot",
  "pixels",
  "rand 0.8.5",
  "rand_chacha 0.3.1",

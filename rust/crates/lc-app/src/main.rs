@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
+use parking_lot::ReentrantMutex;
 use clap::Parser;
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
 use ingame_menu::{IngameMenuAction, IngameMenuState};
@@ -1688,7 +1689,6 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
                 path: identifier.to_string(),
             });
         };
-
         let mut groups = Vec::new();
         let mut seen = HashSet::new();
 
@@ -2075,6 +2075,8 @@ fn apply_save_migrations(mut save: SavedGameFile) -> Result<SavedGameFile> {
 }
 
 fn cached_app_paths() -> std::result::Result<Arc<AppPaths>, PathsError> {
+    #[cfg(test)]
+    let _env_guard = crate::tests::env_lock().lock();
     let mut cache = APP_PATH_CACHE.lock().unwrap();
     if let Some(result) = cache.as_ref() {
         return result.clone();
@@ -2361,6 +2363,11 @@ impl GameApp {
     fn rebuild_definition_sprites(&mut self) {
         let mut sprites = self.assets.base_sprite_map().clone();
         for definition_id in self.engine.definition_ids() {
+            if let Some(image) = self.engine.definition_sprite_image(definition_id) {
+                let data = ImageData::from_arc(image.width(), image.height(), image.into_pixels());
+                sprites.insert(definition_id.to_string(), data);
+                continue;
+            }
             if let Some(image) = self.engine.definition_picture_image(definition_id) {
                 let data = ImageData::from_arc(image.width(), image.height(), image.into_pixels());
                 sprites.insert(definition_id.to_string(), data);
@@ -4953,13 +4960,14 @@ mod tests {
     }
 
     struct EnvGuard {
-        _lock: MutexGuard<'static, ()>,
+        _lock: parking_lot::ReentrantMutexGuard<'static, ()>,
         saved: Vec<(String, Option<OsString>)>,
     }
 
     impl EnvGuard {
         fn set(vars: &[(&str, Option<&Path>)]) -> Self {
-            let lock = env_lock().lock().unwrap();
+            let lock = env_lock().lock();
+            super::reset_cached_app_paths();
             let mut saved = Vec::with_capacity(vars.len());
             for (key, value) in vars {
                 let original = env::var_os(key);
@@ -4984,9 +4992,9 @@ mod tests {
         }
     }
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    pub(super) fn env_lock() -> &'static ReentrantMutex<()> {
+        static LOCK: OnceLock<ReentrantMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| ReentrantMutex::new(()))
     }
 
     #[test]

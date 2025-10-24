@@ -12,6 +12,7 @@ pub struct Definition {
     pub script: DefinitionScript,
     pub action_map: Option<ActionMap>,
     pub picture_image: Option<GraphicsImage>,
+    pub graphics_image: Option<GraphicsImage>,
 }
 
 impl Definition {
@@ -28,12 +29,14 @@ impl Definition {
         };
 
         let picture_image = load_definition_picture(group, &core);
+        let graphics_image = load_definition_graphics(group);
 
         Ok(Self {
             core,
             script,
             action_map,
             picture_image,
+            graphics_image,
         })
     }
 }
@@ -472,6 +475,73 @@ fn find_picture_entry_recursive(
                 return Ok(Some(found));
             }
         } else if is_image_path(&entry.relative_path) {
+            return Ok(Some(combined));
+        }
+    }
+    Ok(None)
+}
+
+fn load_definition_graphics(group: &Group) -> Option<GraphicsImage> {
+    let path = find_graphics_entry(group).ok().flatten()?;
+    let data = group.read_file(&path).ok()?;
+    let image = image::load_from_memory(&data).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(GraphicsImage::new(width, height, image.into_raw()))
+}
+
+fn find_graphics_entry(group: &Group) -> Result<Option<PathBuf>, GroupError> {
+    const PRIORITY_FILES: [&str; 4] = [
+        "Graphics32.png",
+        "Graphics64.png",
+        "Graphics.png",
+        "Graphics.bmp",
+    ];
+    for candidate in PRIORITY_FILES {
+        if group.exists(candidate) {
+            return Ok(Some(PathBuf::from(candidate)));
+        }
+    }
+
+    const PRIORITY_GROUPS: [&str; 3] = ["Graphics.ocg", "Graphics.c4d", "Graphics.c4g"];
+    for candidate in PRIORITY_GROUPS {
+        if let Ok(child) = group.open_child(candidate) {
+            if let Some(found) =
+                find_graphics_entry_recursive(&child, PathBuf::from(candidate), true)?
+            {
+                return Ok(Some(found));
+            }
+        }
+    }
+
+    find_graphics_entry_recursive(group, PathBuf::new(), false)
+}
+
+fn find_graphics_entry_recursive(
+    group: &Group,
+    base: PathBuf,
+    in_graphics_dir: bool,
+) -> Result<Option<PathBuf>, GroupError> {
+    for entry in group.entries()? {
+        let mut combined = base.clone();
+        combined.push(&entry.relative_path);
+        let name_lower = entry
+            .relative_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let next_in_graphics_dir =
+            in_graphics_dir || name_lower.contains("graphics") || name_lower.starts_with("gfx");
+        if entry.is_directory {
+            let child = group.open_child(&entry.relative_path)?;
+            if let Some(found) =
+                find_graphics_entry_recursive(&child, combined.clone(), next_in_graphics_dir)?
+            {
+                return Ok(Some(found));
+            }
+        } else if next_in_graphics_dir && is_image_path(&entry.relative_path) {
             return Ok(Some(combined));
         }
     }
