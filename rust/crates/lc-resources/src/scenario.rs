@@ -6,6 +6,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::debug;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScenarioDiscoveryError {
@@ -378,7 +379,7 @@ fn load_preview_image(group: &Group) -> Result<Option<ScenarioPreview>, Scenario
         .entries()
         .map_err(|err| group_error(group.root(), err))?;
 
-    let mut best: Option<((u8, u8, String), PathBuf)> = None;
+    let mut candidates: Vec<((u8, u8, String), PathBuf)> = Vec::new();
     for entry in entries.iter() {
         if entry.is_directory {
             continue;
@@ -396,32 +397,39 @@ fn load_preview_image(group: &Group) -> Result<Option<ScenarioPreview>, Scenario
         let Some(key) = preview_candidate_key(name) else {
             continue;
         };
-        if best
-            .as_ref()
-            .map(|(current, _)| key < *current)
-            .unwrap_or(true)
-        {
-            best = Some((key, entry.relative_path.clone()));
-        }
+        candidates.push((key, entry.relative_path.clone()));
     }
 
-    let Some((_, relative_path)) = best else {
+    if candidates.is_empty() {
         return Ok(None);
-    };
+    }
 
-    let absolute_path = group.root().join(&relative_path);
-    let bytes = group
-        .read_file(&relative_path)
-        .map_err(|err| group_error(&absolute_path, err))?;
-    let image = load_from_memory(&bytes).map_err(|source| ScenarioDiscoveryError::Preview {
-        path: absolute_path,
-        source,
-    })?;
-    let rgba = image.to_rgba8();
-    let width = rgba.width();
-    let height = rgba.height();
-    let data = rgba.into_raw();
-    Ok(Some(ScenarioPreview::new(width, height, data)))
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (_, relative_path) in candidates {
+        let absolute_path = group.root().join(&relative_path);
+        let bytes = group
+            .read_file(&relative_path)
+            .map_err(|err| group_error(&absolute_path, err))?;
+        let image = match load_from_memory(&bytes) {
+            Ok(image) => image,
+            Err(source) => {
+                debug!(
+                    path = %absolute_path.display(),
+                    error = %source,
+                    "skipping unsupported scenario preview image"
+                );
+                continue;
+            }
+        };
+        let rgba = image.to_rgba8();
+        let width = rgba.width();
+        let height = rgba.height();
+        let data = rgba.into_raw();
+        return Ok(Some(ScenarioPreview::new(width, height, data)));
+    }
+
+    Ok(None)
 }
 
 fn preview_candidate_key(name: &str) -> Option<(u8, u8, String)> {

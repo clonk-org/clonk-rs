@@ -331,7 +331,7 @@ fn main() -> Result<()> {
     let mut display_options = DisplayOptions::load(app_paths.as_deref());
     let audio_options = AudioOptions::load(app_paths.as_deref());
     let (initial_width, initial_height) = display_options.actual_size();
-    let mut window_builder = WindowBuilder::new().with_title("LegacyClonk (Rust preview)");
+    let mut window_builder = WindowBuilder::new().with_title("Clonk Rust");
     if matches!(display_options.mode, DisplayMode::Window) && !display_options.maximized {
         if let Some((x, y)) = display_options.position {
             window_builder = window_builder.with_position(PhysicalPosition::new(x, y));
@@ -4634,27 +4634,33 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
             let roots = scenario_roots(&paths);
             let existing_roots: Vec<_> = roots.into_iter().filter(|path| path.exists()).collect();
             if !existing_roots.is_empty() {
-                match resource_scenario::discover_many(existing_roots.iter()) {
-                    Ok(entries) => {
-                        let mut seen = HashSet::new();
-                        let mut scenarios = Vec::new();
-                        for entry in entries {
-                            if let Some(converted) =
-                                FrontendScenario::from_resource(entry, &mut seen)
-                            {
-                                scenarios.push(converted);
-                            }
-                        }
-                        if !scenarios.is_empty() {
-                            scenarios.sort_by(|a, b| a.title.cmp(&b.title));
-                            return scenarios;
+                let mut combined_entries = Vec::new();
+                for root in &existing_roots {
+                    match resource_scenario::discover(root) {
+                        Ok(mut entries) => combined_entries.append(&mut entries),
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                path = %root.display(),
+                                "failed to discover scenarios from install root"
+                            );
                         }
                     }
-                    Err(err) => {
-                        tracing::warn!(
-                            error = %err,
-                            "failed to discover scenarios from install roots"
-                        );
+                }
+
+                if !combined_entries.is_empty() {
+                    let mut seen = HashSet::new();
+                    let mut scenarios = Vec::new();
+                    for entry in combined_entries {
+                        if let Some(converted) =
+                            FrontendScenario::from_resource(entry, &mut seen)
+                        {
+                            scenarios.push(converted);
+                        }
+                    }
+                    if !scenarios.is_empty() {
+                        scenarios.sort_by(|a, b| a.title.cmp(&b.title));
+                        return scenarios;
                     }
                 }
             }
@@ -5654,6 +5660,8 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some("Alpha.c4s")
         );
+
+        reset_cached_app_paths();
     }
 
     #[test]
@@ -5752,6 +5760,7 @@ mod tests {
     #[test]
     fn install_definition_resolver_handles_case_insensitive_paths() {
         lc_core::logging::init();
+        let _env_lock = crate::tests::env_lock().lock();
         reset_cached_app_paths();
 
         let install_dir = tempdir().unwrap();
