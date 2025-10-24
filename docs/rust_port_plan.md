@@ -52,15 +52,16 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - [x] Map.bmp landscape loading
 - [x] Objects.txt initial object spawning (Scenario.txt crew entries now covered)
 - [ ] Verify all definitions load correctly
-- [ ] Proper error handling (don't fall back silently)
+- [x] Proper error handling (don't fall back silently)
 - [ ] Loading screen with progress
 - [ ] Scenario intro text/mission briefing
 
+**Progress (2025-10-27):** Runtime now stops falling back to the sandbox when a disk scenario fails to load or apply; `GameApp::start_scenario` keeps players in the menu, surfaces the failure in `status_text`, and only swaps the running engine state once the legacy scenario applies cleanly.
 **Progress (2025-10-26):** Legacy loader now parses `Objects.txt`, creating spawn configs with explicit object ids, status, owner, position/velocity, crew state, action info, and resolves containers (including via `Contents=` fallbacks) so full scenario object graphs appear without sandbox fallback.
 **Progress (2025-10-24):** Ported Scenario.txt weather and landscape physics parsing so gravity, wind variation, climate, precipitation, and disaster levels feed straight into the Rust engine instead of defaulting to sandbox values.
 **Progress (2025-10-24):** Legacy `Map.bmp` columns now translate into zoomed `Landscape` surface heights (with a flat fallback when the bitmap is missing) so real scenarios boot with terrain instead of the sandbox void.
 
-**Files:** `lc-engine/src/scenario.rs`, `try_start_real_scenario()` at main.rs:3644
+**Files:** `lc-engine/src/scenario.rs`, `rust/crates/lc-app/src/main.rs:3984`
 
 ---
 

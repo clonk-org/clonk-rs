@@ -99,6 +99,12 @@ struct RuntimeConfig {
     network: Option<NetworkMode>,
 }
 
+enum ScenarioStartAttempt {
+    Started,
+    Unavailable,
+    Failed { message: String },
+}
+
 struct FrontendAssets {
     font: Arc<dyn TextFont>,
     menu_background: Option<ImageData>,
@@ -2473,6 +2479,14 @@ impl GameApp {
         }
     }
 
+    fn apply_material_library_to(&self, engine: &mut Engine) {
+        if let Some(materials) = self.material_library.as_ref() {
+            engine.set_materials((**materials).clone());
+        } else {
+            engine.set_materials(MaterialSet::default());
+        }
+    }
+
     fn update_sprite_cache(&mut self) {
         self.sprite_cache = Arc::new(self.object_sprites.clone());
         self.graphics
@@ -3955,18 +3969,24 @@ impl GameApp {
     }
 
     fn start_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
-        if self.try_start_real_scenario(&scenario)? {
-            return Ok(());
+        match self.try_start_real_scenario(&scenario)? {
+            ScenarioStartAttempt::Started => Ok(()),
+            ScenarioStartAttempt::Unavailable => self.start_sandbox_scenario(scenario),
+            ScenarioStartAttempt::Failed { message } => {
+                self.status_text = message;
+                self.mode = AppMode::Menu;
+                self.ensure_menu_music();
+                Ok(())
+            }
         }
-        self.start_sandbox_scenario(scenario)
     }
 
     fn try_start_real_scenario(
         &mut self,
         scenario: &FrontendScenario,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<ScenarioStartAttempt, EngineError> {
         let Some(path) = scenario.path.as_ref() else {
-            return Ok(false);
+            return Ok(ScenarioStartAttempt::Unavailable);
         };
 
         let resolver = InstallDefinitionResolver::new(cached_app_paths().ok());
@@ -3979,7 +3999,8 @@ impl GameApp {
                     error = %err,
                     "failed to load scenario"
                 );
-                return Ok(false);
+                let message = format!("Failed to load {}: {err}", scenario.title);
+                return Ok(ScenarioStartAttempt::Failed { message });
             }
         };
 
@@ -3989,8 +4010,21 @@ impl GameApp {
             "starting scenario from disk"
         );
 
-        self.engine = Engine::new();
-        self.apply_material_library();
+        let mut engine = Engine::new();
+        self.apply_material_library_to(&mut engine);
+
+        if let Err(err) = scenario_data.apply(&mut engine) {
+            tracing::error!(
+                scenario = %scenario.title,
+                path = %path.display(),
+                error = %err,
+                "failed to apply scenario"
+            );
+            let message = format!("Failed to start {}: {err}", scenario.title);
+            return Ok(ScenarioStartAttempt::Failed { message });
+        }
+
+        self.engine = engine;
         self.input = InputDispatcher::new();
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(Some(path));
@@ -3998,16 +4032,6 @@ impl GameApp {
             scenario_data.visit_definition_groups(|id, group| {
                 audio.register_definition_sounds(id, group);
             });
-        }
-
-        if let Err(err) = scenario_data.apply(&mut self.engine) {
-            tracing::error!(
-                scenario = %scenario.title,
-                path = %path.display(),
-                error = %err,
-                "failed to apply scenario"
-            );
-            return Ok(false);
         }
 
         self.sky = scenario_data.sky().map(sky_render_state_from_config);
@@ -4030,7 +4054,7 @@ impl GameApp {
         self.refresh_focus();
         self.active_scenario = Some(scenario.clone());
         self.play_scenario_audio(path);
-        Ok(true)
+        Ok(ScenarioStartAttempt::Started)
     }
 
     fn start_sandbox_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
