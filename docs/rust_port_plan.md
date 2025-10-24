@@ -21,13 +21,13 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 
 **What's Needed:**
 - [x] Fix scenario discovery to actually find real `.c4s` files from installation
-- [ ] Main menu (C4StartupMainDlg equivalent) with proper navigation
+- [x] Main menu (C4StartupMainDlg equivalent) with proper navigation
 - [x] Remove/hide sandbox fallback when real scenarios exist
-- [ ] Scenario folder navigation
+- [x] Scenario folder navigation
 - [x] Scenario preview images
 - [x] Window title: "Clonk Rust" not "LegacyClonk (Rust preview)"
 
-**Progress (2025-10-24):** Rust frontend now scans install roots per directory, tolerates missing assets, and decodes BMP preview assets so real scenarios populate the browser without the sandbox fallback when data is present. Main menu shell and folder navigation still mirror the scenario browser only.
+**Progress (2025-10-25):** Rust frontend still scans install roots per directory, tolerates missing assets, and decodes BMP previews so real scenarios populate the browser without sandbox fallback. Added a dedicated main menu with the LegacyClonk big-button layout, participants list, and reliable navigation (Back entry/Escape) back from the scenario browser; “Local Game” flows into the browser while other options surface placeholder status until their dialogs are ported.
 
 **Files:** `main.rs:4631` (load_frontend_scenarios), scenario discovery in lc-resources
 

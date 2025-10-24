@@ -20,12 +20,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
-use parking_lot::ReentrantMutex;
 use clap::Parser;
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
 use ingame_menu::{IngameMenuAction, IngameMenuState};
 use input::KeyboardBindings;
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
+use lc_core::std_config::Config;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
@@ -37,8 +37,8 @@ use lc_engine::{
 };
 use lc_frontend::{
     draw_image, CrewOverlay, CursorAtlas, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData,
-    InputDispatcher, KeyCode, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState,
-    StartupMenu, StartupMenuAction, ViewportInput,
+    InputDispatcher, KeyCode, MainMenuAction, MainMenuItem, PlayerOverlay, ScenarioEntry,
+    ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
 use lc_gui::ButtonTextures;
@@ -50,6 +50,7 @@ use lc_resources::{
 };
 use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, NetworkMode};
 use object_menu::{ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState};
+use parking_lot::ReentrantMutex;
 use pixels::{Pixels, SurfaceTexture};
 use serde::{
     de::{self, Unexpected, Visitor},
@@ -526,6 +527,9 @@ fn handle_window_event(
             }
         }
         _ => {}
+    }
+    if app.take_exit_request() {
+        control_flow.set_exit();
     }
     Ok(())
 }
@@ -1293,6 +1297,8 @@ struct GameApp {
     scenario_label: String,
     fallback_ground: i32,
     menu_state: MenuState,
+    main_menu_state: MainMenuState,
+    startup_view: StartupView,
     object_menu: Option<ObjectMenuState>,
     ingame_menu: Option<IngameMenuState>,
     mode: AppMode,
@@ -1306,6 +1312,7 @@ struct GameApp {
     last_save_path: Option<PathBuf>,
     object_sprites: HashMap<String, ImageData>,
     sprite_cache: Arc<HashMap<String, ImageData>>,
+    exit_requested: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1324,6 +1331,17 @@ struct MenuState {
 struct MenuLayer {
     title: String,
     entries: Vec<FrontendScenario>,
+}
+
+struct MainMenuState {
+    menu: StartupMainMenu,
+    participants_label: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupView {
+    MainMenu,
+    ScenarioBrowser,
 }
 
 impl MenuLayer {
@@ -1391,7 +1409,7 @@ impl MenuState {
     }
 
     fn refresh_menu_entries(&mut self) {
-        let include_back = self.stack.len() > 1;
+        let include_back = true;
         let entries = build_menu_entries(self.current_entries(), include_back);
         if let Err(err) = self.menu.set_entries(entries) {
             tracing::error!(error = %err, "failed to update startup menu entries");
@@ -1408,6 +1426,59 @@ impl MenuState {
             .map(|layer| layer.title.clone())
             .collect::<Vec<_>>()
             .join(" / ")
+    }
+}
+
+impl MainMenuState {
+    fn new(menu: StartupMainMenu, participants_label: String) -> Self {
+        Self {
+            menu,
+            participants_label,
+        }
+    }
+
+    fn pointer_position(&self) -> Option<GuiPoint> {
+        self.menu.pointer_position()
+    }
+
+    fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
+        self.menu.set_pointer_position(position);
+    }
+
+    fn handle_pointer_move(&mut self, point: GuiPoint) -> Vec<MainMenuAction> {
+        self.menu.handle_pointer_move(point)
+    }
+
+    fn handle_pointer_down(&mut self, point: GuiPoint) -> Vec<MainMenuAction> {
+        self.menu.handle_pointer_down(point)
+    }
+
+    fn handle_pointer_up(&mut self, point: GuiPoint) -> Vec<MainMenuAction> {
+        self.menu.handle_pointer_up(point)
+    }
+
+    fn handle_key_down(&mut self, key: KeyCode) -> Vec<MainMenuAction> {
+        self.menu.handle_key_down(key)
+    }
+
+    fn handle_key_up(&mut self, key: KeyCode) -> Vec<MainMenuAction> {
+        self.menu.handle_key_up(key)
+    }
+
+    fn pointer_left(&mut self) {
+        self.menu.pointer_left();
+    }
+
+    fn resize(&mut self, width: f32, height: f32) {
+        self.menu.resize(width, height);
+    }
+
+    fn render(&mut self, surface: &mut Surface) {
+        self.menu.render(surface, &self.participants_label);
+    }
+
+    fn update_participants_label(&mut self, label: String) {
+        self.participants_label = label;
     }
 }
 
@@ -2223,6 +2294,56 @@ fn current_unix_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+fn load_participants_label(paths: Option<&AppPaths>) -> String {
+    let mut label = String::from("Participants: ");
+    let Some(paths) = paths else {
+        label.push_str("None");
+        return label;
+    };
+
+    let config_path = paths.config_file();
+    match Config::load(&config_path) {
+        Ok(config) => {
+            let entries = config
+                .get_in(Some("General"), "Participants")
+                .map(|raw| raw.split(';').collect::<Vec<_>>())
+                .unwrap_or_default();
+            let mut names = Vec::new();
+            for entry in entries {
+                let trimmed = entry.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let name = Path::new(trimmed)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| trimmed.to_string());
+                if !name.is_empty() {
+                    names.push(name);
+                }
+            }
+            if names.is_empty() {
+                label.push_str("None");
+            } else {
+                label.push_str(&names.join(", "));
+            }
+        }
+        Err(err) => {
+            if err.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(
+                    error = %err,
+                    path = %config_path.display(),
+                    "failed to read participants from config"
+                );
+            }
+            label.push_str("None");
+        }
+    }
+
+    label
+}
+
 impl GameApp {
     fn new(
         width: u32,
@@ -2258,10 +2379,15 @@ impl GameApp {
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
 
         let scenarios = load_frontend_scenarios();
+        let button_textures = assets.button_textures();
         let menu_entries = build_menu_entries(&scenarios, false);
-        let mut menu = StartupMenu::new(menu_entries, assets.font_arc(), assets.button_textures())
+        let mut menu = StartupMenu::new(menu_entries, assets.font_arc(), button_textures.clone())
             .map_err(|err| anyhow!("failed to create startup menu: {err}"))?;
         menu.resize(width as f32, height as f32);
+        let mut main_menu = StartupMainMenu::new(assets.font_arc(), button_textures.clone());
+        main_menu.resize(width as f32, height as f32);
+        let participants_label = load_participants_label(paths);
+        let main_menu_state = MainMenuState::new(main_menu, participants_label);
 
         let scenario_catalog = build_scenario_catalog(&scenarios);
         let menu_state = MenuState::new(menu, scenarios);
@@ -2289,6 +2415,8 @@ impl GameApp {
             scenario_label,
             fallback_ground: DEFAULT_GROUND_HEIGHT,
             menu_state,
+            main_menu_state,
+            startup_view: StartupView::MainMenu,
             object_menu: None,
             ingame_menu: None,
             mode: AppMode::Menu,
@@ -2302,10 +2430,12 @@ impl GameApp {
             local_owner: runtime.player_owner,
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
+            exit_requested: false,
         };
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);
         }
+        app.show_main_menu();
         app.ensure_menu_music();
         Ok(app)
     }
@@ -2325,8 +2455,12 @@ impl GameApp {
         self.graphics.set_sky(self.sky.clone());
 
         if self.mode == AppMode::Menu {
-            self.menu_state.menu().resize(width as f32, height as f32);
+            let width_f = width as f32;
+            let height_f = height as f32;
+            self.menu_state.menu().resize(width_f, height_f);
             self.menu_state.set_pointer_position(None);
+            self.main_menu_state.resize(width_f, height_f);
+            self.main_menu_state.set_pointer_position(None);
         }
         Ok(())
     }
@@ -2400,12 +2534,25 @@ impl GameApp {
 
         if self.mode == AppMode::Menu {
             if let Some(gui_key) = map_key_code(key) {
-                match state {
-                    ElementState::Pressed => {
-                        self.handle_menu_input(|menu| menu.menu().handle_key_down(gui_key))?
-                    }
-                    ElementState::Released => {
-                        self.handle_menu_input(|menu| menu.menu().handle_key_up(gui_key))?
+                match self.startup_view {
+                    StartupView::ScenarioBrowser => match state {
+                        ElementState::Pressed => {
+                            if gui_key == KeyCode::Escape && self.menu_state.stack.len() <= 1 {
+                                self.show_main_menu();
+                            } else {
+                                self.handle_menu_input(|menu| menu.menu().handle_key_down(gui_key))?
+                            }
+                        }
+                        ElementState::Released => {
+                            self.handle_menu_input(|menu| menu.menu().handle_key_up(gui_key))?
+                        }
+                    },
+                    StartupView::MainMenu => {
+                        let actions = match state {
+                            ElementState::Pressed => self.main_menu_state.handle_key_down(gui_key),
+                            ElementState::Released => self.main_menu_state.handle_key_up(gui_key),
+                        };
+                        self.process_main_menu_actions(actions)?;
                     }
                 }
             }
@@ -2896,12 +3043,21 @@ impl GameApp {
         match self.mode {
             AppMode::Menu => {
                 if let Some(key) = menu_key_from_control_button(button) {
-                    match state {
-                        ElementState::Pressed => {
-                            self.handle_menu_input(|menu| menu.menu().handle_key_down(key))?
-                        }
-                        ElementState::Released => {
-                            self.handle_menu_input(|menu| menu.menu().handle_key_up(key))?
+                    match self.startup_view {
+                        StartupView::ScenarioBrowser => match state {
+                            ElementState::Pressed => {
+                                self.handle_menu_input(|menu| menu.menu().handle_key_down(key))?
+                            }
+                            ElementState::Released => {
+                                self.handle_menu_input(|menu| menu.menu().handle_key_up(key))?
+                            }
+                        },
+                        StartupView::MainMenu => {
+                            let actions = match state {
+                                ElementState::Pressed => self.main_menu_state.handle_key_down(key),
+                                ElementState::Released => self.main_menu_state.handle_key_up(key),
+                            };
+                            self.process_main_menu_actions(actions)?;
                         }
                     }
                 }
@@ -2925,12 +3081,23 @@ impl GameApp {
         match action {
             GamepadActionType::Select => match self.mode {
                 AppMode::Menu => match state {
-                    ElementState::Pressed => {
-                        self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?
-                    }
-                    ElementState::Released => {
-                        self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?
-                    }
+                    ElementState::Pressed => match self.startup_view {
+                        StartupView::ScenarioBrowser => self.handle_menu_input(|menu| {
+                            menu.menu().handle_key_down(KeyCode::Enter)
+                        })?,
+                        StartupView::MainMenu => {
+                            let actions = self.main_menu_state.handle_key_down(KeyCode::Enter);
+                            self.process_main_menu_actions(actions)?;
+                        }
+                    },
+                    ElementState::Released => match self.startup_view {
+                        StartupView::ScenarioBrowser => self
+                            .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?,
+                        StartupView::MainMenu => {
+                            let actions = self.main_menu_state.handle_key_up(KeyCode::Enter);
+                            self.process_main_menu_actions(actions)?;
+                        }
+                    },
                 },
                 AppMode::Running => {
                     if state == ElementState::Pressed {
@@ -2940,12 +3107,23 @@ impl GameApp {
             },
             GamepadActionType::Back => match self.mode {
                 AppMode::Menu => match state {
-                    ElementState::Pressed => {
-                        self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Escape))?
-                    }
-                    ElementState::Released => {
-                        self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Escape))?
-                    }
+                    ElementState::Pressed => match self.startup_view {
+                        StartupView::ScenarioBrowser => self.handle_menu_input(|menu| {
+                            menu.menu().handle_key_down(KeyCode::Escape)
+                        })?,
+                        StartupView::MainMenu => {
+                            let actions = self.main_menu_state.handle_key_down(KeyCode::Escape);
+                            self.process_main_menu_actions(actions)?;
+                        }
+                    },
+                    ElementState::Released => match self.startup_view {
+                        StartupView::ScenarioBrowser => self
+                            .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Escape))?,
+                        StartupView::MainMenu => {
+                            let actions = self.main_menu_state.handle_key_up(KeyCode::Escape);
+                            self.process_main_menu_actions(actions)?;
+                        }
+                    },
                 },
                 AppMode::Running => {
                     if state == ElementState::Pressed {
@@ -2963,57 +3141,110 @@ impl GameApp {
 
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
         let point = gui_point_from_position(position);
-        self.handle_menu_input(|state| {
-            state.set_pointer_position(Some(point));
-            state.menu().handle_pointer_move(point)
-        })
+        if self.mode != AppMode::Menu {
+            return Ok(());
+        }
+        match self.startup_view {
+            StartupView::ScenarioBrowser => self.handle_menu_input(|state| {
+                state.set_pointer_position(Some(point));
+                state.menu().handle_pointer_move(point)
+            }),
+            StartupView::MainMenu => {
+                self.main_menu_state.set_pointer_position(Some(point));
+                let actions = self.main_menu_state.handle_pointer_move(point);
+                self.process_main_menu_actions(actions)
+            }
+        }
     }
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         if self.mode != AppMode::Menu {
             return Ok(());
         }
-        if let Some(point) = self.menu_state.pointer_position() {
-            match button_state {
-                ElementState::Pressed => {
-                    self.handle_menu_input(|state| state.menu().handle_pointer_down(point))?
+        match self.startup_view {
+            StartupView::ScenarioBrowser => {
+                if let Some(point) = self.menu_state.pointer_position() {
+                    match button_state {
+                        ElementState::Pressed => {
+                            self.handle_menu_input(|state| state.menu().handle_pointer_down(point))?
+                        }
+                        ElementState::Released => {
+                            self.handle_menu_input(|state| state.menu().handle_pointer_up(point))?
+                        }
+                    }
                 }
-                ElementState::Released => {
-                    self.handle_menu_input(|state| state.menu().handle_pointer_up(point))?
+                Ok(())
+            }
+            StartupView::MainMenu => {
+                if let Some(point) = self.main_menu_state.pointer_position() {
+                    let actions = match button_state {
+                        ElementState::Pressed => self.main_menu_state.handle_pointer_down(point),
+                        ElementState::Released => self.main_menu_state.handle_pointer_up(point),
+                    };
+                    self.process_main_menu_actions(actions)?;
                 }
+                Ok(())
             }
         }
-        Ok(())
     }
 
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
-        match phase {
-            TouchPhase::Started => self.handle_menu_input(|state| {
-                state.set_pointer_position(Some(position));
-                state.menu().handle_pointer_down(position)
-            }),
-            TouchPhase::Moved => self.handle_menu_input(|state| {
-                state.set_pointer_position(Some(position));
-                state.menu().handle_pointer_move(position)
-            }),
-            TouchPhase::Ended => {
-                let result = self.handle_menu_input(|state| {
+        if self.mode != AppMode::Menu {
+            return Ok(());
+        }
+        match self.startup_view {
+            StartupView::ScenarioBrowser => match phase {
+                TouchPhase::Started => self.handle_menu_input(|state| {
                     state.set_pointer_position(Some(position));
-                    state.menu().handle_pointer_up(position)
-                });
-                self.pointer_left();
-                result
-            }
-            TouchPhase::Cancelled => {
-                self.pointer_left();
-                Ok(())
+                    state.menu().handle_pointer_down(position)
+                }),
+                TouchPhase::Moved => self.handle_menu_input(|state| {
+                    state.set_pointer_position(Some(position));
+                    state.menu().handle_pointer_move(position)
+                }),
+                TouchPhase::Ended => {
+                    let result = self.handle_menu_input(|state| {
+                        state.set_pointer_position(Some(position));
+                        state.menu().handle_pointer_up(position)
+                    });
+                    self.pointer_left();
+                    result
+                }
+                TouchPhase::Cancelled => {
+                    self.pointer_left();
+                    Ok(())
+                }
+            },
+            StartupView::MainMenu => {
+                self.main_menu_state.set_pointer_position(Some(position));
+                let actions = match phase {
+                    TouchPhase::Started => self.main_menu_state.handle_pointer_down(position),
+                    TouchPhase::Moved => self.main_menu_state.handle_pointer_move(position),
+                    TouchPhase::Ended => {
+                        let actions = self.main_menu_state.handle_pointer_up(position);
+                        self.pointer_left();
+                        actions
+                    }
+                    TouchPhase::Cancelled => {
+                        self.pointer_left();
+                        Vec::new()
+                    }
+                };
+                self.process_main_menu_actions(actions)
             }
         }
     }
 
     fn pointer_left(&mut self) {
         if self.mode == AppMode::Menu {
-            self.menu_state.set_pointer_position(None);
+            match self.startup_view {
+                StartupView::ScenarioBrowser => {
+                    self.menu_state.set_pointer_position(None);
+                }
+                StartupView::MainMenu => {
+                    self.main_menu_state.pointer_left();
+                }
+            }
         }
     }
 
@@ -3021,7 +3252,7 @@ impl GameApp {
     where
         F: FnOnce(&mut MenuState) -> Vec<StartupMenuAction>,
     {
-        if self.mode != AppMode::Menu {
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
             return Ok(());
         }
 
@@ -3060,8 +3291,12 @@ impl GameApp {
                 }
                 StartupMenuAction::OpenEntry(summary) => {
                     if summary.identifier == BACK_ENTRY_IDENTIFIER {
-                        self.menu_state.leave_folder();
-                        updated_label = Some(self.menu_state.label_path());
+                        if self.menu_state.stack.len() <= 1 {
+                            self.show_main_menu();
+                        } else {
+                            self.menu_state.leave_folder();
+                            updated_label = Some(self.menu_state.label_path());
+                        }
                         continue;
                     }
 
@@ -3109,6 +3344,85 @@ impl GameApp {
         }
 
         (start_identifier, updated_label)
+    }
+
+    fn process_main_menu_actions(
+        &mut self,
+        actions: Vec<MainMenuAction>,
+    ) -> Result<(), EngineError> {
+        for action in actions {
+            match action {
+                MainMenuAction::SelectionChanged(_) => {}
+                MainMenuAction::Activate(item) => {
+                    self.handle_main_menu_activation(item)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_main_menu_activation(&mut self, item: MainMenuItem) -> Result<(), EngineError> {
+        match item {
+            MainMenuItem::LocalGame => {
+                self.open_scenario_browser();
+            }
+            MainMenuItem::NetworkGame => {
+                self.status_text = "Network game UI not yet implemented".to_string();
+            }
+            MainMenuItem::PlayerSelection => {
+                self.status_text = "Player selection UI not yet implemented".to_string();
+            }
+            MainMenuItem::Options => {
+                self.status_text = "Options UI not yet implemented".to_string();
+            }
+            MainMenuItem::About => {
+                self.status_text = "LegacyClonk Rust Preview".to_string();
+            }
+            MainMenuItem::Quit => {
+                self.request_exit();
+            }
+        }
+        Ok(())
+    }
+
+    fn open_scenario_browser(&mut self) {
+        self.startup_view = StartupView::ScenarioBrowser;
+        self.menu_state.set_pointer_position(None);
+        self.menu_state.refresh_menu_entries();
+        let width = self.graphics.surface().width() as f32;
+        let height = self.graphics.surface().height() as f32;
+        self.menu_state.menu().resize(width, height);
+        self.scenario_label = self.menu_state.label_path();
+        self.status_text.clear();
+    }
+
+    fn show_main_menu(&mut self) {
+        self.startup_view = StartupView::MainMenu;
+        self.main_menu_state.pointer_left();
+        self.refresh_participants_label();
+        self.scenario_label = DEFAULT_SCENARIO_LABEL.to_string();
+        self.status_text.clear();
+    }
+
+    fn refresh_participants_label(&mut self) {
+        let label = match cached_app_paths() {
+            Ok(paths) => load_participants_label(Some(paths.as_ref())),
+            Err(_) => load_participants_label(None),
+        };
+        self.main_menu_state.update_participants_label(label);
+    }
+
+    fn request_exit(&mut self) {
+        self.exit_requested = true;
+    }
+
+    fn take_exit_request(&mut self) -> bool {
+        if self.exit_requested {
+            self.exit_requested = false;
+            true
+        } else {
+            false
+        }
     }
 
     fn launch_editor_by_identifier(&mut self, identifier: &str) -> Result<()> {
@@ -3227,10 +3541,12 @@ impl GameApp {
 
     fn render(&mut self, frame: &mut [u8]) -> Result<()> {
         if self.mode == AppMode::Menu {
-            render_menu_frame(
+            render_startup_frame(
                 &mut self.graphics,
-                self.menu_state.menu(),
                 self.assets.as_ref(),
+                &mut self.main_menu_state,
+                &mut self.menu_state,
+                self.startup_view,
                 frame,
             );
             return Ok(());
@@ -3608,9 +3924,13 @@ impl GameApp {
 
         self.menu_state.set_pointer_position(None);
         self.menu_state.refresh_menu_entries();
-        self.menu_state.menu().resize(width as f32, height as f32);
+        let width_f = width as f32;
+        let height_f = height as f32;
+        self.menu_state.menu().resize(width_f, height_f);
+        self.main_menu_state.resize(width_f, height_f);
 
         self.mode = AppMode::Menu;
+        self.show_main_menu();
         self.ensure_menu_music();
     }
 
@@ -3997,10 +4317,12 @@ impl GameApp {
     }
 }
 
-fn render_menu_frame(
+fn render_startup_frame(
     graphics: &mut GraphicsSystem,
-    menu: &mut StartupMenu,
     assets: &FrontendAssets,
+    main_menu: &mut MainMenuState,
+    scenario_menu: &mut MenuState,
+    view: StartupView,
     frame: &mut [u8],
 ) {
     {
@@ -4014,7 +4336,10 @@ fn render_menu_frame(
         } else {
             surface.fill(Color::opaque(16, 28, 52));
         }
-        menu.render(surface);
+        match view {
+            StartupView::MainMenu => main_menu.render(surface),
+            StartupView::ScenarioBrowser => scenario_menu.menu().render(surface),
+        }
     }
     let surface = graphics.surface();
     let pixels = surface.pixels();
@@ -4652,9 +4977,7 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
                     let mut seen = HashSet::new();
                     let mut scenarios = Vec::new();
                     for entry in combined_entries {
-                        if let Some(converted) =
-                            FrontendScenario::from_resource(entry, &mut seen)
-                        {
+                        if let Some(converted) = FrontendScenario::from_resource(entry, &mut seen) {
                             scenarios.push(converted);
                         }
                     }
@@ -5346,15 +5669,16 @@ mod tests {
         let mut state = MenuState::new(menu, scenarios);
 
         assert_eq!(state.current_entries().len(), 1);
-        let root_entries = build_menu_entries(state.current_entries(), false);
-        assert_eq!(root_entries.len(), 1);
-        assert_eq!(root_entries[0].identifier, "folder_missions");
+        let root_entries = build_menu_entries(state.current_entries(), true);
+        assert_eq!(root_entries.len(), 2);
+        assert_eq!(root_entries[0].identifier, BACK_ENTRY_IDENTIFIER);
+        assert_eq!(root_entries[1].identifier, "folder_missions");
         assert_eq!(state.label_path(), DEFAULT_SCENARIO_LABEL.to_string());
 
         state.enter_folder("folder_missions");
         assert_eq!(state.current_entries().len(), 1);
         assert_eq!(state.stack.len(), 2);
-        let folder_entries = build_menu_entries(state.current_entries(), state.stack.len() > 1);
+        let folder_entries = build_menu_entries(state.current_entries(), true);
         assert_eq!(folder_entries.len(), 2);
         assert_eq!(folder_entries[0].identifier, BACK_ENTRY_IDENTIFIER);
         assert_eq!(folder_entries[1].identifier, "scenario_alpha");
@@ -5363,9 +5687,10 @@ mod tests {
         state.leave_folder();
         assert_eq!(state.current_entries().len(), 1);
         assert_eq!(state.stack.len(), 1);
-        let root_again = build_menu_entries(state.current_entries(), false);
-        assert_eq!(root_again.len(), 1);
-        assert_eq!(root_again[0].identifier, "folder_missions");
+        let root_again = build_menu_entries(state.current_entries(), true);
+        assert_eq!(root_again.len(), 2);
+        assert_eq!(root_again[0].identifier, BACK_ENTRY_IDENTIFIER);
+        assert_eq!(root_again[1].identifier, "folder_missions");
         assert_eq!(state.label_path(), DEFAULT_SCENARIO_LABEL.to_string());
     }
 

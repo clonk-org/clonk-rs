@@ -1,4 +1,5 @@
 mod input;
+mod startup_main_menu;
 mod startup_menu;
 
 use lc_engine::{
@@ -21,6 +22,7 @@ pub use lc_gui::{
     GuiError as StartupMenuError, GuiResult as StartupMenuResult, ImageData, KeyCode,
     Point as GuiPoint, ScenarioEntry, ScenarioKind,
 };
+pub use startup_main_menu::{MainMenuAction, MainMenuItem, StartupMainMenu};
 pub use startup_menu::{ScenarioSummary, StartupMenu, StartupMenuAction};
 
 const OVERLAY_HEIGHT: f32 = 120.0;
