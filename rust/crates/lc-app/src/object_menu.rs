@@ -866,6 +866,7 @@ mod tests {
             category: 0,
             crew_member: false,
             alive: true,
+            graphics_overlays: Vec::new(),
         }
     }
 

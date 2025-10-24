@@ -352,6 +352,7 @@ mod tests {
                 category: crate::DEFAULT_CATEGORY,
                 crew_member: false,
                 alive: true,
+                graphics_overlays: Vec::new(),
             }],
             environment: EnvironmentFrame::default(),
             sky: None,

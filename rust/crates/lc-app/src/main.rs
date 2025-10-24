@@ -5536,6 +5536,7 @@ mod tests {
             category: DEFAULT_CATEGORY,
             crew_member: true,
             alive: true,
+            graphics_overlays: Vec::new(),
         }
     }
 
@@ -5827,6 +5828,7 @@ mod tests {
                 category: DEFAULT_CATEGORY,
                 crew_member: true,
                 alive: true,
+                graphics_overlays: Vec::new(),
             },
             ObjectSnapshot {
                 id: teammate,
@@ -5848,6 +5850,7 @@ mod tests {
                 category: DEFAULT_CATEGORY,
                 crew_member: true,
                 alive: true,
+                graphics_overlays: Vec::new(),
             },
         ];
 

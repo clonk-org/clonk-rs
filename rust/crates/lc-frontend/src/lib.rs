@@ -3,9 +3,10 @@ mod startup_main_menu;
 mod startup_menu;
 
 use lc_engine::{
-    DefinitionActionGraphics, Direction, EnvironmentFrame, EnvironmentSettings, Landscape,
-    ObjectId, ObjectSnapshot, RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
-    SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent,
+    DefinitionActionGraphics, Direction, EnvironmentFrame, EnvironmentSettings,
+    GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, RgbColor,
+    SimulationSnapshot, SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot, Vector2,
+    WeatherEvent,
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
@@ -1218,6 +1219,7 @@ impl GraphicsSystem {
 
         if let Some(sprite) = self.object_sprites.get(&object.definition_id).cloned() {
             if self.draw_action_sprite(object, &sprite, screen_x, screen_y, zoom) {
+                self.draw_object_overlays(object, screen_x, screen_y, zoom);
                 return;
             }
             let sprite_width = (sprite.image.width() as f32 * zoom).max(1.0);
@@ -1230,6 +1232,7 @@ impl GraphicsSystem {
                 GuiSize::new(sprite_width, sprite_height),
             );
             draw_image(&mut self.surface, &rect, &sprite.image);
+            self.draw_object_overlays(object, screen_x, screen_y, zoom);
             return;
         }
 
@@ -1252,7 +1255,27 @@ impl GraphicsSystem {
         screen_y: f32,
         zoom: f32,
     ) -> bool {
-        let action_name = object.action.name.as_str();
+        self.draw_action_graphic(
+            sprite,
+            object.action.name.as_str(),
+            object.action.phase,
+            object.direction,
+            screen_x,
+            screen_y,
+            zoom,
+        )
+    }
+
+    fn draw_action_graphic(
+        &mut self,
+        sprite: &DefinitionSprite,
+        action_name: &str,
+        phase: i32,
+        direction: Direction,
+        screen_x: f32,
+        screen_y: f32,
+        zoom: f32,
+    ) -> bool {
         let Some(graphics) = sprite.actions.get(action_name) else {
             return false;
         };
@@ -1274,12 +1297,12 @@ impl GraphicsSystem {
             return false;
         }
 
-        let mut frame_index = object.action.phase.rem_euclid(frame_count_i32);
+        let mut frame_index = phase.rem_euclid(frame_count_i32);
         if graphics.reverse {
             frame_index = frame_count_i32 - 1 - frame_index;
         }
 
-        let direction_index = match object.direction {
+        let direction_index = match direction {
             Direction::Left => 0,
             Direction::Right => 1,
         };
@@ -1314,6 +1337,91 @@ impl GraphicsSystem {
             flipped,
         );
         true
+    }
+
+    fn draw_object_overlays(
+        &mut self,
+        object: &ObjectSnapshot,
+        screen_x: f32,
+        screen_y: f32,
+        zoom: f32,
+    ) {
+        if object.graphics_overlays.is_empty() {
+            return;
+        }
+        for overlay in &object.graphics_overlays {
+            match overlay.mode {
+                GraphicsOverlayMode::Action => {
+                    self.draw_overlay_action(object, overlay, screen_x, screen_y, zoom)
+                }
+                GraphicsOverlayMode::Base => {
+                    self.draw_overlay_base(object, overlay, screen_x, screen_y, zoom)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn draw_overlay_action(
+        &mut self,
+        object: &ObjectSnapshot,
+        overlay: &ObjectGraphicsOverlay,
+        screen_x: f32,
+        screen_y: f32,
+        zoom: f32,
+    ) {
+        let definition_id = overlay
+            .definition
+            .as_deref()
+            .unwrap_or(&object.definition_id);
+        let Some(sprite) = self.object_sprites.get(definition_id).cloned() else {
+            return;
+        };
+        let action_name = overlay
+            .action
+            .as_deref()
+            .unwrap_or_else(|| object.action.name.as_str());
+        let phase = if overlay.phase != 0 {
+            overlay.phase
+        } else {
+            object.action.phase
+        };
+        let _ = self.draw_action_graphic(
+            &sprite,
+            action_name,
+            phase,
+            object.direction,
+            screen_x,
+            screen_y,
+            zoom,
+        );
+    }
+
+    fn draw_overlay_base(
+        &mut self,
+        object: &ObjectSnapshot,
+        overlay: &ObjectGraphicsOverlay,
+        screen_x: f32,
+        screen_y: f32,
+        zoom: f32,
+    ) {
+        let definition_id = overlay
+            .definition
+            .as_deref()
+            .unwrap_or(&object.definition_id);
+        let Some(sprite) = self.object_sprites.get(definition_id).cloned() else {
+            return;
+        };
+        let sprite_width = (sprite.image.width() as f32 * zoom).max(1.0);
+        let sprite_height = (sprite.image.height() as f32 * zoom).max(1.0);
+        let rect = GuiRect::from_origin_size(
+            GuiPoint::new(
+                screen_x - sprite_width / 2.0,
+                screen_y - sprite_height / 2.0,
+            ),
+            GuiSize::new(sprite_width, sprite_height),
+        );
+        draw_image(&mut self.surface, &rect, &sprite.image);
     }
 
     fn resolve_draw_direction(graphics: &DefinitionActionGraphics, direction: u32) -> (u32, bool) {
@@ -2192,6 +2300,7 @@ mod tests {
                 category: lc_engine::DEFAULT_CATEGORY,
                 crew_member: true,
                 alive: true,
+                graphics_overlays: Vec::new(),
             }],
             environment: EnvironmentFrame::default(),
             sky: None,

@@ -111,6 +111,93 @@ pub type DefinitionId = String;
 
 pub const OWNER_NONE: i32 = -1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GraphicsOverlayMode {
+    None = 0,
+    Base = 1,
+    Action = 2,
+    Picture = 3,
+    IngamePicture = 4,
+    Object = 5,
+    ExtraGraphics = 6,
+}
+
+impl GraphicsOverlayMode {
+    pub fn from_script_value(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(GraphicsOverlayMode::None),
+            1 => Some(GraphicsOverlayMode::Base),
+            2 => Some(GraphicsOverlayMode::Action),
+            3 => Some(GraphicsOverlayMode::Picture),
+            4 => Some(GraphicsOverlayMode::IngamePicture),
+            5 => Some(GraphicsOverlayMode::Object),
+            6 => Some(GraphicsOverlayMode::ExtraGraphics),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectGraphicsOverlay {
+    pub id: i32,
+    pub mode: GraphicsOverlayMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<DefinitionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphics_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub phase: i32,
+    #[serde(default)]
+    pub blit_mode: u32,
+    #[serde(default)]
+    pub color_modulation: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_object: Option<ObjectId>,
+}
+
+impl ObjectGraphicsOverlay {
+    pub fn new(id: i32, mode: GraphicsOverlayMode) -> Self {
+        Self {
+            id,
+            mode,
+            definition: None,
+            graphics_name: None,
+            action: None,
+            phase: 0,
+            blit_mode: 0,
+            color_modulation: 0x00ff_ffff,
+            overlay_object: None,
+        }
+    }
+
+    pub fn with_definition(mut self, definition: Option<DefinitionId>) -> Self {
+        self.definition = definition;
+        self
+    }
+
+    pub fn with_graphics_name(mut self, name: Option<String>) -> Self {
+        self.graphics_name = name;
+        self
+    }
+
+    pub fn with_action(mut self, action: Option<String>) -> Self {
+        self.action = action;
+        self
+    }
+
+    pub fn with_blit_mode(mut self, blit_mode: u32) -> Self {
+        self.blit_mode = blit_mode;
+        self
+    }
+
+    pub fn with_overlay_object(mut self, overlay_object: Option<ObjectId>) -> Self {
+        self.overlay_object = overlay_object;
+        self
+    }
+}
+
 pub const CNAT_NONE: u32 = 0;
 pub const CNAT_LEFT: u32 = 1;
 pub const CNAT_RIGHT: u32 = 2;
@@ -1577,6 +1664,8 @@ pub struct ObjectState {
     pub crew_member: bool,
     #[serde(default = "default_alive")]
     pub alive: bool,
+    #[serde(default)]
+    pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
 }
 
 #[derive(Debug, Clone)]
@@ -1636,6 +1725,9 @@ impl ObjectState {
         if let Some(vertices) = &delta.vertices {
             self.vertices = vertices.clone();
         }
+        if let Some(overlays) = &delta.graphics_overlays {
+            self.graphics_overlays = overlays.clone();
+        }
         if let Some(owner) = delta.owner {
             self.owner = owner;
         }
@@ -1688,6 +1780,7 @@ struct ObjectDelta {
     alive: Option<bool>,
     container: Option<Option<ObjectId>>,
     vertices: Option<Vec<ObjectVertex>>,
+    graphics_overlays: Option<Vec<ObjectGraphicsOverlay>>,
 }
 
 impl ObjectDelta {
@@ -1731,6 +1824,9 @@ impl ObjectDelta {
         if let Some(vertices) = update.vertices {
             self.vertices = Some(vertices);
         }
+        if let Some(overlays) = update.graphics_overlays {
+            self.graphics_overlays = Some(overlays);
+        }
         if let Some(action) = update.action {
             match &mut self.action {
                 Some(existing) => existing.merge(action),
@@ -1757,6 +1853,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             alive: update.alive,
             container: update.container,
             vertices: update.vertices,
+            graphics_overlays: update.graphics_overlays,
         }
     }
 }
@@ -1787,6 +1884,8 @@ pub struct ObjectUpdate {
     pub container: Option<Option<ObjectId>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertices: Option<Vec<ObjectVertex>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphics_overlays: Option<Vec<ObjectGraphicsOverlay>>,
 }
 
 impl ObjectUpdate {
@@ -1911,6 +2010,7 @@ impl ObjectUpdate {
             && self.alive.is_none()
             && self.container.is_none()
             && self.vertices.is_none()
+            && self.graphics_overlays.is_none()
     }
 }
 
@@ -2178,6 +2278,7 @@ impl Object {
             category: self.state.category,
             crew_member: self.state.crew_member,
             alive: self.state.alive,
+            graphics_overlays: self.state.graphics_overlays.clone(),
         }
     }
 
@@ -2637,6 +2738,8 @@ pub struct ObjectSnapshot {
     pub crew_member: bool,
     #[serde(default = "default_alive")]
     pub alive: bool,
+    #[serde(default)]
+    pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3274,6 +3377,7 @@ impl Definition {
                     self.ocf_base,
                     self.crew_member,
                 )
+                .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_alive(state.alive)
                 .with_ocf(self.compute_ocf(state)),
             ),
@@ -3408,6 +3512,7 @@ impl Definition {
                     self.ocf_base,
                     self.crew_member,
                 )
+                .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_alive(state.alive)
                 .with_ocf(self.compute_ocf(state)),
             ),
@@ -3543,6 +3648,7 @@ impl Definition {
                     self.ocf_base,
                     self.crew_member,
                 )
+                .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_alive(state.alive)
                 .with_ocf(self.compute_ocf(state)),
             ),
@@ -6353,6 +6459,7 @@ impl Engine {
             alive,
             container,
             vertices,
+            graphics_overlays,
             ..
         } = update;
 
@@ -6422,6 +6529,9 @@ impl Engine {
             }
             if let Some(vertices) = vertices {
                 object.state.vertices = vertices;
+            }
+            if let Some(overlays) = graphics_overlays {
+                object.state.graphics_overlays = overlays;
             }
 
             self.physics.clamp_velocity(&mut object.state.velocity);
@@ -7072,6 +7182,7 @@ impl Engine {
                     category: snapshot.category,
                     crew_member: snapshot.crew_member,
                     alive: snapshot.alive,
+                    graphics_overlays: snapshot.graphics_overlays.clone(),
                 },
             );
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
@@ -9367,6 +9478,7 @@ impl Engine {
                 category: initial_category,
                 crew_member: initial_crew_member,
                 alive: alive.unwrap_or(true),
+                graphics_overlays: Vec::new(),
             },
         );
         object.ensure_material_capacity(self.materials.len());

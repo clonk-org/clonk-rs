@@ -14,11 +14,12 @@ use crate::ocf;
 use crate::LiquidSegment;
 use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, AudioCommand,
-    CommandDirection, DefinitionId, Direction, EnvironmentSettings, FloatVector2, Landscape,
-    ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig,
-    ParticleLayer, ParticleScope, PathFinder, PhysicsSettings, PlayerState, QueuedCommand,
-    SpawnConfig, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2, CNAT_BOTTOM,
-    CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
+    CommandDirection, DefinitionId, Direction, EnvironmentSettings, FloatVector2,
+    GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectStatus, ObjectUpdate,
+    ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder,
+    PhysicsSettings, PlayerState, QueuedCommand, SpawnConfig, TransferZoneCommand,
+    TransferZoneRect, TransferZoneState, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT,
+    CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -1182,6 +1183,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetObjectStatus", set_object_status);
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("GetOCF", get_ocf);
+    script.register_host_function("SetGraphics", set_graphics);
     script.register_host_function("RemoveObject", remove_object);
     script.register_host_function("GetEnergy", get_energy);
     script.register_host_function("DoEnergy", do_energy);
@@ -1372,6 +1374,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
     pub vertices: &'a [ObjectVertex],
+    pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
 }
 
 impl<'a> HostObjectContext<'a> {
@@ -1467,11 +1470,17 @@ impl<'a> HostObjectContext<'a> {
             action_target,
             action_target2,
             vertices,
+            graphics_overlays: Vec::new(),
         }
     }
 
     pub fn with_alive(mut self, alive: bool) -> Self {
         self.alive = alive;
+        self
+    }
+
+    pub fn with_graphics_overlays(mut self, overlays: Vec<ObjectGraphicsOverlay>) -> Self {
+        self.graphics_overlays = overlays;
         self
     }
 
@@ -5429,6 +5438,176 @@ fn get_ocf(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetGraphics expects at least 1 argument: graphics name",
+        ));
+    }
+
+    let graphics_name = match &args[0] {
+        Value::String(name) if !name.is_empty() => Some(name.clone()),
+        Value::String(_) | Value::Nil => None,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetGraphics: expected string or nil for graphics name, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let mut index = 1;
+
+    let target_id = if let Some(arg) = args.get(index) {
+        index += 1;
+        parse_object_reference_argument(arg, "SetGraphics", "object")?
+    } else {
+        None
+    };
+
+    let definition = if let Some(arg) = args.get(index) {
+        index += 1;
+        parse_definition_argument(Some(arg), "SetGraphics")?
+    } else {
+        None
+    };
+
+    let overlay_id = if let Some(arg) = args.get(index) {
+        index += 1;
+        match arg {
+            Value::Int(value) => *value,
+            Value::Nil => 0,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "SetGraphics: expected int or nil for overlay id, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    } else {
+        0
+    };
+
+    let mode_value = if let Some(arg) = args.get(index) {
+        index += 1;
+        match arg {
+            Value::Int(value) => *value,
+            Value::Nil => 0,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "SetGraphics: expected int or nil for overlay mode, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    } else {
+        0
+    };
+
+    let action_name = if let Some(arg) = args.get(index) {
+        index += 1;
+        match arg {
+            Value::String(name) if !name.is_empty() => Some(name.clone()),
+            Value::String(_) | Value::Nil => None,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "SetGraphics: expected string or nil for action, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    } else {
+        None
+    };
+
+    let blit_mode = if let Some(arg) = args.get(index) {
+        index += 1;
+        match arg {
+            Value::Int(value) => (*value).max(0) as u32,
+            Value::Nil => 0,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "SetGraphics: expected int or nil for blit mode, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    } else {
+        0
+    };
+
+    let overlay_object = if let Some(arg) = args.get(index) {
+        index += 1;
+        parse_object_reference_argument(arg, "SetGraphics", "overlay_object")?
+    } else {
+        None
+    };
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetGraphics: additional arguments are not supported",
+        ));
+    }
+
+    if overlay_id <= 0 {
+        return Ok(Value::Bool(false));
+    }
+
+    let mode = if mode_value == 0 {
+        GraphicsOverlayMode::Base
+    } else {
+        match GraphicsOverlayMode::from_script_value(mode_value) {
+            Some(mode) => mode,
+            None => return Ok(Value::Bool(false)),
+        }
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetGraphics requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        if overlay_id < 0 {
+            return Ok(Value::Bool(false));
+        }
+
+        if mode == GraphicsOverlayMode::Object && overlay_object.is_none() {
+            let removed = object.remove_graphics_overlay(overlay_id);
+            return Ok(Value::Bool(removed));
+        }
+
+        if mode != GraphicsOverlayMode::Object && definition.is_none() {
+            let removed = object.remove_graphics_overlay(overlay_id);
+            return Ok(Value::Bool(removed));
+        }
+
+        let overlay = ObjectGraphicsOverlay::new(overlay_id, mode)
+            .with_definition(if mode == GraphicsOverlayMode::Object {
+                None
+            } else {
+                definition.clone()
+            })
+            .with_graphics_name(graphics_name.clone())
+            .with_action(action_name)
+            .with_blit_mode(blit_mode)
+            .with_overlay_object(overlay_object);
+
+        let changed = object.set_graphics_overlay(overlay);
+        Ok(Value::Bool(changed))
+    })
+}
+
 fn get_category(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 2 {
         return Err(RuntimeError::new(
@@ -6318,6 +6497,7 @@ impl EffectHostContext {
                 action_target,
                 action_target2,
                 vertices,
+                graphics_overlays,
                 category,
                 ocf: _,
                 ocf_base,
@@ -6346,6 +6526,7 @@ impl EffectHostContext {
                 vertices.to_vec(),
                 ocf_base,
                 crew_member,
+                graphics_overlays,
             )
         });
         let global = Some(EffectScopeContext::new(global_effects));
@@ -6664,6 +6845,7 @@ struct ObjectScopeContext {
     current_position: Vector2,
     current_velocity: Vector2,
     vertices: Vec<ObjectVertex>,
+    graphics_overlays: Vec<ObjectGraphicsOverlay>,
 }
 
 impl ObjectScopeContext {
@@ -6690,6 +6872,7 @@ impl ObjectScopeContext {
         vertices: Vec<ObjectVertex>,
         ocf_base: u32,
         crew_member: bool,
+        graphics_overlays: Vec<ObjectGraphicsOverlay>,
     ) -> Self {
         let blocks_other_actions = action_library.blocks_other_actions(&action_name);
         let max_energy = energy.max(DEFAULT_MAX_ENERGY);
@@ -6722,6 +6905,7 @@ impl ObjectScopeContext {
             current_position: position,
             current_velocity: velocity,
             vertices,
+            graphics_overlays,
         }
     }
 
@@ -7013,6 +7197,40 @@ impl ObjectScopeContext {
             vertices
         } else {
             &self.vertices
+        }
+    }
+
+    fn set_graphics_overlay(&mut self, overlay: ObjectGraphicsOverlay) -> bool {
+        let mut change = false;
+        if let Some(existing) = self
+            .graphics_overlays
+            .iter_mut()
+            .find(|existing| existing.id == overlay.id)
+        {
+            if *existing != overlay {
+                *existing = overlay;
+                change = true;
+            }
+        } else {
+            self.graphics_overlays.push(overlay);
+            self.graphics_overlays.sort_by_key(|overlay| overlay.id);
+            change = true;
+        }
+
+        if change {
+            self.pending_update.graphics_overlays = Some(self.graphics_overlays.clone());
+        }
+        change
+    }
+
+    fn remove_graphics_overlay(&mut self, id: i32) -> bool {
+        let original_len = self.graphics_overlays.len();
+        self.graphics_overlays.retain(|overlay| overlay.id != id);
+        if self.graphics_overlays.len() != original_len {
+            self.pending_update.graphics_overlays = Some(self.graphics_overlays.clone());
+            true
+        } else {
+            false
         }
     }
 
@@ -10584,6 +10802,118 @@ mod tests {
         assert_eq!(mask & ocf_mask, ocf_mask);
         assert_ne!(mask & ocf::NORMAL, 0);
         assert_ne!(mask & ocf::NOT_CONTAINED, 0);
+    }
+
+    #[test]
+    fn set_graphics_records_overlay_update() {
+        let object_id = ObjectId::new(42);
+        let object_context = HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            0,
+            0,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+        )
+        .with_graphics_overlays(Vec::new());
+
+        let (result, outcome) = with_effect_context(
+            Some(object_context),
+            &[],
+            HostWorldContext::default(),
+            100,
+            || {
+                set_graphics(&[
+                    Value::String("Default".into()),
+                    Value::Nil,
+                    Value::String("Clonk".into()),
+                    Value::Int(1),
+                    Value::Int(GraphicsOverlayMode::Action as i32),
+                    Value::String("Walk".into()),
+                ])
+            },
+        );
+
+        assert_eq!(result.expect("SetGraphics succeeds"), Value::Bool(true));
+        let update = outcome.object_update.expect("object update expected");
+        let overlays = update
+            .graphics_overlays
+            .expect("graphics overlay update expected");
+        assert_eq!(overlays.len(), 1);
+        let overlay = &overlays[0];
+        assert_eq!(overlay.id, 1);
+        assert_eq!(overlay.mode, GraphicsOverlayMode::Action);
+        assert_eq!(overlay.definition.as_deref(), Some("Clonk"));
+        assert_eq!(overlay.action.as_deref(), Some("Walk"));
+    }
+
+    #[test]
+    fn set_graphics_removes_overlay_when_definition_missing() {
+        let object_id = ObjectId::new(7);
+        let overlay = ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Action)
+            .with_definition(Some("Clonk".into()));
+        let object_context = HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            0,
+            0,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+        )
+        .with_graphics_overlays(vec![overlay]);
+
+        let (result, outcome) = with_effect_context(
+            Some(object_context),
+            &[],
+            HostWorldContext::default(),
+            100,
+            || {
+                set_graphics(&[
+                    Value::String("Default".into()),
+                    Value::Nil,
+                    Value::Nil,
+                    Value::Int(1),
+                    Value::Int(GraphicsOverlayMode::Action as i32),
+                ])
+            },
+        );
+
+        assert_eq!(result.expect("SetGraphics succeeds"), Value::Bool(true));
+        let update = outcome.object_update.expect("object update expected");
+        let overlays = update
+            .graphics_overlays
+            .expect("graphics overlay update expected");
+        assert!(overlays.is_empty());
     }
 
     #[test]
