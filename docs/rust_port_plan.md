@@ -44,17 +44,19 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - Start with proper game state
 
 **Current Rust Behavior:**
-- Unknown - needs testing with real scenario
-- May fail silently and fall back to sandbox
+- Legacy `Scenario.txt` player crew entries spawn with owner/position
+- Objects.txt data, landscape assets, and loading UX still missing; sandbox fallback if apply() fails
 
 **What's Needed:**
 - [ ] Complete Scenario.txt parsing (verify all fields)
 - [ ] Map.bmp landscape loading
-- [ ] Objects.txt initial object spawning
+- [ ] Objects.txt initial object spawning (Scenario.txt crew entries now covered)
 - [ ] Verify all definitions load correctly
 - [ ] Proper error handling (don't fall back silently)
 - [ ] Loading screen with progress
 - [ ] Scenario intro text/mission briefing
+
+**Progress (2025-10-24):** `Scenario.txt` `[PlayerX]` crew definitions map to engine spawns (owner, crew flag, optional Position) so real scenarios start with their roster, implemented in `rust/crates/lc-engine/src/scenario.rs`.
 
 **Files:** `lc-engine/src/scenario.rs`, `try_start_real_scenario()` at main.rs:3644
 

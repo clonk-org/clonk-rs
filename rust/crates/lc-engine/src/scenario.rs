@@ -203,13 +203,14 @@ impl Scenario {
         }
 
         let script = load_legacy_scenario_script(group)?;
+        let initial_spawns = collect_initial_spawns(&manifest.sections, &collected)?;
 
         Ok(Self {
             name: manifest.title,
             ticks: None,
             ground_height_hint: manifest.ground_height_hint,
             definitions: collected,
-            initial_spawns: Vec::new(),
+            initial_spawns,
             landscape: None,
             physics: None,
             environment: None,
@@ -582,6 +583,7 @@ struct LegacyScenarioManifest {
     description: Option<String>,
     definition_specs: Vec<String>,
     ground_height_hint: Option<i32>,
+    sections: HashMap<String, Vec<(String, String)>>,
 }
 
 fn parse_legacy_scenario_manifest(group: &Group) -> Result<LegacyScenarioManifest, ScenarioError> {
@@ -667,6 +669,7 @@ fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, Scen
         description,
         definition_specs,
         ground_height_hint,
+        sections,
     })
 }
 
@@ -745,6 +748,146 @@ fn load_legacy_scenario_script(
         }));
     }
     Ok(None)
+}
+
+fn collect_initial_spawns(
+    sections: &HashMap<String, Vec<(String, String)>>,
+    definitions: &[ScenarioDefinition],
+) -> Result<Vec<ScenarioSpawn>, ScenarioError> {
+    let mut spawns = Vec::new();
+    let mut player_sections: Vec<(&str, &Vec<(String, String)>)> = sections
+        .iter()
+        .filter_map(|(section, entries)| {
+            if section.starts_with("player") {
+                Some((section.as_str(), entries))
+            } else {
+                None
+            }
+        })
+        .collect();
+    player_sections.sort_by(|a, b| a.0.cmp(b.0));
+
+    for (section_name, entries) in player_sections {
+        let owner = match owner_index_from_section(section_name) {
+            Some(owner) => owner,
+            None => continue,
+        };
+        let position = entries.iter().find_map(|(key, value)| {
+            if key.eq_ignore_ascii_case("Position") {
+                parse_player_position(value)
+            } else {
+                None
+            }
+        });
+
+        for (_, value) in entries.iter().filter(|(key, _)| {
+            key.eq_ignore_ascii_case("Crew") || key.eq_ignore_ascii_case("Clonks")
+        }) {
+            for (token, count) in parse_crew_entries(value) {
+                let definition = find_definition_by_token(definitions, &token)
+                    .ok_or_else(|| ScenarioError::UnknownDefinition(token.clone()))?;
+                for _ in 0..count {
+                    let mut config = SpawnConfig::new(&definition.id)
+                        .with_owner(owner)
+                        .with_crew_member(true);
+                    if let Some(position) = position {
+                        config = config.with_position(position);
+                    }
+                    spawns.push(ScenarioSpawn {
+                        handle: None,
+                        container_handle: None,
+                        config,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(spawns)
+}
+
+fn owner_index_from_section(section: &str) -> Option<i32> {
+    let suffix = section.trim_start_matches("player");
+    if suffix.is_empty() {
+        return Some(0);
+    }
+    let index = suffix.parse::<i32>().ok()?;
+    let owner = index - 1;
+    if owner < 0 {
+        None
+    } else {
+        Some(owner)
+    }
+}
+
+fn parse_player_position(value: &str) -> Option<Vector2> {
+    let mut parts = value
+        .split(',')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty());
+    let x = parts.next()?.parse::<i32>().ok()?;
+    let y = parts.next()?.parse::<i32>().ok()?;
+    Some(Vector2::new(x, y))
+}
+
+fn parse_crew_entries(value: &str) -> Vec<(String, i32)> {
+    value
+        .split(';')
+        .filter_map(|segment| {
+            let trimmed = segment.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let mut parts = trimmed
+                .split('=')
+                .map(|part| part.trim())
+                .filter(|part| !part.is_empty());
+            let token = parts.next()?.to_string();
+            if token.is_empty() {
+                return None;
+            }
+            let count = parts
+                .last()
+                .and_then(|raw| raw.parse::<i32>().ok())
+                .filter(|count| *count > 0)
+                .unwrap_or(1);
+            Some((token, count))
+        })
+        .collect()
+}
+
+fn find_definition_by_token<'a>(
+    definitions: &'a [ScenarioDefinition],
+    token: &str,
+) -> Option<&'a ScenarioDefinition> {
+    if token.is_empty() {
+        return None;
+    }
+    let trimmed = token.trim();
+    if trimmed.len() == 4
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        let upper = trimmed.to_ascii_uppercase();
+        if let Some(definition) = definitions
+            .iter()
+            .find(|definition| definition.id.eq_ignore_ascii_case(&upper))
+        {
+            return Some(definition);
+        }
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    definitions.iter().find(|definition| {
+        if definition.id.eq_ignore_ascii_case(trimmed) {
+            return true;
+        }
+        match definition.name.as_ref() {
+            Some(name) => name.eq_ignore_ascii_case(trimmed) || name.to_ascii_lowercase() == lower,
+            None => false,
+        }
+    })
 }
 
 fn collect_definitions_from_group(
@@ -2520,7 +2663,7 @@ global func Step(state, frame, random)
         std::fs::create_dir_all(&foo_core).expect("definition dir");
         std::fs::write(
             foo_core.join("DefCore.txt"),
-            "[DefCore]\nid=FOOO\nName=Foo Object\nCategory=0\nCrewMember=0\n",
+            "[DefCore]\nid=FOOO\nName=Foo\nCategory=0\nCrewMember=0\n",
         )
         .expect("write defcore");
         std::fs::write(foo_core.join("Script.c"), "// empty definition script\n")
@@ -2536,7 +2679,7 @@ global func Step(state, frame, random)
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
-            "[Head]\nTitle=Legacy Test\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+            "[Head]\nTitle=Legacy Test\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Foo=2\nPosition=120,160\n",
         )
         .expect("write legacy scenario core");
         std::fs::write(
@@ -2559,9 +2702,24 @@ global func Step(state, frame, random)
         assert_eq!(scenario.name(), Some("Legacy Test"));
 
         let mut engine = Engine::with_seed(0);
-        scenario
+        let created = scenario
             .apply(&mut engine)
             .expect("legacy scenario applies");
+        assert_eq!(
+            created.len(),
+            2,
+            "expected two crew spawns from legacy scenario"
+        );
+        for id in &created {
+            let object = engine.object_snapshot(*id).expect("spawned object present");
+            assert_eq!(object.definition_id, "FOOO");
+            assert_eq!(object.owner, 0);
+            assert!(
+                object.crew_member,
+                "legacy crew should be marked as crew member"
+            );
+            assert_eq!(object.position, Vector2::new(120, 160));
+        }
         let snapshot = engine.snapshot();
         assert!(
             snapshot.definition_categories.contains_key("FOOO"),
