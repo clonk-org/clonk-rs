@@ -50,13 +50,13 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 **What's Needed:**
 - [ ] Complete Scenario.txt parsing (verify all fields)
 - [ ] Map.bmp landscape loading
-- [ ] Objects.txt initial object spawning (Scenario.txt crew entries now covered)
+- [x] Objects.txt initial object spawning (Scenario.txt crew entries now covered)
 - [ ] Verify all definitions load correctly
 - [ ] Proper error handling (don't fall back silently)
 - [ ] Loading screen with progress
 - [ ] Scenario intro text/mission briefing
 
-**Progress (2025-10-24):** `Scenario.txt` `[PlayerX]` crew definitions map to engine spawns (owner, crew flag, optional Position) so real scenarios start with their roster, implemented in `rust/crates/lc-engine/src/scenario.rs`.
+**Progress (2025-10-26):** Legacy loader now parses `Objects.txt`, creating spawn configs with explicit object ids, status, owner, position/velocity, crew state, action info, and resolves containers (including via `Contents=` fallbacks) so full scenario object graphs appear without sandbox fallback.
 
 **Files:** `lc-engine/src/scenario.rs`, `try_start_real_scenario()` at main.rs:3644
 

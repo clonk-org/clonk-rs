@@ -16,10 +16,10 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::Deserialize;
 
 use crate::{
-    action::ActionSpec, ActionState, Definition, DefinitionPicture, DefinitionPictureImage,
-    DefinitionSpriteImage, EffectState, Engine, EngineError, EnvironmentSettings, Landscape,
-    MovementProfile, ObjectId, ObjectStatus, PhysicsSettings, RgbColor, SkyParallaxMode,
-    SkySettings, SpawnConfig, Vector2,
+    action::ActionSpec, ActionState, CommandDirection, Definition, DefinitionPicture,
+    DefinitionPictureImage, DefinitionSpriteImage, Direction, EffectState, Engine, EngineError,
+    EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings,
+    RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, Vector2,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +44,10 @@ pub enum ScenarioError {
     Definition(#[from] ResourceDefinitionError),
     #[error("invalid legacy scenario data: {0}")]
     LegacyParse(String),
+    #[error("legacy objects file `Objects.txt` is not valid UTF-8")]
+    LegacyObjectsEncoding,
+    #[error("invalid legacy objects data: {0}")]
+    LegacyObjectsParse(String),
     #[error("duplicate definition id `{0}` in scenario manifest")]
     DuplicateDefinition(String),
     #[error("initial object references unknown definition `{0}`")]
@@ -203,7 +207,9 @@ impl Scenario {
         }
 
         let script = load_legacy_scenario_script(group)?;
-        let initial_spawns = collect_initial_spawns(&manifest.sections, &collected)?;
+        let mut initial_spawns = collect_initial_spawns(&manifest.sections, &collected)?;
+        let mut object_spawns = collect_legacy_objects(group, &collected)?;
+        initial_spawns.append(&mut object_spawns);
 
         Ok(Self {
             name: manifest.title,
@@ -804,6 +810,528 @@ fn collect_initial_spawns(
     }
 
     Ok(spawns)
+}
+
+fn collect_legacy_objects(
+    group: &Group,
+    definitions: &[ScenarioDefinition],
+) -> Result<Vec<ScenarioSpawn>, ScenarioError> {
+    let bytes = match group.read_file("Objects.txt") {
+        Ok(bytes) => bytes,
+        Err(GroupError::EntryNotFound(_)) => return Ok(Vec::new()),
+        Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(Vec::new())
+        }
+        Err(error) => return Err(ScenarioError::Resources(error)),
+    };
+
+    let text = String::from_utf8(bytes).map_err(|_| ScenarioError::LegacyObjectsEncoding)?;
+    let mut records = parse_legacy_objects(&text)?;
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut index_by_number: HashMap<u64, usize> = HashMap::new();
+    for (index, record) in records.iter().enumerate() {
+        if let Some(number) = record.number {
+            index_by_number.insert(number, index);
+        }
+    }
+
+    for index in 0..records.len() {
+        let parent_number = match records[index].number {
+            Some(value) => value,
+            None => continue,
+        };
+        let child_numbers: Vec<u64> = records[index].contents.clone();
+        for child_number in child_numbers {
+            if child_number == 0 || child_number == parent_number {
+                continue;
+            }
+            if let Some(child_index) = index_by_number.get(&child_number).copied() {
+                if records[child_index].contained.is_none() {
+                    records[child_index].contained = Some(parent_number);
+                }
+            }
+        }
+    }
+
+    let definition_ids: HashSet<&str> = definitions
+        .iter()
+        .map(|definition| definition.id.as_str())
+        .collect();
+
+    let mut spawns = Vec::new();
+    for record in records.into_iter() {
+        if let Some(spawn) = record.into_spawn(&definition_ids)? {
+            spawns.push(spawn);
+        }
+    }
+    Ok(spawns)
+}
+
+#[derive(Debug, Default)]
+struct LegacyObjectRecord {
+    line: usize,
+    id: Option<String>,
+    number: Option<u64>,
+    status: Option<ObjectStatus>,
+    owner: Option<i32>,
+    x: Option<i32>,
+    y: Option<i32>,
+    xdir: Option<i32>,
+    ydir: Option<i32>,
+    energy: Option<i32>,
+    alive: Option<bool>,
+    category: Option<i32>,
+    direction: Option<Direction>,
+    command_direction: Option<CommandDirection>,
+    action_name: Option<String>,
+    action_phase: Option<i32>,
+    action_ticks: Option<u32>,
+    action_data: Option<i32>,
+    action_target: Option<u64>,
+    action_target2: Option<u64>,
+    contained: Option<u64>,
+    contents: Vec<u64>,
+}
+
+impl LegacyObjectRecord {
+    fn new(line: usize) -> Self {
+        Self {
+            line,
+            ..Self::default()
+        }
+    }
+
+    fn apply_property(&mut self, key: &str, value: &str) -> Result<(), ScenarioError> {
+        let normalized_key = key.trim().to_ascii_lowercase();
+        let trimmed_value = value.trim();
+        match normalized_key.as_str() {
+            "id" => {
+                self.id = Some(trimmed_value.to_string());
+            }
+            "number" => {
+                let number = parse_i64(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Number `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                if number < 0 {
+                    return Err(ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: Number must be >= 0 (got {})",
+                        self.line, number
+                    )));
+                }
+                self.number = Some(number as u64);
+            }
+            "status" => {
+                let raw = parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Status `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                self.status = Some(ObjectStatus::from_script_value(raw).ok_or_else(|| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: unsupported Status value {}",
+                        self.line, raw
+                    ))
+                })?);
+            }
+            "owner" => {
+                let owner = parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Owner `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                self.owner = Some(owner);
+            }
+            "x" => {
+                self.x = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid X `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "y" => {
+                self.y = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Y `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "xdir" => {
+                self.xdir = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid XDir `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "ydir" => {
+                self.ydir = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid YDir `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "energy" => {
+                self.energy = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Energy `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "alive" => {
+                let alive = parse_bool(trimmed_value).ok_or_else(|| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Alive `{}`",
+                        self.line, trimmed_value
+                    ))
+                })?;
+                self.alive = Some(alive);
+            }
+            "category" => {
+                self.category = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Category `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "dir" => {
+                let raw = parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Dir `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                self.direction = Some(Direction::from_script_value(raw).ok_or_else(|| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: unsupported Dir value {}",
+                        self.line, raw
+                    ))
+                })?);
+            }
+            "comdir" => {
+                let raw = parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid ComDir `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                self.command_direction =
+                    Some(CommandDirection::from_script_value(raw).ok_or_else(|| {
+                        ScenarioError::LegacyObjectsParse(format!(
+                            "Objects.txt line {}: unsupported ComDir value {}",
+                            self.line, raw
+                        ))
+                    })?);
+            }
+            "action" => {
+                self.action_name = Some(trimmed_value.to_string());
+            }
+            "actiontime" => {
+                let ticks = parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid ActionTime `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                if ticks < 0 {
+                    return Err(ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: ActionTime must be >= 0 (got {})",
+                        self.line, ticks
+                    )));
+                }
+                self.action_ticks = Some(ticks as u32);
+            }
+            "actiondata" => {
+                self.action_data = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid ActionData `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "phase" => {
+                self.action_phase = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Phase `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "actiontarget1" => {
+                self.action_target = Some(parse_u64(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid ActionTarget1 `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "actiontarget2" => {
+                self.action_target2 = Some(parse_u64(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid ActionTarget2 `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "contained" => {
+                let value = parse_i64(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Contained `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                if value > 0 {
+                    self.contained = Some(value as u64);
+                }
+            }
+            "contents" => {
+                let mut entries = Vec::new();
+                for token in trimmed_value.split(';') {
+                    let candidate = token.trim();
+                    if candidate.is_empty() {
+                        continue;
+                    }
+                    let value = parse_i64(candidate).map_err(|err| {
+                        ScenarioError::LegacyObjectsParse(format!(
+                            "Objects.txt line {}: invalid Contents entry `{}` ({})",
+                            self.line, candidate, err
+                        ))
+                    })?;
+                    if value > 0 {
+                        entries.push(value as u64);
+                    }
+                }
+                self.contents = entries;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn into_spawn(
+        self,
+        definition_ids: &HashSet<&str>,
+    ) -> Result<Option<ScenarioSpawn>, ScenarioError> {
+        let Self {
+            line,
+            id,
+            number,
+            status,
+            owner,
+            x,
+            y,
+            xdir,
+            ydir,
+            energy,
+            alive,
+            category,
+            direction,
+            command_direction,
+            action_name,
+            action_phase,
+            action_ticks,
+            action_data,
+            action_target,
+            action_target2,
+            contained,
+            contents: _,
+        } = self;
+
+        let id = id.ok_or_else(|| {
+            ScenarioError::LegacyObjectsParse(format!(
+                "Objects.txt line {}: object missing `id`",
+                line
+            ))
+        })?;
+
+        if !definition_ids.contains(id.as_str()) {
+            return Err(ScenarioError::UnknownDefinition(id));
+        }
+
+        let number = number.ok_or_else(|| {
+            ScenarioError::LegacyObjectsParse(format!(
+                "Objects.txt line {}: object `{}` missing `Number`",
+                line, id
+            ))
+        })?;
+
+        if matches!(status, Some(ObjectStatus::Deleted)) {
+            return Ok(None);
+        }
+
+        let mut config = SpawnConfig::new(id.clone()).with_id(ObjectId::new(number));
+        config = config.with_position(Vector2::new(x.unwrap_or(0), y.unwrap_or(0)));
+
+        if xdir.is_some() || ydir.is_some() {
+            config = config.with_velocity(Vector2::new(xdir.unwrap_or(0), ydir.unwrap_or(0)));
+        }
+        if let Some(owner) = owner {
+            config = config.with_owner(owner);
+        }
+        if let Some(energy) = energy {
+            config = config.with_energy(energy);
+        }
+        if let Some(alive) = alive {
+            config = config.with_alive(alive);
+        }
+        if let Some(category) = category {
+            config = config.with_category(category);
+        }
+        if let Some(status) = status {
+            if status != ObjectStatus::Normal {
+                config = config.with_status(status);
+            }
+        }
+        if let Some(direction) = direction {
+            config = config.with_direction(direction);
+        }
+        if let Some(command_direction) = command_direction {
+            config = config.with_command_direction(command_direction);
+        }
+        if let Some(action_state) = build_action_state(
+            action_name,
+            action_phase,
+            action_ticks,
+            action_data,
+            action_target,
+            action_target2,
+        ) {
+            config = config.with_action(action_state);
+        }
+
+        Ok(Some(ScenarioSpawn {
+            handle: Some(number.to_string()),
+            container_handle: contained.map(|value| value.to_string()),
+            config,
+        }))
+    }
+}
+
+fn build_action_state(
+    name: Option<String>,
+    phase: Option<i32>,
+    ticks: Option<u32>,
+    data: Option<i32>,
+    target: Option<u64>,
+    target2: Option<u64>,
+) -> Option<ActionState> {
+    let name = name?;
+    let mut state = ActionState::new(name);
+    if let Some(value) = phase {
+        state.phase = value;
+    }
+    if let Some(value) = ticks {
+        state.ticks = value;
+    }
+    if let Some(value) = data {
+        state.data = value;
+    }
+    if let Some(target) = target {
+        state.target = Some(ObjectId::new(target));
+    }
+    if let Some(target2) = target2 {
+        state.target2 = Some(ObjectId::new(target2));
+    }
+    Some(state)
+}
+
+fn parse_legacy_objects(text: &str) -> Result<Vec<LegacyObjectRecord>, ScenarioError> {
+    let mut records = Vec::new();
+    let mut current: Option<LegacyObjectRecord> = None;
+
+    for (index, raw_line) in text.lines().enumerate() {
+        let mut line = raw_line.trim_start_matches('\u{feff}').trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(stripped) = line.split_once("//") {
+            line = stripped.0.trim_end();
+        }
+        if line.is_empty() || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            if let Some(record) = current.take() {
+                records.push(record);
+            }
+            current = Some(LegacyObjectRecord::new(index + 1));
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+
+        let record = current.as_mut().ok_or_else(|| {
+            ScenarioError::LegacyObjectsParse(format!(
+                "Objects.txt line {}: encountered property `{}` outside of an [Object] section",
+                index + 1,
+                key.trim()
+            ))
+        })?;
+        record.apply_property(key, value)?;
+    }
+
+    if let Some(record) = current.take() {
+        records.push(record);
+    }
+
+    Ok(records)
+}
+
+fn parse_i64(value: &str) -> Result<i64, std::num::ParseIntError> {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("-0x")
+        .or_else(|| trimmed.strip_prefix("-0X"))
+    {
+        i64::from_str_radix(rest, 16).map(|parsed| -parsed)
+    } else if let Some(rest) = trimmed
+        .strip_prefix("+0x")
+        .or_else(|| trimmed.strip_prefix("+0X"))
+    {
+        i64::from_str_radix(rest, 16)
+    } else if let Some(rest) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        i64::from_str_radix(rest, 16)
+    } else {
+        trimmed.parse::<i64>()
+    }
+}
+
+fn parse_i32(value: &str) -> Result<i32, String> {
+    let parsed = parse_i64(value).map_err(|err| err.to_string())?;
+    i32::try_from(parsed).map_err(|_| "value out of range for i32".to_string())
+}
+
+fn parse_u64(value: &str) -> Result<u64, String> {
+    let parsed = parse_i64(value).map_err(|err| err.to_string())?;
+    if parsed < 0 {
+        Err("value must be >= 0".to_string())
+    } else {
+        Ok(parsed as u64)
+    }
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "y" | "on" => Some(true),
+        "false" | "0" | "no" | "n" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn owner_index_from_section(section: &str) -> Option<i32> {
@@ -2733,6 +3261,106 @@ global func Step(state, frame, random)
             .object_snapshot(id)
             .expect("object created from legacy definition");
         assert_eq!(object.definition_id, "FOOO");
+    }
+
+    #[test]
+    fn loads_legacy_objects_txt_spawns_initial_objects() {
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let box_core = defs_root.join("Box.c4d");
+        std::fs::create_dir_all(&box_core).expect("box definition dir");
+        std::fs::write(
+            box_core.join("DefCore.txt"),
+            "[DefCore]\nid=BOX1\nName=Box\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write box defcore");
+        std::fs::write(box_core.join("Script.c"), "// box script\n").expect("box script");
+
+        let gem_core = defs_root.join("Gem.c4d");
+        std::fs::create_dir_all(&gem_core).expect("gem definition dir");
+        std::fs::write(
+            gem_core.join("DefCore.txt"),
+            "[DefCore]\nid=GEM1\nName=Gem\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write gem defcore");
+        std::fs::write(gem_core.join("Script.c"), "// gem script\n").expect("gem script");
+
+        let scenario_dir = dir.path().join("LegacyObjects.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Legacy Objects\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=BOX1\nNumber=100\nStatus=1\nCategory=0\nOwner=1\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nStatus=1\nCategory=0\nX=30\nY=40\nXDir=-5\nYDir=3\nEnergy=77\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
+        )
+        .expect("write objects");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("legacy scenario loads");
+
+        assert_eq!(scenario.initial_spawns.len(), 2);
+
+        let first = &scenario.initial_spawns[0];
+        assert_eq!(first.handle.as_deref(), Some("100"));
+        assert!(first.container_handle.is_none());
+        assert_eq!(first.config.definition_id, "BOX1");
+        assert_eq!(first.config.owner, 1);
+        assert_eq!(first.config.position, Vector2::new(10, 20));
+        assert_eq!(first.config.id, Some(ObjectId::new(100)));
+
+        let second = &scenario.initial_spawns[1];
+        assert_eq!(second.handle.as_deref(), Some("101"));
+        assert_eq!(second.container_handle.as_deref(), Some("100"));
+        assert_eq!(second.config.definition_id, "GEM1");
+        assert_eq!(second.config.position, Vector2::new(30, 40));
+        assert_eq!(second.config.velocity, Vector2::new(-5, 3));
+        assert_eq!(second.config.energy, 77);
+        assert_eq!(second.config.alive, Some(false));
+        assert_eq!(second.config.category, Some(0));
+        assert_eq!(second.config.direction, Direction::Right);
+        assert_eq!(second.config.command_direction, CommandDirection::Right);
+        let action = second.config.action.as_ref().expect("action state present");
+        assert_eq!(action.name, "Idle");
+        assert_eq!(action.ticks, 6);
+        assert_eq!(action.phase, 2);
+        assert_eq!(action.data, 5);
+        assert_eq!(action.target, Some(ObjectId::new(100)));
+
+        let mut engine = Engine::with_seed(0);
+        scenario
+            .apply(&mut engine)
+            .expect("legacy scenario applies");
+
+        let box_snapshot = engine
+            .object_snapshot(ObjectId::new(100))
+            .expect("box object");
+        assert_eq!(box_snapshot.definition_id, "BOX1");
+        assert_eq!(box_snapshot.owner, 1);
+        assert_eq!(box_snapshot.position, Vector2::new(10, 20));
+
+        let gem_snapshot = engine
+            .object_snapshot(ObjectId::new(101))
+            .expect("gem object");
+        assert_eq!(gem_snapshot.definition_id, "GEM1");
+        assert_eq!(gem_snapshot.position, Vector2::new(30, 40));
+        assert_eq!(gem_snapshot.velocity, Vector2::new(-5, 3));
+        assert_eq!(gem_snapshot.energy, 77);
+        assert!(!gem_snapshot.alive);
+        assert_eq!(gem_snapshot.container, Some(ObjectId::new(100)));
+        assert_eq!(gem_snapshot.direction, Direction::Right);
+        assert_eq!(gem_snapshot.command_direction, CommandDirection::Right);
+        assert_eq!(gem_snapshot.action.name, "Idle");
+        assert_eq!(gem_snapshot.action.ticks, 6);
+        assert_eq!(gem_snapshot.action.phase, 2);
+        assert_eq!(gem_snapshot.action.data, 5);
+        assert_eq!(gem_snapshot.action.target, Some(ObjectId::new(100)));
     }
 
     #[test]
