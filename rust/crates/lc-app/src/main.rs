@@ -2300,6 +2300,21 @@ impl GameApp {
             .set_object_sprites(Arc::clone(&self.sprite_cache));
     }
 
+    fn derive_ground_height(engine: &Engine, fallback: i32) -> i32 {
+        let fallback = fallback.max(0);
+        engine
+            .landscape()
+            .and_then(|landscape| {
+                landscape
+                    .surface()
+                    .iter()
+                    .copied()
+                    .filter(|height| *height >= 0)
+                    .max()
+            })
+            .unwrap_or(fallback)
+    }
+
     fn rebuild_definition_sprites(&mut self) {
         let mut sprites = self.assets.base_sprite_map().clone();
         for definition_id in self.engine.definition_ids() {
@@ -3632,10 +3647,10 @@ impl GameApp {
             .name()
             .map(|name| name.to_string())
             .unwrap_or_else(|| scenario.title.clone());
-        let ground = scenario_data
-            .ground_height_hint()
-            .unwrap_or(DEFAULT_GROUND_HEIGHT)
-            .max(0);
+        let ground = match scenario_data.ground_height_hint() {
+            Some(hint) => hint.max(0),
+            None => Self::derive_ground_height(&self.engine, DEFAULT_GROUND_HEIGHT),
+        };
 
         self.configure_running_state(label, ground);
         self.apply_focus_selection();
@@ -3677,7 +3692,9 @@ impl GameApp {
 
         self.snapshot = self.engine.snapshot();
         self.rebuild_definition_sprites();
-        self.configure_running_state(scenario.title.clone(), DEFAULT_GROUND_HEIGHT);
+        let fallback_ground =
+            Self::derive_ground_height(&self.engine, DEFAULT_GROUND_HEIGHT);
+        self.configure_running_state(scenario.title.clone(), fallback_ground);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
         self.refresh_object_menu();

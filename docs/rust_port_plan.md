@@ -132,7 +132,7 @@
 - ✅ **Synthetic Audio** (`lc-app/main.rs`) - Missing sound assets now log once and skip playback instead of emitting synthetic tones
 - ❌ **Placeholder Previews** (`lc-app/main.rs:1186-1241`) - Procedural gradient images
 - ❌ **Hardcoded Walker** (`lc-app/main.rs:2383-2414`) - Fixed spawn at (240, 180)
-- ❌ **Fallback Ground Height** (`lc-app/main.rs:55+`) - Hardcoded 360px default
+- ✅ **Fallback Ground Height** (`lc-app/src/main.rs`) - Fallback runtime now derives ground height from the active landscape instead of a fixed 360px
 - ❌ **Sandbox Scenario** (`lc-app/main.rs:1371-1386`) - "Rust Sandbox" instead of real game
 
 ---
