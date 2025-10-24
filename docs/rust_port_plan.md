@@ -195,7 +195,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ⚠️ Definition runtime still incomplete (no scripted context menus, limited metadata, missing graphics/sound wiring)
 - ❌ No real in-game definition graphics (walker sprite mapping only; most objects still fall back)
 - ⚠️ Audio assets still incomplete (missing samples remain silent; asset coverage still partial)
-- ⚠️ Message frames/portraits still missing (text-only rendering today)
+- ✅ Message frames render with tinted backgrounds and portrait accents, replacing the previous text-only overlay
 - ❌ No multiplayer lobby (transport exists but no game coordination)
 
 ---

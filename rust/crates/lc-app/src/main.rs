@@ -39,7 +39,7 @@ use lc_frontend::{
     KeyCode, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMenu,
     StartupMenuAction, ViewportInput,
 };
-use lc_graphics::{BitmapFont, Color, TextFont, TrueTypeFont};
+use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
 use lc_gui::ButtonTextures;
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
@@ -3163,7 +3163,15 @@ impl GameApp {
 
         let surface_width = self.graphics.surface().width() as f32;
         let surface_height = self.graphics.surface().height() as f32;
-        let mut prepared: Vec<((f32, f32), Vec<String>, Color)> = Vec::new();
+        struct PreparedMessage {
+            anchor: (f32, f32),
+            lines: Vec<String>,
+            color: Color,
+            has_frame: bool,
+            portrait: Option<Color>,
+        }
+
+        let mut prepared: Vec<PreparedMessage> = Vec::new();
 
         for message in &self.snapshot.hud.messages {
             if let Some(player) = message.player {
@@ -3212,7 +3220,32 @@ impl GameApp {
                         y = surface_height - 160.0;
                     }
 
-                    prepared.push(((x, y), message.lines.clone(), color));
+                    let has_decoration = message
+                        .decoration
+                        .as_ref()
+                        .map(|decor| !decor.trim().is_empty())
+                        .unwrap_or(false);
+                    let has_portrait = message.portrait.is_some();
+                    let portrait_color = message
+                        .portrait
+                        .as_ref()
+                        .and_then(|spec| Self::parse_portrait_color(spec))
+                        .or_else(|| {
+                            if has_portrait {
+                                Some(Color::new(color.r, color.g, color.b, 255))
+                            } else {
+                                None
+                            }
+                        });
+                    let has_frame = has_portrait || has_decoration;
+
+                    prepared.push(PreparedMessage {
+                        anchor: (x, y),
+                        lines: message.lines.clone(),
+                        color,
+                        has_frame,
+                        portrait: portrait_color,
+                    });
                 }
                 MessageKind::Target | MessageKind::TargetPlayer => {
                     let target_id = match message.target {
@@ -3232,7 +3265,32 @@ impl GameApp {
                     else {
                         continue;
                     };
-                    prepared.push(((screen_x, screen_y), message.lines.clone(), color));
+                    let has_decoration = message
+                        .decoration
+                        .as_ref()
+                        .map(|decor| !decor.trim().is_empty())
+                        .unwrap_or(false);
+                    let has_portrait = message.portrait.is_some();
+                    let portrait_color = message
+                        .portrait
+                        .as_ref()
+                        .and_then(|spec| Self::parse_portrait_color(spec))
+                        .or_else(|| {
+                            if has_portrait {
+                                Some(Color::new(color.r, color.g, color.b, 255))
+                            } else {
+                                None
+                            }
+                        });
+                    let has_frame = has_portrait || has_decoration;
+
+                    prepared.push(PreparedMessage {
+                        anchor: (screen_x, screen_y),
+                        lines: message.lines.clone(),
+                        color,
+                        has_frame,
+                        portrait: portrait_color,
+                    });
                 }
             }
         }
@@ -3243,16 +3301,141 @@ impl GameApp {
 
         let font = self.assets.font_arc();
         let line_height = 20.0;
+
+        const FONT_SIZE: f32 = 18.0;
+        const FRAME_PADDING: f32 = 8.0;
+        const PORTRAIT_SIZE: f32 = 42.0;
+        const PORTRAIT_GAP: f32 = 8.0;
+
         {
             let surface = self.graphics.surface_mut();
-            for (position, lines, color) in prepared {
-                let mut y = position.1;
-                for line in lines {
-                    font.draw_text(surface, position.0, y, &line, 18.0, color);
-                    y += line_height;
+            for message in prepared {
+                if message.has_frame {
+                    let portrait_space = if message.portrait.is_some() {
+                        PORTRAIT_SIZE + PORTRAIT_GAP
+                    } else {
+                        0.0
+                    };
+
+                    let mut text_width = 0.0f32;
+                    for line in &message.lines {
+                        let width = font.measure_text(line, FONT_SIZE).width;
+                        text_width = text_width.max(width);
+                    }
+                    let text_height = message.lines.len() as f32 * line_height;
+
+                    let frame_width = (text_width + portrait_space + FRAME_PADDING * 2.0)
+                        .max(1.0)
+                        .ceil();
+                    let frame_height = (text_height + FRAME_PADDING * 2.0).max(1.0).ceil();
+
+                    let rect = Rect::new(
+                        (message.anchor.0 - portrait_space - FRAME_PADDING).floor() as i32,
+                        (message.anchor.1 - FRAME_PADDING).floor() as i32,
+                        frame_width as u32,
+                        frame_height as u32,
+                    );
+
+                    let background = Color::new(12, 20, 36, 192);
+                    Self::fill_rect(surface, rect, background);
+                    let border = Color::new(
+                        message.color.r.saturating_add(24),
+                        message.color.g.saturating_add(24),
+                        message.color.b.saturating_add(24),
+                        255,
+                    );
+                    Self::draw_border(surface, rect, border);
+
+                    if let Some(portrait_color) = message.portrait {
+                        let portrait_rect = Rect::new(
+                            rect.x + FRAME_PADDING as i32,
+                            rect.y + FRAME_PADDING as i32,
+                            PORTRAIT_SIZE as u32,
+                            PORTRAIT_SIZE as u32,
+                        );
+                        Self::fill_rect(surface, portrait_rect, portrait_color);
+                        Self::draw_border(surface, portrait_rect, border);
+                    }
+
+                    let text_x = rect.x as f32
+                        + FRAME_PADDING
+                        + if message.portrait.is_some() {
+                            PORTRAIT_SIZE + PORTRAIT_GAP
+                        } else {
+                            0.0
+                        };
+                    let mut text_y = rect.y as f32 + FRAME_PADDING;
+
+                    for line in &message.lines {
+                        font.draw_text(surface, text_x, text_y, line, FONT_SIZE, message.color);
+                        text_y += line_height;
+                    }
+                } else {
+                    let mut y = message.anchor.1;
+                    for line in &message.lines {
+                        font.draw_text(
+                            surface,
+                            message.anchor.0,
+                            y,
+                            line,
+                            FONT_SIZE,
+                            message.color,
+                        );
+                        y += line_height;
+                    }
                 }
             }
         }
+    }
+
+    fn parse_portrait_color(spec: &str) -> Option<Color> {
+        let trimmed = spec.trim();
+        let rest = trimmed.strip_prefix("Portrait:")?;
+        let mut parts = rest.split("::");
+        let _id = parts.next()?;
+        let color_token = parts.next()?.trim();
+        let hex = color_token.chars().take(6).collect::<String>();
+        if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return None;
+        }
+        let value = u32::from_str_radix(&hex, 16).ok()?;
+        Some(Color::new(
+            ((value >> 16) & 0xff) as u8,
+            ((value >> 8) & 0xff) as u8,
+            (value & 0xff) as u8,
+            255,
+        ))
+    }
+
+    fn fill_rect(surface: &mut Surface, rect: Rect, color: Color) {
+        if let Some(clipped) = rect.intersection(surface.bounds()) {
+            for y in clipped.y..(clipped.y + clipped.height as i32) {
+                for x in clipped.x..(clipped.x + clipped.width as i32) {
+                    let result = if color.a == 255 {
+                        surface.set_pixel(x as u32, y as u32, color)
+                    } else {
+                        surface.blend_pixel(x as u32, y as u32, color)
+                    };
+                    if result.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_border(surface: &mut Surface, rect: Rect, color: Color) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        let top = Rect::new(rect.x, rect.y, rect.width, 1);
+        let bottom = Rect::new(rect.x, rect.y + rect.height as i32 - 1, rect.width, 1);
+        let left = Rect::new(rect.x, rect.y, 1, rect.height);
+        let right = Rect::new(rect.x + rect.width as i32 - 1, rect.y, 1, rect.height);
+        Self::fill_rect(surface, top, color);
+        Self::fill_rect(surface, bottom, color);
+        Self::fill_rect(surface, left, color);
+        Self::fill_rect(surface, right, color);
     }
 
     fn return_to_menu(&mut self) {
