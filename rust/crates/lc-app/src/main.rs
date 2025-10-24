@@ -16,7 +16,11 @@ use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::ptr::NonNull;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    mpsc::{self, Receiver, TryRecvError},
+    Arc, Mutex, OnceLock,
+};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -99,10 +103,39 @@ struct RuntimeConfig {
     network: Option<NetworkMode>,
 }
 
-enum ScenarioStartAttempt {
-    Started,
-    Unavailable,
-    Failed { message: String },
+const DEFAULT_LOADING_MESSAGE: &str = "Preparing scenario";
+
+enum ScenarioLoadingEvent {
+    Progress { fraction: f32, message: String },
+    Finished(Result<Scenario, String>),
+}
+
+struct ScenarioLoadingState {
+    scenario: FrontendScenario,
+    label: String,
+    progress: f32,
+    message: String,
+    receiver: Receiver<ScenarioLoadingEvent>,
+}
+
+impl ScenarioLoadingState {
+    fn new(scenario: FrontendScenario, receiver: Receiver<ScenarioLoadingEvent>) -> Self {
+        let label = scenario.title.clone();
+        Self {
+            label,
+            progress: 0.0,
+            message: DEFAULT_LOADING_MESSAGE.to_string(),
+            scenario,
+            receiver,
+        }
+    }
+
+    fn update(&mut self, fraction: f32, message: String) {
+        self.progress = fraction.clamp(0.0, 1.0);
+        if !message.trim().is_empty() {
+            self.message = message;
+        }
+    }
 }
 
 struct FrontendAssets {
@@ -1318,12 +1351,14 @@ struct GameApp {
     last_save_path: Option<PathBuf>,
     object_sprites: HashMap<String, ImageData>,
     sprite_cache: Arc<HashMap<String, ImageData>>,
+    loading_state: Option<ScenarioLoadingState>,
     exit_requested: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppMode {
     Menu,
+    Loading,
     Running,
 }
 
@@ -2436,6 +2471,7 @@ impl GameApp {
             local_owner: runtime.player_owner,
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
+            loading_state: None,
             exit_requested: false,
         };
         if let Some(existing) = existing_quick_save_path() {
@@ -2546,47 +2582,55 @@ impl GameApp {
             }
         }
 
-        if self.mode == AppMode::Menu {
-            if let Some(gui_key) = map_key_code(key) {
-                match self.startup_view {
-                    StartupView::ScenarioBrowser => match state {
-                        ElementState::Pressed => {
-                            if gui_key == KeyCode::Escape && self.menu_state.stack.len() <= 1 {
-                                self.show_main_menu();
-                            } else {
-                                self.handle_menu_input(|menu| menu.menu().handle_key_down(gui_key))?
+        match self.mode {
+            AppMode::Menu => {
+                if let Some(gui_key) = map_key_code(key) {
+                    match self.startup_view {
+                        StartupView::ScenarioBrowser => match state {
+                            ElementState::Pressed => {
+                                if gui_key == KeyCode::Escape && self.menu_state.stack.len() <= 1 {
+                                    self.show_main_menu();
+                                } else {
+                                    self.handle_menu_input(|menu| {
+                                        menu.menu().handle_key_down(gui_key)
+                                    })?
+                                }
                             }
+                            ElementState::Released => {
+                                self.handle_menu_input(|menu| menu.menu().handle_key_up(gui_key))?
+                            }
+                        },
+                        StartupView::MainMenu => {
+                            let actions = match state {
+                                ElementState::Pressed => {
+                                    self.main_menu_state.handle_key_down(gui_key)
+                                }
+                                ElementState::Released => {
+                                    self.main_menu_state.handle_key_up(gui_key)
+                                }
+                            };
+                            self.process_main_menu_actions(actions)?;
                         }
-                        ElementState::Released => {
-                            self.handle_menu_input(|menu| menu.menu().handle_key_up(gui_key))?
-                        }
-                    },
-                    StartupView::MainMenu => {
-                        let actions = match state {
-                            ElementState::Pressed => self.main_menu_state.handle_key_down(gui_key),
-                            ElementState::Released => self.main_menu_state.handle_key_up(gui_key),
-                        };
-                        self.process_main_menu_actions(actions)?;
                     }
                 }
+                Ok(())
             }
-            return Ok(());
-        }
-
-        if self.mode == AppMode::Running {
-            if key == VirtualKeyCode::Escape && state == ElementState::Pressed {
-                if self.object_menu.is_some() {
-                    self.close_object_menu();
-                } else if self.ingame_menu.is_some() {
-                    self.close_ingame_menu();
-                } else {
-                    self.open_ingame_menu();
+            AppMode::Running => {
+                if key == VirtualKeyCode::Escape && state == ElementState::Pressed {
+                    if self.object_menu.is_some() {
+                        self.close_object_menu();
+                    } else if self.ingame_menu.is_some() {
+                        self.close_ingame_menu();
+                    } else {
+                        self.open_ingame_menu();
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                self.handle_engine_key(key, state)?;
+                Ok(())
             }
-            self.handle_engine_key(key, state)?;
+            AppMode::Loading => Ok(()),
         }
-        Ok(())
     }
 
     fn handle_engine_key(
@@ -3083,6 +3127,7 @@ impl GameApp {
                 };
                 self.dispatch_control_event(event)?;
             }
+            AppMode::Loading => {}
         }
         Ok(())
     }
@@ -3118,6 +3163,7 @@ impl GameApp {
                         self.dispatch_control_event(ControlEvent::ClearPressed)?;
                     }
                 }
+                AppMode::Loading => {}
             },
             GamepadActionType::Back => match self.mode {
                 AppMode::Menu => match state {
@@ -3148,6 +3194,7 @@ impl GameApp {
                         }
                     }
                 }
+                AppMode::Loading => {}
             },
         }
         Ok(())
@@ -3484,11 +3531,17 @@ impl GameApp {
 
     fn update(&mut self) -> Result<(), EngineError> {
         self.process_network_events()?;
-        if matches!(self.mode, AppMode::Running) {
-            self.snapshot = self.engine.tick()?;
-            self.refresh_object_menu();
-            self.refresh_focus();
-            self.update_audio();
+        match self.mode {
+            AppMode::Running => {
+                self.snapshot = self.engine.tick()?;
+                self.refresh_object_menu();
+                self.refresh_focus();
+                self.update_audio();
+            }
+            AppMode::Loading => {
+                self.poll_loading()?;
+            }
+            AppMode::Menu => {}
         }
         Ok(())
     }
@@ -3510,6 +3563,54 @@ impl GameApp {
                 viewport_center,
             );
         }
+    }
+
+    fn poll_loading(&mut self) -> Result<(), EngineError> {
+        let mut completion: Option<(FrontendScenario, Result<Scenario, String>)> = None;
+        if let Some(state) = self.loading_state.as_mut() {
+            loop {
+                match state.receiver.try_recv() {
+                    Ok(ScenarioLoadingEvent::Progress { fraction, message }) => {
+                        state.update(fraction, message);
+                    }
+                    Ok(ScenarioLoadingEvent::Finished(result)) => {
+                        state.update(1.0, "Starting scenario".to_string());
+                        completion = Some((state.scenario.clone(), result));
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        completion = Some((
+                            state.scenario.clone(),
+                            Err("Scenario loading interrupted".to_string()),
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some((scenario, result)) = completion {
+            self.loading_state = None;
+            match result {
+                Ok(data) => {
+                    if let Err(message) = self.activate_loaded_scenario(scenario.clone(), data) {
+                        tracing::error!(scenario = %scenario.title, error = %message, "failed to start scenario");
+                        self.status_text = message;
+                        self.mode = AppMode::Menu;
+                        self.ensure_menu_music();
+                    }
+                }
+                Err(message) => {
+                    tracing::error!(scenario = %scenario.title, error = %message, "failed to load scenario");
+                    self.status_text = message;
+                    self.mode = AppMode::Menu;
+                    self.ensure_menu_music();
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn refresh_focus(&mut self) {
@@ -3554,18 +3655,102 @@ impl GameApp {
     }
 
     fn render(&mut self, frame: &mut [u8]) -> Result<()> {
-        if self.mode == AppMode::Menu {
-            render_startup_frame(
-                &mut self.graphics,
-                self.assets.as_ref(),
-                &mut self.main_menu_state,
-                &mut self.menu_state,
-                self.startup_view,
-                frame,
-            );
-            return Ok(());
+        match self.mode {
+            AppMode::Menu => {
+                render_startup_frame(
+                    &mut self.graphics,
+                    self.assets.as_ref(),
+                    &mut self.main_menu_state,
+                    &mut self.menu_state,
+                    self.startup_view,
+                    frame,
+                );
+                Ok(())
+            }
+            AppMode::Loading => self.render_loading(frame),
+            AppMode::Running => self.render_running(frame),
         }
-        self.render_running(frame)
+    }
+
+    fn render_loading(&mut self, frame: &mut [u8]) -> Result<()> {
+        {
+            let surface = self.graphics.surface_mut();
+            surface.fill(Color::opaque(16, 28, 52));
+
+            let font = self.assets.font_arc();
+            let width = surface.width() as f32;
+            let height = surface.height() as f32;
+
+            let (label, message, progress) = if let Some(state) = self.loading_state.as_ref() {
+                (
+                    state.label.as_str(),
+                    state.message.as_str(),
+                    state.progress.clamp(0.0, 1.0),
+                )
+            } else {
+                (self.scenario_label.as_str(), DEFAULT_LOADING_MESSAGE, 0.0)
+            };
+
+            let title = format!("Loading {}", label);
+            let title_metrics = font.measure_text(&title, 28.0);
+            let title_x = ((width - title_metrics.width) * 0.5).floor();
+            let title_y = (height * 0.35).floor();
+            font.draw_text(
+                surface,
+                title_x,
+                title_y,
+                &title,
+                28.0,
+                Color::opaque(232, 240, 255),
+            );
+
+            let message_metrics = font.measure_text(message, 20.0);
+            let message_x = ((width - message_metrics.width) * 0.5).floor();
+            let message_y = title_y + 36.0;
+            font.draw_text(
+                surface,
+                message_x,
+                message_y,
+                message,
+                20.0,
+                Color::opaque(196, 206, 228),
+            );
+
+            let bar_width = (width * 0.5).max(260.0).round().max(4.0) as u32;
+            let bar_height = 24u32;
+            let bar_x = ((width - bar_width as f32) * 0.5).round() as i32;
+            let bar_y = (height * 0.62).round() as i32;
+            let frame_rect = Rect::new(bar_x, bar_y, bar_width, bar_height);
+            let frame_fill = Color::new(18, 28, 48, 220);
+            Self::fill_rect(surface, frame_rect, frame_fill);
+            let frame_border = Color::opaque(92, 136, 192);
+            Self::draw_border(surface, frame_rect, frame_border);
+
+            if bar_width > 6 && bar_height > 4 {
+                let inner_margin = 3i32;
+                let available_width = bar_width.saturating_sub((inner_margin * 2) as u32);
+                let progress_width = ((available_width as f32) * progress).round() as u32;
+                if progress_width > 0 {
+                    let fill_rect = Rect::new(
+                        bar_x + inner_margin,
+                        bar_y + inner_margin,
+                        progress_width,
+                        bar_height.saturating_sub((inner_margin * 2) as u32).max(1),
+                    );
+                    let progress_fill = Color::opaque(124, 198, 255);
+                    Self::fill_rect(surface, fill_rect, progress_fill);
+                }
+            }
+        }
+
+        let surface = self.graphics.surface();
+        let pixels = surface.pixels();
+        if pixels.len() == frame.len() {
+            frame.copy_from_slice(pixels);
+        } else {
+            copy_surface(pixels, surface.width(), surface.height(), frame);
+        }
+        Ok(())
     }
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
@@ -3911,6 +4096,7 @@ impl GameApp {
         self.status_text.clear();
         self.energy_fraction = 0.0;
         self.active_scenario = None;
+        self.loading_state = None;
         if let Some(audio) = self.audio.as_mut() {
             audio.stop_music();
             audio.reset_sfx();
@@ -3969,45 +4155,76 @@ impl GameApp {
     }
 
     fn start_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
-        match self.try_start_real_scenario(&scenario)? {
-            ScenarioStartAttempt::Started => Ok(()),
-            ScenarioStartAttempt::Unavailable => self.start_sandbox_scenario(scenario),
-            ScenarioStartAttempt::Failed { message } => {
-                self.status_text = message;
-                self.mode = AppMode::Menu;
-                self.ensure_menu_music();
-                Ok(())
-            }
+        if scenario.path.is_none() {
+            return self.start_sandbox_scenario(scenario);
         }
+        self.begin_loading_scenario(scenario)
     }
 
-    fn try_start_real_scenario(
-        &mut self,
-        scenario: &FrontendScenario,
-    ) -> Result<ScenarioStartAttempt, EngineError> {
-        let Some(path) = scenario.path.as_ref() else {
-            return Ok(ScenarioStartAttempt::Unavailable);
-        };
+    fn begin_loading_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
+        let path = scenario
+            .path
+            .clone()
+            .expect("scenario path must be present when starting load");
+        tracing::info!(
+            scenario = %scenario.title,
+            path = %path.display(),
+            "starting asynchronous scenario load"
+        );
 
-        let resolver = InstallDefinitionResolver::new(cached_app_paths().ok());
-        let scenario_data = match Scenario::load_from_path_with(path, &resolver) {
-            Ok(data) => data,
-            Err(err) => {
-                tracing::error!(
-                    scenario = %scenario.title,
-                    path = %path.display(),
-                    error = %err,
-                    "failed to load scenario"
-                );
-                let message = format!("Failed to load {}: {err}", scenario.title);
-                return Ok(ScenarioStartAttempt::Failed { message });
+        let resolver_paths = cached_app_paths().ok();
+        let scenario_title = scenario.title.clone();
+        let (sender, receiver) = mpsc::channel();
+        let path_for_thread = path.clone();
+
+        thread::spawn(move || {
+            let resolver = InstallDefinitionResolver::new(resolver_paths);
+            let send_progress = |fraction: f32, message: &str| {
+                let _ = sender.send(ScenarioLoadingEvent::Progress {
+                    fraction,
+                    message: message.to_string(),
+                });
+            };
+
+            send_progress(0.05, "Reading scenario data");
+            let scenario_data = Scenario::load_from_path_with(&path_for_thread, &resolver)
+                .map_err(|err| err.to_string());
+
+            match scenario_data {
+                Ok(data) => {
+                    send_progress(0.7, "Preparing scenario resources");
+                    let _ = sender.send(ScenarioLoadingEvent::Finished(Ok(data)));
+                }
+                Err(err) => {
+                    let message = format!("Failed to load {}: {}", scenario_title, err);
+                    let _ = sender.send(ScenarioLoadingEvent::Finished(Err(message)));
+                }
             }
-        };
+        });
+
+        if let Some(audio) = self.audio.as_mut() {
+            audio.stop_music();
+        }
+        self.status_text.clear();
+        self.loading_state = Some(ScenarioLoadingState::new(scenario, receiver));
+        self.mode = AppMode::Loading;
+        Ok(())
+    }
+
+    fn activate_loaded_scenario(
+        &mut self,
+        scenario: FrontendScenario,
+        scenario_data: Scenario,
+    ) -> Result<(), String> {
+        let path = scenario
+            .path
+            .clone()
+            .ok_or_else(|| format!("Scenario `{}` is missing a filesystem path", scenario.title))?;
 
         tracing::info!(
             scenario = %scenario.title,
             path = %path.display(),
-            "starting scenario from disk"
+            "applying loaded scenario"
         );
 
         let mut engine = Engine::new();
@@ -4020,14 +4237,17 @@ impl GameApp {
                 error = %err,
                 "failed to apply scenario"
             );
-            let message = format!("Failed to start {}: {err}", scenario.title);
-            return Ok(ScenarioStartAttempt::Failed { message });
+            return Err(format!("Failed to start {}: {err}", scenario.title));
+        }
+
+        if let Some(description) = scenario_data.description() {
+            engine.show_scenario_intro(description);
         }
 
         self.engine = engine;
         self.input = InputDispatcher::new();
         if let Some(audio) = self.audio.as_mut() {
-            audio.configure_scenario(Some(path));
+            audio.configure_scenario(Some(&path));
             audio.reset_sfx();
             scenario_data.visit_definition_groups(|id, group| {
                 audio.register_definition_sounds(id, group);
@@ -4053,8 +4273,9 @@ impl GameApp {
         self.refresh_object_menu();
         self.refresh_focus();
         self.active_scenario = Some(scenario.clone());
-        self.play_scenario_audio(path);
-        Ok(ScenarioStartAttempt::Started)
+        self.play_scenario_audio(&path);
+        self.status_text.clear();
+        Ok(())
     }
 
     fn start_sandbox_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
@@ -4063,6 +4284,7 @@ impl GameApp {
             "starting sandbox fallback scenario"
         );
 
+        self.loading_state = None;
         self.engine = Engine::new();
         self.apply_material_library();
         self.input = InputDispatcher::new();
@@ -5248,7 +5470,21 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::thread;
+    use std::time::Duration;
     use tempfile::tempdir;
+
+    fn wait_for_running(app: &mut GameApp) {
+        for _ in 0..480 {
+            if matches!(app.mode, AppMode::Running) {
+                return;
+            }
+            app.update()
+                .expect("tick while waiting for scenario to start");
+            thread::sleep(Duration::from_millis(2));
+        }
+        panic!("scenario did not enter running mode in time");
+    }
 
     fn make_object(id: u64, definition: &str, position: Vector2) -> ObjectSnapshot {
         ObjectSnapshot {
@@ -5901,6 +6137,7 @@ mod tests {
                     .cloned()
                     .expect("scenario discovered");
                 app.start_scenario(scenario).expect("start disk scenario");
+                wait_for_running(&mut app);
 
                 for _ in 0..5 {
                     app.update().expect("advance simulation before save");
@@ -6078,6 +6315,7 @@ mod tests {
         assert_eq!(scenario.title, "Alpha Mission");
 
         app.start_scenario(scenario).expect("start disk scenario");
+        wait_for_running(&mut app);
 
         assert!(
             matches!(app.mode, AppMode::Running),

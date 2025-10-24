@@ -83,7 +83,7 @@ use compat::{
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use material::MaterialReactionKind;
-use message::{MessageCommand, MessageManager, PersistedMessage};
+use message::{MessageCommand, MessageManager, MessageSpec, PersistedMessage};
 use ocf::NORMAL as OCF_NORMAL;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
@@ -4735,6 +4735,32 @@ impl Engine {
         };
         engine.environment.refresh_runtime_fields();
         engine
+    }
+
+    pub fn show_scenario_intro(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let cleaned = trimmed.replace('\r', "");
+        let normalized = cleaned
+            .split('\n')
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("|");
+        let spec = MessageSpec {
+            kind: message::MessageKind::Global,
+            text: normalized,
+            target: None,
+            player: None,
+            offset: Vector2::new(0, 0),
+            color: 0xffff_ffff,
+            flags: message::FLAG_TOP | message::FLAG_HCENTER | message::FLAG_ALIGN_CENTER,
+            width: Some(400),
+            decoration: Some("Mission".to_string()),
+            portrait: None,
+        };
+        self.messages.add_message(spec);
     }
 
     pub fn register_player(&mut self, config: PlayerConfig) -> Result<(), EngineError> {

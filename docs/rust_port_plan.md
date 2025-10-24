@@ -53,8 +53,8 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - [x] Objects.txt initial object spawning (Scenario.txt crew entries now covered)
 - [x] Verify all definitions load correctly
 - [x] Proper error handling (don't fall back silently)
-- [ ] Loading screen with progress
-- [ ] Scenario intro text/mission briefing
+        - [x] Loading screen with progress
+        - [x] Scenario intro text/mission briefing
 
 **Progress (2025-10-31):** Legacy loader now mirrors C++ SkipDefs filtering so scenarios stop registering intentionally omitted definitions, with coverage in `rust/crates/lc-engine/src/scenario.rs`.
 **Progress (2025-10-30):** Scenario loader now parses the entire legacy `Scenario.txt` core into typed sections (Head, Definitions, Game, Player start, Landscape, Weather, Animals, Environment), validating every field and exposing it to the engine for parity-critical data.
@@ -62,6 +62,7 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 **Progress (2025-10-26):** Legacy loader now parses `Objects.txt`, creating spawn configs with explicit object ids, status, owner, position/velocity, crew state, action info, and resolves containers (including via `Contents=` fallbacks) so full scenario object graphs appear without sandbox fallback.
 **Progress (2025-10-24):** Ported Scenario.txt weather and landscape physics parsing so gravity, wind variation, climate, precipitation, and disaster levels feed straight into the Rust engine instead of defaulting to sandbox values.
 **Progress (2025-10-24):** Legacy `Map.bmp` columns now translate into zoomed `Landscape` surface heights (with a flat fallback when the bitmap is missing) so real scenarios boot with terrain instead of the sandbox void.
+**Progress (2025-11-03):** Added threaded scenario loading with an in-game progress screen and restored the mission briefing overlay via `rust/crates/lc-app/src/main.rs` and `rust/crates/lc-engine/src/lib.rs`.
 
 **Files:** `lc-engine/src/scenario.rs`, `rust/crates/lc-app/src/main.rs:3984`
 

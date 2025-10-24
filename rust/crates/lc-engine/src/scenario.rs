@@ -132,6 +132,7 @@ struct ScenarioScriptSource {
 #[derive(Debug)]
 pub struct Scenario {
     name: Option<String>,
+    description: Option<String>,
     ticks: Option<u32>,
     ground_height_hint: Option<i32>,
     definitions: Vec<ScenarioDefinition>,
@@ -237,6 +238,7 @@ impl Scenario {
 
         Ok(Self {
             name: manifest.title,
+            description: manifest.description,
             ticks: None,
             ground_height_hint: manifest.ground_height_hint,
             definitions: collected,
@@ -251,6 +253,10 @@ impl Scenario {
 
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
     }
 
     pub fn configured_ticks(&self) -> Option<u32> {
@@ -595,6 +601,7 @@ impl Scenario {
 
         Ok(Self {
             name: manifest.name,
+            description: manifest.description,
             ticks: manifest.ticks,
             ground_height_hint,
             definitions,
@@ -3047,6 +3054,8 @@ struct ScenarioManifest {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
     ticks: Option<u32>,
     #[serde(default)]
     ground_height: Option<i32>,
@@ -4786,6 +4795,7 @@ global func Step(state, frame, random)
 
         let scenario = Scenario {
             name: Some("Script Test".into()),
+            description: None,
             ticks: None,
             ground_height_hint: Some(220),
             definitions: vec![ScenarioDefinition {
@@ -4856,6 +4866,7 @@ global func Step(state, frame, random)
 
         let scenario = Scenario {
             name: Some("Step Test".into()),
+            description: None,
             ticks: None,
             ground_height_hint: Some(220),
             definitions: vec![ScenarioDefinition {
