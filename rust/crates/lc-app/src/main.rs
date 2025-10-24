@@ -13,7 +13,7 @@ use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1654,16 +1654,18 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
         if relative.is_absolute() {
             Self::open_and_push(&relative, &mut groups, &mut seen)?;
         } else {
-            if let Ok(child) = scenario.open_child(&relative) {
+            if let Some(child) =
+                open_child_flexible(scenario, &relative).map_err(ScenarioError::Resources)?
+            {
                 Self::push_group(&mut groups, &mut seen, child);
             }
 
             for ancestor in scenario.root().ancestors() {
                 if let Ok(group) = Group::open(ancestor) {
-                    match group.open_child(&relative) {
-                        Ok(child) => Self::push_group(&mut groups, &mut seen, child),
-                        Err(err) if Self::should_ignore_error(&err) => {}
-                        Err(err) => return Err(ScenarioError::Resources(err)),
+                    if let Some(child) =
+                        open_child_flexible(&group, &relative).map_err(ScenarioError::Resources)?
+                    {
+                        Self::push_group(&mut groups, &mut seen, child);
                     }
                 }
 
@@ -1693,10 +1695,10 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
                     }
 
                     if let Ok(group) = Group::open(&base) {
-                        match group.open_child(&relative) {
-                            Ok(child) => Self::push_group(&mut groups, &mut seen, child),
-                            Err(err) if Self::should_ignore_error(&err) => {}
-                            Err(err) => return Err(ScenarioError::Resources(err)),
+                        if let Some(child) = open_child_flexible(&group, &relative)
+                            .map_err(ScenarioError::Resources)?
+                        {
+                            Self::push_group(&mut groups, &mut seen, child);
                         }
                     }
 
@@ -1718,6 +1720,67 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
             Ok(groups)
         }
     }
+}
+
+fn open_child_flexible(group: &Group, relative: &Path) -> Result<Option<Group>, GroupError> {
+    match group.open_child(relative) {
+        Ok(child) => Ok(Some(child)),
+        Err(err) => match err {
+            GroupError::EntryNotFound(_) | GroupError::Missing(_) | GroupError::NotDirectory(_) => {
+                match open_child_case_insensitive(group, relative) {
+                    Ok(child) => Ok(Some(child)),
+                    Err(GroupError::EntryNotFound(_)) => Ok(None),
+                    Err(other) => Err(other),
+                }
+            }
+            other => Err(other),
+        },
+    }
+}
+
+fn open_child_case_insensitive(group: &Group, relative: &Path) -> Result<Group, GroupError> {
+    let mut current = group.clone();
+    let mut consumed = PathBuf::new();
+
+    for component in relative.components() {
+        match component {
+            Component::Normal(name) => {
+                let target = name.to_string_lossy().to_ascii_lowercase();
+                let entries = current.entries()?;
+                let matched = entries.into_iter().find(|entry| {
+                    if entry.relative_path.components().count() != 1 {
+                        return false;
+                    }
+                    entry
+                        .relative_path
+                        .file_name()
+                        .and_then(|candidate| candidate.to_str())
+                        .map(|candidate| candidate.eq_ignore_ascii_case(&target))
+                        .unwrap_or(false)
+                });
+
+                let entry = match matched {
+                    Some(entry) => entry,
+                    None => {
+                        let mut missing = consumed.clone();
+                        missing.push(name);
+                        return Err(GroupError::EntryNotFound(missing));
+                    }
+                };
+
+                consumed.push(&entry.relative_path);
+                current = current.open_child(&entry.relative_path)?;
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                let mut invalid = consumed.clone();
+                invalid.push(component.as_os_str());
+                return Err(GroupError::EntryNotFound(invalid));
+            }
+        }
+    }
+
+    Ok(current)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4213,14 +4276,13 @@ fn load_install_definitions(
     paths: &AppPaths,
     audio: Option<&mut AudioContext>,
 ) -> Result<Option<String>, EngineError> {
-    let objects_path = paths.planet_dir().join("Objects.ocd");
-    let group = match Group::open(&objects_path) {
-        Ok(group) => group,
-        Err(err) => {
+    let group = match open_install_objects_group(paths) {
+        Some(group) => group,
+        None => {
             tracing::debug!(
-                path = %objects_path.display(),
-                error = %err,
-                "failed to open Objects.ocd; continuing with sandbox fallback"
+                install_root = %paths.install_root().display(),
+                planet = %paths.planet_dir().display(),
+                "no install object definitions found; continuing with sandbox fallback"
             );
             return Ok(None);
         }
@@ -4232,6 +4294,44 @@ fn load_install_definitions(
     let _ =
         load_definitions_from_group(engine, &group, audio_ptr, &mut seen, &mut spawn_candidate)?;
     Ok(spawn_candidate)
+}
+
+fn open_install_objects_group(paths: &AppPaths) -> Option<Group> {
+    const OBJECT_GROUP_NAMES: &[&str] = &["Objects.ocd", "Objects.c4d", "Objects.ocg"];
+
+    let mut bases = Vec::new();
+    bases.push(paths.planet_dir().to_path_buf());
+    bases.push(paths.install_root().to_path_buf());
+    bases.sort();
+    bases.dedup();
+
+    for base in bases {
+        if let Ok(group) = Group::open(&base) {
+            for name in OBJECT_GROUP_NAMES {
+                match open_child_flexible(&group, Path::new(name)) {
+                    Ok(Some(child)) => return Some(child),
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::debug!(
+                            base = %base.display(),
+                            candidate = *name,
+                            error = %err,
+                            "error while probing install object group"
+                        );
+                    }
+                }
+            }
+        }
+
+        for name in OBJECT_GROUP_NAMES {
+            let candidate = base.join(name);
+            if let Ok(group) = Group::open(&candidate) {
+                return Some(group);
+            }
+        }
+    }
+
+    None
 }
 
 fn load_definitions_from_group(
@@ -5578,6 +5678,96 @@ mod tests {
             Some(scenario_dir.as_path()),
             "active scenario should track disk path"
         );
+    }
+
+    #[test]
+    fn install_definition_resolver_handles_case_insensitive_paths() {
+        lc_core::logging::init();
+        reset_cached_app_paths();
+
+        let install_dir = tempdir().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let objects_dir = planet_dir.join("objects.ocd").join("clonk.c4d");
+        fs::create_dir_all(&objects_dir).unwrap();
+        fs::write(
+            objects_dir.join("DefCore.txt"),
+            "[DefCore]\nid=Clonk\nName=Clonk\nCategory=1\nCrewMember=1\nValue=100\nMass=40\n",
+        )
+        .unwrap();
+        fs::write(objects_dir.join("Script.c"), walker_script()).unwrap();
+
+        let scenario_dir = install_dir.path().join("Scenarios").join("Alpha.c4s");
+        fs::create_dir_all(&scenario_dir).unwrap();
+        let scenario_group = Group::open(&scenario_dir).unwrap();
+
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+
+        let paths = cached_app_paths().expect("discover app paths");
+        let resolver = InstallDefinitionResolver::new(Some(paths.clone()));
+        let groups = resolver
+            .resolve_definition_groups(&scenario_group, "Objects.ocd\\Clonk.c4d")
+            .expect("resolve definition groups");
+        let found_definition = groups.iter().any(|group| {
+            group
+                .root()
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .ends_with("clonk.c4d")
+        });
+        assert!(found_definition, "expected to locate definition group");
+
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn load_install_definitions_discovers_mixed_case_objects_group() {
+        lc_core::logging::init();
+        reset_cached_app_paths();
+
+        let install_dir = tempdir().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let objects_dir = planet_dir.join("objects.c4d").join("clonk.c4d");
+        fs::create_dir_all(&objects_dir).unwrap();
+        fs::write(
+            objects_dir.join("DefCore.txt"),
+            "[DefCore]\nid=Clonk\nName=Clonk\nCategory=1\nCrewMember=1\nValue=100\nMass=40\n",
+        )
+        .unwrap();
+        fs::write(objects_dir.join("Script.c"), walker_script()).unwrap();
+
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+
+        let paths = cached_app_paths().expect("discover app paths");
+        let mut engine = Engine::new();
+        let spawn =
+            load_install_definitions(&mut engine, &paths, None).expect("load install definitions");
+        assert_eq!(spawn.as_deref(), Some("Clonk"));
+        assert!(
+            engine
+                .definition_ids()
+                .any(|id| id.eq_ignore_ascii_case("Clonk")),
+            "expected Clonk definition to be registered"
+        );
+
+        reset_cached_app_paths();
     }
 
     fn cleanup_quicksave_file() {

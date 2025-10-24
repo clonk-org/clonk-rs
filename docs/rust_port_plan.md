@@ -157,6 +157,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 2. ✅ Port C4Weather and C4Sky for atmosphere — sky assets now load from scenarios/Graphics.c4g with wind-driven parallax, precipitation reacts to temperature (rain vs. snow), and lightning events tie into HUD lighting
 3. ✅ Port C4PXS particle system for effects — engine now simulates material PXS with landscape reactions and object friction passthrough
 4. Integrate real game assets (objects, scenarios, graphics, sounds)
+   - ✅ Install definition discovery now handles case-insensitive `Objects.*` groups and loads mixed-case assets; new lc-app tests cover resolver + loader to prevent regressions
 
 ### Phase 4: Remove Fallbacks
 **Only after Phases 1-3:** Remove synthetic audio, placeholder previews, sandbox scenario, hardcoded defaults
