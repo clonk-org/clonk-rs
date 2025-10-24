@@ -91,9 +91,9 @@
   - ✅ Script loader descends into `Script.c4d` folders (skipping embedded `DefCore` groups) so complex definitions compile all their sources
 
 - ⚠️  **Graphics Resources** (C4GraphicsResource.cpp 🔗 Minimal)
-  - Progress: Fonts, startup backgrounds, and button textures now sourced from Graphics.c4g; walker sprite mapped from crew assets
-  - Missing: Comprehensive definition graphics pipeline, cursor graphics, broader GUI icon sets
-  - Has: Basic surface rendering only
+  - Progress: Fonts, startup backgrounds, and button textures now sourced from Graphics.c4g; walker sprite mapped from crew assets; player cursor atlas now loads from Graphics.c4g and renders viewport cursor markers
+  - Missing: Comprehensive definition graphics pipeline and broader GUI icon sets
+  - Has: Basic surface rendering with cursor overlays
 
 - ⚠️  **Landscape Features** (C4Landscape.cpp is 88KB, lc-engine has basics only)
   - Progress: Digging raises surface depths (DigFree); blasting now carves heightmap craters honoring BlastFree and tracking removal stats; incineration hooks respect Inflammable. Scripted deformation still outstanding.
@@ -184,6 +184,7 @@ The documentation previously focused on "removing fallbacks." **This is backward
 - ✅ Landscape blast operations carve heightmap craters respecting BlastFree and expose per-material removal totals for follow-up effects
 - ✅ Player registry + HUD overlay surface real player metadata (names, wealth, cursor) sourced from engine snapshots
 - ✅ Cursor cycling and selection toggles now respect classic COM_Single/COM_Double timing with network serialization parity
+- ✅ Viewport cursor markers render using Graphics.c4g cursor atlas instead of placeholder arrows
 - ✅ Team home-base rule produces and syncs materials between teammates (C4Player::ExecHomeBaseProduction)
 - ✅ In-game pause menu implemented (resume, quick save/load, abort) while gameplay continues; scripted context menus now surface definition-driven actions
 - ⚠️ Player inventory menu mirrors crew contents with navigation/selection feedback, shows value/mass stats, and now routes Focus/DropAll/build deliveries through definition `MenuCommand`

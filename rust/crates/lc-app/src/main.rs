@@ -35,9 +35,9 @@ use lc_engine::{
     FLAG_VCENTER, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
-    draw_image, CrewOverlay, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData, InputDispatcher,
-    KeyCode, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMenu,
-    StartupMenuAction, ViewportInput,
+    draw_image, CrewOverlay, CursorAtlas, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData,
+    InputDispatcher, KeyCode, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState,
+    StartupMenu, StartupMenuAction, ViewportInput,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
 use lc_gui::ButtonTextures;
@@ -102,6 +102,7 @@ struct FrontendAssets {
     menu_background: Option<ImageData>,
     button_textures: Option<ButtonTextures>,
     base_sprites: HashMap<String, ImageData>,
+    cursor_atlas: Arc<CursorAtlas>,
 }
 
 impl FrontendAssets {
@@ -110,6 +111,7 @@ impl FrontendAssets {
         let mut menu_background = None;
         let mut button_textures = None;
         let mut sprites = HashMap::new();
+        let mut cursor_atlas = CursorAtlas::empty();
 
         if let Some(paths) = paths {
             let graphics_path = paths.planet_dir().join("Graphics.c4g");
@@ -123,6 +125,7 @@ impl FrontendAssets {
                     if let Ok(sprite) = graphics.load_image("Crew.png") {
                         sprites.insert("Walker".to_string(), Self::image_to_data(sprite));
                     }
+                    cursor_atlas = Self::load_cursor_atlas(&graphics);
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -139,6 +142,7 @@ impl FrontendAssets {
             menu_background,
             button_textures,
             base_sprites: sprites,
+            cursor_atlas: Arc::new(cursor_atlas),
         }
     }
 
@@ -184,6 +188,10 @@ impl FrontendAssets {
         self.button_textures.clone()
     }
 
+    fn cursor_atlas(&self) -> Arc<CursorAtlas> {
+        Arc::clone(&self.cursor_atlas)
+    }
+
     fn base_sprite_map(&self) -> &HashMap<String, ImageData> {
         &self.base_sprites
     }
@@ -203,6 +211,39 @@ impl FrontendAssets {
             selected,
             disabled: Some(disabled),
         })
+    }
+
+    fn load_cursor_atlas(graphics: &GraphicsResource) -> CursorAtlas {
+        const CURSOR_FILES: [(&str, usize); 8] = [
+            ("CursorXXXXXLarge.png", 0),
+            ("CursorXXXXLarge.png", 1),
+            ("CursorXXXLarge.png", 2),
+            ("CursorXXLarge.png", 3),
+            ("CursorXLarge.png", 4),
+            ("CursorLarge.png", 5),
+            ("CursorMedium.png", 6),
+            ("CursorSmall.png", 7),
+        ];
+
+        let mut images = vec![None; CURSOR_FILES.len()];
+        let mut loaded = false;
+        for (name, index) in CURSOR_FILES {
+            match graphics.load_image(name) {
+                Ok(image) => {
+                    images[index] = Some(Self::image_to_data(image));
+                    loaded = true;
+                }
+                Err(err) => {
+                    tracing::debug!(file = name, error = %err, "cursor image missing");
+                }
+            }
+        }
+
+        if loaded {
+            CursorAtlas::new(images)
+        } else {
+            CursorAtlas::empty()
+        }
     }
 
     fn image_to_data(image: GraphicsImage) -> ImageData {
@@ -2210,6 +2251,7 @@ impl GameApp {
             &scenario_label,
             assets.font_arc(),
             Arc::clone(&sprite_cache),
+            assets.cursor_atlas(),
         );
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
 
@@ -2274,6 +2316,7 @@ impl GameApp {
             &self.scenario_label,
             self.assets.font_arc(),
             Arc::clone(&self.sprite_cache),
+            self.assets.cursor_atlas(),
         );
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics = graphics;
@@ -3551,6 +3594,7 @@ impl GameApp {
             &self.scenario_label,
             self.assets.font_arc(),
             Arc::clone(&self.sprite_cache),
+            self.assets.cursor_atlas(),
         );
         self.graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics.set_sky(self.sky.clone());
@@ -3692,8 +3736,7 @@ impl GameApp {
 
         self.snapshot = self.engine.snapshot();
         self.rebuild_definition_sprites();
-        let fallback_ground =
-            Self::derive_ground_height(&self.engine, DEFAULT_GROUND_HEIGHT);
+        let fallback_ground = Self::derive_ground_height(&self.engine, DEFAULT_GROUND_HEIGHT);
         self.configure_running_state(scenario.title.clone(), fallback_ground);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
@@ -3905,6 +3948,7 @@ impl GameApp {
             &self.scenario_label,
             self.assets.font_arc(),
             Arc::clone(&self.sprite_cache),
+            self.assets.cursor_atlas(),
         );
         self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
         self.graphics.set_sky(self.sky.clone());

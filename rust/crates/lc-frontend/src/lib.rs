@@ -89,6 +89,62 @@ fn smooth_value(current: f32, target: f32) -> f32 {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CursorAtlas {
+    images: Vec<Option<ImageData>>,
+}
+
+impl CursorAtlas {
+    pub fn new(images: Vec<Option<ImageData>>) -> Self {
+        Self { images }
+    }
+
+    pub fn empty() -> Self {
+        Self { images: Vec::new() }
+    }
+
+    pub fn image_for_resolution(&self, width: u32) -> Option<ImageData> {
+        if self.images.is_empty() {
+            return None;
+        }
+
+        const DEFAULT_INDEX: usize = 5;
+        const BREAKPOINTS: [u32; 2] = [1280, 800];
+
+        let mut index = DEFAULT_INDEX;
+        if width <= BREAKPOINTS[0] {
+            for &bp in &BREAKPOINTS {
+                if width >= bp {
+                    break;
+                }
+                index += 1;
+            }
+        }
+        if index >= self.images.len() {
+            index = self.images.len() - 1;
+        }
+
+        let mut candidates = Vec::with_capacity(self.images.len());
+        candidates.push(index);
+        for offset in 1..self.images.len() {
+            if let Some(left) = index.checked_sub(offset) {
+                candidates.push(left);
+            }
+            let right = index + offset;
+            if right < self.images.len() {
+                candidates.push(right);
+            }
+        }
+
+        for idx in candidates {
+            if let Some(image) = self.images[idx].clone() {
+                return Some(image);
+            }
+        }
+        None
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SkyRenderState {
     settings: SkySettings,
@@ -206,6 +262,7 @@ pub struct GraphicsSystem {
     world_width: i32,
     world_height: i32,
     object_sprites: Arc<HashMap<String, ImageData>>,
+    cursor_atlas: Arc<CursorAtlas>,
     active_viewports: Vec<ActiveViewport>,
     camera_states: HashMap<CameraKey, CameraState>,
     sky: Option<SkyRenderState>,
@@ -219,6 +276,7 @@ impl GraphicsSystem {
         scenario_label: &str,
         font: Arc<dyn TextFont>,
         object_sprites: Arc<HashMap<String, ImageData>>,
+        cursor_atlas: Arc<CursorAtlas>,
     ) -> Self {
         let mut gui = Gui::new(font.clone());
         let root = gui.root();
@@ -257,6 +315,7 @@ impl GraphicsSystem {
             world_width: surface_width as i32,
             world_height: fallback_ground_height.max(surface_height as i32).max(0),
             object_sprites,
+            cursor_atlas,
             active_viewports: Vec::new(),
             camera_states: HashMap::new(),
             sky: None,
@@ -532,6 +591,7 @@ impl GraphicsSystem {
             lighting,
         );
         self.draw_objects(&snapshot.objects, lighting);
+        self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom);
 
         let content_surface = std::mem::replace(&mut self.surface, main_surface);
 
@@ -1152,6 +1212,67 @@ impl GraphicsSystem {
             GuiSize::new(size, size),
         );
         fill_rect(&mut self.surface, &rect, color);
+    }
+
+    fn draw_player_cursors(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        owner: i32,
+        origin_x: f32,
+        origin_y: f32,
+        zoom: f32,
+    ) {
+        let Some(image) = self.cursor_atlas.image_for_resolution(self.surface_width) else {
+            return;
+        };
+
+        let cursor_id = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .and_then(|player| player.cursor)
+            .or_else(|| {
+                snapshot
+                    .crew_selection
+                    .get(&owner)
+                    .and_then(|selection| selection.cursor)
+            });
+        let Some(cursor_id) = cursor_id else {
+            return;
+        };
+        let Some(object) = snapshot.object(cursor_id) else {
+            return;
+        };
+
+        let content_width = self.surface_width as f32;
+        let content_height = self.surface_height as f32;
+        let screen_x = (object.position.x as f32 - origin_x) * zoom;
+        let screen_y = (object.position.y as f32 - origin_y) * zoom;
+        let margin = 16.0;
+        if screen_x < -margin
+            || screen_y < -margin
+            || screen_x > content_width + margin
+            || screen_y > content_height + margin
+        {
+            return;
+        }
+
+        let sprite_height = self
+            .object_sprites
+            .get(&object.definition_id)
+            .map(|sprite| (sprite.height() as f32 * zoom).max(1.0))
+            .unwrap_or(12.0 * zoom);
+        let cursor_width = image.width() as f32;
+        let cursor_height = image.height() as f32;
+
+        let rect = GuiRect::from_origin_size(
+            GuiPoint::new(
+                screen_x - cursor_width / 2.0,
+                screen_y - sprite_height / 2.0 - cursor_height,
+            ),
+            GuiSize::new(cursor_width, cursor_height),
+        );
+        draw_image(&mut self.surface, &rect, &image);
     }
 
     fn draw_gui_overlay(&mut self) {
@@ -1806,7 +1927,8 @@ pub(crate) fn draw_text(
 mod tests {
     use super::*;
     use lc_engine::{
-        EnvironmentFrame, Landscape, LiquidSegment, ObjectId, ObjectVertex, RgbColor, Vector2,
+        EnvironmentFrame, Landscape, LiquidSegment, ObjectId, ObjectVertex, PlayerState, RgbColor,
+        Vector2,
     };
     use lc_graphics::{BitmapFont, PixelFormat};
     use rand::SeedableRng;
@@ -1819,6 +1941,10 @@ mod tests {
 
     fn empty_sprites() -> Arc<HashMap<String, ImageData>> {
         Arc::new(HashMap::new())
+    }
+
+    fn empty_cursor_atlas() -> Arc<CursorAtlas> {
+        Arc::new(CursorAtlas::empty())
     }
 
     fn make_snapshot() -> SimulationSnapshot {
@@ -1872,8 +1998,15 @@ mod tests {
     fn graphics_system_draws_ground() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
-        let mut graphics =
-            GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Test Scenario",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+        );
         graphics.set_world_width(256);
 
         let viewports = vec![ViewportInput::from_focus(focus)];
@@ -1888,8 +2021,15 @@ mod tests {
     fn overlay_updates_clamp_energy() {
         let snapshot = make_snapshot();
         let focus = &snapshot.objects[0];
-        let mut graphics =
-            GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Test Scenario",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+        );
         graphics
             .update_overlay(&GraphicsOverlay {
                 frame_text: "FRAME",
@@ -1913,8 +2053,15 @@ mod tests {
             ObjectVertex::new(-4, 4),
         ];
         let focus = &snapshot.objects[0];
-        let mut graphics =
-            GraphicsSystem::new(120, 80, 60, "Atlas Scenario", test_font(), empty_sprites());
+        let mut graphics = GraphicsSystem::new(
+            120,
+            80,
+            60,
+            "Atlas Scenario",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+        );
 
         let viewports = vec![ViewportInput::from_focus(focus)];
         let atlas = graphics.render_frame(&snapshot, &viewports);
@@ -1933,8 +2080,15 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(100, 260);
         snapshot.landscape = Some(Landscape::flat(256, 280));
-        let mut graphics =
-            GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Test Scenario",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+        );
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -1948,8 +2102,15 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(100, 30);
         snapshot.landscape = Some(Landscape::flat(256, 200));
-        let mut graphics =
-            GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Test Scenario",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+        );
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -1959,8 +2120,15 @@ mod tests {
         let mut snapshot = make_snapshot();
         snapshot.objects[0].position = Vector2::new(100, 360);
         snapshot.landscape = Some(Landscape::flat(256, 360));
-        let mut graphics =
-            GraphicsSystem::new(320, 180, 150, "Test Scenario", test_font(), empty_sprites());
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Test Scenario",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+        );
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -2008,8 +2176,15 @@ mod tests {
         ];
         snapshot.landscape = Some(Landscape::flat(128, 80));
 
-        let mut graphics =
-            GraphicsSystem::new(80, 60, 60, "Polygon Scenario", test_font(), empty_sprites());
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Polygon Scenario",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+        );
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -2028,21 +2203,84 @@ mod tests {
     }
 
     #[test]
+    fn render_frame_draws_player_cursor() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].owner = 1;
+        let object_id = snapshot.objects[0].id;
+        snapshot.players.push(PlayerState {
+            id: 1,
+            cursor: Some(object_id),
+            ..PlayerState::default()
+        });
+
+        let mut cursor_pixels = Vec::new();
+        for _ in 0..4 {
+            cursor_pixels.extend_from_slice(&[123, 45, 210, 255]);
+        }
+        let cursor_pixels = Arc::from(cursor_pixels.into_boxed_slice());
+        let cursor_image = ImageData::from_arc(2, 2, cursor_pixels);
+        let mut cursor_entries = vec![None; 8];
+        cursor_entries[5] = Some(cursor_image);
+        let cursor_atlas = Arc::new(CursorAtlas::new(cursor_entries));
+
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Cursor Scenario",
+            test_font(),
+            empty_sprites(),
+            cursor_atlas,
+        );
+        let focus = &snapshot.objects[0];
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let cursor_color = [123u8, 45, 210, 255];
+        let mut found = false;
+        for chunk in graphics.surface().pixels().chunks_exact(4) {
+            if chunk == cursor_color {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "expected to find player cursor color in surface pixels"
+        );
+    }
+
+    #[test]
     fn lighting_darkens_sky_at_night() {
         let mut daytime = make_snapshot();
         daytime.environment.sky_color = Some(RgbColor::new(160, 160, 160));
         daytime.environment.settings.time_of_day = EnvironmentSettings::TIME_CYCLE / 2;
 
         let focus = &daytime.objects[0];
-        let mut day_view = GraphicsSystem::new(120, 80, 60, "Day", test_font(), empty_sprites());
+        let mut day_view = GraphicsSystem::new(
+            120,
+            80,
+            60,
+            "Day",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+        );
         let day_viewports = vec![ViewportInput::from_focus(focus)];
         day_view.render_frame(&daytime, &day_viewports);
         let day_pixel = day_view.surface().get_pixel(0, 0).unwrap();
 
         let mut nighttime = daytime.clone();
         nighttime.environment.settings.time_of_day = 0;
-        let mut night_view =
-            GraphicsSystem::new(120, 80, 60, "Night", test_font(), empty_sprites());
+        let mut night_view = GraphicsSystem::new(
+            120,
+            80,
+            60,
+            "Night",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+        );
         let night_focus = &nighttime.objects[0];
         let night_viewports = vec![ViewportInput::from_focus(night_focus)];
         night_view.render_frame(&nighttime, &night_viewports);
@@ -2066,8 +2304,15 @@ mod tests {
         daytime.environment.settings.time_of_day = EnvironmentSettings::TIME_CYCLE / 2;
         daytime.objects[0].position = Vector2::new(150, 140);
 
-        let mut day_view =
-            GraphicsSystem::new(200, 150, 150, "Day Object", test_font(), empty_sprites());
+        let mut day_view = GraphicsSystem::new(
+            200,
+            150,
+            150,
+            "Day Object",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+        );
         let day_focus = &daytime.objects[0];
         let day_viewports = vec![ViewportInput::from_focus(day_focus)];
         day_view.render_frame(&daytime, &day_viewports);
@@ -2081,8 +2326,15 @@ mod tests {
 
         let mut nighttime = daytime.clone();
         nighttime.environment.settings.time_of_day = 0;
-        let mut night_view =
-            GraphicsSystem::new(200, 150, 150, "Night Object", test_font(), empty_sprites());
+        let mut night_view = GraphicsSystem::new(
+            200,
+            150,
+            150,
+            "Night Object",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+        );
         let night_focus = &nighttime.objects[0];
         let night_viewports = vec![ViewportInput::from_focus(night_focus)];
         night_view.render_frame(&nighttime, &night_viewports);
@@ -2116,8 +2368,15 @@ mod tests {
         snapshot.objects[0].position = Vector2::new(20, 20);
 
         let focus = &snapshot.objects[0];
-        let mut graphics =
-            GraphicsSystem::new(120, 80, 40, "Letterbox", test_font(), empty_sprites());
+        let mut graphics = GraphicsSystem::new(
+            120,
+            80,
+            40,
+            "Letterbox",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+        );
         let viewports = vec![ViewportInput::new(0, Vector2::new(20, 20), 1.0, focus)];
         graphics.render_frame(&snapshot, &viewports);
 
@@ -2144,8 +2403,15 @@ mod tests {
             landscape.set_liquid_column(30, vec![LiquidSegment::new(40, 60)]);
         }
         let focus = &snapshot.objects[0];
-        let mut graphics =
-            GraphicsSystem::new(120, 80, 80, "Liquid Scenario", test_font(), empty_sprites());
+        let mut graphics = GraphicsSystem::new(
+            120,
+            80,
+            80,
+            "Liquid Scenario",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+        );
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);
 
