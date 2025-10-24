@@ -599,7 +599,1224 @@ struct LegacyScenarioManifest {
     description: Option<String>,
     definition_specs: Vec<String>,
     ground_height_hint: Option<i32>,
+    core: LegacyScenarioCore,
     sections: HashMap<String, Vec<(String, String)>>,
+}
+
+const BASEFUNC_AUTO_SELL_CONTENTS: i32 = 1 << 0;
+const BASEFUNC_REGENERATE_ENERGY: i32 = 1 << 1;
+const BASEFUNC_BUY: i32 = 1 << 2;
+const BASEFUNC_SELL: i32 = 1 << 3;
+const BASEFUNC_REJECT_ENTRANCE: i32 = 1 << 4;
+const BASEFUNC_EXTINGUISH: i32 = 1 << 5;
+const BASEFUNC_DEFAULT: i32 = 0xffff;
+const BASE_REGENERATE_ENERGY_PRICE: i32 = 5;
+const DEFAULT_FOW_RESOLUTION: i32 = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyIdEntry {
+    id: String,
+    count: Option<i32>,
+}
+
+type LegacyIdList = Vec<LegacyIdEntry>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyNameEntry {
+    name: String,
+    count: Option<i32>,
+}
+
+type LegacyNameList = Vec<LegacyNameEntry>;
+
+#[derive(Debug, Clone)]
+struct LegacyScenarioCore {
+    head: LegacyHead,
+    definitions: LegacyDefinitions,
+    game: LegacyGame,
+    players: Vec<LegacyPlayer>,
+    landscape: LegacyLandscape,
+    weather: LegacyWeather,
+    disasters: LegacyDisasters,
+    animals: LegacyAnimals,
+    environment: LegacyEnvironment,
+}
+
+impl Default for LegacyScenarioCore {
+    fn default() -> Self {
+        Self {
+            head: LegacyHead::default(),
+            definitions: LegacyDefinitions::default(),
+            game: LegacyGame::default(),
+            players: Vec::new(),
+            landscape: LegacyLandscape::default(),
+            weather: LegacyWeather::default(),
+            disasters: LegacyDisasters::default(),
+            animals: LegacyAnimals::default(),
+            environment: LegacyEnvironment::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LegacyHead {
+    icon: i32,
+    title: String,
+    loader: String,
+    font: String,
+    version: [i32; 5],
+    difficulty: i32,
+    max_player: i32,
+    max_player_league: i32,
+    min_player: i32,
+    save_game: bool,
+    replay: bool,
+    film: i32,
+    disable_mouse: bool,
+    no_initialize: bool,
+    random_seed: i32,
+    forced_auto_context_menu: i32,
+    forced_control_style: i32,
+    engine: String,
+    mission_access: String,
+    network_game: bool,
+    network_runtime_join: bool,
+    forced_gfx_mode: i32,
+    forced_fair_crew: i32,
+    fair_crew_strength: i32,
+    origin: Option<String>,
+}
+
+impl Default for LegacyHead {
+    fn default() -> Self {
+        Self {
+            icon: 18,
+            title: "Default Title".to_string(),
+            loader: String::new(),
+            font: String::new(),
+            version: [0; 5],
+            difficulty: 0,
+            max_player: 12,
+            max_player_league: 12,
+            min_player: 0,
+            save_game: false,
+            replay: false,
+            film: 0,
+            disable_mouse: false,
+            no_initialize: false,
+            random_seed: 0,
+            forced_auto_context_menu: -1,
+            forced_control_style: -1,
+            engine: String::new(),
+            mission_access: String::new(),
+            network_game: false,
+            network_runtime_join: false,
+            forced_gfx_mode: 0,
+            forced_fair_crew: 0,
+            fair_crew_strength: 0,
+            origin: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LegacyDefinitions {
+    local_only: bool,
+    allow_user_change: bool,
+    definitions: Vec<String>,
+    skip_defs: LegacyIdList,
+}
+
+impl Default for LegacyDefinitions {
+    fn default() -> Self {
+        Self {
+            local_only: false,
+            allow_user_change: false,
+            definitions: Vec::new(),
+            skip_defs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LegacyRealism {
+    construction_needs_material: bool,
+    structures_need_energy: bool,
+    value_overloads: LegacyIdList,
+    landscape_push_pull: i32,
+    landscape_insert_thrust: i32,
+    base_functionality: i32,
+    base_regenerate_energy_price: i32,
+}
+
+impl Default for LegacyRealism {
+    fn default() -> Self {
+        Self {
+            construction_needs_material: false,
+            structures_need_energy: true,
+            value_overloads: Vec::new(),
+            landscape_push_pull: 0,
+            landscape_insert_thrust: 0,
+            base_functionality: BASEFUNC_DEFAULT,
+            base_regenerate_energy_price: BASE_REGENERATE_ENERGY_PRICE,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LegacyGame {
+    mode: i32,
+    elimination: i32,
+    cooperative_goal: i32,
+    create_objects: LegacyIdList,
+    clear_objects: LegacyIdList,
+    clear_materials: LegacyNameList,
+    value_gain: i32,
+    enable_remove_flag: bool,
+    realism: LegacyRealism,
+    goals: LegacyIdList,
+    rules: LegacyIdList,
+    fow_color: u32,
+}
+
+impl Default for LegacyGame {
+    fn default() -> Self {
+        Self {
+            mode: 0,
+            elimination: 1,
+            cooperative_goal: 0,
+            create_objects: Vec::new(),
+            clear_objects: Vec::new(),
+            clear_materials: Vec::new(),
+            value_gain: 0,
+            enable_remove_flag: false,
+            realism: LegacyRealism::default(),
+            goals: Vec::new(),
+            rules: Vec::new(),
+            fow_color: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LegacyPlayer {
+    standard_crew: Option<String>,
+    clonks: LegacyC4SVal,
+    wealth: LegacyC4SVal,
+    position: [i32; 2],
+    enforce_position: bool,
+    crew: LegacyIdList,
+    buildings: LegacyIdList,
+    vehicles: LegacyIdList,
+    material: LegacyIdList,
+    knowledge: LegacyIdList,
+    home_base_material: LegacyIdList,
+    home_base_production: LegacyIdList,
+    magic: LegacyIdList,
+}
+
+impl Default for LegacyPlayer {
+    fn default() -> Self {
+        Self {
+            standard_crew: None,
+            clonks: LegacyC4SVal::new(1, 0, 1, 10),
+            wealth: LegacyC4SVal::new(0, 0, 0, 250),
+            position: [-1, -1],
+            enforce_position: false,
+            crew: Vec::new(),
+            buildings: Vec::new(),
+            vehicles: Vec::new(),
+            material: Vec::new(),
+            knowledge: Vec::new(),
+            home_base_material: Vec::new(),
+            home_base_production: Vec::new(),
+            magic: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LegacyLandscape {
+    exact_landscape: bool,
+    vegetation: LegacyIdList,
+    vegetation_level: LegacyC4SVal,
+    in_earth: LegacyIdList,
+    in_earth_level: LegacyC4SVal,
+    sky: Option<String>,
+    sky_fade: [i32; 6],
+    no_sky: bool,
+    bottom_open: bool,
+    top_open: bool,
+    left_open: i32,
+    right_open: i32,
+    auto_scan_side_open: bool,
+    map_width: LegacyC4SVal,
+    map_height: LegacyC4SVal,
+    map_zoom: LegacyC4SVal,
+    amplitude: LegacyC4SVal,
+    phase: LegacyC4SVal,
+    period: LegacyC4SVal,
+    random: LegacyC4SVal,
+    material: String,
+    liquid: String,
+    liquid_level: LegacyC4SVal,
+    map_player_extend: bool,
+    layers: LegacyNameList,
+    gravity: LegacyC4SVal,
+    no_scan: bool,
+    keep_map_creator: bool,
+    sky_scroll_mode: i32,
+    new_style_landscape: i32,
+    fow_resolution: i32,
+    shade_materials: bool,
+}
+
+impl Default for LegacyLandscape {
+    fn default() -> Self {
+        Self {
+            exact_landscape: false,
+            vegetation: Vec::new(),
+            vegetation_level: LegacyC4SVal::new(50, 30, 0, 100),
+            in_earth: Vec::new(),
+            in_earth_level: LegacyC4SVal::new(50, 0, 0, 100),
+            sky: None,
+            sky_fade: [0; 6],
+            no_sky: false,
+            bottom_open: false,
+            top_open: true,
+            left_open: 0,
+            right_open: 0,
+            auto_scan_side_open: true,
+            map_width: LegacyC4SVal::new(100, 0, 64, 250),
+            map_height: LegacyC4SVal::new(50, 0, 40, 250),
+            map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
+            amplitude: LegacyC4SVal::new(0, 0, 0, 100),
+            phase: LegacyC4SVal::new(50, 0, 0, 100),
+            period: LegacyC4SVal::new(15, 0, 0, 100),
+            random: LegacyC4SVal::new(0, 0, 0, 100),
+            material: "Earth".to_string(),
+            liquid: "Water".to_string(),
+            liquid_level: LegacyC4SVal::new(0, 0, 0, 100),
+            map_player_extend: false,
+            layers: Vec::new(),
+            gravity: LegacyC4SVal::new(100, 0, 10, 200),
+            no_scan: false,
+            keep_map_creator: false,
+            sky_scroll_mode: 0,
+            new_style_landscape: 0,
+            fow_resolution: DEFAULT_FOW_RESOLUTION,
+            shade_materials: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LegacyWeather {
+    climate: LegacyC4SVal,
+    start_season: LegacyC4SVal,
+    year_speed: LegacyC4SVal,
+    rain: LegacyC4SVal,
+    wind: LegacyC4SVal,
+    lightning: LegacyC4SVal,
+    precipitation: String,
+    no_gamma: bool,
+}
+
+impl Default for LegacyWeather {
+    fn default() -> Self {
+        Self {
+            climate: LegacyC4SVal::new(50, 10, 0, 100),
+            start_season: LegacyC4SVal::new(50, 50, 0, 100),
+            year_speed: LegacyC4SVal::new(50, 0, 0, 100),
+            rain: LegacyC4SVal::new(0, 0, 0, 100),
+            wind: LegacyC4SVal::new(0, 70, -100, 100),
+            lightning: LegacyC4SVal::new(0, 0, 0, 100),
+            precipitation: "Water".to_string(),
+            no_gamma: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LegacyDisasters {
+    meteorite: LegacyC4SVal,
+    volcano: LegacyC4SVal,
+    earthquake: LegacyC4SVal,
+}
+
+impl Default for LegacyDisasters {
+    fn default() -> Self {
+        Self {
+            meteorite: LegacyC4SVal::new(0, 0, 0, 100),
+            volcano: LegacyC4SVal::new(0, 0, 0, 100),
+            earthquake: LegacyC4SVal::new(0, 0, 0, 100),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LegacyAnimals {
+    free_life: LegacyIdList,
+    earth_nest: LegacyIdList,
+}
+
+impl Default for LegacyAnimals {
+    fn default() -> Self {
+        Self {
+            free_life: Vec::new(),
+            earth_nest: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LegacyEnvironment {
+    objects: LegacyIdList,
+}
+
+impl Default for LegacyEnvironment {
+    fn default() -> Self {
+        Self {
+            objects: Vec::new(),
+        }
+    }
+}
+
+fn parse_bool_field(field: &str, raw: &str) -> Result<bool, ScenarioError> {
+    if let Some(value) = parse_legacy_bool(raw) {
+        return Ok(value);
+    }
+    match parse_i32(raw) {
+        Ok(value) => Ok(value != 0),
+        Err(err) => Err(ScenarioError::LegacyParse(format!(
+            "invalid boolean for `{field}`: {err}"
+        ))),
+    }
+}
+
+fn parse_legacy_id_list(field: &str, raw: &str) -> Result<LegacyIdList, ScenarioError> {
+    let mut entries = Vec::new();
+    for token in raw.split(';') {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, '=');
+        let id_part = parts.next().unwrap().trim();
+        if id_part.is_empty() {
+            return Err(ScenarioError::LegacyParse(format!(
+                "missing identifier in `{field}` entry `{trimmed}`"
+            )));
+        }
+        let normalized = id_part.to_ascii_uppercase();
+        let count = match parts.next() {
+            Some(value_part) => {
+                let value_trimmed = value_part.trim();
+                if value_trimmed.is_empty() {
+                    None
+                } else {
+                    Some(parse_i32(value_trimmed).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid count `{value_trimmed}` for `{field}` entry `{trimmed}`: {err}"
+                        ))
+                    })?)
+                }
+            }
+            None => None,
+        };
+        entries.push(LegacyIdEntry {
+            id: normalized,
+            count,
+        });
+    }
+    Ok(entries)
+}
+
+fn parse_legacy_name_list(field: &str, raw: &str) -> Result<LegacyNameList, ScenarioError> {
+    let mut entries = Vec::new();
+    for token in raw.split(';') {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, '=');
+        let name_part = parts.next().unwrap().trim();
+        if name_part.is_empty() {
+            return Err(ScenarioError::LegacyParse(format!(
+                "missing name in `{field}` entry `{trimmed}`"
+            )));
+        }
+        let count = match parts.next() {
+            Some(value_part) => {
+                let value_trimmed = value_part.trim();
+                if value_trimmed.is_empty() {
+                    None
+                } else {
+                    Some(parse_i32(value_trimmed).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid count `{value_trimmed}` for `{field}` entry `{trimmed}`: {err}"
+                        ))
+                    })?)
+                }
+            }
+            None => None,
+        };
+        entries.push(LegacyNameEntry {
+            name: name_part.to_string(),
+            count,
+        });
+    }
+    Ok(entries)
+}
+
+fn parse_legacy_version(field: &str, raw: &str) -> Result<[i32; 5], ScenarioError> {
+    let mut version = [0; 5];
+    for (index, fragment) in raw.split(',').enumerate() {
+        if index >= version.len() {
+            break;
+        }
+        let trimmed = fragment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        version[index] = parse_i32(trimmed).map_err(|err| {
+            ScenarioError::LegacyParse(format!(
+                "invalid version component `{trimmed}` for `{field}`: {err}"
+            ))
+        })?;
+    }
+    Ok(version)
+}
+
+fn parse_base_functionality(field: &str, raw: &str) -> Result<i32, ScenarioError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(BASEFUNC_DEFAULT);
+    }
+    if let Ok(value) = parse_i32(trimmed) {
+        return Ok(value);
+    }
+    let mut value = 0;
+    for token in trimmed.split(|ch| matches!(ch, '|' | ',' | '&')) {
+        let entry = token.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let flag = match entry {
+            "BASEFUNC_Default" => BASEFUNC_DEFAULT,
+            "BASEFUNC_AutoSellContents" => BASEFUNC_AUTO_SELL_CONTENTS,
+            "BASEFUNC_RegenerateEnergy" => BASEFUNC_REGENERATE_ENERGY,
+            "BASEFUNC_Buy" => BASEFUNC_BUY,
+            "BASEFUNC_Sell" => BASEFUNC_SELL,
+            "BASEFUNC_RejectEntrance" => BASEFUNC_REJECT_ENTRANCE,
+            "BASEFUNC_Extinguish" => BASEFUNC_EXTINGUISH,
+            other => {
+                return Err(ScenarioError::LegacyParse(format!(
+                    "unknown BaseFunctionality token `{other}` in `{field}`"
+                )))
+            }
+        };
+        if flag == BASEFUNC_DEFAULT {
+            value |= BASEFUNC_DEFAULT;
+        } else {
+            value |= flag;
+        }
+    }
+    if value == 0 {
+        Ok(0)
+    } else {
+        Ok(value)
+    }
+}
+
+fn parse_i32_array<const N: usize>(field: &str, raw: &str) -> Result<[i32; N], ScenarioError> {
+    let mut result = [0; N];
+    for (index, fragment) in raw.split(|ch| ch == ',' || ch == ';').enumerate() {
+        if index >= N {
+            break;
+        }
+        let trimmed = fragment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        result[index] = parse_i32(trimmed).map_err(|err| {
+            ScenarioError::LegacyParse(format!(
+                "invalid value `{trimmed}` for `{field}` component {index}: {err}"
+            ))
+        })?;
+    }
+    Ok(result)
+}
+
+fn parse_position(field: &str, raw: &str) -> Result<[i32; 2], ScenarioError> {
+    let mut result = [-1, -1];
+    let mut parts = raw
+        .split(',')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty());
+    if let Some(x) = parts.next() {
+        result[0] = parse_i32(x).map_err(|err| {
+            ScenarioError::LegacyParse(format!("invalid x coordinate `{x}` for `{field}`: {err}"))
+        })?;
+    }
+    if let Some(y) = parts.next() {
+        result[1] = parse_i32(y).map_err(|err| {
+            ScenarioError::LegacyParse(format!("invalid y coordinate `{y}` for `{field}`: {err}"))
+        })?;
+    }
+    Ok(result)
+}
+
+impl LegacyHead {
+    fn apply_entries(&mut self, entries: &[(String, String)]) -> Result<(), ScenarioError> {
+        for (key, value) in entries {
+            let key_lower = key.to_ascii_lowercase();
+            let raw = value.trim();
+            match key_lower.as_str() {
+                "icon" => {
+                    self.icon = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "title" => {
+                    if !raw.is_empty() {
+                        self.title = raw.to_string();
+                    }
+                }
+                "loader" => {
+                    if !raw.is_empty() {
+                        self.loader = raw.to_string();
+                    }
+                }
+                "font" => {
+                    if !raw.is_empty() {
+                        self.font = raw.to_string();
+                    }
+                }
+                "version" => {
+                    self.version = parse_legacy_version(key, raw)?;
+                }
+                "difficulty" => {
+                    self.difficulty = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "maxplayer" => {
+                    self.max_player = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "maxplayerleague" => {
+                    self.max_player_league = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "minplayer" => {
+                    self.min_player = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "savegame" => {
+                    self.save_game = parse_bool_field(key, raw)?;
+                }
+                "replay" => {
+                    self.replay = parse_bool_field(key, raw)?;
+                }
+                "film" => {
+                    self.film = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "disablemouse" => {
+                    self.disable_mouse = parse_bool_field(key, raw)?;
+                }
+                "noinitialize" => {
+                    self.no_initialize = parse_bool_field(key, raw)?;
+                }
+                "randomseed" => {
+                    self.random_seed = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "forcedautocontextmenu" => {
+                    self.forced_auto_context_menu = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "forcedautostopcontrol" => {
+                    self.forced_control_style = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "engine" => {
+                    if !raw.is_empty() {
+                        self.engine = raw.to_string();
+                    }
+                }
+                "missionaccess" => {
+                    if !raw.is_empty() {
+                        self.mission_access = raw.to_string();
+                    }
+                }
+                "networkgame" => {
+                    self.network_game = parse_bool_field(key, raw)?;
+                }
+                "networkruntimejoin" => {
+                    self.network_runtime_join = parse_bool_field(key, raw)?;
+                }
+                "forcedgfxmode" => {
+                    self.forced_gfx_mode = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "forcednocrew" => {
+                    self.forced_fair_crew = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "defcrewstrength" => {
+                    self.fair_crew_strength = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "origin" => {
+                    if raw.is_empty() {
+                        self.origin = None;
+                    } else {
+                        self.origin = Some(raw.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LegacyDefinitions {
+    fn apply_entries(&mut self, entries: &[(String, String)]) -> Result<(), ScenarioError> {
+        for (key, value) in entries {
+            let key_lower = key.to_ascii_lowercase();
+            let raw = value.trim();
+            match key_lower.as_str() {
+                "localonly" => {
+                    self.local_only = parse_bool_field(key, raw)?;
+                }
+                "allowuserchange" => {
+                    self.allow_user_change = parse_bool_field(key, raw)?;
+                }
+                "definitions" => {
+                    for fragment in raw.split(|ch| ch == ';' || ch == ',') {
+                        let trimmed = fragment.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        self.definitions.push(normalize_definition_path(trimmed));
+                    }
+                }
+                _ if key_lower.starts_with("definition") => {
+                    for fragment in raw.split(|ch| ch == ';' || ch == ',') {
+                        let trimmed = fragment.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        self.definitions.push(normalize_definition_path(trimmed));
+                    }
+                }
+                "skipdefs" => {
+                    self.skip_defs = parse_legacy_id_list(key, raw)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LegacyGame {
+    fn apply_entries(&mut self, entries: &[(String, String)]) -> Result<(), ScenarioError> {
+        for (key, value) in entries {
+            let key_lower = key.to_ascii_lowercase();
+            let raw = value.trim();
+            match key_lower.as_str() {
+                "mode" => {
+                    self.mode = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "elimination" => {
+                    self.elimination = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "cooperativegoal" => {
+                    self.cooperative_goal = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "createobjects" => {
+                    self.create_objects = parse_legacy_id_list(key, raw)?;
+                }
+                "clearobjects" => {
+                    self.clear_objects = parse_legacy_id_list(key, raw)?;
+                }
+                "clearmaterials" => {
+                    self.clear_materials = parse_legacy_name_list(key, raw)?;
+                }
+                "valuegain" => {
+                    self.value_gain = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "enableremoveflag" => {
+                    self.enable_remove_flag = parse_bool_field(key, raw)?;
+                }
+                "structneedmaterial" => {
+                    self.realism.construction_needs_material = parse_bool_field(key, raw)?;
+                }
+                "structneedenergy" => {
+                    self.realism.structures_need_energy = parse_bool_field(key, raw)?;
+                }
+                "valueoverloads" => {
+                    self.realism.value_overloads = parse_legacy_id_list(key, raw)?;
+                }
+                "landscapepushpull" => {
+                    self.realism.landscape_push_pull = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "landscapeinsertthrust" => {
+                    self.realism.landscape_insert_thrust = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "basefunctionality" => {
+                    self.realism.base_functionality = parse_base_functionality(key, raw)?;
+                }
+                "baseregenerateenergyprice" => {
+                    self.realism.base_regenerate_energy_price = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "goals" => {
+                    self.goals = parse_legacy_id_list(key, raw)?;
+                }
+                "rules" => {
+                    self.rules = parse_legacy_id_list(key, raw)?;
+                }
+                "fowcolor" => {
+                    let parsed = parse_i64(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                    if parsed < 0 || parsed > u32::MAX as i64 {
+                        return Err(ScenarioError::LegacyParse(format!(
+                            "value `{raw}` for `{key}` is out of range"
+                        )));
+                    }
+                    self.fow_color = parsed as u32;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LegacyPlayer {
+    fn apply_entries(&mut self, entries: &[(String, String)]) -> Result<(), ScenarioError> {
+        for (key, value) in entries {
+            let key_lower = key.to_ascii_lowercase();
+            let raw = value.trim();
+            match key_lower.as_str() {
+                "standardcrew" => {
+                    if raw.is_empty() {
+                        self.standard_crew = None;
+                    } else {
+                        self.standard_crew = Some(raw.to_ascii_uppercase());
+                    }
+                }
+                "clonks" => {
+                    self.clonks = parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(1, 0, 1, 10))?;
+                }
+                "wealth" => {
+                    self.wealth =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(0, 0, 0, 250))?;
+                }
+                "position" => {
+                    self.position = parse_position(key, raw)?;
+                }
+                "enforceposition" => {
+                    self.enforce_position = parse_bool_field(key, raw)?;
+                }
+                "crew" => {
+                    self.crew = parse_legacy_id_list(key, raw)?;
+                }
+                "buildings" => {
+                    self.buildings = parse_legacy_id_list(key, raw)?;
+                }
+                "vehicles" => {
+                    self.vehicles = parse_legacy_id_list(key, raw)?;
+                }
+                "material" => {
+                    self.material = parse_legacy_id_list(key, raw)?;
+                }
+                "knowledge" => {
+                    self.knowledge = parse_legacy_id_list(key, raw)?;
+                }
+                "homebasematerial" => {
+                    self.home_base_material = parse_legacy_id_list(key, raw)?;
+                }
+                "homebaseproduction" => {
+                    self.home_base_production = parse_legacy_id_list(key, raw)?;
+                }
+                "magic" => {
+                    self.magic = parse_legacy_id_list(key, raw)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LegacyLandscape {
+    fn apply_entries(&mut self, entries: &[(String, String)]) -> Result<(), ScenarioError> {
+        for (key, value) in entries {
+            let key_lower = key.to_ascii_lowercase();
+            let raw = value.trim();
+            match key_lower.as_str() {
+                "exactlandscape" => {
+                    self.exact_landscape = parse_bool_field(key, raw)?;
+                }
+                "vegetation" => {
+                    self.vegetation = parse_legacy_id_list(key, raw)?;
+                }
+                "vegetationlevel" => {
+                    self.vegetation_level =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(50, 30, 0, 100))?;
+                }
+                "inearth" => {
+                    self.in_earth = parse_legacy_id_list(key, raw)?;
+                }
+                "inearthlevel" => {
+                    self.in_earth_level =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(50, 0, 0, 100))?;
+                }
+                "sky" => {
+                    if raw.is_empty() {
+                        self.sky = None;
+                    } else {
+                        self.sky = Some(raw.to_string());
+                    }
+                }
+                "skyfade" => {
+                    self.sky_fade = parse_i32_array::<6>(key, raw)?;
+                }
+                "nosky" => {
+                    self.no_sky = parse_bool_field(key, raw)?;
+                }
+                "bottomopen" => {
+                    self.bottom_open = parse_bool_field(key, raw)?;
+                }
+                "topopen" => {
+                    self.top_open = parse_bool_field(key, raw)?;
+                }
+                "leftopen" => {
+                    self.left_open = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "rightopen" => {
+                    self.right_open = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "autoscansideopen" => {
+                    self.auto_scan_side_open = parse_bool_field(key, raw)?;
+                }
+                "mapwidth" => {
+                    self.map_width =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(100, 0, 64, 250))?;
+                }
+                "mapheight" => {
+                    self.map_height =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(50, 0, 40, 250))?;
+                }
+                "mapzoom" => {
+                    self.map_zoom =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(10, 0, 5, 15))?;
+                }
+                "amplitude" => {
+                    self.amplitude =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(0, 0, 0, 100))?;
+                }
+                "phase" => {
+                    self.phase =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(50, 0, 0, 100))?;
+                }
+                "period" => {
+                    self.period =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(15, 0, 0, 100))?;
+                }
+                "random" => {
+                    self.random =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(0, 0, 0, 100))?;
+                }
+                "material" => {
+                    if !raw.is_empty() {
+                        self.material = raw.to_string();
+                    }
+                }
+                "liquid" => {
+                    if !raw.is_empty() {
+                        self.liquid = raw.to_string();
+                    }
+                }
+                "liquidlevel" => {
+                    self.liquid_level =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(0, 0, 0, 100))?;
+                }
+                "mapplayerextend" => {
+                    self.map_player_extend = parse_bool_field(key, raw)?;
+                }
+                "layers" => {
+                    self.layers = parse_legacy_name_list(key, raw)?;
+                }
+                "gravity" => {
+                    self.gravity =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(100, 0, 10, 200))?;
+                }
+                "noscan" => {
+                    self.no_scan = parse_bool_field(key, raw)?;
+                }
+                "keepmapcreator" => {
+                    self.keep_map_creator = parse_bool_field(key, raw)?;
+                }
+                "skyscrollmode" => {
+                    self.sky_scroll_mode = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "newstylelandscape" => {
+                    self.new_style_landscape = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "fowres" => {
+                    self.fow_resolution = parse_i32(raw).map_err(|err| {
+                        ScenarioError::LegacyParse(format!(
+                            "invalid value `{raw}` for `{key}`: {err}"
+                        ))
+                    })?;
+                }
+                "shadematerials" => {
+                    self.shade_materials = parse_bool_field(key, raw)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LegacyWeather {
+    fn apply_entries(&mut self, entries: &[(String, String)]) -> Result<(), ScenarioError> {
+        for (key, value) in entries {
+            let key_lower = key.to_ascii_lowercase();
+            let raw = value.trim();
+            match key_lower.as_str() {
+                "climate" => {
+                    self.climate =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(50, 10, 0, 100))?;
+                }
+                "startseason" => {
+                    self.start_season =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(50, 50, 0, 100))?;
+                }
+                "yearspeed" => {
+                    self.year_speed =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(50, 0, 0, 100))?;
+                }
+                "rain" => {
+                    self.rain = parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(0, 0, 0, 100))?;
+                }
+                "wind" => {
+                    self.wind =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(0, 70, -100, 100))?;
+                }
+                "lightning" => {
+                    self.lightning =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(0, 0, 0, 100))?;
+                }
+                "precipitation" => {
+                    if !raw.is_empty() {
+                        self.precipitation = raw.to_string();
+                    }
+                }
+                "nogamma" => {
+                    self.no_gamma = parse_bool_field(key, raw)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LegacyDisasters {
+    fn apply_entries(&mut self, entries: &[(String, String)]) -> Result<(), ScenarioError> {
+        for (key, value) in entries {
+            let key_lower = key.to_ascii_lowercase();
+            let raw = value.trim();
+            match key_lower.as_str() {
+                "meteorite" => {
+                    self.meteorite =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(0, 0, 0, 100))?;
+                }
+                "volcano" => {
+                    self.volcano =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(0, 0, 0, 100))?;
+                }
+                "earthquake" => {
+                    self.earthquake =
+                        parse_legacy_c4s_value(key, raw, LegacyC4SVal::new(0, 0, 0, 100))?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LegacyAnimals {
+    fn apply_entries(&mut self, entries: &[(String, String)]) -> Result<(), ScenarioError> {
+        for (key, value) in entries {
+            let key_lower = key.to_ascii_lowercase();
+            let raw = value.trim();
+            match key_lower.as_str() {
+                "animal" => {
+                    self.free_life = parse_legacy_id_list(key, raw)?;
+                }
+                "nest" => {
+                    self.earth_nest = parse_legacy_id_list(key, raw)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LegacyEnvironment {
+    fn apply_entries(&mut self, entries: &[(String, String)]) -> Result<(), ScenarioError> {
+        for (key, value) in entries {
+            let key_lower = key.to_ascii_lowercase();
+            let raw = value.trim();
+            if key_lower == "objects" {
+                self.objects = parse_legacy_id_list(key, raw)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LegacyScenarioCore {
+    fn from_sections(
+        sections: &HashMap<String, Vec<(String, String)>>,
+    ) -> Result<Self, ScenarioError> {
+        let mut core = LegacyScenarioCore::default();
+        if let Some(entries) = sections.get("head") {
+            core.head.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("definitions") {
+            core.definitions.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("game") {
+            core.game.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("landscape") {
+            core.landscape.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("weather") {
+            core.weather.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("disasters") {
+            core.disasters.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("animals") {
+            core.animals.apply_entries(entries)?;
+        }
+        if let Some(entries) = sections.get("environment") {
+            core.environment.apply_entries(entries)?;
+        }
+
+        for (section, entries) in sections {
+            if !section.starts_with("player") {
+                continue;
+            }
+            let Some(owner) = owner_index_from_section(section) else {
+                continue;
+            };
+            if owner < 0 {
+                continue;
+            }
+            let index = owner as usize;
+            if core.players.len() <= index {
+                core.players.resize(index + 1, LegacyPlayer::default());
+            }
+            core.players[index].apply_entries(entries)?;
+        }
+
+        Ok(core)
+    }
 }
 
 fn parse_legacy_scenario_manifest(group: &Group) -> Result<LegacyScenarioManifest, ScenarioError> {
@@ -679,12 +1896,14 @@ fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, Scen
         .and_then(|entries| find_entry(entries, "description"));
 
     let ground_height_hint = derive_ground_height_hint(&sections);
+    let core = LegacyScenarioCore::from_sections(&sections)?;
 
     Ok(LegacyScenarioManifest {
         title,
         description,
         definition_specs,
         ground_height_hint,
+        core,
         sections,
     })
 }
@@ -2595,6 +3814,260 @@ global func Step(state, frame, random)
     return nil;
 }
 "#;
+
+    #[test]
+    fn legacy_scenario_core_parses_all_fields() {
+        let legacy = r#"
+[Head]
+Title=Legacy Land
+Icon=7
+Loader=LoaderGfx
+Font=CustomFont
+Version=4,9,10,15,359
+Difficulty=3
+MaxPlayer=6
+MaxPlayerLeague=4
+MinPlayer=2
+SaveGame=1
+Replay=0
+Film=2
+DisableMouse=1
+NoInitialize=1
+RandomSeed=12345
+ForcedAutoContextMenu=0
+ForcedAutoStopControl=1
+Engine=Legacy
+MissionAccess=MISS
+NetworkGame=1
+NetworkRuntimeJoin=0
+ForcedGfxMode=2
+ForcedNoCrew=1
+DefCrewStrength=42
+Origin=Planet\Legacy.c4s
+
+[Definitions]
+LocalOnly=0
+AllowUserChange=1
+Definitions=Defs.c4d;More.c4d
+Definition3=Extra.c4d
+SkipDefs=CLNK=2;ROCK
+
+[Game]
+Mode=2
+Elimination=3
+CooperativeGoal=1
+CreateObjects=FIRE=3;WOOD=1
+ClearObjects=ROCK=2
+ClearMaterials=Earth=5;Gold
+ValueGain=150
+EnableRemoveFlag=1
+StructNeedMaterial=1
+StructNeedEnergy=0
+ValueOverloads=VALU=2
+LandscapePushPull=2
+LandscapeInsertThrust=3
+BaseFunctionality=BASEFUNC_Buy|BASEFUNC_Sell
+BaseRegenerateEnergyPrice=12
+Goals=GOAL=1
+Rules=RULE=1
+FoWColor=0x12345678
+
+[Player1]
+StandardCrew=CLNK
+Clonks=2,1,1,5
+Wealth=50,0,0,500
+Position=100,200
+EnforcePosition=1
+Crew=CLNK=2;OCEN
+Buildings=HUTS=1
+Vehicles=CARR=1
+Material=ROCK=3
+Knowledge=KNOW
+HomeBaseMaterial=WOOD=5
+HomeBaseProduction=METL=2
+Magic=MAGI=1
+
+[Landscape]
+ExactLandscape=1
+Vegetation=GRAS;TREE
+VegetationLevel=60,20,0,100
+InEarth=ROCK;COAL
+InEarthLevel=40,0,0,100
+Sky=Sky.ocg
+SkyFade=1,2,3,4,5,6
+NoSky=0
+BottomOpen=1
+TopOpen=0
+LeftOpen=1
+RightOpen=2
+AutoScanSideOpen=0
+MapWidth=120,0,64,250
+MapHeight=80,0,40,250
+MapZoom=5,0,5,15
+Amplitude=10,0,0,100
+Phase=25,0,0,100
+Period=30,0,0,100
+Random=15,0,0,100
+Material=Sand
+Liquid=Lava
+LiquidLevel=5,0,0,100
+MapPlayerExtend=1
+Layers=Earth=2;Sky=1
+Gravity=90,0,10,200
+NoScan=1
+KeepMapCreator=1
+SkyScrollMode=2
+NewStyleLandscape=1
+FoWRes=128
+ShadeMaterials=0
+
+[Weather]
+Climate=40,10,0,100
+StartSeason=10,20,0,100
+YearSpeed=5,0,0,100
+Rain=30,0,0,100
+Wind=5,10,-50,50
+Lightning=20,0,0,100
+Precipitation=Oil
+NoGamma=0
+
+[Disasters]
+Meteorite=10,0,0,100
+Volcano=5,0,0,100
+Earthquake=3,0,0,100
+
+[Animals]
+Animal=WLF_=2
+Nest=ANT_=3
+
+[Environment]
+Objects=STNE=1;TREE=1
+"#;
+
+        let manifest = parse_legacy_scenario_text(legacy).expect("legacy scenario manifest parses");
+        let core = &manifest.core;
+
+        assert_eq!(core.head.title, "Legacy Land");
+        assert_eq!(core.head.icon, 7);
+        assert_eq!(core.head.loader, "LoaderGfx");
+        assert_eq!(core.head.font, "CustomFont");
+        assert_eq!(core.head.version, [4, 9, 10, 15, 359]);
+        assert_eq!(core.head.difficulty, 3);
+        assert_eq!(core.head.max_player, 6);
+        assert_eq!(core.head.max_player_league, 4);
+        assert_eq!(core.head.min_player, 2);
+        assert!(core.head.save_game);
+        assert!(core.head.disable_mouse);
+        assert!(core.head.no_initialize);
+        assert_eq!(core.head.random_seed, 12345);
+        assert_eq!(core.head.forced_auto_context_menu, 0);
+        assert_eq!(core.head.forced_control_style, 1);
+        assert_eq!(core.head.engine, "Legacy");
+        assert_eq!(core.head.mission_access, "MISS");
+        assert!(core.head.network_game);
+        assert!(!core.head.network_runtime_join);
+        assert_eq!(core.head.forced_gfx_mode, 2);
+        assert_eq!(core.head.forced_fair_crew, 1);
+        assert_eq!(core.head.fair_crew_strength, 42);
+        assert_eq!(core.head.origin.as_deref(), Some("Planet\\Legacy.c4s"));
+
+        assert!(!core.definitions.local_only);
+        assert!(core.definitions.allow_user_change);
+        assert_eq!(
+            core.definitions.definitions,
+            vec![
+                "Defs.c4d".to_string(),
+                "More.c4d".to_string(),
+                "Extra.c4d".to_string()
+            ]
+        );
+        assert_eq!(core.definitions.skip_defs.len(), 2);
+        assert_eq!(core.definitions.skip_defs[0].id, "CLNK");
+        assert_eq!(core.definitions.skip_defs[0].count, Some(2));
+        assert_eq!(core.definitions.skip_defs[1].id, "ROCK");
+        assert_eq!(core.definitions.skip_defs[1].count, None);
+
+        assert_eq!(core.game.mode, 2);
+        assert_eq!(core.game.elimination, 3);
+        assert_eq!(core.game.cooperative_goal, 1);
+        assert_eq!(core.game.create_objects.len(), 2);
+        assert_eq!(core.game.clear_objects.len(), 1);
+        assert_eq!(core.game.clear_materials.len(), 2);
+        assert_eq!(core.game.value_gain, 150);
+        assert!(core.game.enable_remove_flag);
+        assert!(core.game.realism.construction_needs_material);
+        assert!(!core.game.realism.structures_need_energy);
+        assert_eq!(core.game.realism.landscape_push_pull, 2);
+        assert_eq!(core.game.realism.landscape_insert_thrust, 3);
+        assert_eq!(
+            core.game.realism.base_functionality,
+            BASEFUNC_BUY | BASEFUNC_SELL
+        );
+        assert_eq!(core.game.realism.base_regenerate_energy_price, 12);
+        assert_eq!(core.game.goals.len(), 1);
+        assert_eq!(core.game.rules.len(), 1);
+        assert_eq!(core.game.fow_color, 0x1234_5678);
+
+        assert_eq!(core.players.len(), 1);
+        let player = &core.players[0];
+        assert_eq!(player.standard_crew.as_deref(), Some("CLNK"));
+        assert_eq!(player.clonks.std, 2);
+        assert_eq!(player.clonks.rnd, 1);
+        assert_eq!(player.wealth.std, 50);
+        assert_eq!(player.position, [100, 200]);
+        assert!(player.enforce_position);
+        assert_eq!(player.crew.len(), 2);
+        assert_eq!(player.buildings.len(), 1);
+        assert_eq!(player.vehicles.len(), 1);
+        assert_eq!(player.material.len(), 1);
+        assert_eq!(player.knowledge.len(), 1);
+        assert_eq!(player.home_base_material.len(), 1);
+        assert_eq!(player.home_base_production.len(), 1);
+        assert_eq!(player.magic.len(), 1);
+
+        let landscape = &core.landscape;
+        assert!(landscape.exact_landscape);
+        assert_eq!(landscape.vegetation.len(), 2);
+        assert_eq!(landscape.in_earth.len(), 2);
+        assert_eq!(landscape.sky.as_deref(), Some("Sky.ocg"));
+        assert_eq!(landscape.sky_fade, [1, 2, 3, 4, 5, 6]);
+        assert!(landscape.bottom_open);
+        assert!(!landscape.top_open);
+        assert_eq!(landscape.left_open, 1);
+        assert_eq!(landscape.right_open, 2);
+        assert!(!landscape.auto_scan_side_open);
+        assert_eq!(landscape.map_width.std, 120);
+        assert_eq!(landscape.map_height.std, 80);
+        assert_eq!(landscape.map_zoom.std, 5);
+        assert_eq!(landscape.material, "Sand");
+        assert_eq!(landscape.liquid, "Lava");
+        assert!(landscape.map_player_extend);
+        assert_eq!(landscape.layers.len(), 2);
+        assert!(landscape.no_scan);
+        assert!(landscape.keep_map_creator);
+        assert_eq!(landscape.sky_scroll_mode, 2);
+        assert_eq!(landscape.new_style_landscape, 1);
+        assert_eq!(landscape.fow_resolution, 128);
+        assert!(!landscape.shade_materials);
+
+        let weather = &core.weather;
+        assert_eq!(weather.climate.std, 40);
+        assert_eq!(weather.start_season.std, 10);
+        assert_eq!(weather.year_speed.std, 5);
+        assert_eq!(weather.rain.std, 30);
+        assert_eq!(weather.wind.std, 5);
+        assert_eq!(weather.lightning.std, 20);
+        assert_eq!(weather.precipitation, "Oil");
+        assert!(!weather.no_gamma);
+
+        assert_eq!(core.disasters.meteorite.std, 10);
+        assert_eq!(core.disasters.volcano.std, 5);
+        assert_eq!(core.disasters.earthquake.std, 3);
+
+        assert_eq!(core.animals.free_life.len(), 1);
+        assert_eq!(core.animals.earth_nest.len(), 1);
+        assert_eq!(core.environment.objects.len(), 2);
+    }
 
     #[test]
     fn loads_flat_landscape_scenario() {
