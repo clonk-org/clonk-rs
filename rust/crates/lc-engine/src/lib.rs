@@ -2972,14 +2972,28 @@ pub struct DefinitionSpriteImage {
     width: u32,
     height: u32,
     pixels: Arc<[u8]>,
+    color_mask: Option<Arc<[u8]>>,
 }
 
 impl DefinitionSpriteImage {
-    fn from_resource(image: &lc_resources::GraphicsImage) -> Self {
+    fn from_resource(
+        image: &lc_resources::GraphicsImage,
+        mask: Option<&lc_resources::ColorByOwnerMask>,
+    ) -> Self {
+        let color_mask = mask.and_then(|mask| {
+            if mask.width != image.width() || mask.height != image.height() {
+                return None;
+            }
+            if mask.pixels.iter().all(|value| *value == 0) {
+                return None;
+            }
+            Some(Arc::from(mask.pixels.clone().into_boxed_slice()))
+        });
         Self {
             width: image.width(),
             height: image.height(),
             pixels: image.clone_pixels(),
+            color_mask,
         }
     }
 
@@ -2997,6 +3011,10 @@ impl DefinitionSpriteImage {
 
     pub fn into_pixels(self) -> Arc<[u8]> {
         self.pixels
+    }
+
+    pub fn color_mask(&self) -> Option<Arc<[u8]>> {
+        self.color_mask.as_ref().map(Arc::clone)
     }
 }
 
@@ -3145,7 +3163,8 @@ impl Definition {
             definition.set_picture_image(Some(DefinitionPictureImage::from_resource(image)));
         }
         if let Some(image) = resource.graphics_image.as_ref() {
-            definition.set_sprite_image(Some(DefinitionSpriteImage::from_resource(image)));
+            let mask = resource.color_by_owner_mask.as_ref();
+            definition.set_sprite_image(Some(DefinitionSpriteImage::from_resource(image, mask)));
         }
         Ok(definition)
     }

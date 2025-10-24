@@ -13,6 +13,14 @@ pub struct Definition {
     pub action_map: Option<ActionMap>,
     pub picture_image: Option<GraphicsImage>,
     pub graphics_image: Option<GraphicsImage>,
+    pub color_by_owner_mask: Option<ColorByOwnerMask>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ColorByOwnerMask {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
 }
 
 impl Definition {
@@ -29,7 +37,8 @@ impl Definition {
         };
 
         let picture_image = load_definition_picture(group, &core);
-        let graphics_image = load_definition_graphics(group);
+        let (graphics_image, color_by_owner_mask) =
+            load_definition_graphics(group, core.color_by_owner);
 
         Ok(Self {
             core,
@@ -37,6 +46,7 @@ impl Definition {
             action_map,
             picture_image,
             graphics_image,
+            color_by_owner_mask,
         })
     }
 }
@@ -51,6 +61,7 @@ pub struct DefCore {
     pub value: i32,
     pub mass: i32,
     pub picture: Option<PictureRect>,
+    pub color_by_owner: bool,
 }
 
 impl DefCore {
@@ -174,6 +185,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut object_value: i32 = 0;
     let mut object_mass: i32 = 0;
     let mut picture: Option<PictureRect> = None;
+    let mut color_by_owner = false;
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -231,6 +243,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     picture = Some(rect);
                 }
             }
+            "colorbyowner" => {
+                color_by_owner = parse_i32(value).unwrap_or(0) != 0;
+            }
             _ => {}
         }
     }
@@ -249,6 +264,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         value: object_value,
         mass: object_mass,
         picture,
+        color_by_owner,
     })
 }
 
@@ -519,15 +535,202 @@ fn find_picture_entry_recursive(
     Ok(None)
 }
 
-fn load_definition_graphics(group: &Group) -> Option<GraphicsImage> {
-    let path = find_graphics_entry(group).ok().flatten()?;
-    let data = group.read_file(&path).ok()?;
-    let image = image::load_from_memory(&data).ok()?.into_rgba8();
+fn load_definition_graphics(
+    group: &Group,
+    color_by_owner: bool,
+) -> (Option<GraphicsImage>, Option<ColorByOwnerMask>) {
+    let path = match find_graphics_entry(group).ok().flatten() {
+        Some(path) => path,
+        None => return (None, None),
+    };
+    let data = match group.read_file(&path) {
+        Ok(data) => data,
+        Err(_) => return (None, None),
+    };
+    let mut image = match image::load_from_memory(&data) {
+        Ok(image) => image.into_rgba8(),
+        Err(_) => return (None, None),
+    };
     let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
+        return (None, None);
+    }
+
+    let mask = if color_by_owner {
+        load_or_generate_color_by_owner_mask(group, &path, &mut image)
+    } else {
+        None
+    };
+
+    let graphics_image = GraphicsImage::new(width, height, image.into_raw());
+    (Some(graphics_image), mask)
+}
+
+fn load_or_generate_color_by_owner_mask(
+    group: &Group,
+    graphics_path: &Path,
+    image: &mut image::RgbaImage,
+) -> Option<ColorByOwnerMask> {
+    if let Some(overlay) = load_color_by_owner_overlay(group, graphics_path) {
+        return extract_mask_from_overlay(&overlay, image);
+    }
+    generate_color_by_owner_mask(image)
+}
+
+fn load_color_by_owner_overlay(group: &Group, graphics_path: &Path) -> Option<image::RgbaImage> {
+    let mut candidates = Vec::new();
+
+    if let Some(parent) = graphics_path.parent() {
+        if let Some(name) = graphics_path.file_name().and_then(|n| n.to_str()) {
+            if let Some(stripped) = name.strip_prefix("Graphics") {
+                if !stripped.is_empty() {
+                    let mut candidate = parent.to_path_buf();
+                    candidate.push(format!("Overlay{}", stripped));
+                    candidates.push(candidate);
+                }
+            }
+        }
+        let mut overlay_name = parent.to_path_buf();
+        overlay_name.push("Overlay.png");
+        candidates.push(overlay_name);
+    }
+
+    candidates.push(PathBuf::from("Overlay.png"));
+
+    for candidate in candidates {
+        if let Ok(data) = group.read_file(&candidate) {
+            if let Ok(image) = image::load_from_memory(&data) {
+                return Some(image.into_rgba8());
+            }
+        }
+    }
+
+    None
+}
+
+fn extract_mask_from_overlay(
+    overlay: &image::RgbaImage,
+    base: &mut image::RgbaImage,
+) -> Option<ColorByOwnerMask> {
+    let (width, height) = base.dimensions();
+    if overlay.dimensions() != (width, height) {
         return None;
     }
-    Some(GraphicsImage::new(width, height, image.into_raw()))
+
+    let mut pixels = vec![0u8; (width * height) as usize];
+    let mut has_mask = false;
+    for y in 0..height {
+        for x in 0..width {
+            let overlay_pixel = overlay.get_pixel(x, y);
+            let mask_value = overlay_pixel[0];
+            if mask_value == 0 {
+                continue;
+            }
+            let idx = (y * width + x) as usize;
+            pixels[idx] = mask_value;
+            has_mask = true;
+            let base_pixel = base.get_pixel_mut(x, y);
+            let alpha = base_pixel[3];
+            *base_pixel = image::Rgba([255, 255, 255, alpha]);
+        }
+    }
+
+    if has_mask {
+        Some(ColorByOwnerMask {
+            width,
+            height,
+            pixels,
+        })
+    } else {
+        None
+    }
+}
+
+fn generate_color_by_owner_mask(image: &mut image::RgbaImage) -> Option<ColorByOwnerMask> {
+    let (width, height) = image.dimensions();
+    let mut pixels = vec![0u8; (width * height) as usize];
+    let mut has_mask = false;
+
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) as usize;
+            let pixel = image.get_pixel_mut(x, y);
+            let r = pixel[0];
+            let g = pixel[1];
+            let b = pixel[2];
+            let a = pixel[3];
+            let dw = u32::from(a) << 24 | u32::from(b) << 16 | u32::from(g) << 8 | u32::from(r);
+            if let Some(mask_value) = detect_color_by_owner(dw) {
+                pixels[idx] = mask_value;
+                pixel[0] = 255;
+                pixel[1] = 255;
+                pixel[2] = 255;
+                pixel[3] = a;
+                has_mask = true;
+            }
+        }
+    }
+
+    if has_mask {
+        Some(ColorByOwnerMask {
+            width,
+            height,
+            pixels,
+        })
+    } else {
+        None
+    }
+}
+
+fn detect_color_by_owner(dw_clr: u32) -> Option<u8> {
+    const RANGE: i32 = 255;
+    const HLSMAX: i32 = RANGE;
+    const RGBMAX: i32 = 255;
+
+    let r = ((dw_clr >> 16) & 0xff) as i32;
+    let g = ((dw_clr >> 8) & 0xff) as i32;
+    let b = (dw_clr & 0xff) as i32;
+    let c_max = r.max(g).max(b);
+    let c_min = r.min(g).min(b);
+
+    let l = ((c_max + c_min) * HLSMAX + RGBMAX) / (2 * RGBMAX);
+    let mut h;
+    let s;
+    if c_max == c_min {
+        s = 0;
+        h = (HLSMAX * 2) / 3;
+    } else {
+        if l <= (HLSMAX / 2) {
+            s = ((c_max - c_min) * HLSMAX + ((c_max + c_min) / 2)) / (c_max + c_min);
+        } else {
+            s = ((c_max - c_min) * HLSMAX + ((2 * RGBMAX - c_max - c_min) / 2))
+                / (2 * RGBMAX - c_max - c_min);
+        }
+
+        let rdelta = ((c_max - r) * (HLSMAX / 6) + ((c_max - c_min) / 2)) / (c_max - c_min);
+        let gdelta = ((c_max - g) * (HLSMAX / 6) + ((c_max - c_min) / 2)) / (c_max - c_min);
+        let bdelta = ((c_max - b) * (HLSMAX / 6) + ((c_max - c_min) / 2)) / (c_max - c_min);
+
+        if r == c_max {
+            h = bdelta - gdelta;
+        } else if g == c_max {
+            h = (HLSMAX / 3) + rdelta - bdelta;
+        } else {
+            h = (2 * HLSMAX) / 3 + gdelta - rdelta;
+        }
+        if h < 0 {
+            h += HLSMAX;
+        }
+        if h > HLSMAX {
+            h -= HLSMAX;
+        }
+    }
+
+    if !(145..=175).contains(&h) || s <= 100 {
+        return None;
+    }
+
+    Some((dw_clr & 0xff) as u8)
 }
 
 fn find_graphics_entry(group: &Group) -> Result<Option<PathBuf>, GroupError> {

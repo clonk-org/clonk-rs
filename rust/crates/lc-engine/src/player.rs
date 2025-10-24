@@ -1,4 +1,4 @@
-use crate::{DefinitionId, ObjectId, Vector2};
+use crate::{DefinitionId, ObjectId, RgbColor, Vector2};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -100,6 +100,8 @@ pub struct PlayerState {
     pub production_delay: u32,
     #[serde(default)]
     pub production_unit: u32,
+    #[serde(default)]
+    pub color: Option<RgbColor>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +127,7 @@ pub struct Player {
     home_base_production: HashMap<DefinitionId, u32>,
     production_delay: u32,
     production_unit: u32,
+    color: Option<RgbColor>,
 }
 
 impl Player {
@@ -151,6 +154,7 @@ impl Player {
             home_base_production: HashMap::new(),
             production_delay: 0,
             production_unit: 0,
+            color: None,
         }
     }
 
@@ -176,6 +180,7 @@ impl Player {
             home_base_production,
             production_delay,
             production_unit,
+            color,
         } = config;
         let mut player = Self {
             id,
@@ -199,6 +204,7 @@ impl Player {
             home_base_production,
             production_delay,
             production_unit,
+            color,
         };
         player.sort_crew();
         player
@@ -227,6 +233,7 @@ impl Player {
             home_base_production,
             production_delay,
             production_unit,
+            color,
         } = state;
         let mut player = Self {
             id,
@@ -250,6 +257,7 @@ impl Player {
             home_base_production,
             production_delay,
             production_unit,
+            color,
         };
         player.sort_crew();
         player
@@ -280,6 +288,7 @@ impl Player {
             home_base_production: self.home_base_production.clone(),
             production_delay: self.production_delay,
             production_unit: self.production_unit,
+            color: self.color,
         }
     }
 
@@ -596,6 +605,7 @@ pub struct PlayerConfig {
     home_base_production: HashMap<DefinitionId, u32>,
     production_delay: u32,
     production_unit: u32,
+    color: Option<RgbColor>,
 }
 
 impl PlayerConfig {
@@ -621,6 +631,7 @@ impl PlayerConfig {
             home_base_production: HashMap::new(),
             production_delay: 0,
             production_unit: 0,
+            color: None,
         }
     }
 
@@ -711,6 +722,11 @@ impl PlayerConfig {
 
     pub fn with_production_unit(mut self, unit: u32) -> Self {
         self.production_unit = unit;
+        self
+    }
+
+    pub fn with_color(mut self, color: Option<RgbColor>) -> Self {
+        self.color = color;
         self
     }
 

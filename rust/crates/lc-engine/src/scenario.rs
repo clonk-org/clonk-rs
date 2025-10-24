@@ -8,7 +8,7 @@ use std::sync::Arc;
 use image::{load_from_memory, ImageError};
 use lc_resources::definition::ActionFacet as ResourceActionFacet;
 use lc_resources::{
-    ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap,
+    ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap, ColorByOwnerMask,
     DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
     ResourceDefinition as ResourceDefinitionData,
 };
@@ -103,6 +103,7 @@ struct ScenarioDefinition {
     picture: Option<DefinitionPicture>,
     picture_image: Option<GraphicsImage>,
     graphics_image: Option<GraphicsImage>,
+    color_by_owner_mask: Option<ColorByOwnerMask>,
     resource_group: Option<Group>,
 }
 
@@ -334,10 +335,9 @@ impl Scenario {
                 .as_ref()
                 .map(DefinitionPictureImage::from_resource);
             compiled.set_picture_image(picture_image);
-            let sprite_image = definition
-                .graphics_image
-                .as_ref()
-                .map(DefinitionSpriteImage::from_resource);
+            let sprite_image = definition.graphics_image.as_ref().map(|image| {
+                DefinitionSpriteImage::from_resource(image, definition.color_by_owner_mask.as_ref())
+            });
             compiled.set_sprite_image(sprite_image);
             engine.register_definition(compiled)?;
         }
@@ -486,6 +486,7 @@ impl Scenario {
                     picture: None,
                     picture_image: None,
                     graphics_image: None,
+                    color_by_owner_mask: None,
                     resource_group: None,
                 }
             };
@@ -3031,6 +3032,7 @@ fn scenario_definition_from_resource(
         action_map,
         picture_image,
         graphics_image,
+        color_by_owner_mask,
     } = resource;
     let actions = action_map.map(|map| convert_action_map(&map));
 
@@ -3047,6 +3049,7 @@ fn scenario_definition_from_resource(
         picture: core.picture.map(DefinitionPicture::from),
         picture_image,
         graphics_image,
+        color_by_owner_mask,
         resource_group: source_group,
     }
 }
@@ -4903,6 +4906,7 @@ global func Step(state, frame, random)
                 picture: None,
                 picture_image: None,
                 graphics_image: None,
+                color_by_owner_mask: None,
                 resource_group: None,
             }],
             initial_spawns: vec![ScenarioSpawn {
@@ -4974,6 +4978,7 @@ global func Step(state, frame, random)
                 picture: None,
                 picture_image: None,
                 graphics_image: None,
+                color_by_owner_mask: None,
                 resource_group: None,
             }],
             initial_spawns: vec![ScenarioSpawn {

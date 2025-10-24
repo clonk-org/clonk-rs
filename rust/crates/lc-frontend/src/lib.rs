@@ -6,7 +6,7 @@ use lc_engine::{
     DefinitionActionGraphics, Direction, EnvironmentFrame, EnvironmentSettings,
     GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, RgbColor,
     SimulationSnapshot, SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot, Vector2,
-    WeatherEvent,
+    WeatherEvent, OWNER_NONE,
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
@@ -32,11 +32,71 @@ const MAX_VIEWPORT_ZOOM: f32 = 4.0;
 const CAMERA_SMOOTHING_ALPHA: f32 = 0.2;
 const CAMERA_SNAP_THRESHOLD: f32 = 1.0;
 const CAMERA_JUMP_THRESHOLD: f32 = 256.0;
+const DEFAULT_PLAYER_COLORS: [Color; 12] = [
+    Color::opaque(0xE8, 0x00, 0x00),
+    Color::opaque(0x00, 0x00, 0xF4),
+    Color::opaque(0x00, 0xC8, 0x00),
+    Color::opaque(0x1C, 0xF4, 0xFC),
+    Color::opaque(0x44, 0x84, 0xC4),
+    Color::opaque(0x30, 0x48, 0x78),
+    Color::opaque(0x00, 0x44, 0xA0),
+    Color::opaque(0x50, 0x80, 0xF0),
+    Color::opaque(0x84, 0x84, 0x84),
+    Color::opaque(0xFF, 0xFF, 0xFF),
+    Color::opaque(0xF8, 0x94, 0x00),
+    Color::opaque(0xC0, 0x00, 0xBC),
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DefinitionSprite {
     pub image: ImageData,
     pub actions: HashMap<String, DefinitionActionGraphics>,
+    pub color_mask: Option<ColorByOwnerMask>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColorByOwnerMask {
+    width: u32,
+    height: u32,
+    pixels: Arc<[u8]>,
+}
+
+impl ColorByOwnerMask {
+    pub fn new(width: u32, height: u32, pixels: Arc<[u8]>) -> Self {
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    fn value_at(&self, x: u32, y: u32) -> u8 {
+        if x >= self.width || y >= self.height {
+            return 0;
+        }
+        let idx = (y * self.width + x) as usize;
+        self.pixels.get(idx).copied().unwrap_or(0)
+    }
+}
+
+fn blend_color_by_owner(base: Color, mask_value: u8, owner_color: Color) -> Color {
+    let mask = mask_value as u16;
+    if mask == 0 {
+        return base;
+    }
+    let inv_mask = 255u16.saturating_sub(mask);
+    let mix_channel = |base_channel: u8, owner_channel: u8| -> u8 {
+        let tinted = (owner_channel as u16 * mask) / 255;
+        let base_contrib = (base_channel as u16 * inv_mask) / 255;
+        (tinted + base_contrib).min(255) as u8
+    };
+
+    Color::new(
+        mix_channel(base.r, owner_color.r),
+        mix_channel(base.g, owner_color.g),
+        mix_channel(base.b, owner_color.b),
+        base.a,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -460,8 +520,9 @@ impl GraphicsSystem {
         self.active_viewports.clear();
         self.surface.fill(Color::opaque(8, 12, 24)); // base fill before compositing viewports
 
+        let owner_colors = Self::collect_owner_colors(snapshot);
         let mut used_camera_keys = Vec::new();
-        self.render_viewports(snapshot, viewports, &mut used_camera_keys);
+        self.render_viewports(snapshot, viewports, &owner_colors, &mut used_camera_keys);
         let used_keys: HashSet<_> = used_camera_keys.into_iter().collect();
         self.camera_states.retain(|key, _| used_keys.contains(key));
 
@@ -474,6 +535,7 @@ impl GraphicsSystem {
         &mut self,
         snapshot: &SimulationSnapshot,
         viewports: &[ViewportInput<'_>],
+        owner_colors: &HashMap<i32, Color>,
         used_camera_keys: &mut Vec<CameraKey>,
     ) {
         if viewports.is_empty() {
@@ -483,6 +545,7 @@ impl GraphicsSystem {
                     snapshot,
                     &default,
                     SurfaceRect::new(0, 0, self.surface_width, self.surface_height),
+                    owner_colors,
                     used_camera_keys,
                 );
             }
@@ -491,7 +554,7 @@ impl GraphicsSystem {
 
         let layout = self.layout_viewports(viewports.len());
         for (input, rect) in viewports.iter().zip(layout.into_iter()) {
-            self.render_viewport(snapshot, input, rect, used_camera_keys);
+            self.render_viewport(snapshot, input, rect, owner_colors, used_camera_keys);
         }
     }
 
@@ -500,6 +563,7 @@ impl GraphicsSystem {
         snapshot: &SimulationSnapshot,
         input: &ViewportInput<'_>,
         rect: SurfaceRect,
+        owner_colors: &HashMap<i32, Color>,
         used_camera_keys: &mut Vec<CameraKey>,
     ) {
         if rect.width == 0 || rect.height == 0 {
@@ -618,7 +682,7 @@ impl GraphicsSystem {
             snapshot.landscape.as_ref(),
             lighting,
         );
-        self.draw_objects(&snapshot.objects, lighting);
+        self.draw_objects(&snapshot.objects, lighting, owner_colors);
         self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom);
 
         let content_surface = std::mem::replace(&mut self.surface, main_surface);
@@ -1168,17 +1232,28 @@ impl GraphicsSystem {
         }
     }
 
-    fn draw_objects(&mut self, objects: &[ObjectSnapshot], lighting: f32) {
+    fn draw_objects(
+        &mut self,
+        objects: &[ObjectSnapshot],
+        lighting: f32,
+        owner_colors: &HashMap<i32, Color>,
+    ) {
         for object in objects {
-            self.paint_object(object, lighting);
+            self.paint_object(object, lighting, owner_colors);
         }
     }
 
-    fn paint_object(&mut self, object: &ObjectSnapshot, lighting: f32) {
+    fn paint_object(
+        &mut self,
+        object: &ObjectSnapshot,
+        lighting: f32,
+        owner_colors: &HashMap<i32, Color>,
+    ) {
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let content_width = self.surface_width as f32;
         let content_height = self.surface_height as f32;
         let color = object_color(object).modulate(lighting);
+        let owner_color = owner_colors.get(&object.owner).copied();
         if object.vertices.len() >= 3 {
             let mut points = Vec::with_capacity(object.vertices.len());
             let mut min_x = f32::MAX;
@@ -1218,8 +1293,8 @@ impl GraphicsSystem {
         }
 
         if let Some(sprite) = self.object_sprites.get(&object.definition_id).cloned() {
-            if self.draw_action_sprite(object, &sprite, screen_x, screen_y, zoom) {
-                self.draw_object_overlays(object, screen_x, screen_y, zoom);
+            if self.draw_action_sprite(object, &sprite, owner_color, screen_x, screen_y, zoom) {
+                self.draw_object_overlays(object, owner_color, screen_x, screen_y, zoom);
                 return;
             }
             let sprite_width = (sprite.image.width() as f32 * zoom).max(1.0);
@@ -1232,7 +1307,7 @@ impl GraphicsSystem {
                 GuiSize::new(sprite_width, sprite_height),
             );
             draw_image(&mut self.surface, &rect, &sprite.image);
-            self.draw_object_overlays(object, screen_x, screen_y, zoom);
+            self.draw_object_overlays(object, owner_color, screen_x, screen_y, zoom);
             return;
         }
 
@@ -1245,12 +1320,14 @@ impl GraphicsSystem {
             GuiSize::new(size, size),
         );
         fill_rect(&mut self.surface, &rect, color);
+        self.draw_object_overlays(object, owner_color, screen_x, screen_y, zoom);
     }
 
     fn draw_action_sprite(
         &mut self,
         object: &ObjectSnapshot,
         sprite: &DefinitionSprite,
+        owner_color: Option<Color>,
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
@@ -1260,6 +1337,7 @@ impl GraphicsSystem {
             object.action.name.as_str(),
             object.action.phase,
             object.direction,
+            owner_color,
             screen_x,
             screen_y,
             zoom,
@@ -1272,6 +1350,7 @@ impl GraphicsSystem {
         action_name: &str,
         phase: i32,
         direction: Direction,
+        owner_color: Option<Color>,
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
@@ -1333,8 +1412,10 @@ impl GraphicsSystem {
             &mut self.surface,
             &dest_rect,
             &sprite.image,
+            sprite.color_mask.as_ref(),
             &source_rect,
             flipped,
+            owner_color,
         );
         true
     }
@@ -1342,6 +1423,7 @@ impl GraphicsSystem {
     fn draw_object_overlays(
         &mut self,
         object: &ObjectSnapshot,
+        owner_color: Option<Color>,
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
@@ -1352,10 +1434,10 @@ impl GraphicsSystem {
         for overlay in &object.graphics_overlays {
             match overlay.mode {
                 GraphicsOverlayMode::Action => {
-                    self.draw_overlay_action(object, overlay, screen_x, screen_y, zoom)
+                    self.draw_overlay_action(object, overlay, owner_color, screen_x, screen_y, zoom)
                 }
                 GraphicsOverlayMode::Base => {
-                    self.draw_overlay_base(object, overlay, screen_x, screen_y, zoom)
+                    self.draw_overlay_base(object, overlay, owner_color, screen_x, screen_y, zoom)
                 }
                 _ => {}
             }
@@ -1366,6 +1448,7 @@ impl GraphicsSystem {
         &mut self,
         object: &ObjectSnapshot,
         overlay: &ObjectGraphicsOverlay,
+        owner_color: Option<Color>,
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
@@ -1391,6 +1474,7 @@ impl GraphicsSystem {
             action_name,
             phase,
             object.direction,
+            owner_color,
             screen_x,
             screen_y,
             zoom,
@@ -1401,6 +1485,7 @@ impl GraphicsSystem {
         &mut self,
         object: &ObjectSnapshot,
         overlay: &ObjectGraphicsOverlay,
+        owner_color: Option<Color>,
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
@@ -1421,7 +1506,21 @@ impl GraphicsSystem {
             ),
             GuiSize::new(sprite_width, sprite_height),
         );
-        draw_image(&mut self.surface, &rect, &sprite.image);
+        let source_rect = SourceRect::new(
+            0,
+            0,
+            sprite.image.width() as i32,
+            sprite.image.height() as i32,
+        );
+        draw_image_region(
+            &mut self.surface,
+            &rect,
+            &sprite.image,
+            sprite.color_mask.as_ref(),
+            &source_rect,
+            false,
+            owner_color,
+        );
     }
 
     fn resolve_draw_direction(graphics: &DefinitionActionGraphics, direction: u32) -> (u32, bool) {
@@ -1637,6 +1736,43 @@ impl GraphicsSystem {
 
     fn apply_lighting(color: Color, lighting: f32) -> Color {
         color.modulate(lighting)
+    }
+
+    fn collect_owner_colors(snapshot: &SimulationSnapshot) -> HashMap<i32, Color> {
+        let mut colors: HashMap<i32, Color> = HashMap::new();
+        for player in &snapshot.players {
+            if let Some(rgb) = player.color {
+                colors.insert(player.id, Color::opaque(rgb.r, rgb.g, rgb.b));
+            }
+        }
+
+        let mut owners: HashSet<i32> = snapshot.players.iter().map(|state| state.id).collect();
+        owners.extend(snapshot.known_crew_owners.iter().copied());
+        owners.extend(snapshot.eliminated_crew_owners.iter().copied());
+        for object in &snapshot.objects {
+            if object.owner != OWNER_NONE {
+                owners.insert(object.owner);
+            }
+        }
+
+        for owner in owners {
+            if owner == OWNER_NONE {
+                continue;
+            }
+            colors
+                .entry(owner)
+                .or_insert_with(|| Self::default_owner_color(owner));
+        }
+
+        colors
+    }
+
+    fn default_owner_color(owner: i32) -> Color {
+        if owner <= 0 {
+            return Color::opaque(255, 255, 255);
+        }
+        let idx = ((owner - 1) as usize) % DEFAULT_PLAYER_COLORS.len();
+        DEFAULT_PLAYER_COLORS[idx]
     }
 
     fn collect_sprite_atlas(&self, snapshot: &SimulationSnapshot) -> Vec<EngineSurfaceSnapshot> {
@@ -2048,8 +2184,10 @@ fn draw_image_region(
     surface: &mut Surface,
     rect: &GuiRect,
     image: &ImageData,
+    mask: Option<&ColorByOwnerMask>,
     source: &SourceRect,
     flip_x: bool,
+    owner_color: Option<Color>,
 ) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
         return;
@@ -2111,12 +2249,21 @@ fn draw_image_region(
                 continue;
             }
 
-            let color = Color::new(
+            let mut color = Color::new(
                 pixels[idx],
                 pixels[idx + 1],
                 pixels[idx + 2],
                 pixels[idx + 3],
             );
+
+            if let (Some(mask_map), Some(owner)) = (mask, owner_color) {
+                if src_x >= 0 && src_y >= 0 {
+                    let mask_value = mask_map.value_at(src_x as u32, src_y as u32);
+                    if mask_value != 0 {
+                        color = blend_color_by_owner(color, mask_value, owner);
+                    }
+                }
+            }
 
             if color.a == 0 {
                 continue;

@@ -40,10 +40,10 @@ use lc_engine::{
     FLAG_VCENTER, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
-    draw_image, CrewOverlay, CursorAtlas, DefinitionSprite, GraphicsOverlay, GraphicsSystem,
-    GuiPoint, ImageData, InputDispatcher, KeyCode, MainMenuAction, MainMenuItem, PlayerOverlay,
-    ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction,
-    ViewportInput,
+    draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite, GraphicsOverlay,
+    GraphicsSystem, GuiPoint, ImageData, InputDispatcher, KeyCode, MainMenuAction, MainMenuItem,
+    PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu,
+    StartupMenuAction, ViewportInput,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
 use lc_gui::ButtonTextures;
@@ -171,6 +171,7 @@ impl FrontendAssets {
                             DefinitionSprite {
                                 image,
                                 actions: HashMap::new(),
+                                color_mask: None,
                             },
                         );
                     }
@@ -2560,27 +2561,34 @@ impl GameApp {
                 .definition_action_graphics(definition_id)
                 .unwrap_or_default();
 
-            let sprite_image =
+            let (sprite_image, color_mask) =
                 if let Some(image) = self.engine.definition_sprite_image(definition_id) {
-                    Some(ImageData::from_arc(
-                        image.width(),
-                        image.height(),
-                        image.into_pixels(),
-                    ))
+                    let width = image.width();
+                    let height = image.height();
+                    let mask = image
+                        .color_mask()
+                        .map(|mask| ColorByOwnerMask::new(width, height, mask));
+                    let pixels = image.into_pixels();
+                    (Some(ImageData::from_arc(width, height, pixels)), mask)
                 } else if let Some(image) = self.engine.definition_picture_image(definition_id) {
-                    Some(ImageData::from_arc(
-                        image.width(),
-                        image.height(),
-                        image.into_pixels(),
-                    ))
+                    let width = image.width();
+                    let height = image.height();
+                    (
+                        Some(ImageData::from_arc(width, height, image.into_pixels())),
+                        None,
+                    )
                 } else {
-                    None
+                    (None, None)
                 };
 
             if let Some(image) = sprite_image {
                 sprites.insert(
                     definition_id.to_string(),
-                    DefinitionSprite { image, actions },
+                    DefinitionSprite {
+                        image,
+                        actions,
+                        color_mask,
+                    },
                 );
             } else if let Some(existing) = sprites.get_mut(definition_id) {
                 existing.actions = actions;
