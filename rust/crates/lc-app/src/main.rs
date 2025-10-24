@@ -40,9 +40,10 @@ use lc_engine::{
     FLAG_VCENTER, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
-    draw_image, CrewOverlay, CursorAtlas, GraphicsOverlay, GraphicsSystem, GuiPoint, ImageData,
-    InputDispatcher, KeyCode, MainMenuAction, MainMenuItem, PlayerOverlay, ScenarioEntry,
-    ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput,
+    draw_image, CrewOverlay, CursorAtlas, DefinitionSprite, GraphicsOverlay, GraphicsSystem,
+    GuiPoint, ImageData, InputDispatcher, KeyCode, MainMenuAction, MainMenuItem, PlayerOverlay,
+    ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction,
+    ViewportInput,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
 use lc_gui::ButtonTextures;
@@ -142,7 +143,7 @@ struct FrontendAssets {
     font: Arc<dyn TextFont>,
     menu_background: Option<ImageData>,
     button_textures: Option<ButtonTextures>,
-    base_sprites: HashMap<String, ImageData>,
+    base_sprites: HashMap<String, DefinitionSprite>,
     cursor_atlas: Arc<CursorAtlas>,
 }
 
@@ -164,7 +165,14 @@ impl FrontendAssets {
                         .map(Self::image_to_data);
                     button_textures = Self::load_button_textures(&graphics);
                     if let Ok(sprite) = graphics.load_image("Crew.png") {
-                        sprites.insert("Walker".to_string(), Self::image_to_data(sprite));
+                        let image = Self::image_to_data(sprite);
+                        sprites.insert(
+                            "Walker".to_string(),
+                            DefinitionSprite {
+                                image,
+                                actions: HashMap::new(),
+                            },
+                        );
                     }
                     cursor_atlas = Self::load_cursor_atlas(&graphics);
                 }
@@ -233,7 +241,7 @@ impl FrontendAssets {
         Arc::clone(&self.cursor_atlas)
     }
 
-    fn base_sprite_map(&self) -> &HashMap<String, ImageData> {
+    fn base_sprite_map(&self) -> &HashMap<String, DefinitionSprite> {
         &self.base_sprites
     }
 
@@ -1349,8 +1357,8 @@ struct GameApp {
     network: Option<NetworkManager>,
     local_owner: i32,
     last_save_path: Option<PathBuf>,
-    object_sprites: HashMap<String, ImageData>,
-    sprite_cache: Arc<HashMap<String, ImageData>>,
+    object_sprites: HashMap<String, DefinitionSprite>,
+    sprite_cache: Arc<HashMap<String, DefinitionSprite>>,
     loading_state: Option<ScenarioLoadingState>,
     exit_requested: bool,
 }
@@ -2547,14 +2555,35 @@ impl GameApp {
     fn rebuild_definition_sprites(&mut self) {
         let mut sprites = self.assets.base_sprite_map().clone();
         for definition_id in self.engine.definition_ids() {
-            if let Some(image) = self.engine.definition_sprite_image(definition_id) {
-                let data = ImageData::from_arc(image.width(), image.height(), image.into_pixels());
-                sprites.insert(definition_id.to_string(), data);
-                continue;
-            }
-            if let Some(image) = self.engine.definition_picture_image(definition_id) {
-                let data = ImageData::from_arc(image.width(), image.height(), image.into_pixels());
-                sprites.insert(definition_id.to_string(), data);
+            let actions = self
+                .engine
+                .definition_action_graphics(definition_id)
+                .unwrap_or_default();
+
+            let sprite_image =
+                if let Some(image) = self.engine.definition_sprite_image(definition_id) {
+                    Some(ImageData::from_arc(
+                        image.width(),
+                        image.height(),
+                        image.into_pixels(),
+                    ))
+                } else if let Some(image) = self.engine.definition_picture_image(definition_id) {
+                    Some(ImageData::from_arc(
+                        image.width(),
+                        image.height(),
+                        image.into_pixels(),
+                    ))
+                } else {
+                    None
+                };
+
+            if let Some(image) = sprite_image {
+                sprites.insert(
+                    definition_id.to_string(),
+                    DefinitionSprite { image, actions },
+                );
+            } else if let Some(existing) = sprites.get_mut(definition_id) {
+                existing.actions = actions;
             }
         }
         if sprites != self.object_sprites {

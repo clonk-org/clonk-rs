@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use image::{load_from_memory, ImageError};
+use lc_resources::definition::ActionFacet as ResourceActionFacet;
 use lc_resources::{
     ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap,
     DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
@@ -16,10 +17,11 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::Deserialize;
 
 use crate::{
-    action::ActionSpec, ActionState, CommandDirection, Definition, DefinitionPicture,
-    DefinitionPictureImage, DefinitionSpriteImage, Direction, EffectState, Engine, EngineError,
-    EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings,
-    RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, Vector2,
+    action::ActionSpec, ActionState, CommandDirection, Definition, DefinitionActionFacet,
+    DefinitionActionGraphics, DefinitionPicture, DefinitionPictureImage, DefinitionSpriteImage,
+    Direction, EffectState, Engine, EngineError, EnvironmentSettings, Landscape, MovementProfile,
+    ObjectId, ObjectStatus, PhysicsSettings, RgbColor, SkyParallaxMode, SkySettings, SpawnConfig,
+    Vector2,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -114,6 +116,7 @@ pub struct SkyConfig {
 struct DefinitionActions {
     default_action: Option<String>,
     specs: HashMap<String, ActionSpec>,
+    graphics: HashMap<String, DefinitionActionGraphics>,
 }
 
 #[derive(Debug, Clone)]
@@ -318,6 +321,7 @@ impl Scenario {
             let mut compiled = Definition::from_script(&definition.id, name, &definition.script)?;
             if let Some(actions) = &definition.actions {
                 compiled.configure_actions(actions.default_action.clone(), actions.specs.clone());
+                compiled.configure_action_graphics(actions.graphics.clone());
             }
             compiled.set_crew_member(definition.crew_member);
             compiled.set_movement_profile(definition.movement);
@@ -425,6 +429,7 @@ impl Scenario {
                 Some(DefinitionActions {
                     default_action,
                     specs: actions,
+                    graphics: HashMap::new(),
                 })
             };
 
@@ -3048,16 +3053,22 @@ fn scenario_definition_from_resource(
 
 fn convert_action_map(map: &ResourceActionMap) -> DefinitionActions {
     let mut specs = HashMap::new();
+    let mut graphics = HashMap::new();
     for (name, definition) in &map.actions {
-        specs.insert(name.clone(), convert_action_definition(definition));
+        let (spec, visuals) = convert_action_definition(definition);
+        specs.insert(name.clone(), spec);
+        graphics.insert(name.clone(), visuals);
     }
     DefinitionActions {
         default_action: map.default_action.clone(),
         specs,
+        graphics,
     }
 }
 
-fn convert_action_definition(action: &ResourceActionDefinition) -> ActionSpec {
+fn convert_action_definition(
+    action: &ResourceActionDefinition,
+) -> (ActionSpec, DefinitionActionGraphics) {
     let mut spec = ActionSpec::default();
     if let Some(length) = action.length {
         spec = spec.with_length(length);
@@ -3089,7 +3100,27 @@ fn convert_action_definition(action: &ResourceActionDefinition) -> ActionSpec {
     if action.no_other_action {
         spec = spec.with_no_other_action(true);
     }
-    spec
+    let mut graphics = DefinitionActionGraphics::default();
+    graphics.length = action.length;
+    graphics.directions = action.directions.unwrap_or(1).max(1);
+    graphics.flip_dir = action.flip_dir;
+    graphics.reverse = action.reverse;
+    graphics.facet_base = action.facet_base;
+    graphics.facet_top_face = action.facet_top_face;
+    graphics.facet_target_stretch = action.facet_target_stretch;
+    graphics.facet = action.facet.as_ref().map(convert_action_facet);
+    (spec, graphics)
+}
+
+fn convert_action_facet(facet: &ResourceActionFacet) -> DefinitionActionFacet {
+    DefinitionActionFacet {
+        x: facet.x,
+        y: facet.y,
+        width: facet.width,
+        height: facet.height,
+        target_x: facet.target_x,
+        target_y: facet.target_y,
+    }
 }
 
 fn read_group_file_bytes(group: &Group, path: &Path) -> Result<Vec<u8>, ScenarioError> {

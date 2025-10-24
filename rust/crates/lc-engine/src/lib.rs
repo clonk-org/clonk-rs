@@ -94,6 +94,7 @@ use std::ops::AddAssign;
 use std::path::Path;
 use std::sync::Arc;
 
+use lc_resources::definition::ActionFacet as ResourceActionFacet;
 use lc_resources::{
     ActionDefinition as ResourceActionDefinition, PictureRect as ResourcePictureRect,
     ResourceDefinition as ResourceDefinitionData,
@@ -2896,6 +2897,28 @@ impl DefinitionSpriteImage {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DefinitionActionFacet {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub target_x: i32,
+    pub target_y: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct DefinitionActionGraphics {
+    pub facet: Option<DefinitionActionFacet>,
+    pub directions: u32,
+    pub flip_dir: Option<u32>,
+    pub reverse: bool,
+    pub facet_base: bool,
+    pub facet_top_face: bool,
+    pub facet_target_stretch: bool,
+    pub length: Option<u32>,
+}
+
 pub struct Definition {
     id: DefinitionId,
     name: String,
@@ -2903,6 +2926,7 @@ pub struct Definition {
     has_initialize: bool,
     has_step: bool,
     action_library: ActionLibrary,
+    action_graphics: HashMap<String, DefinitionActionGraphics>,
     crew_member: bool,
     movement: MovementProfile,
     category: i32,
@@ -2959,6 +2983,7 @@ impl Definition {
             has_initialize,
             has_step,
             action_library: ActionLibrary::default(),
+            action_graphics: HashMap::new(),
             crew_member: false,
             movement: MovementProfile::default(),
             category: DEFAULT_CATEGORY,
@@ -2994,17 +3019,18 @@ impl Definition {
 
         if let Some(action_map) = &resource.action_map {
             let mut specs = HashMap::new();
+            let mut visuals = HashMap::new();
             for (action_name, action_def) in &action_map.actions {
-                specs.insert(
-                    action_name.clone(),
-                    Self::convert_action_definition(action_def),
-                );
+                let (spec, graphics) = Self::convert_action_definition(action_def);
+                specs.insert(action_name.clone(), spec);
+                visuals.insert(action_name.clone(), graphics);
             }
             let default_action = action_map
                 .default_action
                 .clone()
                 .or_else(|| specs.keys().next().cloned());
-            definition.configure_actions(default_action, specs);
+            definition.configure_actions(default_action.clone(), specs);
+            definition.configure_action_graphics(visuals);
         }
 
         definition.set_crew_member(resource.core.crew_member);
@@ -3021,7 +3047,9 @@ impl Definition {
         Ok(definition)
     }
 
-    fn convert_action_definition(action: &ResourceActionDefinition) -> ActionSpec {
+    fn convert_action_definition(
+        action: &ResourceActionDefinition,
+    ) -> (ActionSpec, DefinitionActionGraphics) {
         let mut spec = ActionSpec::default();
         if let Some(procedure) = &action.procedure {
             spec = spec.with_procedure(procedure.clone());
@@ -3056,7 +3084,27 @@ impl Definition {
         if let Some(dig_free) = action.dig_free {
             spec = spec.with_dig_free(dig_free);
         }
-        spec
+        let mut graphics = DefinitionActionGraphics::default();
+        graphics.length = action.length;
+        graphics.directions = action.directions.unwrap_or(1).max(1);
+        graphics.flip_dir = action.flip_dir;
+        graphics.reverse = action.reverse;
+        graphics.facet_base = action.facet_base;
+        graphics.facet_top_face = action.facet_top_face;
+        graphics.facet_target_stretch = action.facet_target_stretch;
+        graphics.facet = action.facet.as_ref().map(Self::convert_action_facet);
+        (spec, graphics)
+    }
+
+    fn convert_action_facet(facet: &ResourceActionFacet) -> DefinitionActionFacet {
+        DefinitionActionFacet {
+            x: facet.x,
+            y: facet.y,
+            width: facet.width,
+            height: facet.height,
+            target_x: facet.target_x,
+            target_y: facet.target_y,
+        }
     }
 
     pub fn set_debugger_hooks(&mut self, hooks: DebuggerHooks) {
@@ -3071,8 +3119,23 @@ impl Definition {
         self.action_library = ActionLibrary::new(default_action, specs);
     }
 
+    pub fn configure_action_graphics(
+        &mut self,
+        graphics: HashMap<String, DefinitionActionGraphics>,
+    ) {
+        self.action_graphics = graphics;
+    }
+
     pub fn action_library(&self) -> &ActionLibrary {
         &self.action_library
+    }
+
+    pub fn action_graphics(&self) -> &HashMap<String, DefinitionActionGraphics> {
+        &self.action_graphics
+    }
+
+    pub fn graphics_for_action(&self, action: &str) -> Option<&DefinitionActionGraphics> {
+        self.action_graphics.get(action)
     }
 
     pub fn default_action_state(&self) -> ActionState {
@@ -5653,6 +5716,15 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .and_then(|definition| definition.sprite_image().cloned())
+    }
+
+    pub fn definition_action_graphics(
+        &self,
+        definition_id: &str,
+    ) -> Option<HashMap<String, DefinitionActionGraphics>> {
+        self.definitions
+            .get(definition_id)
+            .map(|definition| definition.action_graphics().clone())
     }
 
     pub fn definition_ids(&self) -> impl Iterator<Item = &str> {

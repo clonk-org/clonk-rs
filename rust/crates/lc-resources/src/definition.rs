@@ -117,6 +117,23 @@ pub struct ActionDefinition {
     pub abort_call: Option<String>,
     pub no_other_action: bool,
     pub dig_free: Option<i32>,
+    pub directions: Option<u32>,
+    pub flip_dir: Option<u32>,
+    pub facet: Option<ActionFacet>,
+    pub reverse: bool,
+    pub facet_base: bool,
+    pub facet_top_face: bool,
+    pub facet_target_stretch: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionFacet {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub target_x: i32,
+    pub target_y: i32,
 }
 
 #[derive(Debug, Error)]
@@ -402,6 +419,27 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
             "digfree" => {
                 current_definition.dig_free = parse_i32(value);
             }
+            "directions" => {
+                current_definition.directions = parse_u32(value);
+            }
+            "flipdir" => {
+                current_definition.flip_dir = parse_u32(value);
+            }
+            "facet" => {
+                current_definition.facet = parse_action_facet(value);
+            }
+            "reverse" => {
+                current_definition.reverse = parse_bool(value);
+            }
+            "facetbase" => {
+                current_definition.facet_base = parse_bool(value);
+            }
+            "facettopface" => {
+                current_definition.facet_top_face = parse_bool(value);
+            }
+            "facettargetstretch" => {
+                current_definition.facet_target_stretch = parse_bool(value);
+            }
             _ => {}
         }
     }
@@ -681,6 +719,38 @@ fn parse_i64(value: &str) -> Option<i64> {
     } else {
         trimmed.parse().ok()
     }
+}
+
+fn parse_action_facet(value: &str) -> Option<ActionFacet> {
+    let parts: Vec<_> = value
+        .split(|c: char| c == ',' || c == ';')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() != 4 && parts.len() != 6 {
+        return None;
+    }
+    let mut numbers = Vec::with_capacity(parts.len());
+    for part in parts {
+        numbers.push(parse_i32(part)?);
+    }
+    let x = numbers[0];
+    let y = numbers[1];
+    let width = numbers[2];
+    let height = numbers[3];
+    let (target_x, target_y) = if numbers.len() == 6 {
+        (numbers[4], numbers[5])
+    } else {
+        (0, 0)
+    };
+    Some(ActionFacet {
+        x,
+        y,
+        width,
+        height,
+        target_x,
+        target_y,
+    })
 }
 
 const CATEGORY_FLAGS: &[(&str, i32)] = &[

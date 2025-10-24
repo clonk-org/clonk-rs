@@ -3,9 +3,9 @@ mod startup_main_menu;
 mod startup_menu;
 
 use lc_engine::{
-    EnvironmentFrame, EnvironmentSettings, Landscape, ObjectId, ObjectSnapshot, RgbColor,
-    SimulationSnapshot, SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot, Vector2,
-    WeatherEvent,
+    DefinitionActionGraphics, Direction, EnvironmentFrame, EnvironmentSettings, Landscape,
+    ObjectId, ObjectSnapshot, RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
+    SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent,
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
@@ -31,6 +31,31 @@ const MAX_VIEWPORT_ZOOM: f32 = 4.0;
 const CAMERA_SMOOTHING_ALPHA: f32 = 0.2;
 const CAMERA_SNAP_THRESHOLD: f32 = 1.0;
 const CAMERA_JUMP_THRESHOLD: f32 = 256.0;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DefinitionSprite {
+    pub image: ImageData,
+    pub actions: HashMap<String, DefinitionActionGraphics>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceRect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl SourceRect {
+    fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct CameraKey {
@@ -263,7 +288,7 @@ pub struct GraphicsSystem {
     fallback_ground_height: i32,
     world_width: i32,
     world_height: i32,
-    object_sprites: Arc<HashMap<String, ImageData>>,
+    object_sprites: Arc<HashMap<String, DefinitionSprite>>,
     cursor_atlas: Arc<CursorAtlas>,
     active_viewports: Vec<ActiveViewport>,
     camera_states: HashMap<CameraKey, CameraState>,
@@ -277,7 +302,7 @@ impl GraphicsSystem {
         fallback_ground_height: i32,
         scenario_label: &str,
         font: Arc<dyn TextFont>,
-        object_sprites: Arc<HashMap<String, ImageData>>,
+        object_sprites: Arc<HashMap<String, DefinitionSprite>>,
         cursor_atlas: Arc<CursorAtlas>,
     ) -> Self {
         let mut gui = Gui::new(font.clone());
@@ -324,7 +349,7 @@ impl GraphicsSystem {
         }
     }
 
-    pub fn set_object_sprites(&mut self, sprites: Arc<HashMap<String, ImageData>>) {
+    pub fn set_object_sprites(&mut self, sprites: Arc<HashMap<String, DefinitionSprite>>) {
         self.object_sprites = sprites;
     }
 
@@ -1191,9 +1216,12 @@ impl GraphicsSystem {
             return;
         }
 
-        if let Some(sprite) = self.object_sprites.get(&object.definition_id) {
-            let sprite_width = (sprite.width() as f32 * zoom).max(1.0);
-            let sprite_height = (sprite.height() as f32 * zoom).max(1.0);
+        if let Some(sprite) = self.object_sprites.get(&object.definition_id).cloned() {
+            if self.draw_action_sprite(object, &sprite, screen_x, screen_y, zoom) {
+                return;
+            }
+            let sprite_width = (sprite.image.width() as f32 * zoom).max(1.0);
+            let sprite_height = (sprite.image.height() as f32 * zoom).max(1.0);
             let rect = GuiRect::from_origin_size(
                 GuiPoint::new(
                     screen_x - sprite_width / 2.0,
@@ -1201,7 +1229,7 @@ impl GraphicsSystem {
                 ),
                 GuiSize::new(sprite_width, sprite_height),
             );
-            draw_image(&mut self.surface, &rect, sprite);
+            draw_image(&mut self.surface, &rect, &sprite.image);
             return;
         }
 
@@ -1214,6 +1242,105 @@ impl GraphicsSystem {
             GuiSize::new(size, size),
         );
         fill_rect(&mut self.surface, &rect, color);
+    }
+
+    fn draw_action_sprite(
+        &mut self,
+        object: &ObjectSnapshot,
+        sprite: &DefinitionSprite,
+        screen_x: f32,
+        screen_y: f32,
+        zoom: f32,
+    ) -> bool {
+        let action_name = object.action.name.as_str();
+        let Some(graphics) = sprite.actions.get(action_name) else {
+            return false;
+        };
+        let Some(facet) = &graphics.facet else {
+            return false;
+        };
+
+        if facet.width <= 0 || facet.height <= 0 {
+            return false;
+        }
+
+        let frame_count = graphics.length.unwrap_or(1).max(1);
+        let frame_count_i32 = if frame_count > i32::MAX as u32 {
+            i32::MAX
+        } else {
+            frame_count as i32
+        };
+        if frame_count_i32 <= 0 {
+            return false;
+        }
+
+        let mut frame_index = object.action.phase.rem_euclid(frame_count_i32);
+        if graphics.reverse {
+            frame_index = frame_count_i32 - 1 - frame_index;
+        }
+
+        let direction_index = match object.direction {
+            Direction::Left => 0,
+            Direction::Right => 1,
+        };
+        let (draw_dir, flipped) = Self::resolve_draw_direction(graphics, direction_index);
+
+        let source_rect = SourceRect::new(
+            facet.x + facet.width.saturating_mul(frame_index),
+            facet.y + facet.height.saturating_mul(draw_dir as i32),
+            facet.width,
+            facet.height,
+        );
+
+        if !Self::source_within_image(&sprite.image, &source_rect) {
+            return false;
+        }
+
+        let dest_width = facet.width as f32 * zoom;
+        let dest_height = facet.height as f32 * zoom;
+        if dest_width <= 0.0 || dest_height <= 0.0 {
+            return false;
+        }
+
+        let dest_rect = GuiRect::from_origin_size(
+            GuiPoint::new(screen_x - dest_width / 2.0, screen_y - dest_height / 2.0),
+            GuiSize::new(dest_width, dest_height),
+        );
+        draw_image_region(
+            &mut self.surface,
+            &dest_rect,
+            &sprite.image,
+            &source_rect,
+            flipped,
+        );
+        true
+    }
+
+    fn resolve_draw_direction(graphics: &DefinitionActionGraphics, direction: u32) -> (u32, bool) {
+        let directions = graphics.directions.max(1);
+        if let Some(flip_dir) = graphics.flip_dir {
+            if flip_dir > 0 && direction >= flip_dir {
+                let base = flip_dir - 1;
+                let delta = direction - flip_dir;
+                let draw_dir = base.saturating_sub(delta).min(directions.saturating_sub(1));
+                return (draw_dir, true);
+            }
+        }
+        (direction.min(directions.saturating_sub(1)), false)
+    }
+
+    fn source_within_image(image: &ImageData, rect: &SourceRect) -> bool {
+        let width = image.width() as i32;
+        let height = image.height() as i32;
+        if width <= 0 || height <= 0 {
+            return false;
+        }
+        rect.x >= 0
+            && rect.y >= 0
+            && rect.width > 0
+            && rect.height > 0
+            && rect.x + rect.width <= width
+            && rect.y + rect.height <= height
     }
 
     fn draw_player_cursors(
@@ -1262,7 +1389,7 @@ impl GraphicsSystem {
         let sprite_height = self
             .object_sprites
             .get(&object.definition_id)
-            .map(|sprite| (sprite.height() as f32 * zoom).max(1.0))
+            .map(|sprite| (sprite.image.height() as f32 * zoom).max(1.0))
             .unwrap_or(12.0 * zoom);
         let cursor_width = image.width() as f32;
         let cursor_height = image.height() as f32;
@@ -1809,6 +1936,98 @@ pub(crate) fn fill_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
     }
 }
 
+fn draw_image_region(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    image: &ImageData,
+    source: &SourceRect,
+    flip_x: bool,
+) {
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+        return;
+    }
+
+    if source.width <= 0 || source.height <= 0 {
+        return;
+    }
+
+    let dest_width = rect.size.width.max(1.0).round() as u32;
+    let dest_height = rect.size.height.max(1.0).round() as u32;
+    if dest_width == 0 || dest_height == 0 || image.width() == 0 || image.height() == 0 {
+        return;
+    }
+
+    let dest_x = rect.origin.x.round() as i32;
+    let dest_y = rect.origin.y.round() as i32;
+
+    let bounds = surface.bounds();
+    let image_width = image.width() as i32;
+    let image_height = image.height() as i32;
+    let pixels = image.pixels();
+
+    for dy in 0..dest_height {
+        let target_y = dest_y + dy as i32;
+        if target_y < bounds.y || target_y >= bounds.y + bounds.height as i32 {
+            continue;
+        }
+
+        let src_y = ((dy as f32 / dest_height as f32) * source.height as f32)
+            .floor()
+            .clamp(0.0, (source.height - 1) as f32) as i32
+            + source.y;
+        if src_y < 0 || src_y >= image_height {
+            continue;
+        }
+
+        for dx in 0..dest_width {
+            let target_x = dest_x + dx as i32;
+            if target_x < bounds.x || target_x >= bounds.x + bounds.width as i32 {
+                continue;
+            }
+
+            let rel = ((dx as f32 / dest_width as f32) * source.width as f32)
+                .floor()
+                .clamp(0.0, (source.width - 1) as f32) as i32;
+            let sample_x_rel = if flip_x {
+                (source.width - 1).saturating_sub(rel)
+            } else {
+                rel
+            };
+            let src_x = source.x + sample_x_rel;
+            if src_x < 0 || src_x >= image_width {
+                continue;
+            }
+
+            let idx = ((src_y as usize * image.width() as usize + src_x as usize) * 4) as usize;
+            if idx + 3 >= pixels.len() {
+                continue;
+            }
+
+            let color = Color::new(
+                pixels[idx],
+                pixels[idx + 1],
+                pixels[idx + 2],
+                pixels[idx + 3],
+            );
+
+            if color.a == 0 {
+                continue;
+            }
+
+            let blended = if color.a == 255 {
+                color
+            } else {
+                let background = surface
+                    .get_pixel(target_x as u32, target_y as u32)
+                    .unwrap_or_default();
+                blend_colors(color, background)
+            };
+
+            let _ = surface.set_pixel(target_x as u32, target_y as u32, blended);
+        }
+    }
+}
+
 pub fn draw_image(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
         return;
@@ -1941,7 +2160,7 @@ mod tests {
         Arc::new(BitmapFont::new())
     }
 
-    fn empty_sprites() -> Arc<HashMap<String, ImageData>> {
+    fn empty_sprites() -> Arc<HashMap<String, DefinitionSprite>> {
         Arc::new(HashMap::new())
     }
 
