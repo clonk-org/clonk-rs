@@ -82,13 +82,15 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - Animations may not work
 
 **What's Needed:**
-- [ ] Verify Graphics.png loads for ALL definitions
+- [x] Verify Graphics.png loads for ALL definitions
 - [ ] Action frame graphics (ActMap procedure graphics)
 - [ ] Overlay graphics (ClonkGraphics, tool overlays)
 - [ ] ColorByOwner player color modulation
 - [ ] Animation frame cycling
 - [ ] Z-order rendering (background → objects → overlays)
 - [ ] Rotation and scaling for graphics
+
+**Progress (2025-11-07):** Manifest-backed definitions now load their full `.ocd` resources so sprite sheets come through via `Scenario::from_manifest`, ensuring every definition exposes `Graphics.png` to the frontend sprite cache.
 
 **Files:** `lc-resources/src/definition.rs`, graphics loading in main.rs, GraphicsSystem rendering
 

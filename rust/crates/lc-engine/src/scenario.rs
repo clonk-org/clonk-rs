@@ -418,13 +418,8 @@ impl Scenario {
             }
 
             let script_path = Path::new(&script);
-            let script_bytes = read_group_file_bytes(group, script_path)?;
-            let script_source =
-                String::from_utf8(script_bytes).map_err(|_| ScenarioError::ScriptEncoding {
-                    path: PathBuf::from(script_path),
-                })?;
-
-            let actions = if actions.is_empty() && default_action.is_none() {
+            let name_override = name.clone();
+            let actions_override = if actions.is_empty() && default_action.is_none() {
                 None
             } else {
                 Some(DefinitionActions {
@@ -433,30 +428,86 @@ impl Scenario {
                 })
             };
 
-            let movement_profile = match movement {
-                Some(manifest) => manifest.into_profile(&id)?,
-                None => MovementProfile::default(),
+            let movement_override = match movement {
+                Some(manifest) => Some(manifest.into_profile(&id)?),
+                None => None,
             };
 
-            let normalized_category = category
-                .map(|value| crate::normalize_category(value, crate::DEFAULT_CATEGORY))
-                .unwrap_or(crate::DEFAULT_CATEGORY);
+            let category_override =
+                category.map(|value| crate::normalize_category(value, crate::DEFAULT_CATEGORY));
 
-            definitions.push(ScenarioDefinition {
-                id,
-                name,
-                script: script_source,
-                actions,
-                crew_member,
-                movement: movement_profile,
-                category: normalized_category,
-                value: 0,
-                mass: 0,
-                picture: None,
-                picture_image: None,
-                graphics_image: None,
-                resource_group: None,
-            });
+            let mut base_definition = None;
+            if let Some(parent) = script_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    match group.open_child(parent) {
+                        Ok(def_group) => match ResourceDefinitionData::load(&def_group) {
+                            Ok(resource) => {
+                                base_definition = Some(scenario_definition_from_resource(
+                                    resource,
+                                    Some(def_group),
+                                ));
+                            }
+                            Err(ResourceDefinitionError::DefCoreMissing) => {}
+                            Err(ResourceDefinitionError::Resources(group_error))
+                                if is_missing_group_error(&group_error) => {}
+                            Err(error) => return Err(ScenarioError::Definition(error)),
+                        },
+                        Err(GroupError::EntryNotFound(_))
+                        | Err(GroupError::Missing(_))
+                        | Err(GroupError::NotDirectory(_)) => {}
+                        Err(error) => return Err(ScenarioError::Resources(error)),
+                    }
+                }
+            }
+
+            let mut scenario_definition = if let Some(base) = base_definition {
+                base
+            } else {
+                let script_bytes = read_group_file_bytes(group, script_path)?;
+                let script_source =
+                    String::from_utf8(script_bytes).map_err(|_| ScenarioError::ScriptEncoding {
+                        path: PathBuf::from(script_path),
+                    })?;
+                ScenarioDefinition {
+                    id: id.clone(),
+                    name: name_override.clone(),
+                    script: script_source,
+                    actions: None,
+                    crew_member,
+                    movement: MovementProfile::default(),
+                    category: category_override.unwrap_or(crate::DEFAULT_CATEGORY),
+                    value: 0,
+                    mass: 0,
+                    picture: None,
+                    picture_image: None,
+                    graphics_image: None,
+                    resource_group: None,
+                }
+            };
+
+            if scenario_definition.id != id {
+                scenario_definition.id = id.clone();
+            }
+
+            if let Some(name_value) = name_override {
+                scenario_definition.name = Some(name_value);
+            }
+
+            if let Some(profile) = movement_override {
+                scenario_definition.movement = profile;
+            }
+
+            if let Some(category_value) = category_override {
+                scenario_definition.category = category_value;
+            }
+
+            scenario_definition.crew_member = crew_member || scenario_definition.crew_member;
+
+            if let Some(actions) = actions_override {
+                scenario_definition.actions = Some(actions);
+            }
+
+            definitions.push(scenario_definition);
         }
 
         let script = if let Some(path) = manifest.script {
@@ -2927,6 +2978,16 @@ fn find_definition_by_token<'a>(
             None => false,
         }
     })
+}
+
+fn is_missing_group_error(error: &GroupError) -> bool {
+    matches!(
+        error,
+        GroupError::Missing(_) | GroupError::NotDirectory(_) | GroupError::EntryNotFound(_)
+    ) || matches!(
+        error,
+        GroupError::Io(io_error) if io_error.kind() == io::ErrorKind::NotFound
+    )
 }
 
 fn collect_definitions_from_group(

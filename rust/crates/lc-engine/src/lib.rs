@@ -1437,7 +1437,7 @@ impl EnvironmentSettings {
     }
 
     fn update_temperature_from_season(&mut self) {
-        if self.temperature_range <= 0 {
+        if self.temperature_range <= 0 || self.year_speed == 0 {
             return;
         }
         let season_angle = (self.season.rem_euclid(100) as f32 / 100.0) * core::f32::consts::TAU;
