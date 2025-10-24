@@ -209,6 +209,20 @@ impl Scenario {
             }
         }
 
+        if !manifest.core.definitions.skip_defs.is_empty() {
+            let skip_ids: HashSet<String> = manifest
+                .core
+                .definitions
+                .skip_defs
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect();
+            collected.retain(|definition| {
+                let id_upper = definition.id.to_ascii_uppercase();
+                !skip_ids.contains(&id_upper)
+            });
+        }
+
         if collected.is_empty() {
             return Err(ScenarioError::NoDefinitions);
         }
@@ -5006,6 +5020,63 @@ global func Step(state, frame, random)
             .object_snapshot(id)
             .expect("object created from legacy definition");
         assert_eq!(object.definition_id, "FOOO");
+    }
+
+    #[test]
+    fn legacy_skipdefs_excludes_specified_definitions() {
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let foo_core = defs_root.join("Foo.c4d");
+        std::fs::create_dir_all(&foo_core).expect("foo definition dir");
+        std::fs::write(
+            foo_core.join("DefCore.txt"),
+            "[DefCore]\nid=FOOO\nName=Foo\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write foo defcore");
+        std::fs::write(foo_core.join("Script.c"), "// foo script\n").expect("write foo script");
+
+        let bar_core = defs_root.join("Bar.c4d");
+        std::fs::create_dir_all(&bar_core).expect("bar definition dir");
+        std::fs::write(
+            bar_core.join("DefCore.txt"),
+            "[DefCore]\nid=BARR\nName=Bar\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write bar defcore");
+        std::fs::write(bar_core.join("Script.c"), "// bar script\n").expect("write bar script");
+
+        let scenario_dir = dir.path().join("SkipDefsScenario.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=SkipDefs\n\n[Definitions]\nDefinition1=Defs.c4d\nSkipDefs=FOOO\n\n[Player1]\nCrew=BARR\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Script.c"),
+            "global func Initialize(state, random) { return nil; }\n",
+        )
+        .expect("write scenario script");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("legacy scenario loads");
+        let ids: Vec<String> = scenario
+            .definitions
+            .iter()
+            .map(|def| def.id.clone())
+            .collect();
+        assert!(
+            ids.iter().any(|id| id == "BARR"),
+            "expected non-skipped definition to be present"
+        );
+        assert!(
+            !ids.iter().any(|id| id == "FOOO"),
+            "expected skipped definition to be filtered out"
+        );
     }
 
     #[test]

@@ -51,11 +51,12 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - [x] Complete Scenario.txt parsing (verify all fields)
 - [x] Map.bmp landscape loading
 - [x] Objects.txt initial object spawning (Scenario.txt crew entries now covered)
-- [ ] Verify all definitions load correctly
+- [x] Verify all definitions load correctly
 - [x] Proper error handling (don't fall back silently)
 - [ ] Loading screen with progress
 - [ ] Scenario intro text/mission briefing
 
+**Progress (2025-10-31):** Legacy loader now mirrors C++ SkipDefs filtering so scenarios stop registering intentionally omitted definitions, with coverage in `rust/crates/lc-engine/src/scenario.rs`.
 **Progress (2025-10-30):** Scenario loader now parses the entire legacy `Scenario.txt` core into typed sections (Head, Definitions, Game, Player start, Landscape, Weather, Animals, Environment), validating every field and exposing it to the engine for parity-critical data.
 **Progress (2025-10-27):** Runtime now stops falling back to the sandbox when a disk scenario fails to load or apply; `GameApp::start_scenario` keeps players in the menu, surfaces the failure in `status_text`, and only swaps the running engine state once the legacy scenario applies cleanly.
 **Progress (2025-10-26):** Legacy loader now parses `Objects.txt`, creating spawn configs with explicit object ids, status, owner, position/velocity, crew state, action info, and resolves containers (including via `Contents=` fallbacks) so full scenario object graphs appear without sandbox fallback.
