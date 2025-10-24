@@ -48,6 +48,13 @@ pub enum ScenarioError {
     LegacyObjectsEncoding,
     #[error("invalid legacy objects data: {0}")]
     LegacyObjectsParse(String),
+    #[error("legacy map `Map.bmp` could not be decoded: {source}")]
+    LegacyMapDecode {
+        #[source]
+        source: ImageError,
+    },
+    #[error("legacy map `Map.bmp` has zero width or height")]
+    LegacyMapEmpty,
     #[error("duplicate definition id `{0}` in scenario manifest")]
     DuplicateDefinition(String),
     #[error("initial object references unknown definition `{0}`")]
@@ -207,6 +214,7 @@ impl Scenario {
         }
 
         let script = load_legacy_scenario_script(group)?;
+        let landscape = load_legacy_landscape(group, &manifest)?;
         let mut initial_spawns = collect_initial_spawns(&manifest.sections, &collected)?;
         let mut object_spawns = collect_legacy_objects(group, &collected)?;
         initial_spawns.append(&mut object_spawns);
@@ -217,7 +225,7 @@ impl Scenario {
             ground_height_hint: manifest.ground_height_hint,
             definitions: collected,
             initial_spawns,
-            landscape: None,
+            landscape,
             physics: None,
             environment: None,
             sky: None,
@@ -736,6 +744,14 @@ fn parse_c4sval_std(value: &str) -> Option<i32> {
     }
 }
 
+fn parse_legacy_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 fn load_legacy_scenario_script(
     group: &Group,
 ) -> Result<Option<ScenarioScriptSource>, ScenarioError> {
@@ -810,6 +826,109 @@ fn collect_initial_spawns(
     }
 
     Ok(spawns)
+}
+
+fn load_legacy_landscape(
+    group: &Group,
+    manifest: &LegacyScenarioManifest,
+) -> Result<Option<Landscape>, ScenarioError> {
+    let landscape_section = manifest.sections.get("landscape");
+    let map_zoom_value = landscape_section
+        .and_then(|entries| find_entry(entries, "mapzoom"))
+        .and_then(|value| parse_c4sval_std(&value))
+        .unwrap_or(1)
+        .max(1);
+    let map_zoom_u32 = map_zoom_value as u32;
+    let map_width_hint = landscape_section
+        .and_then(|entries| find_entry(entries, "mapwidth"))
+        .and_then(|value| parse_c4sval_std(&value))
+        .map(|value| value.max(1));
+    let map_height_hint = landscape_section
+        .and_then(|entries| find_entry(entries, "mapheight"))
+        .and_then(|value| parse_c4sval_std(&value))
+        .map(|value| value.max(1));
+    let exact_landscape = landscape_section
+        .and_then(|entries| find_entry(entries, "exactlandscape"))
+        .and_then(|value| parse_legacy_bool(&value))
+        .unwrap_or(false);
+
+    let map_bytes = match group.read_file("Map.bmp") {
+        Ok(bytes) => Some(bytes),
+        Err(GroupError::EntryNotFound(_)) => None,
+        Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(ScenarioError::Resources(error)),
+    };
+
+    if let Some(bytes) = map_bytes {
+        let dynamic =
+            load_from_memory(&bytes).map_err(|source| ScenarioError::LegacyMapDecode { source })?;
+        let rgba = dynamic.to_rgba8();
+        let width = rgba.width();
+        let height = rgba.height();
+        if width == 0 || height == 0 {
+            return Err(ScenarioError::LegacyMapEmpty);
+        }
+
+        let map_zoom_i32 = map_zoom_value;
+        let sky_pixel = rgba.get_pixel(0, 0).0;
+        let capacity = (width as usize).saturating_mul(map_zoom_u32 as usize);
+        let mut heights = Vec::with_capacity(capacity);
+
+        for x in 0..width {
+            let mut column_height_world: Option<i32> = None;
+            for y in 0..height {
+                if rgba.get_pixel(x, y).0 != sky_pixel {
+                    let pixels = (height - y) as i32;
+                    column_height_world = Some(pixels.saturating_mul(map_zoom_i32));
+                    break;
+                }
+            }
+
+            let world_height = column_height_world
+                .or_else(|| manifest.ground_height_hint.map(|hint| hint.max(0)))
+                .or_else(|| map_height_hint.map(|value| value.saturating_mul(map_zoom_i32).max(0)))
+                .unwrap_or_else(|| (height as i32).saturating_mul(map_zoom_i32).max(0));
+
+            for _ in 0..map_zoom_u32 {
+                heights.push(world_height);
+            }
+        }
+
+        if heights.iter().all(|&value| value <= 0) {
+            let fallback = manifest
+                .ground_height_hint
+                .or_else(|| map_height_hint.map(|value| value.saturating_mul(map_zoom_i32).max(0)))
+                .unwrap_or((height as i32).saturating_mul(map_zoom_i32).max(0));
+            if fallback > 0 {
+                for value in &mut heights {
+                    *value = fallback;
+                }
+            }
+        }
+
+        let final_width = width.saturating_mul(map_zoom_u32);
+        let landscape = Landscape::new(final_width, heights)
+            .map_err(|error| ScenarioError::InvalidLandscape(error.to_string()))?;
+        return Ok(Some(landscape));
+    }
+
+    if exact_landscape {
+        return Ok(None);
+    }
+
+    let fallback_map_width = map_width_hint.unwrap_or(96);
+    let fallback_map_height = map_height_hint.unwrap_or(50);
+    let width_product =
+        i64::from(fallback_map_width).saturating_mul(i64::from(map_zoom_value.max(1)));
+    let width_u32 = width_product
+        .clamp(1, i64::from(u32::MAX))
+        .try_into()
+        .unwrap_or(u32::MAX);
+    let fallback_height = fallback_map_height
+        .saturating_mul(map_zoom_value.max(1))
+        .max(1);
+    let landscape = Landscape::flat(width_u32, fallback_height);
+    Ok(Some(landscape))
 }
 
 fn collect_legacy_objects(
@@ -2309,6 +2428,7 @@ fn rgb_to_bgr_u32(color: RgbColor) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{codecs::bmp::BmpEncoder, ColorType, Rgba, RgbaImage};
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
@@ -3361,6 +3481,62 @@ global func Step(state, frame, random)
         assert_eq!(gem_snapshot.action.phase, 2);
         assert_eq!(gem_snapshot.action.data, 5);
         assert_eq!(gem_snapshot.action.target, Some(ObjectId::new(100)));
+    }
+
+    #[test]
+    fn legacy_map_bmp_creates_landscape_height_profile() {
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let crew_core = defs_root.join("Crew.c4d");
+        std::fs::create_dir_all(&crew_core).expect("crew definition dir");
+        std::fs::write(
+            crew_core.join("DefCore.txt"),
+            "[DefCore]\nid=CLNK\nName=Clonk\nCategory=0\nCrewMember=1\n",
+        )
+        .expect("write crew defcore");
+        std::fs::write(crew_core.join("Script.c"), "// crew script\n").expect("crew script");
+
+        let scenario_dir = dir.path().join("LegacyLandscape.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Legacy Landscape\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=CLNK=1\nPosition=40,60\n\n[Landscape]\nMapWidth=4\nMapHeight=4\nMapZoom=2\n",
+        )
+        .expect("write scenario core");
+
+        let mut map = RgbaImage::from_pixel(4, 4, Rgba([0, 0, 255, 255]));
+        for y in 1..4 {
+            for x in 0..4 {
+                map.put_pixel(x, y, Rgba([128, 64, 32, 255]));
+            }
+        }
+        let raw = map.into_raw();
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = BmpEncoder::new(&mut encoded);
+            encoder
+                .encode(&raw, 4, 4, ColorType::Rgba8)
+                .expect("encode map bmp");
+        }
+        std::fs::write(scenario_dir.join("Map.bmp"), encoded).expect("write map");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("legacy scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let landscape = engine.landscape().expect("landscape present");
+        assert_eq!(landscape.width(), 8);
+        assert_eq!(
+            landscape.surface(),
+            vec![6; 8].as_slice(),
+            "expected map zoom to scale surface heights"
+        );
     }
 
     #[test]
