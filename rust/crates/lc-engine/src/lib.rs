@@ -5676,6 +5676,7 @@ impl Engine {
                     object.state.container,
                     object.state.draw_transform,
                 )
+                .with_contents(object.state.contents.clone())
                 .with_alive(object.state.alive)
                 .with_ocf(ocf)
             }),
@@ -9467,7 +9468,6 @@ impl Engine {
                 let contents = &mut self.objects[container_index].state.contents;
                 if !contents.contains(&object_id) {
                     contents.push(object_id);
-                    contents.sort_by_key(|id| id.as_u64());
                 }
 
                 self.objects[object_index].state.container = Some(container_id);

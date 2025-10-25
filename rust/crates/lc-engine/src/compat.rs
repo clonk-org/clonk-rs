@@ -68,6 +68,7 @@ pub(crate) struct HostWorldObject {
     pub action_data: i32,
     pub action_ticks: u32,
     container: Option<ObjectId>,
+    contents: Vec<ObjectId>,
     pub draw_transform: Option<DrawTransform>,
 }
 
@@ -168,6 +169,7 @@ impl HostWorldObject {
             action_data,
             action_ticks,
             container,
+            contents: Vec::new(),
             draw_transform,
         }
     }
@@ -236,6 +238,19 @@ impl HostWorldObject {
 
     pub fn container(&self) -> Option<ObjectId> {
         self.container
+    }
+
+    pub fn contents(&self) -> &[ObjectId] {
+        &self.contents
+    }
+
+    pub fn with_contents(mut self, contents: Vec<ObjectId>) -> Self {
+        self.contents = contents;
+        self
+    }
+
+    pub fn is_present(&self) -> bool {
+        !matches!(self.status, ObjectStatus::Deleted)
     }
 
     pub fn position(&self) -> Vector2 {
@@ -1201,6 +1216,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CreateParticle", create_particle);
     script.register_host_function("ClearParticles", clear_particles);
     script.register_host_function("CustomMessage", custom_message);
+    script.register_host_function("Contents", contents);
+    script.register_host_function("ContentsCount", contents_count);
+    script.register_host_function("FindContents", find_contents);
+    script.register_host_function("FindOtherContents", find_other_contents);
     script.register_host_function("Contained", contained);
     script.register_host_function("GetCategory", get_category);
     script.register_host_function("SetCategory", set_category);
@@ -5625,6 +5644,236 @@ fn contained(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         Ok(to_value(object.container()))
+    })
+}
+
+fn contents(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "Contents expects at most 3 arguments: index, object, include_attached",
+        ));
+    }
+
+    let index = match args.get(0) {
+        None | Some(Value::Nil) => 0,
+        Some(value) => value_to_i32(value, "Contents", "index")?,
+    };
+    if index < 0 {
+        return Ok(Value::Nil);
+    }
+
+    let target_id =
+        parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "Contents", "object")?;
+    let include_attached = if let Some(value) = args.get(2) {
+        value_to_bool(value, "Contents", "include_attached")?
+    } else {
+        false
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let container_id = if let Some(id) = target_id {
+            id
+        } else {
+            match context.object_context() {
+                Some(object) => object.id(),
+                None => return Ok(Value::Nil),
+            }
+        };
+
+        let container = match context.get_world_object(container_id) {
+            Some(object) if object.is_present() => object,
+            _ => return Ok(Value::Nil),
+        };
+
+        let mut entries = Vec::new();
+        for child_id in container.contents() {
+            if let Some(child) = context.get_world_object(*child_id) {
+                if !child.is_present() {
+                    continue;
+                }
+                if !include_attached {
+                    if let Some(procedure) = child.procedure_name() {
+                        if procedure.eq_ignore_ascii_case("attach") {
+                            continue;
+                        }
+                    }
+                }
+                entries.push(child.id);
+            }
+        }
+
+        let Some(selected) = entries.get(index as usize) else {
+            return Ok(Value::Nil);
+        };
+        Ok(object_reference_value(*selected))
+    })
+}
+
+fn contents_count(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "ContentsCount expects at most 2 arguments: definition, object",
+        ));
+    }
+
+    let definition = parse_definition_argument(args.get(0), "ContentsCount")?;
+    let target_id = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "ContentsCount",
+        "object",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Int(0)),
+        };
+
+        let container_id = if let Some(id) = target_id {
+            id
+        } else {
+            match context.object_context() {
+                Some(object) => object.id(),
+                None => return Ok(Value::Int(0)),
+            }
+        };
+
+        let container = match context.get_world_object(container_id) {
+            Some(object) if object.is_present() => object,
+            _ => return Ok(Value::Int(0)),
+        };
+
+        let mut count = 0;
+        for child_id in container.contents() {
+            if let Some(child) = context.get_world_object(*child_id) {
+                if !child.is_present() {
+                    continue;
+                }
+                if let Some(definition_id) = definition.as_ref() {
+                    if child.definition_id() != definition_id {
+                        continue;
+                    }
+                }
+                count += 1;
+            }
+        }
+
+        Ok(Value::Int(count))
+    })
+}
+
+fn find_contents(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "FindContents expects at least 1 argument: definition",
+        ));
+    }
+
+    let definition = parse_definition_argument(Some(&args[0]), "FindContents")?;
+    let Some(definition) = definition else {
+        return Ok(Value::Nil);
+    };
+
+    let target_id = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "FindContents",
+        "object",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let container_id = if let Some(id) = target_id {
+            id
+        } else {
+            match context.object_context() {
+                Some(object) => object.id(),
+                None => return Ok(Value::Nil),
+            }
+        };
+
+        let container = match context.get_world_object(container_id) {
+            Some(object) if object.is_present() => object,
+            _ => return Ok(Value::Nil),
+        };
+
+        for child_id in container.contents() {
+            if let Some(child) = context.get_world_object(*child_id) {
+                if !child.is_present() {
+                    continue;
+                }
+                if child.definition_id() == definition {
+                    return Ok(object_reference_value(child.id));
+                }
+            }
+        }
+
+        Ok(Value::Nil)
+    })
+}
+
+fn find_other_contents(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "FindOtherContents expects at least 1 argument: definition",
+        ));
+    }
+
+    let definition = parse_definition_argument(Some(&args[0]), "FindOtherContents")?;
+    let target_id = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "FindOtherContents",
+        "object",
+    )?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let container_id = if let Some(id) = target_id {
+            id
+        } else {
+            match context.object_context() {
+                Some(object) => object.id(),
+                None => return Ok(Value::Nil),
+            }
+        };
+
+        let container = match context.get_world_object(container_id) {
+            Some(object) if object.is_present() => object,
+            _ => return Ok(Value::Nil),
+        };
+
+        for child_id in container.contents() {
+            if let Some(child) = context.get_world_object(*child_id) {
+                if !child.is_present() {
+                    continue;
+                }
+                let matches = match definition.as_ref() {
+                    Some(definition_id) => child.definition_id() != definition_id,
+                    None => true,
+                };
+                if matches {
+                    return Ok(object_reference_value(child.id));
+                }
+            }
+        }
+
+        Ok(Value::Nil)
     })
 }
 
@@ -11102,6 +11351,499 @@ mod tests {
                 );
             }
             other => panic!("expected proplist for container reference, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn contents_skips_attached_by_default() {
+        let container_id = ObjectId::new(100);
+        let attached_id = ObjectId::new(101);
+        let item_id = ObjectId::new(102);
+
+        let container = HostWorldObject::new(
+            container_id,
+            "Crew",
+            ObjectStatus::Normal,
+            "Walk",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_contents(vec![attached_id, item_id]);
+
+        let attached = HostWorldObject::new(
+            attached_id,
+            "Banner",
+            ObjectStatus::Normal,
+            "Attach",
+            None,
+            None,
+            Some("Attach".into()),
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            Some(container_id),
+        );
+
+        let item = HostWorldObject::new(
+            item_id,
+            "Gem",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            Some(container_id),
+        );
+
+        let world = HostWorldContext::from_objects(vec![container, attached, item]);
+        let context = HostObjectContext::new(
+            container_id,
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Walk",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+
+        let (result, _) = with_effect_context(Some(context), &[], world, 200, || contents(&[]));
+        let value = result.expect("Contents succeeds");
+        match value {
+            Value::Proplist(map) => {
+                assert_eq!(map.get("id"), Some(&Value::Int(item_id.as_u64() as i32)));
+            }
+            other => panic!("expected proplist result for contents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn contents_includes_attached_when_requested() {
+        let container_id = ObjectId::new(110);
+        let attached_id = ObjectId::new(111);
+
+        let container = HostWorldObject::new(
+            container_id,
+            "Crew",
+            ObjectStatus::Normal,
+            "Walk",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_contents(vec![attached_id]);
+
+        let attached = HostWorldObject::new(
+            attached_id,
+            "Banner",
+            ObjectStatus::Normal,
+            "Attach",
+            None,
+            None,
+            Some("Attach".into()),
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            Some(container_id),
+        );
+
+        let world = HostWorldContext::from_objects(vec![container, attached]);
+        let context = HostObjectContext::new(
+            container_id,
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Walk",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+
+        let args = [Value::Nil, Value::Nil, Value::Bool(true)];
+        let (result, _) = with_effect_context(Some(context), &[], world, 200, || contents(&args));
+        let value = result.expect("Contents with attachments succeeds");
+        match value {
+            Value::Proplist(map) => {
+                assert_eq!(
+                    map.get("id"),
+                    Some(&Value::Int(attached_id.as_u64() as i32))
+                );
+            }
+            other => panic!("expected proplist result for contents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn contents_count_filters_by_definition() {
+        let container_id = ObjectId::new(120);
+        let gem_id = ObjectId::new(121);
+        let hammer_id = ObjectId::new(122);
+
+        let container = HostWorldObject::new(
+            container_id,
+            "Chest",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_contents(vec![gem_id, hammer_id]);
+
+        let gem = HostWorldObject::new(
+            gem_id,
+            "Gem",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            Some(container_id),
+        );
+
+        let hammer = HostWorldObject::new(
+            hammer_id,
+            "Hammer",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            Some(container_id),
+        );
+
+        let world = HostWorldContext::from_objects(vec![container, gem, hammer]);
+        let context_all = HostObjectContext::new(
+            container_id,
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+        let context_filtered = HostObjectContext::new(
+            container_id,
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+
+        let (result, _) = with_effect_context(Some(context_all), &[], world.clone(), 300, || {
+            contents_count(&[])
+        });
+        let value = result.expect("ContentsCount without filter succeeds");
+        assert_eq!(value, Value::Int(2));
+
+        let args = [Value::String("Gem".into())];
+        let (filtered, _) = with_effect_context(Some(context_filtered), &[], world, 300, || {
+            contents_count(&args)
+        });
+        let filtered_value = filtered.expect("ContentsCount with filter succeeds");
+        assert_eq!(filtered_value, Value::Int(1));
+    }
+
+    #[test]
+    fn find_contents_returns_matching_object() {
+        let container_id = ObjectId::new(130);
+        let gem_id = ObjectId::new(131);
+        let hammer_id = ObjectId::new(132);
+
+        let container = HostWorldObject::new(
+            container_id,
+            "Chest",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_contents(vec![hammer_id, gem_id]);
+
+        let hammer = HostWorldObject::new(
+            hammer_id,
+            "Hammer",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            Some(container_id),
+        );
+
+        let gem = HostWorldObject::new(
+            gem_id,
+            "Gem",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            Some(container_id),
+        );
+
+        let world = HostWorldContext::from_objects(vec![container, hammer, gem]);
+        let context = HostObjectContext::new(
+            container_id,
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+
+        let args = [Value::String("Gem".into())];
+        let (result, _) =
+            with_effect_context(Some(context), &[], world, 400, || find_contents(&args));
+        let value = result.expect("FindContents succeeds");
+        match value {
+            Value::Proplist(map) => {
+                assert_eq!(map.get("id"), Some(&Value::Int(gem_id.as_u64() as i32)));
+            }
+            other => panic!("expected proplist from FindContents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn find_other_contents_returns_first_non_matching_object() {
+        let container_id = ObjectId::new(140);
+        let gem_id = ObjectId::new(141);
+        let hammer_id = ObjectId::new(142);
+
+        let container = HostWorldObject::new(
+            container_id,
+            "Chest",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_contents(vec![gem_id, hammer_id]);
+
+        let gem = HostWorldObject::new(
+            gem_id,
+            "Gem",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            Some(container_id),
+        );
+
+        let hammer = HostWorldObject::new(
+            hammer_id,
+            "Hammer",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            Some(container_id),
+        );
+
+        let world = HostWorldContext::from_objects(vec![container, gem, hammer]);
+        let context = HostObjectContext::new(
+            container_id,
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+
+        let args = [Value::String("Gem".into())];
+        let (result, _) = with_effect_context(Some(context), &[], world, 500, || {
+            find_other_contents(&args)
+        });
+        let value = result.expect("FindOtherContents succeeds");
+        match value {
+            Value::Proplist(map) => {
+                assert_eq!(map.get("id"), Some(&Value::Int(hammer_id.as_u64() as i32)));
+            }
+            other => panic!("expected proplist from FindOtherContents, got {other:?}"),
         }
     }
 
