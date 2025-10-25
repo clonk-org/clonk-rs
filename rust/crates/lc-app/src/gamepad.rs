@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use gilrs::{Axis, Button, Event, EventType, GamepadId, Gilrs};
-use lc_engine::ControlButton;
+use lc_engine::{ControlButton, ControlCommand};
 use winit::event::ElementState;
 
 const AXIS_PRESS_THRESHOLD: f32 = 0.6;
@@ -107,14 +107,75 @@ impl GamepadManager {
                     });
                 }
             }
-            Button::South => output.push(GamepadEvent::Action {
-                action: GamepadActionType::Select,
-                state,
-            }),
-            Button::East => output.push(GamepadEvent::Action {
-                action: GamepadActionType::Back,
-                state,
-            }),
+            Button::South => {
+                output.push(GamepadEvent::Action {
+                    action: GamepadActionType::Select,
+                    state,
+                });
+                output.push(GamepadEvent::Command {
+                    command: ControlCommand::Throw,
+                    state,
+                });
+            }
+            Button::East => {
+                output.push(GamepadEvent::Action {
+                    action: GamepadActionType::Cancel,
+                    state,
+                });
+                output.push(GamepadEvent::Command {
+                    command: ControlCommand::Dig,
+                    state,
+                });
+            }
+            Button::West => {
+                output.push(GamepadEvent::Command {
+                    command: ControlCommand::Special,
+                    state,
+                });
+            }
+            Button::North => {
+                output.push(GamepadEvent::Command {
+                    command: ControlCommand::Special2,
+                    state,
+                });
+            }
+            Button::LeftTrigger => {
+                output.push(GamepadEvent::Command {
+                    command: ControlCommand::CursorLeft,
+                    state,
+                });
+            }
+            Button::RightTrigger => {
+                output.push(GamepadEvent::Command {
+                    command: ControlCommand::CursorRight,
+                    state,
+                });
+            }
+            Button::LeftTrigger2 => {
+                output.push(GamepadEvent::Command {
+                    command: ControlCommand::CursorToggle,
+                    state,
+                });
+            }
+            Button::RightTrigger2 => {
+                if state == ElementState::Pressed {
+                    output.push(GamepadEvent::Clear);
+                }
+            }
+            Button::Start => {
+                if state == ElementState::Pressed {
+                    output.push(GamepadEvent::Command {
+                        command: ControlCommand::PlayerMenu,
+                        state,
+                    });
+                }
+            }
+            Button::Select => {
+                output.push(GamepadEvent::Action {
+                    action: GamepadActionType::MenuToggle,
+                    state,
+                });
+            }
             _ => {}
         }
     }
@@ -236,7 +297,8 @@ impl DirectionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GamepadActionType {
     Select,
-    Back,
+    Cancel,
+    MenuToggle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,6 +307,11 @@ pub(crate) enum GamepadEvent {
         button: ControlButton,
         state: ElementState,
     },
+    Command {
+        command: ControlCommand,
+        state: ElementState,
+    },
+    Clear,
     Action {
         action: GamepadActionType,
         state: ElementState,

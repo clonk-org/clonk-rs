@@ -3582,11 +3582,34 @@ impl GameApp {
             GamepadEvent::Direction { button, state } => {
                 self.handle_gamepad_direction(button, state)?;
             }
+            GamepadEvent::Command { command, state } => {
+                self.handle_gamepad_command(command, state)?;
+            }
+            GamepadEvent::Clear => {
+                if matches!(self.mode, AppMode::Running) {
+                    self.dispatch_control_event(ControlEvent::ClearPressed)?;
+                }
+            }
             GamepadEvent::Action { action, state } => {
                 self.handle_gamepad_action(action, state)?;
             }
         }
         Ok(())
+    }
+
+    fn handle_gamepad_command(
+        &mut self,
+        command: ControlCommand,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
+        if !matches!(self.mode, AppMode::Running) {
+            return Ok(());
+        }
+        let kind = match state {
+            ElementState::Pressed => CommandKind::Press,
+            ElementState::Released => CommandKind::Release,
+        };
+        self.dispatch_control_event(ControlEvent::Command { command, kind })
     }
 
     fn handle_gamepad_direction(
@@ -3628,6 +3651,27 @@ impl GameApp {
         Ok(())
     }
 
+    fn handle_menu_cancel_action(&mut self, state: ElementState) -> Result<(), EngineError> {
+        match self.startup_view {
+            StartupView::ScenarioBrowser => match state {
+                ElementState::Pressed => {
+                    self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Escape))?
+                }
+                ElementState::Released => {
+                    self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Escape))?
+                }
+            },
+            StartupView::MainMenu => {
+                let actions = match state {
+                    ElementState::Pressed => self.main_menu_state.handle_key_down(KeyCode::Escape),
+                    ElementState::Released => self.main_menu_state.handle_key_up(KeyCode::Escape),
+                };
+                self.process_main_menu_actions(actions)?;
+            }
+        }
+        Ok(())
+    }
+
     fn handle_gamepad_action(
         &mut self,
         action: GamepadActionType,
@@ -3635,52 +3679,38 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         match action {
             GamepadActionType::Select => match self.mode {
-                AppMode::Menu => match state {
-                    ElementState::Pressed => match self.startup_view {
-                        StartupView::ScenarioBrowser => self.handle_menu_input(|menu| {
+                AppMode::Menu => match self.startup_view {
+                    StartupView::ScenarioBrowser => match state {
+                        ElementState::Pressed => self.handle_menu_input(|menu| {
                             menu.menu().handle_key_down(KeyCode::Enter)
                         })?,
-                        StartupView::MainMenu => {
-                            let actions = self.main_menu_state.handle_key_down(KeyCode::Enter);
-                            self.process_main_menu_actions(actions)?;
-                        }
-                    },
-                    ElementState::Released => match self.startup_view {
-                        StartupView::ScenarioBrowser => self
+                        ElementState::Released => self
                             .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?,
-                        StartupView::MainMenu => {
-                            let actions = self.main_menu_state.handle_key_up(KeyCode::Enter);
-                            self.process_main_menu_actions(actions)?;
-                        }
                     },
-                },
-                AppMode::Running => {
-                    if state == ElementState::Pressed {
-                        self.dispatch_control_event(ControlEvent::ClearPressed)?;
+                    StartupView::MainMenu => {
+                        let actions = match state {
+                            ElementState::Pressed => {
+                                self.main_menu_state.handle_key_down(KeyCode::Enter)
+                            }
+                            ElementState::Released => {
+                                self.main_menu_state.handle_key_up(KeyCode::Enter)
+                            }
+                        };
+                        self.process_main_menu_actions(actions)?;
                     }
-                }
-                AppMode::Loading => {}
-            },
-            GamepadActionType::Back => match self.mode {
-                AppMode::Menu => match state {
-                    ElementState::Pressed => match self.startup_view {
-                        StartupView::ScenarioBrowser => self.handle_menu_input(|menu| {
-                            menu.menu().handle_key_down(KeyCode::Escape)
-                        })?,
-                        StartupView::MainMenu => {
-                            let actions = self.main_menu_state.handle_key_down(KeyCode::Escape);
-                            self.process_main_menu_actions(actions)?;
-                        }
-                    },
-                    ElementState::Released => match self.startup_view {
-                        StartupView::ScenarioBrowser => self
-                            .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Escape))?,
-                        StartupView::MainMenu => {
-                            let actions = self.main_menu_state.handle_key_up(KeyCode::Escape);
-                            self.process_main_menu_actions(actions)?;
-                        }
-                    },
                 },
+                AppMode::Running | AppMode::Loading => {}
+            },
+            GamepadActionType::Cancel => match self.mode {
+                AppMode::Menu => {
+                    self.handle_menu_cancel_action(state)?;
+                }
+                AppMode::Running | AppMode::Loading => {}
+            },
+            GamepadActionType::MenuToggle => match self.mode {
+                AppMode::Menu => {
+                    self.handle_menu_cancel_action(state)?;
+                }
                 AppMode::Running => {
                     if state == ElementState::Pressed {
                         if self.ingame_menu.is_some() {
