@@ -389,11 +389,12 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [x] Load from file
 - [x] Save/load UI dialogs
 - [x] Savegame thumbnails
-- [ ] Scenario completion records
+- [x] Scenario completion records
 
 **Files:** SavedGameFile in main.rs, quick_save()/quick_load()
 
 **Progress (2025-10-26):** Added a dedicated Save/Load browser with named save slots, thumbnail capture, and load support. The in-game menu now branches into the `SaveBrowserState` overlay, writing named saves via `GameApp::perform_named_save` and loading them through `GameApp::load_saved_game_from_path`. Quick saves reuse the same pipeline and emit PNG thumbnails for parity. Implemented across `rust/crates/lc-app/src/main.rs:4456`, `rust/crates/lc-app/src/save_browser.rs`, and guarded with extended quick-save regression tests.
+**Progress (2027-12-04):** Honored the legacy Record flag by starting a frame-by-frame `Recorder` whenever a real scenario launches, then exporting the captured timeline as `{###}-Scenario.json` into the user `Recordings` directory on return-to-menu. The exporter mirrors the C++ numbering scheme, includes scenario metadata, and skips empty captures. Implemented in `rust/crates/lc-app/src/main.rs` with JSON serialization handled locally.
 
 ---
 

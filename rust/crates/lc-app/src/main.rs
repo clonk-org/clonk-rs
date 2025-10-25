@@ -41,10 +41,11 @@ use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
     ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, FloatVector2,
     Landscape, MaterialSet, MenuCommandKind, MenuCommandSelection, MessageKind, MovementProfile,
-    ObjectId, ObjectSnapshot, ObjectUpdate, PlayerStatus, Scenario, ScenarioError,
-    SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER,
-    FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK,
-    FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
+    ObjectId, ObjectSnapshot, ObjectUpdate, PlayerStatus, Recorder, Recording, Scenario,
+    ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2,
+    FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT,
+    FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL,
+    OWNER_NONE,
 };
 use lc_frontend::{
     default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
@@ -92,6 +93,7 @@ const BACK_ENTRY_TITLE: &str = "← Back";
 const SAVE_DIR_NAME: &str = "Savegames";
 const QUICK_SAVE_FILE: &str = "quicksave.lcsave";
 const SAVE_FILE_VERSION: SaveFileVersion = SaveFileVersion::new(1, 0, 0);
+const RECORD_FILE_VERSION: u32 = 1;
 const MOUSE_DRAG_THRESHOLD: f32 = 6.0;
 const MIN_THROW_DRAG_DISTANCE: f32 = 12.0;
 static APP_PATH_CACHE: Mutex<Option<std::result::Result<Arc<AppPaths>, PathsError>>> =
@@ -117,6 +119,7 @@ struct RuntimeConfig {
     player_owner: i32,
     player_name: String,
     network: Option<NetworkMode>,
+    record_enabled: bool,
 }
 
 const SYNC_CHECK_RATE: u32 = if cfg!(debug_assertions) { 1 } else { 100 };
@@ -488,13 +491,6 @@ fn main() -> Result<()> {
     lc_core::logging::init();
 
     let cli = Cli::parse();
-    let runtime = RuntimeConfig {
-        player_owner: cli.player_owner,
-        player_name: cli.player_name.clone(),
-        network: resolve_network_mode(&cli)?,
-    };
-
-    let event_loop = EventLoop::new();
     let app_paths = cached_app_paths().ok();
     if let Some(paths) = app_paths.as_ref() {
         if let Err(err) = paths.ensure_user_dirs() {
@@ -505,6 +501,14 @@ fn main() -> Result<()> {
             );
         }
     }
+    let runtime = RuntimeConfig {
+        player_owner: cli.player_owner,
+        player_name: cli.player_name.clone(),
+        network: resolve_network_mode(&cli)?,
+        record_enabled: load_recording_flag(app_paths.as_deref()),
+    };
+
+    let event_loop = EventLoop::new();
     let mut display_options = DisplayOptions::load(app_paths.as_deref());
     let audio_options = AudioOptions::load(app_paths.as_deref());
     let (initial_width, initial_height) = display_options.actual_size();
@@ -1822,6 +1826,9 @@ struct GameApp {
     network_mode: Option<NetworkMode>,
     network_lobby: Option<NetworkLobbyState>,
     sync_checks: SyncCheckState,
+    recording_enabled: bool,
+    recordings_dir: Option<PathBuf>,
+    recording: Option<RecordingSession>,
     local_owner: i32,
     last_save_path: Option<PathBuf>,
     object_sprites: HashMap<String, DefinitionSprite>,
@@ -1830,6 +1837,51 @@ struct GameApp {
     ingame_pointer: Option<ViewportPointer>,
     mouse_state: Option<IngameMouseState>,
     exit_requested: bool,
+}
+
+struct RecordingSession {
+    recorder: Recorder,
+    scenario_title: String,
+    scenario_identifier: String,
+    scenario_path: Option<PathBuf>,
+    started_at: SystemTime,
+}
+
+impl RecordingSession {
+    fn new(
+        recorder: Recorder,
+        scenario_title: String,
+        scenario_identifier: String,
+        scenario_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            recorder,
+            scenario_title,
+            scenario_identifier,
+            scenario_path,
+            started_at: SystemTime::now(),
+        }
+    }
+
+    fn sanitized_base_name(&self) -> String {
+        let raw = self
+            .scenario_path
+            .as_ref()
+            .and_then(|path| path.file_stem().and_then(|stem| stem.to_str()))
+            .unwrap_or_else(|| self.scenario_identifier.as_str());
+        sanitize_record_name(raw)
+    }
+}
+
+#[derive(Serialize)]
+struct ScenarioRecordingFile {
+    version: u32,
+    scenario_title: String,
+    scenario_identifier: String,
+    scenario_path: Option<String>,
+    started_at_unix_millis: u128,
+    frame_count: u64,
+    frames: Vec<SimulationSnapshot>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3444,6 +3496,60 @@ fn unique_save_path(dir: &Path, base: &str) -> PathBuf {
     }
 }
 
+fn next_recording_index(dir: &Path) -> io::Result<u32> {
+    let mut max_index = 0u32;
+    if dir.exists() {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            if let Some(name) = entry.file_name().to_str() {
+                if let Some((prefix, _)) = name.split_once('-') {
+                    if prefix.chars().all(|c| c.is_ascii_digit()) {
+                        if let Ok(index) = prefix.parse::<u32>() {
+                            max_index = max_index.max(index);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(max_index + 1)
+}
+
+fn sanitize_record_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_digits = trimmed.trim_end_matches(|c: char| c.is_ascii_digit());
+    let candidate = if without_digits.is_empty() {
+        trimmed
+    } else {
+        without_digits
+    };
+    let mut result = String::new();
+    let mut last_was_separator = false;
+    for ch in candidate.chars() {
+        if ch.is_ascii_alphanumeric() {
+            result.push(ch);
+            last_was_separator = false;
+        } else if ch.is_ascii_whitespace() || matches!(ch, '-' | '_') {
+            if !last_was_separator && !result.is_empty() {
+                result.push('_');
+                last_was_separator = true;
+            }
+        } else if !last_was_separator && !result.is_empty() {
+            result.push('_');
+            last_was_separator = true;
+        }
+    }
+    let sanitized = result.trim_matches('_');
+    if sanitized.is_empty() {
+        "scenario".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
 fn encode_surface_to_png(surface: &Surface) -> Result<Vec<u8>> {
     let width = surface.width();
     let height = surface.height();
@@ -3555,6 +3661,36 @@ fn load_save_thumbnail(path: &Path) -> Option<ImageData> {
         _ => return None,
     };
     Some(ImageData::new(info.width, info.height, pixels))
+}
+
+fn parse_config_bool(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
+    let Some(paths) = paths else {
+        return false;
+    };
+    let config_path = paths.config_file();
+    match Config::load(&config_path) {
+        Ok(config) => config
+            .get_in(Some("General"), "Record")
+            .map(parse_config_bool)
+            .unwrap_or(false),
+        Err(err) => {
+            if err.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(
+                    error = %err,
+                    path = %config_path.display(),
+                    "failed to read record setting from config"
+                );
+            }
+            false
+        }
+    }
 }
 
 fn load_participants_label(paths: Option<&AppPaths>) -> String {
@@ -3706,6 +3842,9 @@ impl GameApp {
             network_mode,
             network_lobby,
             sync_checks: SyncCheckState::new(),
+            recording_enabled: runtime.record_enabled && paths.is_some(),
+            recordings_dir: paths.map(|p| p.recordings_dir()),
+            recording: None,
             local_owner: runtime.player_owner,
             last_save_path: None,
             object_sprites: base_sprites,
@@ -5767,6 +5906,7 @@ impl GameApp {
                     network.finalize_tick(tick);
                 }
                 self.snapshot = self.engine.tick()?;
+                self.record_current_snapshot();
                 self.refresh_object_menu();
                 self.refresh_focus();
                 self.update_audio();
@@ -6452,7 +6592,111 @@ impl GameApp {
         Self::fill_rect(surface, right, color);
     }
 
+    fn start_recording_for(&mut self, scenario: &FrontendScenario) {
+        if !self.recording_enabled {
+            self.recording = None;
+            return;
+        }
+        if self.recordings_dir.is_none() {
+            self.recording = None;
+            return;
+        }
+        let mut recorder = Recorder::new();
+        recorder.record(&self.snapshot);
+        self.recording = Some(RecordingSession::new(
+            recorder,
+            scenario.title.clone(),
+            scenario.identifier.clone(),
+            scenario.path.clone(),
+        ));
+    }
+
+    fn record_current_snapshot(&mut self) {
+        if !self.recording_enabled {
+            return;
+        }
+        if let Some(session) = self.recording.as_mut() {
+            session.recorder.record(&self.snapshot);
+        }
+    }
+
+    fn finish_recording(&mut self) {
+        let Some(session) = self.recording.take() else {
+            return;
+        };
+        if !self.recording_enabled {
+            return;
+        }
+        let base_name = session.sanitized_base_name();
+        let RecordingSession {
+            recorder,
+            scenario_title,
+            scenario_identifier,
+            scenario_path,
+            started_at,
+        } = session;
+        let recording = recorder.into_recording();
+        if recording.is_empty() {
+            return;
+        }
+        let Some(dir) = self.recordings_dir.as_ref() else {
+            return;
+        };
+        match self.write_scenario_recording(
+            dir,
+            base_name,
+            scenario_title,
+            scenario_identifier,
+            scenario_path,
+            started_at,
+            recording,
+        ) {
+            Ok(path) => {
+                tracing::info!(path = %path.display(), "saved scenario recording");
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to save scenario recording");
+            }
+        }
+    }
+
+    fn write_scenario_recording(
+        &self,
+        dir: &Path,
+        base_name: String,
+        scenario_title: String,
+        scenario_identifier: String,
+        scenario_path: Option<PathBuf>,
+        started_at: SystemTime,
+        recording: Recording,
+    ) -> io::Result<PathBuf> {
+        fs::create_dir_all(dir)?;
+        let index = next_recording_index(dir)?;
+        let filename = format!("{index:03}-{base_name}.json");
+        let path = dir.join(filename);
+        let frames = recording.into_frames();
+        let frame_count = frames.len() as u64;
+        let started_at_unix_millis = started_at
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let record_file = ScenarioRecordingFile {
+            version: RECORD_FILE_VERSION,
+            scenario_title,
+            scenario_identifier,
+            scenario_path: scenario_path.map(|path| path.display().to_string()),
+            started_at_unix_millis,
+            frame_count,
+            frames,
+        };
+        let mut file = File::create(&path)?;
+        serde_json::to_writer_pretty(&mut file, &record_file)?;
+        file.flush()?;
+        Ok(path)
+    }
+
     fn return_to_menu(&mut self) {
+        self.finish_recording();
         self.close_ingame_menu();
         self.object_menu = None;
         self.save_browser = None;
@@ -6593,6 +6837,7 @@ impl GameApp {
         scenario: FrontendScenario,
         scenario_data: Scenario,
     ) -> Result<(), String> {
+        self.finish_recording();
         let path = scenario
             .path
             .clone()
@@ -6654,6 +6899,7 @@ impl GameApp {
         self.active_scenario = Some(scenario.clone());
         self.play_scenario_audio(&path);
         self.status_text.clear();
+        self.start_recording_for(&scenario);
         Ok(())
     }
 
@@ -6663,6 +6909,7 @@ impl GameApp {
             "starting sandbox fallback scenario"
         );
 
+        self.finish_recording();
         self.loading_state = None;
         self.engine = Engine::new();
         self.apply_material_library();
@@ -6738,6 +6985,7 @@ impl GameApp {
         let scenario_info = save.scenario.clone();
         let frontend = scenario_info.to_frontend();
 
+        self.finish_recording();
         self.engine = Engine::new();
         self.apply_material_library();
         self.input = InputDispatcher::new();
@@ -6807,6 +7055,7 @@ impl GameApp {
         }
         self.refresh_focus();
 
+        self.start_recording_for(&frontend);
         self.scenario_catalog
             .insert(frontend.identifier.clone(), frontend.clone());
 
@@ -8418,6 +8667,7 @@ mod tests {
                 player_owner: 1,
                 player_name: "Player".to_string(),
                 network: None,
+                record_enabled: false,
             },
         )
         .expect("initialise app with audio");
@@ -8468,6 +8718,7 @@ mod tests {
                     player_owner: 1,
                     player_name: "Player".to_string(),
                     network: None,
+                    record_enabled: false,
                 },
             )
             .expect("initialise app");
@@ -8578,6 +8829,7 @@ mod tests {
                         player_owner: 1,
                         player_name: "Player".to_string(),
                         network: None,
+                        record_enabled: false,
                     },
                 )
                 .expect("initialise app");
@@ -8618,6 +8870,7 @@ mod tests {
                         player_owner: 1,
                         player_name: "Player".to_string(),
                         network: None,
+                        record_enabled: false,
                     },
                 )
                 .expect("initialise app after restart");
@@ -8810,6 +9063,7 @@ mod tests {
                 player_owner: 1,
                 player_name: "Player".to_string(),
                 network: None,
+                record_enabled: false,
             },
         )
         .expect("initialise app");
