@@ -282,7 +282,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [x] Liquid flow physics
 - [x] Temperature propagation
 - [x] Material conversion (temperature-based)
-- [ ] Dig2Object (materials spawn objects when dug)
+- [x] Dig2Object (materials spawn objects when dug)
 - [ ] Blast2Object (blast spawns objects/particles)
 
 **Progress (2025-10-25):** Dig procedure now mirrors the legacy `DigFree` cleanup so even tangential hits clear the top surface pixel; added regression coverage (`dig_procedure_removes_surface_pixel_when_circle_touches_ground`) to guard the behavior.
@@ -293,6 +293,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2026-01-25):** Ported the Legacy mass mover system into Rust (`rust/crates/lc-engine/src/mass_mover.rs`), extended `Landscape` liquid columns to carry material metadata, and wired instability tracking so liquids continuously reflow when terrain opens up, matching the C++ flow behaviour.
 **Progress (2026-01-30):** Environment ticks now advance the legacy temperature drift even with a static year speed, keeping ambient heat propagation active for material conversions with coverage in `rust/crates/lc-engine/src/lib.rs` engine tests and refreshed snapshots.
 **Progress (2026-02-05):** Solid columns and liquid segments now honor legacy temperature conversions, including sky removal depth limits and steam/water phase changes, with targeted regressions in `rust/crates/lc-engine/src/landscape.rs`.
+**Progress (2026-02-08):** Dig2Object conversions now zero carried material like C++, respect the request-only flag, and spawn a single randomly rotated object per dig tick with regression coverage in `lc-engine/src/lib.rs`.
 
 **Files:** lc-engine/src/landscape.rs, lc-engine/src/material.rs, lc-resources/src/material.rs
 

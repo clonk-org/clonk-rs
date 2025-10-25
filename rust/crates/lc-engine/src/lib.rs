@@ -9922,7 +9922,7 @@ impl Engine {
             )
         };
 
-        let mut spawn_requests = Vec::new();
+        let mut spawn_definitions: Vec<DefinitionId> = Vec::new();
 
         {
             let object = &mut self.objects[idx];
@@ -9944,28 +9944,21 @@ impl Engine {
                 if current < ratio {
                     continue;
                 }
-                let spawn_count = current / ratio;
-                let remainder = current % ratio;
-                object.set_material_content(material.id(), remainder);
-                if spawn_count <= 0 {
-                    continue;
-                }
-                if !self.definitions.contains_key(definition_id) {
-                    continue;
-                }
-                let spawn_definition = definition_id.to_string();
-                let spawn_position = Vector2::new(position.x, bottom);
-                for _ in 0..spawn_count {
-                    spawn_requests.push(
-                        SpawnConfig::new(spawn_definition.clone())
-                            .with_position(spawn_position)
-                            .with_owner(owner),
-                    );
-                }
+                object.set_material_content(material.id(), 0);
+                spawn_definitions.push(definition_id.to_string());
             }
         }
 
-        for config in spawn_requests {
+        let spawn_position = Vector2::new(position.x, bottom);
+        for definition_id in spawn_definitions {
+            if !self.definitions.contains_key(&definition_id) {
+                continue;
+            }
+            let rotation = self.rng.gen_range(0..360);
+            let config = SpawnConfig::new(definition_id)
+                .with_position(spawn_position)
+                .with_owner(owner)
+                .with_rotation(rotation);
             let _ = self.spawn_object(config);
         }
     }
@@ -14732,6 +14725,192 @@ func ControlDig() { SetAction("Dig"); return true; }
             spawned,
             "expected Dig2Object conversion to spawn target definition"
         );
+    }
+    #[test]
+    fn dig_procedure_spawns_at_most_one_dig2object_per_tick() {
+        let mut digger = Definition::from_script("DGRR", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
+            .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Dig".to_string(),
+            ActionSpec::default().with_procedure("dig").with_dig_free(6),
+        );
+        digger.configure_actions(Some("Dig".to_string()), actions);
+
+        let gem = Definition::from_script(
+            "GEM_",
+            "Gem",
+            "global func Initialize(state, random) { return nil; }\n",
+        )
+        .expect("script compiles");
+
+        let material_source = r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            Friction=25
+            DigFree=1
+            Dig2Object=GEM_
+            Dig2ObjectRatio=1
+        "#;
+        let library =
+            lc_resources::MaterialLibrary::parse(material_source).expect("material parses");
+        let mut materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut engine = Engine::with_seed(13);
+        engine
+            .register_definition(digger)
+            .expect("digger registers");
+        engine.register_definition(gem).expect("gem registers");
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(32, 6, Some(earth)));
+
+        engine
+            .spawn_object(
+                SpawnConfig::new("DGRR")
+                    .with_position(Vector2::new(12, 8))
+                    .with_action(ActionState::new("Dig")),
+            )
+            .expect("spawn succeeds");
+
+        let mut previous_count = 0;
+        let mut observed_spawn = false;
+        for _ in 0..20 {
+            let snapshot = engine.tick().expect("tick succeeds");
+            let current_count = snapshot
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "GEM_")
+                .count();
+            if current_count > previous_count {
+                assert_eq!(
+                    current_count - previous_count,
+                    1,
+                    "expected at most one Dig2Object spawn per tick"
+                );
+                observed_spawn = true;
+                break;
+            }
+            previous_count = current_count;
+        }
+
+        assert!(
+            observed_spawn,
+            "expected Dig2Object conversion to occur within 20 ticks"
+        );
+    }
+
+    #[test]
+    fn dig2object_request_only_requires_explicit_request() {
+        fn build_digger_definition() -> Definition {
+            let mut digger = Definition::from_script("DGRR", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+            let mut actions = HashMap::new();
+            actions.insert(
+                "Dig".to_string(),
+                ActionSpec::default().with_procedure("dig").with_dig_free(6),
+            );
+            digger.configure_actions(Some("Dig".to_string()), actions);
+            digger
+        }
+
+        fn build_gem_definition() -> Definition {
+            Definition::from_script(
+                "GEM_",
+                "Gem",
+                "global func Initialize(state, random) { return nil; }\n",
+            )
+            .expect("script compiles")
+        }
+
+        let material_source = r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            Friction=25
+            DigFree=1
+            Dig2Object=GEM_
+            Dig2ObjectRatio=1
+            Dig2ObjectRequest=1
+        "#;
+        let library =
+            lc_resources::MaterialLibrary::parse(material_source).expect("material parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        // Without request flag set on the action we should not spawn anything.
+        {
+            let mut engine = Engine::with_seed(19);
+            engine
+                .register_definition(build_digger_definition())
+                .expect("digger registers");
+            engine
+                .register_definition(build_gem_definition())
+                .expect("gem registers");
+            engine.set_materials(materials.clone());
+            engine.set_landscape(Landscape::flat_with_material(32, 6, Some(earth)));
+
+            engine
+                .spawn_object(
+                    SpawnConfig::new("DGRR")
+                        .with_position(Vector2::new(12, 8))
+                        .with_action(ActionState::new("Dig")),
+                )
+                .expect("spawn succeeds");
+
+            for _ in 0..20 {
+                let snapshot = engine.tick().expect("tick succeeds");
+                assert!(
+                    !snapshot
+                        .objects
+                        .iter()
+                        .any(|object| object.definition_id == "GEM_"),
+                    "expected no Dig2Object spawn without request"
+                );
+            }
+        }
+
+        // With request flag set, the conversion should occur.
+        {
+            let mut engine = Engine::with_seed(19);
+            engine
+                .register_definition(build_digger_definition())
+                .expect("digger registers");
+            engine
+                .register_definition(build_gem_definition())
+                .expect("gem registers");
+            engine.set_materials(materials);
+            engine.set_landscape(Landscape::flat_with_material(32, 6, Some(earth)));
+
+            let mut requested_action = ActionState::new("Dig");
+            requested_action.data = 1;
+            engine
+                .spawn_object(
+                    SpawnConfig::new("DGRR")
+                        .with_position(Vector2::new(12, 8))
+                        .with_action(requested_action),
+                )
+                .expect("spawn succeeds");
+
+            let mut spawned = false;
+            for _ in 0..20 {
+                let snapshot = engine.tick().expect("tick succeeds");
+                if snapshot
+                    .objects
+                    .iter()
+                    .any(|object| object.definition_id == "GEM_")
+                {
+                    spawned = true;
+                    break;
+                }
+            }
+
+            assert!(
+                spawned,
+                "expected Dig2Object conversion to respect request flag when set"
+            );
+        }
     }
 
     #[test]

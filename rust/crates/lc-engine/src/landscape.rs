@@ -128,9 +128,12 @@ fn find_column_conversion(
         TemperatureDirection::Downwards,
         TemperatureDirection::Upwards,
     ] {
-        if let Some(action) =
-            find_temperature_conversion_action(materials, material_id, direction, ambient_temperature)
-        {
+        if let Some(action) = find_temperature_conversion_action(
+            materials,
+            material_id,
+            direction,
+            ambient_temperature,
+        ) {
             return Some(action);
         }
     }
@@ -314,8 +317,8 @@ impl Landscape {
         self.ensure_material_capacity();
         self.ensure_liquid_capacity();
         let original_default = self.default_solid_material;
-        let default_conversion =
-            original_default.and_then(|id| find_column_conversion(materials, id, ambient_temperature));
+        let default_conversion = original_default
+            .and_then(|id| find_column_conversion(materials, id, ambient_temperature));
 
         let mut changed = false;
         let mut new_default = original_default;
@@ -1022,8 +1025,7 @@ impl LiquidColumn {
             return false;
         }
         let original_segments = self.segments.clone();
-        let mut updated_segments: Vec<LiquidSegment> =
-            Vec::with_capacity(original_segments.len());
+        let mut updated_segments: Vec<LiquidSegment> = Vec::with_capacity(original_segments.len());
 
         for segment in original_segments.iter() {
             let Some(material_id) = segment.material.or(default_material) else {
@@ -1049,22 +1051,16 @@ impl LiquidColumn {
                     if convert_height > 0 {
                         match action {
                             TemperatureConversionAction::ChangeMaterial { target, .. } => {
-                                let bottom =
-                                    remaining_top.saturating_add(convert_height - 1);
+                                let bottom = remaining_top.saturating_add(convert_height - 1);
                                 top_segments.push(LiquidSegment {
                                     top: remaining_top,
                                     bottom,
-                                    material: segment_material_override(
-                                        target,
-                                        default_material,
-                                    ),
+                                    material: segment_material_override(target, default_material),
                                 });
-                                remaining_top =
-                                    remaining_top.saturating_add(convert_height);
+                                remaining_top = remaining_top.saturating_add(convert_height);
                             }
                             TemperatureConversionAction::RemoveToSky { .. } => {
-                                remaining_top =
-                                    remaining_top.saturating_add(convert_height);
+                                remaining_top = remaining_top.saturating_add(convert_height);
                             }
                         }
                     }
@@ -1089,22 +1085,16 @@ impl LiquidColumn {
                     if convert_height > 0 {
                         match action {
                             TemperatureConversionAction::ChangeMaterial { target, .. } => {
-                                let top =
-                                    remaining_bottom.saturating_sub(convert_height - 1);
+                                let top = remaining_bottom.saturating_sub(convert_height - 1);
                                 bottom_segments.push(LiquidSegment {
                                     top,
                                     bottom: remaining_bottom,
-                                    material: segment_material_override(
-                                        target,
-                                        default_material,
-                                    ),
+                                    material: segment_material_override(target, default_material),
                                 });
-                                remaining_bottom =
-                                    remaining_bottom.saturating_sub(convert_height);
+                                remaining_bottom = remaining_bottom.saturating_sub(convert_height);
                             }
                             TemperatureConversionAction::RemoveToSky { .. } => {
-                                remaining_bottom =
-                                    remaining_bottom.saturating_sub(convert_height);
+                                remaining_bottom = remaining_bottom.saturating_sub(convert_height);
                             }
                         }
                     }
