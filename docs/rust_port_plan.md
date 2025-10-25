@@ -28,6 +28,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [x] Window title: "Clonk Rust" not "LegacyClonk (Rust preview)"
 
 **Progress (2025-10-25):** Rust frontend still scans install roots per directory, tolerates missing assets, and decodes BMP previews so real scenarios populate the browser without sandbox fallback. Added a dedicated main menu with the LegacyClonk big-button layout, participants list, and reliable navigation (Back entry/Escape) back from the scenario browser; “Local Game” flows into the browser while other options surface placeholder status until their dialogs are ported.
+**Progress (2025-12-27):** Scenario discovery now preserves the LegacyClonk search priority, letting user scenario overrides shadow installed variants so the browser matches the C++ catalog order.
 
 **Files:** `main.rs:4631` (load_frontend_scenarios), scenario discovery in lc-resources
 

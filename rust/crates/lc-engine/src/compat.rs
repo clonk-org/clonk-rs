@@ -19,7 +19,7 @@ use crate::{
     ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder,
     PhysicsSettings, PlayerState, QueuedCommand, SpawnConfig, TransferZoneCommand,
     TransferZoneRect, TransferZoneState, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT,
-    CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, OWNER_NONE,
+    CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -56,6 +56,7 @@ pub(crate) struct HostWorldObject {
     pub owner: i32,
     pub category: i32,
     pub energy: i32,
+    pub construction: i32,
     pub damage: i32,
     pub ocf: u32,
     pub position: Vector2,
@@ -91,6 +92,7 @@ impl HostWorldObject {
         action_procedure: Option<String>,
         owner: i32,
         energy: i32,
+        construction: i32,
         position: Vector2,
         velocity: Vector2,
         vertices: Vec<ObjectVertex>,
@@ -109,6 +111,7 @@ impl HostWorldObject {
             owner,
             DEFAULT_CATEGORY,
             energy,
+            construction,
             0,
             position,
             velocity,
@@ -132,6 +135,7 @@ impl HostWorldObject {
         owner: i32,
         category: i32,
         energy: i32,
+        construction: i32,
         damage: i32,
         position: Vector2,
         velocity: Vector2,
@@ -154,6 +158,7 @@ impl HostWorldObject {
             owner,
             category,
             energy,
+            construction: construction.clamp(0, FULL_CON),
             damage,
             ocf: ocf::NORMAL,
             position,
@@ -215,6 +220,10 @@ impl HostWorldObject {
 
     pub fn energy(&self) -> i32 {
         self.energy
+    }
+
+    pub fn construction(&self) -> i32 {
+        self.construction
     }
 
     pub fn damage(&self) -> i32 {
@@ -1025,6 +1034,15 @@ fn energy_to_script_value(energy: i32) -> i32 {
     }
 }
 
+fn construction_to_script_value(construction: i32) -> i32 {
+    let clamped = construction.clamp(0, FULL_CON);
+    ((clamped as i64) * 100 / (FULL_CON as i64)) as i32
+}
+
+fn construction_delta_from_percent(percent: i32) -> i32 {
+    ((percent as i64) * (FULL_CON as i64) / 100) as i32
+}
+
 const LEGACY_MAX_PHYSICAL: i32 = 100_000;
 const CONTACT_DIRECTION_MASK: u32 = CNAT_LEFT | CNAT_RIGHT | CNAT_TOP | CNAT_BOTTOM | CNAT_CENTER;
 
@@ -1199,6 +1217,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("RemoveObject", remove_object);
     script.register_host_function("GetEnergy", get_energy);
     script.register_host_function("DoEnergy", do_energy);
+    script.register_host_function("GetCon", get_con);
+    script.register_host_function("DoCon", do_con);
     script.register_host_function("DoDamage", do_damage);
     script.register_host_function("Random", random);
     script.register_host_function("SetGravity", set_gravity);
@@ -1387,6 +1407,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
     pub vertices: &'a [ObjectVertex],
+    pub construction: i32,
     pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
     pub draw_transform: Option<DrawTransform>,
 }
@@ -1411,6 +1432,7 @@ impl<'a> HostObjectContext<'a> {
         action_target: Option<ObjectId>,
         action_target2: Option<ObjectId>,
         vertices: &'a [ObjectVertex],
+        construction: i32,
     ) -> Self {
         Self::with_category(
             id,
@@ -1418,6 +1440,7 @@ impl<'a> HostObjectContext<'a> {
             status,
             energy,
             0,
+            construction,
             owner,
             position,
             velocity,
@@ -1445,6 +1468,7 @@ impl<'a> HostObjectContext<'a> {
         status: ObjectStatus,
         energy: i32,
         damage: i32,
+        construction: i32,
         owner: i32,
         position: Vector2,
         velocity: Vector2,
@@ -1470,6 +1494,7 @@ impl<'a> HostObjectContext<'a> {
             status,
             energy,
             damage,
+            construction: construction.clamp(0, FULL_CON),
             alive: true,
             owner,
             category,
@@ -2855,6 +2880,52 @@ fn get_energy(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn get_con(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetCon expects at most 1 argument: target",
+        ));
+    }
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(0) {
+        target_id = parse_object_reference_argument(arg, "GetCon", "target")?;
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if object.id() == target {
+                    return Ok(Value::Int(construction_to_script_value(
+                        object.construction(),
+                    )));
+                }
+            }
+            if let Some(other) = context.get_world_object(target) {
+                return Ok(Value::Int(construction_to_script_value(
+                    other.construction(),
+                )));
+            }
+            return Ok(Value::Nil);
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        Ok(Value::Int(construction_to_script_value(
+            object.construction(),
+        )))
+    })
+}
+
 fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() {
         return Err(RuntimeError::new(
@@ -2974,6 +3045,57 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         }
 
         object.adjust_energy(change, exact);
+        Ok(Value::Bool(true))
+    })
+}
+
+fn do_con(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "DoCon expects at least 1 argument: change",
+        ));
+    }
+
+    let change_percent = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "DoCon: expected int or nil for change, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(1) {
+        target_id = parse_object_reference_argument(arg, "DoCon", "target")?;
+    }
+
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "DoCon: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("DoCon requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        let delta = construction_delta_from_percent(change_percent);
+        object.adjust_construction(delta);
         Ok(Value::Bool(true))
     })
 }
@@ -5245,6 +5367,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             true,
             ObjectStatus::Normal,
             false,
+            FULL_CON,
         );
         let preview = HostWorldObject::with_category(
             id,
@@ -5257,6 +5380,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             owner,
             definition_category,
             0,
+            FULL_CON,
             0,
             position,
             Vector2::ZERO,
@@ -6754,6 +6878,7 @@ impl EffectHostContext {
                 status,
                 energy,
                 damage,
+                construction,
                 alive,
                 owner,
                 position,
@@ -6782,6 +6907,7 @@ impl EffectHostContext {
                 status,
                 energy,
                 damage,
+                construction,
                 alive,
                 owner,
                 category,
@@ -7109,6 +7235,7 @@ struct ObjectScopeContext {
     current_action_ticks: u32,
     current_energy: i32,
     current_damage: i32,
+    current_construction: i32,
     current_alive: bool,
     max_energy: i32,
     current_owner: i32,
@@ -7132,6 +7259,7 @@ impl ObjectScopeContext {
         status: ObjectStatus,
         energy: i32,
         damage: i32,
+        construction: i32,
         alive: bool,
         owner: i32,
         category: i32,
@@ -7156,6 +7284,7 @@ impl ObjectScopeContext {
         let blocks_other_actions = action_library.blocks_other_actions(&action_name);
         let max_energy = energy.max(DEFAULT_MAX_ENERGY);
         let clamped_damage = damage.max(0);
+        let clamped_construction = construction.clamp(0, FULL_CON);
         Self {
             id,
             current_container: container,
@@ -7173,6 +7302,7 @@ impl ObjectScopeContext {
             current_action_ticks: action_ticks,
             current_energy: energy,
             current_damage: clamped_damage,
+            current_construction: clamped_construction,
             current_alive: alive,
             max_energy,
             current_owner: owner,
@@ -7237,7 +7367,14 @@ impl ObjectScopeContext {
         let alive = self.alive();
         let status = self.status();
         let is_contained = self.container().is_some();
-        ocf::compute(self.ocf_base, self.crew_member, alive, status, is_contained)
+        ocf::compute(
+            self.ocf_base,
+            self.crew_member,
+            alive,
+            status,
+            is_contained,
+            self.construction(),
+        )
     }
 
     fn container(&self) -> Option<ObjectId> {
@@ -7414,6 +7551,30 @@ impl ObjectScopeContext {
             next = 0;
         }
         self.set_damage(next);
+        next
+    }
+
+    fn construction(&self) -> i32 {
+        self.pending_update
+            .construction
+            .unwrap_or(self.current_construction)
+    }
+
+    fn set_construction(&mut self, construction: i32) {
+        let clamped = construction.clamp(0, FULL_CON);
+        self.current_construction = clamped;
+        self.pending_update.construction = Some(clamped);
+    }
+
+    fn adjust_construction(&mut self, delta: i32) -> i32 {
+        let current = self.construction();
+        let mut next = current.saturating_add(delta);
+        if next < 0 {
+            next = 0;
+        } else if next > FULL_CON {
+            next = FULL_CON;
+        }
+        self.set_construction(next);
         next
     }
 
@@ -7651,6 +7812,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             world,
@@ -7761,6 +7923,7 @@ mod tests {
             None,
             None,
             &[],
+            crate::FULL_CON,
         );
         let (result, _) = with_effect_context(Some(object_context), &[], world, 9, || {
             g_back_solid(&[Value::Int(0), Value::Int(7)])
@@ -7975,6 +8138,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::ZERO,
                 Vector2::ZERO,
                 Vec::new(),
@@ -8017,6 +8181,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::ZERO,
                 Vector2::ZERO,
                 Vec::new(),
@@ -8382,6 +8547,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -8412,6 +8578,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -8455,6 +8622,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -8497,6 +8665,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -8534,6 +8703,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -8575,6 +8745,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -8604,6 +8775,7 @@ mod tests {
             None,
             OWNER_NONE,
             100,
+            crate::FULL_CON,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -8674,6 +8846,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -8716,6 +8889,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -8755,6 +8929,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -8798,6 +8973,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -8824,6 +9000,7 @@ mod tests {
             Some("swim".to_string()),
             OWNER_NONE,
             100,
+            crate::FULL_CON,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -8866,6 +9043,7 @@ mod tests {
             None,
             OWNER_NONE,
             100,
+            crate::FULL_CON,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -8896,6 +9074,7 @@ mod tests {
             None,
             OWNER_NONE,
             100,
+            crate::FULL_CON,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -8948,6 +9127,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -8996,6 +9176,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -9025,6 +9206,7 @@ mod tests {
             None,
             OWNER_NONE,
             100,
+            crate::FULL_CON,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -9071,6 +9253,7 @@ mod tests {
                 None,
                 None,
                 &vertices,
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -9107,6 +9290,7 @@ mod tests {
                 None,
                 None,
                 &vertices,
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -9133,6 +9317,7 @@ mod tests {
                 None,
                 None,
                 &vertices,
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -9159,6 +9344,7 @@ mod tests {
                 None,
                 None,
                 &vertices,
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -9188,6 +9374,7 @@ mod tests {
                 None,
                 None,
                 &vertices,
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -9228,6 +9415,7 @@ mod tests {
                 None,
                 None,
                 &vertices,
+                crate::FULL_CON,
             )),
             &[],
             world,
@@ -9273,6 +9461,7 @@ mod tests {
                 None,
                 None,
                 &vertices,
+                crate::FULL_CON,
             )),
             &[],
             world,
@@ -9361,6 +9550,7 @@ mod tests {
             None,
             OWNER_NONE,
             100,
+            crate::FULL_CON,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -9462,6 +9652,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -9494,6 +9685,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -9517,6 +9709,7 @@ mod tests {
             None,
             OWNER_NONE,
             100,
+            crate::FULL_CON,
             Vector2::new(-12, 34),
             Vector2::ZERO,
             Vec::new(),
@@ -9556,6 +9749,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(10, 15),
                 Vector2::ZERO,
                 Vec::new(),
@@ -9573,6 +9767,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(25, 30),
                 Vector2::ZERO,
                 Vec::new(),
@@ -9601,6 +9796,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             world,
@@ -9626,6 +9822,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(-40, 12),
                 Vector2::ZERO,
                 Vec::new(),
@@ -9643,6 +9840,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(-10, -18),
                 Vector2::ZERO,
                 Vec::new(),
@@ -9682,6 +9880,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -9712,6 +9911,7 @@ mod tests {
             None,
             None,
             &[],
+            crate::FULL_CON,
         );
         let (result, _) =
             with_effect_context(Some(context), &[], HostWorldContext::default(), 1, || {
@@ -9741,6 +9941,7 @@ mod tests {
             None,
             None,
             &[],
+            crate::FULL_CON,
         );
         let args = [Value::Nil, Value::Int(5)];
         let (result, _) =
@@ -9763,6 +9964,7 @@ mod tests {
             None,
             OWNER_NONE,
             100,
+            crate::FULL_CON,
             Vector2::ZERO,
             Vector2::new(-8, 3),
             Vec::new(),
@@ -9877,6 +10079,7 @@ mod tests {
                 None,
                 None,
                 &[ObjectVertex::new(0, 0)],
+                crate::FULL_CON,
             )),
             &[],
             world,
@@ -10180,6 +10383,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -10203,6 +10407,7 @@ mod tests {
             None,
             42,
             100,
+            crate::FULL_CON,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -10238,6 +10443,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -10277,6 +10483,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             world,
@@ -10311,6 +10518,7 @@ mod tests {
                     None,
                     None,
                     &[],
+                    crate::FULL_CON,
                 )
                 .with_alive(true),
             ),
@@ -10351,6 +10559,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -10385,6 +10594,7 @@ mod tests {
                     None,
                     None,
                     &[],
+                    crate::FULL_CON,
                 )
                 .with_alive(false),
             ),
@@ -10410,6 +10620,7 @@ mod tests {
             None,
             OWNER_NONE,
             100,
+            crate::FULL_CON,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -10511,6 +10722,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -10520,6 +10732,51 @@ mod tests {
 
         let value = result.expect("GetEnergy succeeds");
         assert_eq!(value, Value::Int(75));
+    }
+
+    #[test]
+    fn get_con_returns_current_construction() {
+        let (result, _) = with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                None,
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                None,
+                None,
+                &[],
+                crate::FULL_CON / 2,
+            )),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || get_con(&[]),
+        );
+
+        let value = result.expect("GetCon succeeds");
+        assert_eq!(value, Value::Int(50));
+    }
+
+    #[test]
+    fn do_con_adjusts_construction() {
+        let (result, outcome) = with_object_host_context(|| do_con(&[Value::Int(-25)]));
+        let value = result.expect("DoCon returns bool");
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome
+            .object_update
+            .expect("DoCon should produce an object update");
+        let expected = crate::FULL_CON - ((crate::FULL_CON * 25) / 100);
+        assert_eq!(update.construction, Some(expected));
     }
 
     #[test]
@@ -10534,6 +10791,7 @@ mod tests {
             None,
             OWNER_NONE,
             33,
+            crate::FULL_CON,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -10583,6 +10841,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                crate::FULL_CON,
             )),
             &[],
             HostWorldContext::default(),
@@ -10651,6 +10910,7 @@ mod tests {
             None,
             OWNER_NONE,
             100,
+            crate::FULL_CON,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -10734,6 +10994,7 @@ mod tests {
             None,
             OWNER_NONE,
             100,
+            crate::FULL_CON,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -10784,6 +11045,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 0,
+                crate::FULL_CON,
                 Vector2::ZERO,
                 Vector2::ZERO,
                 Vec::new(),
@@ -10801,6 +11063,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 0,
+                crate::FULL_CON,
                 Vector2::ZERO,
                 Vector2::ZERO,
                 Vec::new(),
@@ -10827,6 +11090,7 @@ mod tests {
             None,
             None,
             &[],
+            crate::FULL_CON,
         );
         let (result, _) = with_effect_context(Some(context), &[], world, 100, || contained(&[]));
         let value = result.expect("Contained with container succeeds");
@@ -10861,6 +11125,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(10, 5),
                 Vector2::ZERO,
                 Vec::new(),
@@ -10878,6 +11143,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(50, 5),
                 Vector2::ZERO,
                 Vec::new(),
@@ -10906,6 +11172,7 @@ mod tests {
                 None,
                 1,
                 100,
+                crate::FULL_CON,
                 Vector2::new(0, 0),
                 Vector2::ZERO,
                 Vec::new(),
@@ -10923,6 +11190,7 @@ mod tests {
                 None,
                 2,
                 100,
+                crate::FULL_CON,
                 Vector2::new(5, 0),
                 Vector2::ZERO,
                 Vec::new(),
@@ -10962,6 +11230,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(2, 0),
                 Vector2::ZERO,
                 Vec::new(),
@@ -10979,6 +11248,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(6, 0),
                 Vector2::ZERO,
                 Vec::new(),
@@ -11035,6 +11305,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(0, 0),
                 Vector2::ZERO,
                 Vec::new(),
@@ -11053,6 +11324,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(5, 0),
                 Vector2::ZERO,
                 Vec::new(),
@@ -11096,6 +11368,7 @@ mod tests {
             None,
             OWNER_NONE,
             100,
+            crate::FULL_CON,
             Vector2::ZERO,
             Vector2::ZERO,
             Vec::new(),
@@ -11111,6 +11384,7 @@ mod tests {
             ObjectStatus::Normal,
             100,
             0,
+            crate::FULL_CON,
             OWNER_NONE,
             Vector2::ZERO,
             Vector2::ZERO,
@@ -11153,6 +11427,7 @@ mod tests {
             ObjectStatus::Normal,
             0,
             0,
+            crate::FULL_CON,
             OWNER_NONE,
             Vector2::ZERO,
             Vector2::ZERO,
@@ -11215,6 +11490,7 @@ mod tests {
             ObjectStatus::Normal,
             0,
             0,
+            crate::FULL_CON,
             OWNER_NONE,
             Vector2::ZERO,
             Vector2::ZERO,
@@ -11269,6 +11545,7 @@ mod tests {
             ObjectStatus::Normal,
             0,
             0,
+            crate::FULL_CON,
             OWNER_NONE,
             Vector2::ZERO,
             Vector2::ZERO,
@@ -11331,6 +11608,7 @@ mod tests {
             ObjectStatus::Normal,
             0,
             0,
+            crate::FULL_CON,
             OWNER_NONE,
             Vector2::ZERO,
             Vector2::ZERO,
@@ -11405,6 +11683,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(0, 0),
                 Vector2::ZERO,
                 Vec::new(),
@@ -11422,6 +11701,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(10, 0),
                 Vector2::ZERO,
                 Vec::new(),
@@ -11449,6 +11729,7 @@ mod tests {
                 None,
                 1,
                 100,
+                crate::FULL_CON,
                 Vector2::new(0, 0),
                 Vector2::ZERO,
                 Vec::new(),
@@ -11466,6 +11747,7 @@ mod tests {
                 None,
                 2,
                 100,
+                crate::FULL_CON,
                 Vector2::new(5, 0),
                 Vector2::ZERO,
                 Vec::new(),
@@ -11506,6 +11788,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(0, 0),
                 Vector2::ZERO,
                 Vec::new(),
@@ -11523,6 +11806,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(3, 0),
                 Vector2::ZERO,
                 Vec::new(),
@@ -11540,6 +11824,7 @@ mod tests {
                 None,
                 OWNER_NONE,
                 100,
+                crate::FULL_CON,
                 Vector2::new(5, 0),
                 Vector2::ZERO,
                 Vec::new(),

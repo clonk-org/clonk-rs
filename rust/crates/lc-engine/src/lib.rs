@@ -111,6 +111,7 @@ use transfer::{TransferZoneCommand, TransferZoneRect, TransferZoneState, Transfe
 pub type DefinitionId = String;
 
 pub const OWNER_NONE: i32 = -1;
+pub const FULL_CON: i32 = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GraphicsOverlayMode {
@@ -1706,6 +1707,10 @@ fn default_alive() -> bool {
     true
 }
 
+fn default_construction() -> i32 {
+    FULL_CON
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectState {
     pub position: Vector2,
@@ -1719,6 +1724,8 @@ pub struct ObjectState {
     pub magic_energy: i32,
     #[serde(default)]
     pub magic_capacity: i32,
+    #[serde(default = "default_construction")]
+    pub construction: i32,
     pub action: ActionState,
     #[serde(default)]
     pub direction: Direction,
@@ -1790,6 +1797,9 @@ impl ObjectState {
         }
         if let Some(magic_capacity) = delta.magic_capacity {
             self.magic_capacity = magic_capacity.max(0);
+        }
+        if let Some(construction) = delta.construction {
+            self.construction = construction.clamp(0, FULL_CON);
         }
         if let Some(direction) = delta.direction {
             self.direction = direction;
@@ -1864,6 +1874,7 @@ struct ObjectDelta {
     damage: Option<i32>,
     magic_energy: Option<i32>,
     magic_capacity: Option<i32>,
+    construction: Option<i32>,
     direction: Option<Direction>,
     command_direction: Option<CommandDirection>,
     action: Option<ActionUpdate>,
@@ -1950,6 +1961,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             velocity: update.velocity,
             rotation: update.rotation,
             energy: update.energy,
+            construction: update.construction,
             damage: update.damage,
             magic_energy: update.magic_energy,
             magic_capacity: update.magic_capacity,
@@ -1982,6 +1994,8 @@ pub struct ObjectUpdate {
     pub magic_energy: Option<i32>,
     #[serde(default)]
     pub magic_capacity: Option<i32>,
+    #[serde(default)]
+    pub construction: Option<i32>,
     pub action: Option<ActionUpdate>,
     #[serde(default)]
     pub direction: Option<Direction>,
@@ -2034,6 +2048,11 @@ impl ObjectUpdate {
 
     pub fn with_damage(mut self, damage: i32) -> Self {
         self.damage = Some(damage);
+        self
+    }
+
+    pub fn with_construction(mut self, construction: i32) -> Self {
+        self.construction = Some(construction.clamp(0, FULL_CON));
         self
     }
 
@@ -2134,6 +2153,7 @@ impl ObjectUpdate {
             && self.velocity.is_none()
             && self.rotation.is_none()
             && self.energy.is_none()
+            && self.construction.is_none()
             && self.damage.is_none()
             && self.magic_energy.is_none()
             && self.magic_capacity.is_none()
@@ -2406,6 +2426,7 @@ impl Object {
             damage: self.state.damage,
             magic_energy: self.state.magic_energy,
             magic_capacity: self.state.magic_capacity,
+            construction: self.state.construction,
             action: self.state.action.clone(),
             direction: self.state.direction,
             command_direction: self.state.command_direction,
@@ -2717,6 +2738,8 @@ pub struct SpawnConfig {
     #[serde(default)]
     pub rotation: i32,
     pub energy: i32,
+    #[serde(default = "default_construction")]
+    pub construction: i32,
     pub action: Option<ActionState>,
     #[serde(default)]
     pub direction: Direction,
@@ -2748,6 +2771,7 @@ impl SpawnConfig {
             velocity: Vector2::ZERO,
             rotation: 0,
             energy: 0,
+            construction: FULL_CON,
             action: None,
             direction: Direction::default(),
             command_direction: CommandDirection::default(),
@@ -2779,6 +2803,11 @@ impl SpawnConfig {
 
     pub fn with_energy(mut self, energy: i32) -> Self {
         self.energy = energy;
+        self
+    }
+
+    pub fn with_construction(mut self, construction: i32) -> Self {
+        self.construction = construction.clamp(0, FULL_CON);
         self
     }
 
@@ -2868,6 +2897,8 @@ pub struct ObjectSnapshot {
     pub magic_energy: i32,
     #[serde(default)]
     pub magic_capacity: i32,
+    #[serde(default = "default_construction")]
+    pub construction: i32,
     #[serde(default)]
     pub action: ActionState,
     #[serde(default)]
@@ -3461,6 +3492,7 @@ impl Definition {
             state.alive,
             state.status,
             state.container.is_some(),
+            state.construction,
         )
     }
 
@@ -3537,6 +3569,7 @@ impl Definition {
                     state.status,
                     state.energy,
                     state.damage,
+                    state.construction,
                     state.owner,
                     state.position,
                     state.velocity,
@@ -3674,6 +3707,7 @@ impl Definition {
                     state.status,
                     state.energy,
                     state.damage,
+                    state.construction,
                     state.owner,
                     state.position,
                     state.velocity,
@@ -3812,6 +3846,7 @@ impl Definition {
                     state.status,
                     state.energy,
                     state.damage,
+                    state.construction,
                     state.owner,
                     state.position,
                     state.velocity,
@@ -3906,6 +3941,7 @@ impl Definition {
             state.status,
             state.energy,
             state.damage,
+            state.construction,
             state.owner,
             state.position,
             state.velocity,
@@ -4023,6 +4059,7 @@ impl Definition {
             state.status,
             state.energy,
             state.damage,
+            state.construction,
             state.owner,
             state.position,
             state.velocity,
@@ -4125,6 +4162,7 @@ impl Definition {
             state.status,
             state.energy,
             state.damage,
+            state.construction,
             state.owner,
             state.position,
             state.velocity,
@@ -4239,6 +4277,7 @@ impl Definition {
             state.status,
             state.energy,
             state.damage,
+            state.construction,
             state.owner,
             state.position,
             state.velocity,
@@ -4533,6 +4572,7 @@ impl Definition {
                     state.status,
                     state.energy,
                     state.damage,
+                    state.construction,
                     state.owner,
                     state.position,
                     state.velocity,
@@ -5611,6 +5651,7 @@ impl Engine {
                             object.state.alive,
                             object.state.status,
                             object.state.container.is_some(),
+                            object.state.construction,
                         )
                     });
                 HostWorldObject::with_category(
@@ -5624,6 +5665,7 @@ impl Engine {
                     object.state.owner,
                     object.state.category,
                     object.state.energy,
+                    object.state.construction,
                     object.state.damage,
                     object.state.position,
                     object.state.velocity,
@@ -7654,6 +7696,7 @@ impl Engine {
                     velocity: snapshot.velocity,
                     rotation: snapshot.rotation.rem_euclid(360),
                     energy: snapshot.energy,
+                    construction: snapshot.construction,
                     damage: snapshot.damage,
                     magic_energy: snapshot.magic_energy,
                     magic_capacity: snapshot.magic_capacity,
@@ -8209,6 +8252,12 @@ impl Engine {
             }
         }
 
+        if matches!(procedure, ActionProcedure::Build) {
+            if !self.apply_build_procedure(idx, &definition_id) {
+                return;
+            }
+        }
+
         if matches!(procedure, ActionProcedure::Fight) {
             if !self.apply_fight_procedure(idx, movement_profile, &definition_id) {
                 return;
@@ -8601,6 +8650,73 @@ impl Engine {
         if parameters.move_clonk && direction_sign != 0 && action_time > 0 {
             let object = &mut self.objects[idx];
             object.state.position.x = object.state.position.x.saturating_add(direction_sign);
+        }
+
+        true
+    }
+
+    fn apply_build_procedure(&mut self, idx: usize, definition_id: &DefinitionId) -> bool {
+        let category = self.objects[idx].state.category;
+        let is_structure = (category & (CATEGORY_STRUCTURE | CATEGORY_STATIC_BACK)) != 0;
+
+        let target_id = match self.objects[idx].state.action.target {
+            Some(id) => id,
+            None => {
+                if is_structure {
+                    return true;
+                }
+                self.reset_action_to_default(idx, definition_id, true);
+                return false;
+            }
+        };
+
+        let target_idx = match self.find_object_index(target_id) {
+            Some(index) if index != idx => index,
+            _ => {
+                self.reset_action_to_default(idx, definition_id, true);
+                return false;
+            }
+        };
+
+        if self.objects[target_idx].destroyed || !self.objects[target_idx].state.status.is_active()
+        {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        if self.objects[target_idx].state.construction >= FULL_CON {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+
+        let level = if self.objects[target_idx].state.container.is_some() {
+            1
+        } else {
+            10
+        };
+
+        let target_definition_id = self.objects[target_idx].definition_id.clone();
+        let target_mass = self
+            .definitions
+            .get(&target_definition_id)
+            .map(|definition| definition.mass().max(1))
+            .unwrap_or(100)
+            .max(1);
+
+        let build_speed = 100; // Legacy default; physical training not yet modeled.
+        let mut delta = (i64::from(level) * i64::from(build_speed) * 150) / i64::from(target_mass);
+        if delta <= 0 {
+            delta = 1;
+        }
+
+        {
+            let target = &mut self.objects[target_idx];
+            let next = (i64::from(target.state.construction) + delta).clamp(0, i64::from(FULL_CON));
+            target.state.construction = next as i32;
+        }
+
+        if self.objects[target_idx].state.construction >= FULL_CON {
+            self.reset_action_to_default(idx, definition_id, true);
         }
 
         true
@@ -9255,6 +9371,7 @@ impl Engine {
                     object.state.alive,
                     object.state.status,
                     object.state.container.is_some(),
+                    object.state.construction,
                 )
             })
     }
@@ -9971,6 +10088,7 @@ impl Engine {
             velocity,
             rotation,
             energy,
+            construction,
             action,
             direction,
             command_direction,
@@ -10031,6 +10149,7 @@ impl Engine {
                 damage: 0,
                 magic_energy: 0,
                 magic_capacity: 0,
+                construction: construction.clamp(0, FULL_CON),
                 action: initial_action,
                 direction,
                 command_direction,
@@ -10249,6 +10368,7 @@ fn build_state_value(
     map.insert("position".into(), state.position.to_value());
     map.insert("velocity".into(), state.velocity.to_value());
     map.insert("energy".into(), Value::Int(state.energy));
+    map.insert("construction".into(), Value::Int(state.construction));
     map.insert(
         "direction".into(),
         Value::Int(state.direction.to_script_value()),
@@ -10369,6 +10489,7 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
         Value::Int(snapshot.rotation.rem_euclid(360)),
     );
     map.insert("energy".into(), Value::Int(snapshot.energy));
+    map.insert("construction".into(), Value::Int(snapshot.construction));
     map.insert("damage".into(), Value::Int(snapshot.damage));
     map.insert(
         "direction".into(),
@@ -10481,6 +10602,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.owner,
                 object.category,
                 object.energy,
+                object.construction,
                 object.damage,
                 object.position,
                 object.velocity,

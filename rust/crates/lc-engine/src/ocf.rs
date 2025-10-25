@@ -4,7 +4,7 @@
 //! intentionally remain `u32` so we can faithfully represent bit masks that
 //! rely on the signed interpretation (e.g. `OCF_All == !0u32` in C++).
 
-use crate::ObjectStatus;
+use crate::{ObjectStatus, FULL_CON as OBJECT_FULL_CON};
 
 pub const NONE: u32 = 0;
 pub const ALL: u32 = u32::MAX;
@@ -49,6 +49,7 @@ pub fn compute(
     alive: bool,
     status: ObjectStatus,
     is_contained: bool,
+    construction: i32,
 ) -> u32 {
     let mut ocf = base | NORMAL;
 
@@ -56,7 +57,7 @@ pub fn compute(
         ocf |= NOT_CONTAINED | AVAILABLE;
     }
 
-    if matches!(status, ObjectStatus::Normal) {
+    if construction >= OBJECT_FULL_CON {
         ocf |= FULL_CON;
     }
 
@@ -81,7 +82,14 @@ mod tests {
 
     #[test]
     fn compute_adds_dynamic_bits() {
-        let ocf = compute(NORMAL | CONTAINER, true, true, ObjectStatus::Normal, false);
+        let ocf = compute(
+            NORMAL | CONTAINER,
+            true,
+            true,
+            ObjectStatus::Normal,
+            false,
+            OBJECT_FULL_CON,
+        );
         assert!(ocf & NOT_CONTAINED != 0);
         assert!(ocf & AVAILABLE != 0);
         assert!(ocf & FULL_CON != 0);
@@ -93,7 +101,7 @@ mod tests {
 
     #[test]
     fn compute_handles_contained_objects() {
-        let ocf = compute(NORMAL, false, false, ObjectStatus::Inactive, true);
+        let ocf = compute(NORMAL, false, false, ObjectStatus::Inactive, true, 0);
         assert_eq!(ocf & NOT_CONTAINED, 0);
         assert_eq!(ocf & AVAILABLE, 0);
         assert_eq!(ocf & FULL_CON, 0);

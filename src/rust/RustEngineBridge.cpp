@@ -291,7 +291,7 @@ C4Object *CreateRuntimeObject(
     const int32_t normalized_category = NormalizeCategory(state.category, definition->Category);
     object->SetCategory(normalized_category);
 
-    object->Con = FullCon;
+    object->Con = std::clamp(state.construction, 0, FullCon);
     object->UpdateMass();
     object->UpdateFace(true);
     object->SetOCF();
@@ -348,6 +348,10 @@ void ApplyRuntimeObjectStateToC4Object(
     if (object.Owner != state.owner) {
         object.SetOwner(state.owner);
     }
+    object.Con = std::clamp(state.construction, 0, FullCon);
+    object.UpdateMass();
+    object.UpdateFace(true);
+    object.SetOCF();
 
     const int32_t normalized_category = NormalizeCategory(state.category, object.Category);
     if (object.Category != normalized_category) {

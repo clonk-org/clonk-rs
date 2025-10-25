@@ -21,7 +21,7 @@ use crate::{
     DefinitionActionGraphics, DefinitionPicture, DefinitionPictureImage, DefinitionSpriteImage,
     Direction, EffectState, Engine, EngineError, EnvironmentSettings, Landscape, MovementProfile,
     ObjectId, ObjectStatus, PhysicsSettings, RgbColor, SkyParallaxMode, SkySettings, SpawnConfig,
-    Vector2,
+    Vector2, FULL_CON,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -2450,6 +2450,7 @@ struct LegacyObjectRecord {
     xdir: Option<i32>,
     ydir: Option<i32>,
     energy: Option<i32>,
+    construction: Option<i32>,
     alive: Option<bool>,
     category: Option<i32>,
     direction: Option<Direction>,
@@ -2556,6 +2557,21 @@ impl LegacyObjectRecord {
                         self.line, trimmed_value, err
                     ))
                 })?);
+            }
+            "con" => {
+                let value = parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Con `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                let raw = if value > 1000 {
+                    value
+                } else {
+                    (value.clamp(0, 100) * FULL_CON) / 100
+                };
+                let clamped = raw.clamp(0, FULL_CON);
+                self.construction = Some(clamped);
             }
             "alive" => {
                 let alive = parse_bool(trimmed_value).ok_or_else(|| {
@@ -2703,6 +2719,7 @@ impl LegacyObjectRecord {
             xdir,
             ydir,
             energy,
+            construction,
             alive,
             category,
             direction,
@@ -2750,6 +2767,9 @@ impl LegacyObjectRecord {
         }
         if let Some(energy) = energy {
             config = config.with_energy(energy);
+        }
+        if let Some(construction) = construction {
+            config = config.with_construction(construction);
         }
         if let Some(alive) = alive {
             config = config.with_alive(alive);

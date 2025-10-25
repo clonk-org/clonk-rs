@@ -613,10 +613,10 @@ global func Step(state, frame, random) { return nil; }
     fn command_events_update_actions_via_control_scripts() -> Result<(), EngineError> {
         let script = r#"
 global func Initialize(state, random) { return nil; }
-public func ControlThrow() { SetAction("ThrowCtl"); return true; }
-public func ControlDig() { SetAction("DigCtl"); return true; }
-public func ControlSpecial() { SetAction("SpecialCtl"); return true; }
-public func ControlSpecial2() { SetAction("Special2Ctl"); return true; }
+global func ControlThrow() { SetAction("ThrowCtl"); return true; }
+global func ControlDig() { SetAction("DigCtl"); return true; }
+global func ControlSpecial() { SetAction("SpecialCtl"); return true; }
+global func ControlSpecial2() { SetAction("Special2Ctl"); return true; }
 "#;
         let mut definition =
             Definition::from_script("CLNK", "Clonk", script).expect("control script compiles");

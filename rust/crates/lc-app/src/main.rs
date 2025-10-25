@@ -6298,15 +6298,20 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
 }
 
 fn scenario_roots(paths: &AppPaths) -> Vec<PathBuf> {
-    let mut roots = vec![
+    let candidates = vec![
         paths.scenario_dir(),
         paths.install_root().join("Scenarios"),
         paths.install_root().join("scenarios"),
         paths.planet_dir().to_path_buf(),
         paths.system_group_path().to_path_buf(),
     ];
-    roots.sort();
-    roots.dedup();
+    let mut roots = Vec::new();
+    for candidate in candidates {
+        if roots.iter().any(|existing| existing == &candidate) {
+            continue;
+        }
+        roots.push(candidate);
+    }
     roots
 }
 
@@ -6546,6 +6551,7 @@ mod tests {
             velocity: Vector2::new(0, 0),
             rotation: 0,
             energy: 100,
+            construction: lc_engine::FULL_CON,
             damage: 0,
             magic_energy: 0,
             magic_capacity: 0,
@@ -6848,6 +6854,7 @@ mod tests {
                 velocity: Vector2::ZERO,
                 rotation: 0,
                 energy: 80,
+                construction: lc_engine::FULL_CON,
                 damage: 0,
                 magic_energy: 0,
                 magic_capacity: 0,
@@ -6874,6 +6881,7 @@ mod tests {
                 velocity: Vector2::ZERO,
                 rotation: 0,
                 energy: 40,
+                construction: lc_engine::FULL_CON,
                 damage: 0,
                 magic_energy: 0,
                 magic_capacity: 0,
@@ -7325,6 +7333,56 @@ mod tests {
                 .and_then(|path| path.file_name())
                 .and_then(|name| name.to_str()),
             Some("Alpha.c4s")
+        );
+
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn load_frontend_scenarios_prefers_user_over_install() {
+        reset_cached_app_paths();
+
+        let install_dir = tempdir().unwrap();
+
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let install_scenario_dir = install_dir.path().join("Scenarios").join("Alpha.c4s");
+        fs::create_dir_all(&install_scenario_dir).unwrap();
+        fs::write(
+            install_scenario_dir.join("Scenario.json"),
+            br#"{"name":"System Alpha"}"#,
+        )
+        .unwrap();
+
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+        let user_scenario_dir = user_dir.join("Scenarios").join("Alpha.c4s");
+        fs::create_dir_all(&user_scenario_dir).unwrap();
+        fs::write(
+            user_scenario_dir.join("Scenario.json"),
+            br#"{"name":"User Alpha"}"#,
+        )
+        .unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+
+        let scenarios = load_frontend_scenarios();
+        assert_eq!(scenarios.len(), 1, "duplicate scenario should be merged");
+        let scenario = &scenarios[0];
+        assert_eq!(scenario.identifier, "Alpha.c4s");
+        assert_eq!(
+            scenario.title, "User Alpha",
+            "user scenario should override install variant"
+        );
+        let path = scenario.path.as_ref().expect("scenario path");
+        assert!(
+            path.starts_with(&user_dir),
+            "expected scenario path to point at user overrides"
         );
 
         reset_cached_app_paths();
