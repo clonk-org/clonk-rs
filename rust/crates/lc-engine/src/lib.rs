@@ -4370,6 +4370,103 @@ impl Definition {
         Ok((handled, host_effects, audio_state, rng))
     }
 
+    fn call_object_function(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        function: &str,
+        args: &[Value],
+        rng: ChaCha8Rng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        audio: AudioRegistry,
+    ) -> Result<
+        (
+            Value,
+            compat::EffectContextOutcome,
+            AudioRegistry,
+            ChaCha8Rng,
+        ),
+        EngineError,
+    > {
+        if !self.script.has_function(function) {
+            let next_object_id = world.next_object_id();
+            return Ok((
+                Value::Nil,
+                compat::EffectContextOutcome::empty(next_object_id, audio.clone()),
+                audio,
+                rng,
+            ));
+        }
+
+        let arg_values: Vec<Value> = args.iter().cloned().collect();
+        let physics_guard = enter_physics_context(physics);
+        let env_guard = enter_environment_context(environment, frame);
+        let guard = enter_random_context(rng);
+        let next_object_id = world.next_object_id();
+        let audio_guard = enter_audio_context(audio);
+        let object_context = compat::HostObjectContext::with_category(
+            object_id,
+            state.container,
+            state.status,
+            state.energy,
+            state.damage,
+            state.construction,
+            state.owner,
+            state.position,
+            state.velocity,
+            state.rotation,
+            &state.effects,
+            state.action.name.clone(),
+            state.action.ticks,
+            state.action.data,
+            self.action_library.clone(),
+            state.direction,
+            state.command_direction,
+            state.action.target,
+            state.action.target2,
+            &state.vertices,
+            state.category,
+            self.ocf_base,
+            self.crew_member,
+            state.draw_transform,
+        )
+        .with_graphics_overlays(state.graphics_overlays.clone())
+        .with_alive(state.alive)
+        .with_ocf(self.compute_ocf(state));
+        let (result, mut host_effects) = compat::with_effect_context(
+            Some(object_context),
+            global_effects,
+            world,
+            next_object_id,
+            || self.script.call(function, &arg_values),
+        );
+        let rng = guard.finish();
+        let physics_delta = physics_guard.finish();
+        let environment_delta = env_guard.finish();
+        let value = result.map_err(|source| {
+            let function_label: &'static str = Box::leak(function.to_string().into_boxed_str());
+            EngineError::Script {
+                definition: self.id.clone(),
+                function: function_label,
+                source,
+            }
+        })?;
+
+        if !environment_delta.is_empty() {
+            host_effects.environment = Some(environment_delta);
+        }
+        if !physics_delta.is_empty() {
+            host_effects.physics = Some(physics_delta);
+        }
+
+        let audio_state = audio_guard.finish();
+        Ok((value, host_effects, audio_state, rng))
+    }
+
     fn call_menu_callback(
         &self,
         state: &ObjectState,
@@ -6239,6 +6336,56 @@ impl Engine {
         Ok(handled)
     }
 
+    fn call_object_function(
+        &mut self,
+        index: usize,
+        function: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, EngineError> {
+        let (object_id, definition_id, state_snapshot) = {
+            let object = self
+                .objects
+                .get(index)
+                .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?;
+            (
+                object.id,
+                object.definition_id.clone(),
+                object.state.clone(),
+            )
+        };
+        let definition = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let action_library = definition.action_library().clone();
+        let rng_state = self.rng.clone();
+        let global_view = self.global_effects.clone();
+        let world = self.host_world_context();
+        let (value, outcome, audio_state, new_rng) = definition.call_object_function(
+            &state_snapshot,
+            object_id,
+            function,
+            &args,
+            rng_state,
+            &global_view,
+            self.physics,
+            self.environment,
+            self.frame,
+            world,
+            self.audio_registry.clone(),
+        )?;
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        self.apply_action_callback_outcome(
+            index,
+            outcome,
+            &action_library,
+            object_id,
+            &definition_id,
+        )?;
+        Ok(value)
+    }
+
     pub fn handle_control_command(
         &mut self,
         owner: i32,
@@ -6662,9 +6809,38 @@ impl Engine {
         }
     }
 
-    fn tick_weather_events(&mut self, frame: u64) {
+    fn trigger_lightning(&mut self, position: i32) -> Result<bool, EngineError> {
+        const LIGHTNING_DEFINITION: &str = "FXL1";
+        if !self.definitions.contains_key(LIGHTNING_DEFINITION) {
+            return Ok(false);
+        }
+        let position = position.max(0);
+        let config =
+            SpawnConfig::new(LIGHTNING_DEFINITION).with_position(Vector2::new(position, 0));
+        let lightning_id = match self.spawn_object(config) {
+            Ok(id) => id,
+            Err(EngineError::UnknownDefinition(_)) => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        let Some(index) = self.find_object_index(lightning_id) else {
+            return Ok(false);
+        };
+        let args = vec![
+            Value::Int(position),
+            Value::Int(0),
+            Value::Int(-20),
+            Value::Int(41),
+            Value::Int(5),
+            Value::Int(15),
+            Value::Bool(true),
+        ];
+        let _ = self.call_object_function(index, "Activate", args)?;
+        Ok(true)
+    }
+
+    fn tick_weather_events(&mut self, frame: u64) -> Result<(), EngineError> {
         if frame % 10 != 0 {
-            return;
+            return Ok(());
         }
 
         if self.environment.lightning > 0
@@ -6678,11 +6854,14 @@ impl Engine {
             {
                 if width > 0 {
                     let position = self.rng.gen_range(0..width);
-                    self.weather_events
-                        .push(WeatherEvent::Lightning { position });
+                    if self.trigger_lightning(position)? {
+                        self.weather_events
+                            .push(WeatherEvent::Lightning { position });
+                    }
                 }
             }
         }
+        Ok(())
     }
 
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
@@ -6706,6 +6885,7 @@ impl Engine {
         }
         self.weather_events.clear();
         self.environment.advance_frame(&mut self.rng);
+        self.tick_weather_events(frame)?;
         if let Some(sky) = &mut self.sky {
             sky.advance(&self.environment);
         }
@@ -6740,7 +6920,6 @@ impl Engine {
         }
         let mut spawn_requests = Vec::new();
         self.tick_global_effects();
-        self.tick_weather_events(frame);
         for idx in 0..self.objects.len() {
             let definition_id = self.objects[idx].definition_id.clone();
             let previous_action_state = self.objects[idx].state.action.clone();
@@ -10024,10 +10203,8 @@ impl Engine {
                 let owner = controller.unwrap_or(OWNER_NONE);
                 for _ in 0..spawn_count {
                     let rotation = self.rng.gen_range(0..360);
-                    let velocity = Vector2::new(
-                        self.rng.gen_range(-30..=30),
-                        self.rng.gen_range(-40..=20),
-                    );
+                    let velocity =
+                        Vector2::new(self.rng.gen_range(-30..=30), self.rng.gen_range(-40..=20));
                     spawn_requests.push(
                         SpawnConfig::new(definition_id.clone())
                             .with_position(center)
@@ -15913,6 +16090,94 @@ func ControlDig() { SetAction("Dig"); return true; }
 
         let dry = EnvironmentSettings::new(0).with_precipitation(-180);
         assert_eq!(dry.precipitation(), -100);
+    }
+
+    #[test]
+    fn lightning_event_spawns_effect_and_calls_activate() {
+        let script = r#"
+        global func Initialize(state, random)
+        {
+            this.activate_params = nil;
+            return nil;
+        }
+
+        global func Step(state, frame, random)
+        {
+            return nil;
+        }
+
+        global func Activate(int x, int y, int xdir, int xrange, int ydir, int yrange, bool gamma)
+        {
+            this.activate_params = [x, y, xdir, xrange, ydir, yrange, gamma];
+            return true;
+        }
+
+        global func GetActivateParam(int index)
+        {
+            if (!this.activate_params) return nil;
+            return this.activate_params[index];
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FXL1", "Lightning", script).expect("definition builds"),
+            )
+            .expect("definition registers");
+
+        assert!(
+            engine
+                .trigger_lightning(120)
+                .expect("lightning trigger succeeds"),
+            "lightning definition should spawn effect"
+        );
+
+        let index = engine
+            .objects
+            .iter()
+            .position(|object| object.definition_id == "FXL1")
+            .expect("lightning effect spawned");
+        assert_eq!(
+            engine.objects[index].state.position,
+            Vector2::new(120, 0),
+            "lightning effect should spawn at requested x position"
+        );
+
+        let x_param = engine
+            .call_object_function(index, "GetActivateParam", vec![Value::Int(0)])
+            .expect("x param query succeeds");
+        assert_eq!(x_param, Value::Int(120));
+
+        let y_param = engine
+            .call_object_function(index, "GetActivateParam", vec![Value::Int(1)])
+            .expect("y param query succeeds");
+        assert_eq!(y_param, Value::Int(0));
+
+        let xdir_param = engine
+            .call_object_function(index, "GetActivateParam", vec![Value::Int(2)])
+            .expect("xdir param query succeeds");
+        assert_eq!(xdir_param, Value::Int(-20));
+
+        let xrange_param = engine
+            .call_object_function(index, "GetActivateParam", vec![Value::Int(3)])
+            .expect("xrange param query succeeds");
+        assert_eq!(xrange_param, Value::Int(41));
+
+        let ydir_param = engine
+            .call_object_function(index, "GetActivateParam", vec![Value::Int(4)])
+            .expect("ydir param query succeeds");
+        assert_eq!(ydir_param, Value::Int(5));
+
+        let yrange_param = engine
+            .call_object_function(index, "GetActivateParam", vec![Value::Int(5)])
+            .expect("yrange param query succeeds");
+        assert_eq!(yrange_param, Value::Int(15));
+
+        let gamma_param = engine
+            .call_object_function(index, "GetActivateParam", vec![Value::Int(6)])
+            .expect("gamma param query succeeds");
+        assert_eq!(gamma_param, Value::Bool(true));
     }
 
     #[test]
