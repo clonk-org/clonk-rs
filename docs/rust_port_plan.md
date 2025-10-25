@@ -316,7 +316,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - May not display correctly
 
 **What's Needed:**
-- [ ] Verify precipitation renders
+- [x] Verify precipitation renders
 - [ ] Wind affects objects (trees sway, objects pushed)
 - [ ] Lightning flashes and strikes objects
 - [ ] Day/night lighting changes
@@ -325,6 +325,8 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [ ] Climate zones (temperature varies by height)
 
 **Files:** lc-engine/src/sky.rs, SkyRenderState in lc-frontend
+
+**Progress (2025-10-25):** Precipitation overlay now renders after world composition so rain and snow appear onscreen; added `precipitation_renders_over_world` regression test in `rust/crates/lc-frontend/src/lib.rs` to guard the behavior.
 
 ---
 

@@ -849,12 +849,6 @@ impl GraphicsSystem {
         let lighting = Self::lighting_factor(environment.settings.time_of_day);
 
         self.draw_sky(snapshot.sky.as_ref(), environment, events, lighting);
-        self.draw_precipitation(
-            environment.precipitation,
-            environment.ambient_temperature,
-            snapshot.frame,
-            lighting,
-        );
         self.draw_ground(
             environment.ambient_temperature,
             snapshot.landscape.as_ref(),
@@ -866,6 +860,12 @@ impl GraphicsSystem {
             lighting,
         );
         self.draw_objects(&snapshot.objects, lighting, owner_colors);
+        self.draw_precipitation(
+            environment.precipitation,
+            environment.ambient_temperature,
+            snapshot.frame,
+            lighting,
+        );
         let highlight_ids = Self::collect_highlight_ids(snapshot, input.owner, input.focus.id);
         self.draw_object_energy_bars(
             snapshot,
@@ -3404,6 +3404,51 @@ mod tests {
 
         let ground = graphics.surface().get_pixel(0, 179).unwrap();
         assert_ne!(ground, Color::opaque(8, 12, 24));
+    }
+
+    #[test]
+    fn precipitation_renders_over_world() {
+        let mut snapshot = make_snapshot();
+        snapshot.environment.ambient_temperature = 10;
+        let mut base_settings = snapshot.environment.settings;
+        base_settings = base_settings.with_temperature(10);
+        snapshot.environment.settings = base_settings;
+
+        let focus = &snapshot.objects[0];
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Weather Scenario",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+
+        let dry_viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &dry_viewports);
+        let baseline = graphics.surface().pixels().to_vec();
+
+        let mut rainy = snapshot.clone();
+        rainy.environment.precipitation = 80;
+        let mut rainy_settings = rainy.environment.settings;
+        rainy_settings = rainy_settings.with_precipitation(80);
+        rainy_settings = rainy_settings.with_precipitation_strength(80);
+        rainy.environment.settings = rainy_settings;
+        let rainy_viewports = vec![ViewportInput::from_focus(&rainy.objects[0])];
+
+        graphics.render_frame(&rainy, &rainy_viewports);
+        let rainy_pixels = graphics.surface().pixels();
+        let differences = rainy_pixels
+            .iter()
+            .zip(baseline.iter())
+            .filter(|(wet, dry)| wet != dry)
+            .count();
+        assert!(
+            differences > 0,
+            "expected precipitation to affect rendered frame"
+        );
     }
 
     #[test]
