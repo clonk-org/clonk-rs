@@ -1,6 +1,7 @@
 mod gamepad;
 mod ingame_menu;
 mod input;
+mod menu_controls;
 mod network;
 mod object_menu;
 mod settings;
@@ -54,6 +55,7 @@ use lc_resources::{
     DefinitionError as ResourceDefinitionError, GraphicsImage, GraphicsResource, Group, GroupError,
     ResourceDefinition as ResourceDefinitionData,
 };
+use menu_controls::map_menu_control_event;
 use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, NetworkMode};
 use object_menu::{ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState};
 use parking_lot::ReentrantMutex;
@@ -3128,6 +3130,12 @@ impl GameApp {
     }
 
     fn dispatch_control_event(&mut self, event: ControlEvent) -> Result<(), EngineError> {
+        let mut event = event;
+        if self.menu_controls_active() {
+            if let Some(mapped) = map_menu_control_event(event) {
+                event = mapped;
+            }
+        }
         if self.mode == AppMode::Running {
             let consumed = if let ControlEvent::Command { command, kind } = event {
                 self.handle_menu_command(command, kind)?
@@ -3166,6 +3174,11 @@ impl GameApp {
         }
         let _ = self.input.handle_event(&mut self.engine, owner, event)?;
         Ok(())
+    }
+
+    fn menu_controls_active(&self) -> bool {
+        matches!(self.mode, AppMode::Running)
+            && (self.object_menu.is_some() || self.ingame_menu.is_some())
     }
 
     fn open_ingame_menu(&mut self) {

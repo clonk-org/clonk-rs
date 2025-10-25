@@ -238,7 +238,7 @@ fn handle_command(
         },
         ControlCommand::PlayerMenu => {
             if matches!(kind, CommandKind::Press) {
-                // Menu system not yet implemented in Rust frontend.
+                // Menu handling occurs in the app layer; nothing to forward to the engine.
                 return Ok(true);
             }
         }

@@ -187,7 +187,7 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - [ ] Verify ALL control inputs work:
   - Movement (up/down/left/right)
   - [x] Actions (dig, throw, special, special2)
-  - Menu controls (open, navigate, select)
+  - [x] Menu controls (open, navigate, select)
   - Object interaction (grab, drop, enter)
   - Cursor cycling
 - [x] Mouse controls (select, drag, throw)
@@ -197,6 +197,7 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 
 **Progress (2025-11-30):** Engine now routes Dig/Throw/Special/Special2 commands through the legacy `Control*` scripts via `Engine::handle_control_command`, with both the frontend dispatcher and playback runtime invoking it so scripted behaviors (e.g. `ControlDig`) trigger identical to C++.
 **Progress (2025-12-15):** Rust frontend now mirrors LegacyClonk's mouse flow: left-click selection snaps the cursor to the clicked crew, keeps focus overlays in sync, and dragging from a selected crew synthesizes the directional control events plus throw command so inventory items launch in the dragged direction without using the keyboard. Pointer tracking halts while menus are open to avoid spamming commands.
+**Progress (2025-12-17):** Menu input once again translates gameplay keys (cursor, throw, dig, special2) into the legacy `COM_Menu*` commands while an object or in-game menu is open, so keyboard navigation and selection behave like C4FullScreen: arrows walk the menu, throw confirms, dig closes, and special2 triggers the “enter all” branch.
 
 **Files:** InputDispatcher, handle_key() in main.rs, lc-engine/src/input.rs
 
@@ -416,9 +417,9 @@ These are NOT needed for parity (C++ doesn't have them either or they're not cor
 1. **Scenario Discovery** - Make real scenarios appear in list
 2. **Scenario Loading** - Make selected scenario actually load
 3. **Object Graphics** - Make objects visible
-4. **Controls** - Make game playable
-5. **HUD** - Show game state
-6. **Sound** - Play audio
+4. **Player Controls** (see §6) - Make game playable
+5. **HUD & UI** (see §4) - Show game state
+6. **Sound & Music** (see §5) - Play audio
 7. **Everything Else** - Polish remaining systems
 
 **Start with #1. If real scenarios don't load, nothing else matters.**
