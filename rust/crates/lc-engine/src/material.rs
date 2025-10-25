@@ -225,6 +225,8 @@ pub struct MaterialProperties {
     dig_to_object_ratio: Option<i32>,
     dig_to_object_on_request_only: bool,
     wind_drift: i32,
+    max_slide: i32,
+    instable: bool,
     inflammable: i32,
     incindiary: i32,
     extinguisher: i32,
@@ -260,6 +262,8 @@ impl MaterialProperties {
         };
         let splash_rate = definition.int("splashrate").unwrap_or(10).max(0);
         let wind_drift = definition.int("winddrift").unwrap_or(0);
+        let max_slide = definition.int("maxslide").unwrap_or(0).max(0);
+        let instable = definition.int("instable").unwrap_or(0) != 0;
         let inflammable = definition.int("inflammable").unwrap_or(0);
         let incindiary = definition.int("incindiary").unwrap_or(0);
         let extinguisher = definition.int("extinguisher").unwrap_or(0);
@@ -340,6 +344,8 @@ impl MaterialProperties {
             dig_to_object_ratio,
             dig_to_object_on_request_only,
             wind_drift,
+            max_slide,
+            instable,
             inflammable,
             incindiary,
             extinguisher,
@@ -439,6 +445,14 @@ impl Material {
 
     pub fn wind_drift(&self) -> i32 {
         self.properties.wind_drift
+    }
+
+    pub fn max_slide(&self) -> i32 {
+        self.properties.max_slide
+    }
+
+    pub fn instable(&self) -> bool {
+        self.properties.instable
     }
 
     pub fn inflammable(&self) -> i32 {

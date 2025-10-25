@@ -24,6 +24,8 @@ pub struct LiquidColumn {
 pub struct LiquidSegment {
     pub top: i32,
     pub bottom: i32,
+    #[serde(default)]
+    pub material: Option<MaterialId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -36,6 +38,10 @@ pub struct Landscape {
     solid_materials: Vec<Option<MaterialId>>,
     #[serde(default)]
     default_solid_material: Option<MaterialId>,
+    #[serde(default)]
+    default_liquid_material: Option<MaterialId>,
+    #[serde(skip)]
+    mass_mover_dirty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -114,6 +120,8 @@ impl Landscape {
             liquids: vec![LiquidColumn::default(); size],
             solid_materials: vec![default_material; size],
             default_solid_material: default_material,
+            default_liquid_material: None,
+            mass_mover_dirty: false,
         })
     }
 
@@ -131,30 +139,44 @@ impl Landscape {
 
     pub fn set_height(&mut self, x: u32, height: i32) {
         if let Some(slot) = self.surface.get_mut(x as usize) {
-            *slot = height;
+            if *slot != height {
+                *slot = height;
+                self.mark_mass_mover_dirty();
+            }
         }
     }
 
     pub fn set_liquid_column(&mut self, x: u32, segments: Vec<LiquidSegment>) {
-        if self.liquids.len() != self.surface.len() {
-            self.liquids
-                .resize(self.surface.len(), LiquidColumn::default());
-        }
+        self.ensure_liquid_capacity();
         if let Some(column) = self.liquids.get_mut(x as usize) {
             *column = LiquidColumn::from_segments(segments);
+            self.mark_mass_mover_dirty();
         }
     }
 
     pub fn clear_liquid_column(&mut self, x: u32) {
+        self.ensure_liquid_capacity();
         if let Some(column) = self.liquids.get_mut(x as usize) {
             column.clear();
+            self.mark_mass_mover_dirty();
         }
+    }
+
+    pub fn set_default_liquid_material(&mut self, material: Option<MaterialId>) {
+        self.default_liquid_material = material;
+    }
+
+    pub fn default_liquid_material(&self) -> Option<MaterialId> {
+        self.default_liquid_material
     }
 
     pub fn set_solid_material(&mut self, column: u32, material: Option<MaterialId>) {
         self.ensure_material_capacity();
         if let Some(slot) = self.solid_materials.get_mut(column as usize) {
-            *slot = material;
+            if *slot != material {
+                *slot = material;
+                self.mark_mass_mover_dirty();
+            }
         }
     }
 
@@ -168,6 +190,7 @@ impl Landscape {
                 *slot = material;
             }
         }
+        self.mark_mass_mover_dirty();
     }
 
     pub fn set_default_solid_material(&mut self, material: Option<MaterialId>) {
@@ -180,6 +203,7 @@ impl Landscape {
                 }
             }
         }
+        self.mark_mass_mover_dirty();
     }
 
     pub fn default_solid_material(&self) -> Option<MaterialId> {
@@ -270,6 +294,149 @@ impl Landscape {
             .or(self.default_solid_material)
     }
 
+    fn ensure_liquid_capacity(&mut self) {
+        if self.liquids.len() != self.surface.len() {
+            self.liquids
+                .resize(self.surface.len(), LiquidColumn::default());
+        }
+    }
+
+    fn mark_mass_mover_dirty(&mut self) {
+        self.mass_mover_dirty = true;
+    }
+
+    pub fn take_mass_mover_dirty(&mut self) -> bool {
+        let dirty = self.mass_mover_dirty;
+        self.mass_mover_dirty = false;
+        dirty
+    }
+
+    fn is_within_bounds(&self, x: i32, y: i32) -> bool {
+        x >= 0 && (x as u32) < self.width && y >= 0
+    }
+
+    pub fn liquid_material_at(&self, x: i32, y: i32) -> Option<MaterialId> {
+        if x < 0 {
+            return None;
+        }
+        let index = usize::try_from(x).ok()?;
+        self.liquids
+            .get(index)
+            .and_then(|column| column.material_at(y, self.default_liquid_material))
+    }
+
+    pub fn material_at(&self, x: i32, y: i32) -> Option<MaterialId> {
+        if self.is_solid_at(x, y) {
+            self.solid_material_at(x)
+        } else {
+            self.liquid_material_at(x, y)
+        }
+    }
+
+    pub fn density_at(&self, x: i32, y: i32, materials: &MaterialSet) -> i32 {
+        if x < 0 || x as u32 >= self.width {
+            return i32::MAX;
+        }
+        if y < 0 {
+            return 0;
+        }
+        match self.material_at(x, y) {
+            Some(material_id) => materials
+                .get_by_id(material_id)
+                .map(|material| material.density())
+                .unwrap_or(i32::MAX),
+            None => 0,
+        }
+    }
+
+    pub fn find_liquid_surface(
+        &self,
+        material: MaterialId,
+        mut x: i32,
+        mut y: i32,
+        materials: &MaterialSet,
+    ) -> (i32, i32) {
+        let max_slide = materials
+            .get_by_id(material)
+            .map(|mat| mat.max_slide())
+            .unwrap_or(0)
+            .max(0);
+        loop {
+            let mut slide_direction: Option<(i32, i32)> = None;
+            let mut left_active = true;
+            let mut right_active = true;
+            let mut cslide = 0;
+            while cslide <= max_slide && (left_active || right_active) {
+                if left_active {
+                    if self.material_at(x - cslide, y) != Some(material) {
+                        left_active = false;
+                    } else if self.material_at(x - cslide, y - 1) == Some(material) {
+                        slide_direction = Some((-cslide, -1));
+                        break;
+                    }
+                }
+                if right_active {
+                    if self.material_at(x + cslide, y) != Some(material) {
+                        right_active = false;
+                    } else if self.material_at(x + cslide, y - 1) == Some(material) {
+                        slide_direction = Some((cslide, -1));
+                        break;
+                    }
+                }
+                cslide += 1;
+            }
+
+            match slide_direction {
+                Some((dx, dy)) => {
+                    x += dx;
+                    y += dy;
+                }
+                None => break,
+            }
+        }
+        (x, y)
+    }
+
+    pub fn remove_liquid_at(&mut self, x: i32, y: i32) -> Option<MaterialId> {
+        if x < 0 {
+            return None;
+        }
+        let Ok(index) = usize::try_from(x) else {
+            return None;
+        };
+        self.ensure_liquid_capacity();
+        let column = self.liquids.get_mut(index)?;
+        if let Some(material) = column.remove_pixel(y) {
+            self.mark_mass_mover_dirty();
+            material.or(self.default_liquid_material)
+        } else {
+            None
+        }
+    }
+
+    pub fn insert_liquid_at(&mut self, x: i32, y: i32, material: Option<MaterialId>) -> bool {
+        if x < 0 {
+            return false;
+        }
+        let Ok(index) = usize::try_from(x) else {
+            return false;
+        };
+        let Some(surface_y) = self.surface_height(x) else {
+            return false;
+        };
+        if y >= surface_y {
+            return false;
+        }
+        self.ensure_liquid_capacity();
+        let column = self.liquids.get_mut(index).expect("column must exist");
+        let desired_material = material.or(self.default_liquid_material);
+        let inserted = column.insert_pixel(y, desired_material);
+        if inserted {
+            self.mark_mass_mover_dirty();
+        }
+        inserted
+    }
+
     pub fn lower_range(&mut self, start: i32, end: i32, height: i32) {
         if start >= end {
             return;
@@ -281,12 +448,17 @@ impl Landscape {
             return;
         }
         let target_height = height.max(0);
+        let mut changed = false;
         for x in clamped_start..clamped_end {
             if let Some(slot) = self.surface.get_mut(x as usize) {
                 if target_height > *slot {
                     *slot = target_height;
+                    changed = true;
                 }
             }
+        }
+        if changed {
+            self.mark_mass_mover_dirty();
         }
     }
 
@@ -305,6 +477,7 @@ impl Landscape {
         if let Some(slot) = self.surface.get_mut(index) {
             if *slot < target_height {
                 *slot = target_height;
+                self.mark_mass_mover_dirty();
             }
         }
     }
@@ -421,6 +594,10 @@ impl Landscape {
             result.affected_columns.push((column, target_height));
         }
 
+        if !result.affected_columns.is_empty() || !result.removed_by_material.is_empty() {
+            self.mark_mass_mover_dirty();
+        }
+
         result
     }
     pub fn can_incinerate(&self, x: i32, y: i32, materials: &MaterialSet) -> bool {
@@ -499,10 +676,12 @@ impl Landscape {
         }
         if target == current_height {
             self.solid_materials[index] = Some(material);
+            self.mark_mass_mover_dirty();
             return true;
         }
         self.surface[index] = target;
         self.solid_materials[index] = Some(material);
+        self.mark_mass_mover_dirty();
         true
     }
 
@@ -520,6 +699,7 @@ impl Landscape {
             }
             let target = (*height - 1).max(0);
             *height = target;
+            self.mark_mass_mover_dirty();
             true
         } else {
             false
@@ -663,6 +843,67 @@ impl LiquidColumn {
         &self.segments
     }
 
+    pub fn material_at(&self, y: i32, default: Option<MaterialId>) -> Option<MaterialId> {
+        self.segments
+            .iter()
+            .find(|segment| segment.contains(y))
+            .and_then(|segment| segment.material.or(default))
+    }
+
+    fn remove_pixel(&mut self, y: i32) -> Option<Option<MaterialId>> {
+        let mut removed_material = None;
+        let mut new_segments = Vec::with_capacity(self.segments.len());
+        let mut encountered = false;
+        for segment in &self.segments {
+            if !segment.contains(y) {
+                new_segments.push(*segment);
+                continue;
+            }
+
+            if encountered {
+                // Should not happen due to normalization but guard anyway.
+                continue;
+            }
+            encountered = true;
+            removed_material = Some(segment.material);
+            if segment.top < y {
+                new_segments.push(LiquidSegment {
+                    top: segment.top,
+                    bottom: y - 1,
+                    material: segment.material,
+                });
+            }
+            if y < segment.bottom {
+                new_segments.push(LiquidSegment {
+                    top: y + 1,
+                    bottom: segment.bottom,
+                    material: segment.material,
+                });
+            }
+        }
+
+        if !encountered {
+            return None;
+        }
+
+        self.segments = new_segments;
+        self.normalize();
+        removed_material
+    }
+
+    fn insert_pixel(&mut self, y: i32, material: Option<MaterialId>) -> bool {
+        if self.contains(y) {
+            return false;
+        }
+        self.segments.push(LiquidSegment {
+            top: y,
+            bottom: y,
+            material,
+        });
+        self.normalize();
+        true
+    }
+
     fn normalize(&mut self) {
         if self.segments.is_empty() {
             return;
@@ -678,7 +919,7 @@ impl LiquidColumn {
         let mut merged: Vec<LiquidSegment> = Vec::with_capacity(segments.len());
         for segment in segments {
             if let Some(last) = merged.last_mut() {
-                if segment.top <= last.bottom + 1 {
+                if segment.top <= last.bottom + 1 && segment.material == last.material {
                     if segment.bottom > last.bottom {
                         last.bottom = segment.bottom;
                     }
@@ -693,14 +934,22 @@ impl LiquidColumn {
 
 impl LiquidSegment {
     pub fn new(top: i32, bottom: i32) -> Self {
-        if bottom < top {
-            Self {
-                top: bottom,
-                bottom: top,
-            }
+        let (top, bottom) = if bottom < top {
+            (bottom, top)
         } else {
-            Self { top, bottom }
+            (top, bottom)
+        };
+        Self {
+            top,
+            bottom,
+            material: None,
         }
+    }
+
+    pub fn with_material(top: i32, bottom: i32, material: Option<MaterialId>) -> Self {
+        let mut segment = Self::new(top, bottom);
+        segment.material = material;
+        segment
     }
 
     pub fn contains(&self, y: i32) -> bool {
@@ -723,6 +972,8 @@ impl<'de> Deserialize<'de> for Landscape {
             solid_materials: Vec<Option<MaterialId>>,
             #[serde(default)]
             default_solid_material: Option<MaterialId>,
+            #[serde(default)]
+            default_liquid_material: Option<MaterialId>,
         }
 
         let mut data = LandscapeData::deserialize(deserializer)?;
@@ -756,6 +1007,8 @@ impl<'de> Deserialize<'de> for Landscape {
                 .map_err(|error| D::Error::custom(error.to_string()))?;
         landscape.liquids = data.liquids;
         landscape.solid_materials = data.solid_materials;
+        landscape.default_liquid_material = data.default_liquid_material;
+        landscape.mass_mover_dirty = false;
         Ok(landscape)
     }
 }

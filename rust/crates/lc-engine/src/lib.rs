@@ -7,6 +7,7 @@ pub mod ffi;
 pub mod fixtures;
 mod input;
 mod landscape;
+mod mass_mover;
 mod material;
 mod math;
 mod message;
@@ -101,6 +102,7 @@ use lc_resources::{
     ResourceDefinition as ResourceDefinitionData,
 };
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, ScriptError, Value};
+use mass_mover::MassMoverSet;
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -5024,6 +5026,7 @@ pub struct Engine {
     global_effects: Vec<EffectState>,
     particles: Vec<ActiveParticle>,
     material_particles: Vec<MaterialParticle>,
+    mass_movers: MassMoverSet,
     weather_events: Vec<WeatherEvent>,
     scenario_script: Option<ScenarioScript>,
     players: HashMap<i32, Player>,
@@ -5396,6 +5399,7 @@ impl Engine {
             global_effects: Vec::new(),
             particles: Vec::new(),
             material_particles: Vec::new(),
+            mass_movers: MassMoverSet::new(),
             weather_events: Vec::new(),
             scenario_script: None,
             players: HashMap::new(),
@@ -5920,6 +5924,13 @@ impl Engine {
                 }
             }
             self.landscape = landscape_slot;
+            if let Some(landscape_ref) = self.landscape.as_ref() {
+                self.mass_movers
+                    .seed_from_landscape(landscape_ref, &self.materials);
+            }
+            if let Some(landscape_mut) = self.landscape.as_mut() {
+                landscape_mut.take_mass_mover_dirty();
+            }
         }
         self.apply_particle_commands(particles);
         if !transfer_zones.is_empty() {
@@ -6679,6 +6690,20 @@ impl Engine {
         let frame = self.frame;
         self.tick_material_particles();
         self.tick_particles();
+        let mut rescan_mass_movers = false;
+        if let Some(landscape) = self.landscape.as_mut() {
+            self.mass_movers
+                .execute(landscape, &self.materials, &mut self.rng);
+            if landscape.take_mass_mover_dirty() {
+                rescan_mass_movers = true;
+            }
+        }
+        if rescan_mass_movers {
+            if let Some(landscape) = self.landscape.as_ref() {
+                self.mass_movers
+                    .seed_from_landscape(landscape, &self.materials);
+            }
+        }
         self.weather_events.clear();
         self.environment.advance_frame(&mut self.rng);
         if let Some(sky) = &mut self.sky {
@@ -7867,6 +7892,15 @@ impl Engine {
         self.environment = state.environment;
         self.environment.refresh_runtime_fields();
         self.landscape = state.landscape.clone();
+        if let Some(landscape) = self.landscape.as_ref() {
+            self.mass_movers
+                .seed_from_landscape(landscape, &self.materials);
+        }
+        if let Some(landscape) = self.landscape.as_mut() {
+            landscape.take_mass_mover_dirty();
+        } else {
+            self.mass_movers.clear();
+        }
         self.rng = state.rng.clone();
         self.objects.clear();
         self.global_effects = state.global_effects.clone();
@@ -10395,9 +10429,8 @@ impl Engine {
             return false;
         }
 
-        let result = self.spawn_object(
-            SpawnConfig::new(FIRE_DEFINITION_ID).with_position(Vector2::new(x, y)),
-        );
+        let result = self
+            .spawn_object(SpawnConfig::new(FIRE_DEFINITION_ID).with_position(Vector2::new(x, y)));
         result.is_ok()
     }
 
@@ -12572,19 +12605,19 @@ mod tests {
         let mut flame_spawned = false;
         for _ in 0..20 {
             engine.tick_material_particles();
-            flame_spawned = engine
-                .objects
-                .iter()
-                .any(|object| {
-                    !object.destroyed
-                        && object.state.status.is_active()
-                        && object.definition_id == FIRE_DEFINITION_ID
-                });
+            flame_spawned = engine.objects.iter().any(|object| {
+                !object.destroyed
+                    && object.state.status.is_active()
+                    && object.definition_id == FIRE_DEFINITION_ID
+            });
             if flame_spawned {
                 break;
             }
         }
-        assert!(flame_spawned, "expected a flame to spawn after particle collision");
+        assert!(
+            flame_spawned,
+            "expected a flame to spawn after particle collision"
+        );
 
         let after_height = engine
             .landscape()
