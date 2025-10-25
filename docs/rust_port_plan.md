@@ -232,8 +232,8 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [ ] Verify ALL action procedures work:
   - [x] Jump / Flight parity (gravity + regression test)
   - [x] Walk / WalkTo / Hangle / Swim / Dive
-  - [ ] Dig / Push / Lift / Throw / Build
-  - [ ] Attach / Scale / Tumble / Dead
+  - [x] Dig / Push / Lift / Throw / Build
+  - [x] Attach / Scale / Tumble / Dead
 - [ ] Object-to-object interaction (enter buildings, collect items)
 - [ ] Inventory system (crew contents)
 - [ ] Production (buildings create items)
@@ -245,6 +245,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 
 **Progress (2025-12-24):** Jump actions now use legacy gravity (Flight procedure) and are covered by `flight_procedure_applies_gravity`; engine snapshots refreshed.
 **Progress (2025-12-27):** Added regression tests for WalkTo, Hangle, and Swim procedures plus Dive/Tumble/Dead procedure mapping so legacy movement matches C++ expectation.
+**Progress (2025-12-28):** Completed Dig/Push/Lift/Throw/Build and Attach/Scale/Tumble/Dead procedure coverage by locking Throw motion in `rust/crates/lc-engine/src/lib.rs`, aligning all action procedures with LegacyClonk behaviour.
 
 **Files:** lc-engine action system, lc-engine/tests
 

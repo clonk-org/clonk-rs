@@ -14058,6 +14058,38 @@ func ControlDig() { SetAction("Dig"); return true; }
     }
 
     #[test]
+    fn throw_procedure_zeroes_velocity() {
+        let mut definition =
+            Definition::from_script("Thrower", "Thrower", PROCEDURE_MOVEMENT_SCRIPT)
+                .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        actions.insert(
+            "Throw".to_string(),
+            ActionSpec::default().with_procedure("throw"),
+        );
+        definition.configure_actions(Some("Throw".to_string()), actions);
+
+        let mut engine = Engine::with_seed(17);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Thrower")
+                    .with_velocity(Vector2::new(6, -3))
+                    .with_action(ActionState::new("Throw")),
+            )
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.velocity, Vector2::ZERO);
+        assert_eq!(object.action.name, "Throw");
+    }
+
+    #[test]
     fn scale_procedure_zeroes_horizontal_velocity() {
         let mut definition = Definition::from_script("Scaler", "Scaler", PROCEDURE_MOVEMENT_SCRIPT)
             .expect("script compiles");
