@@ -25,6 +25,8 @@ pub enum IngameMenuAction {
     Resume,
     QuickSave,
     QuickLoad,
+    SaveGame,
+    LoadGame,
     AbortToMenu,
 }
 
@@ -58,7 +60,7 @@ pub struct IngameMenuState {
 }
 
 impl IngameMenuState {
-    pub fn new(has_quick_save: bool) -> Self {
+    pub fn new(has_quick_save: bool, has_saved_games: bool) -> Self {
         let items = vec![
             IngameMenuItem::new(
                 "Resume Game",
@@ -79,6 +81,18 @@ impl IngameMenuState {
                 has_quick_save,
             ),
             IngameMenuItem::new(
+                "Save Game",
+                Some("Create or overwrite a named save slot."),
+                IngameMenuAction::SaveGame,
+                true,
+            ),
+            IngameMenuItem::new(
+                "Load Game",
+                Some("Resume from an existing saved game."),
+                IngameMenuAction::LoadGame,
+                has_saved_games,
+            ),
+            IngameMenuItem::new(
                 "Abort to Startup Menu",
                 Some("Stop the current game and return to the startup browser."),
                 IngameMenuAction::AbortToMenu,
@@ -94,10 +108,12 @@ impl IngameMenuState {
         Self { items, selected }
     }
 
-    pub fn set_quick_save_available(&mut self, available: bool) {
+    pub fn update_save_options(&mut self, quick_available: bool, load_available: bool) {
         for item in &mut self.items {
-            if matches!(item.action, IngameMenuAction::QuickLoad) {
-                item.enabled = available;
+            match item.action {
+                IngameMenuAction::QuickLoad => item.enabled = quick_available,
+                IngameMenuAction::LoadGame => item.enabled = load_available,
+                _ => {}
             }
         }
         if !self

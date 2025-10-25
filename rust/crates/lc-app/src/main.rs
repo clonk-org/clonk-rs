@@ -5,6 +5,7 @@ mod input;
 mod menu_controls;
 mod network;
 mod object_menu;
+mod save_browser;
 mod settings;
 
 use std::collections::{hash_map::DefaultHasher, hash_map::Entry, BTreeMap, HashMap, HashSet};
@@ -65,12 +66,15 @@ use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, Networ
 use object_menu::{ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState};
 use parking_lot::ReentrantMutex;
 use pixels::{Pixels, SurfaceTexture};
+use png::{BitDepth, ColorType, Decoder, Encoder};
+use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
 use serde::{
     de::{self, Unexpected, Visitor},
     ser::Serializer,
     Deserialize, Serialize,
 };
 use settings::{AudioOptions, DisplayMode, DisplayOptions};
+use time::{macros::format_description, OffsetDateTime};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{
     ElementState, Event, KeyboardInput, MouseButton, TouchPhase, VirtualKeyCode, WindowEvent,
@@ -1806,6 +1810,8 @@ struct GameApp {
     startup_view: StartupView,
     object_menu: Option<ObjectMenuState>,
     ingame_menu: Option<IngameMenuState>,
+    save_browser: Option<SaveBrowserState>,
+    save_browser_return_to_menu: bool,
     mode: AppMode,
     scenario_catalog: HashMap<String, FrontendScenario>,
     active_scenario: Option<FrontendScenario>,
@@ -3136,7 +3142,18 @@ struct SavedGameFile {
     saved_at_seconds: u64,
     scenario: SavedScenarioInfo,
     focus_id: Option<ObjectId>,
+    #[serde(default)]
+    user_label: Option<String>,
     engine_state: EngineState,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SavedGameHeader {
+    version: SaveFileVersion,
+    saved_at_seconds: u64,
+    scenario: SavedScenarioInfo,
+    #[serde(default)]
+    user_label: Option<String>,
 }
 
 struct SaveMigration {
@@ -3250,6 +3267,28 @@ fn existing_quick_save_path() -> Option<PathBuf> {
     }
 }
 
+fn quick_save_exists() -> bool {
+    existing_quick_save_path().is_some()
+}
+
+fn is_save_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("lcsave"))
+        .unwrap_or(false)
+}
+
+fn any_saved_games_exist() -> bool {
+    let dir = resolve_save_directory();
+    match fs::read_dir(&dir) {
+        Ok(entries) => entries.flatten().any(|entry| {
+            let path = entry.path();
+            is_save_file(&path)
+        }),
+        Err(_) => quick_save_exists(),
+    }
+}
+
 fn load_install_material_library(paths: Option<&AppPaths>) -> Option<Arc<MaterialSet>> {
     let paths = match paths {
         Some(paths) => paths,
@@ -3351,6 +3390,171 @@ fn current_unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn format_saved_timestamp(seconds: u64) -> String {
+    if let Ok(datetime) = OffsetDateTime::from_unix_timestamp(seconds as i64) {
+        let format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second] UTC");
+        match datetime.format(&format) {
+            Ok(value) => value,
+            Err(_) => format!("{}", seconds),
+        }
+    } else {
+        format!("{}", seconds)
+    }
+}
+
+fn sanitize_save_label(label: &str) -> String {
+    let mut result = String::new();
+    let mut last_was_separator = false;
+    for ch in label.chars() {
+        if result.len() >= 64 {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() {
+            result.push(ch);
+            last_was_separator = false;
+        } else if ch.is_ascii_whitespace() || matches!(ch, '-' | '_') {
+            if !last_was_separator && !result.is_empty() {
+                result.push('_');
+                last_was_separator = true;
+            }
+        }
+    }
+    let trimmed = result.trim_matches('_');
+    if trimmed.is_empty() {
+        "save".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn unique_save_path(dir: &Path, base: &str) -> PathBuf {
+    let mut index = 0u32;
+    loop {
+        let candidate = if index == 0 {
+            dir.join(format!("{}.lcsave", base))
+        } else {
+            dir.join(format!("{}_{:02}.lcsave", base, index))
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+        index = index.saturating_add(1);
+    }
+}
+
+fn encode_surface_to_png(surface: &Surface) -> Result<Vec<u8>> {
+    let width = surface.width();
+    let height = surface.height();
+    let mut buffer = Vec::new();
+    {
+        let mut encoder = Encoder::new(&mut buffer, width, height);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_depth(BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .context("failed to initialise PNG encoder")?;
+        writer
+            .write_image_data(surface.pixels())
+            .context("failed to encode PNG surface")?;
+        writer.finish().context("failed to finish PNG encoding")?;
+    }
+    Ok(buffer)
+}
+
+fn load_save_entry(path: &Path) -> Result<SaveEntry> {
+    let file =
+        File::open(path).with_context(|| format!("failed to open save file {}", path.display()))?;
+    let header: SavedGameHeader = serde_json::from_reader(file)
+        .with_context(|| format!("failed to parse save metadata from {}", path.display()))?;
+    let is_quick_save = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case(QUICK_SAVE_FILE))
+        .unwrap_or(false);
+    let display_name = header
+        .user_label
+        .clone()
+        .filter(|label| !label.trim().is_empty())
+        .or_else(|| {
+            if is_quick_save {
+                Some("Quick Save".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| header.scenario.title.clone());
+    let saved_label = format_saved_timestamp(header.saved_at_seconds);
+    let thumbnail_path = path.with_extension("png");
+    let thumbnail = load_save_thumbnail(&thumbnail_path);
+    Ok(SaveEntry {
+        display_name,
+        scenario_title: header.scenario.title.clone(),
+        saved_at_seconds: header.saved_at_seconds,
+        saved_label,
+        path: path.to_path_buf(),
+        thumbnail,
+    })
+}
+
+fn load_save_thumbnail(path: &Path) -> Option<ImageData> {
+    let file = File::open(path).ok()?;
+    let decoder = Decoder::new(file);
+    let mut reader = decoder.read_info().ok()?;
+    let palette = reader.info().palette.clone();
+    let transparency = reader.info().trns.clone();
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let data = &buf[..info.buffer_size()];
+    let pixels = match info.color_type {
+        ColorType::Rgba => data.to_vec(),
+        ColorType::Rgb => {
+            let mut rgba = Vec::with_capacity(data.len() / 3 * 4);
+            for chunk in data.chunks_exact(3) {
+                rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+            rgba
+        }
+        ColorType::Grayscale => {
+            let mut rgba = Vec::with_capacity(data.len() * 4);
+            for &value in data {
+                rgba.extend_from_slice(&[value, value, value, 255]);
+            }
+            rgba
+        }
+        ColorType::GrayscaleAlpha => {
+            let mut rgba = Vec::with_capacity(data.len() / 2 * 4);
+            for chunk in data.chunks_exact(2) {
+                let value = chunk[0];
+                let alpha = chunk[1];
+                rgba.extend_from_slice(&[value, value, value, alpha]);
+            }
+            rgba
+        }
+        ColorType::Indexed => {
+            let palette = palette?;
+            let mut rgba = Vec::with_capacity(data.len() * 4);
+            for &index in data {
+                let position = (index as usize) * 3;
+                if position + 2 >= palette.len() {
+                    continue;
+                }
+                let r = palette[position];
+                let g = palette[position + 1];
+                let b = palette[position + 2];
+                let a = transparency
+                    .as_ref()
+                    .and_then(|values| values.get(index as usize))
+                    .copied()
+                    .unwrap_or(255);
+                rgba.extend_from_slice(&[r, g, b, a]);
+            }
+            rgba
+        }
+        _ => return None,
+    };
+    Some(ImageData::new(info.width, info.height, pixels))
 }
 
 fn load_participants_label(paths: Option<&AppPaths>) -> String {
@@ -3490,6 +3694,8 @@ impl GameApp {
             startup_view: StartupView::MainMenu,
             object_menu: None,
             ingame_menu: None,
+            save_browser: None,
+            save_browser_return_to_menu: false,
             mode: AppMode::Menu,
             scenario_catalog,
             active_scenario: None,
@@ -3862,12 +4068,9 @@ impl GameApp {
         }
         self.close_object_menu();
         self.clear_local_controls()?;
-        let has_quick_save = self
-            .last_save_path
-            .as_ref()
-            .map(|path| path.exists())
-            .unwrap_or_else(|| existing_quick_save_path().is_some());
-        self.ingame_menu = Some(IngameMenuState::new(has_quick_save));
+        let has_quick_save = quick_save_exists();
+        let has_saved_games = any_saved_games_exist();
+        self.ingame_menu = Some(IngameMenuState::new(has_quick_save, has_saved_games));
         if self.status_text.is_empty() {
             self.status_text = "Paused".to_string();
         }
@@ -3935,7 +4138,11 @@ impl GameApp {
                 | ControlCommand::MenuUp
         );
 
-        if menu_command && self.object_menu.is_none() && self.ingame_menu.is_none() {
+        if menu_command
+            && self.object_menu.is_none()
+            && self.ingame_menu.is_none()
+            && self.save_browser.is_none()
+        {
             return Ok(false);
         }
 
@@ -3944,7 +4151,13 @@ impl GameApp {
                 kind,
                 CommandKind::Press | CommandKind::Single | CommandKind::Double
             ) {
-                if self.object_menu.is_some() {
+                if let Some(_) = self.save_browser.take() {
+                    let reopen = self.save_browser_return_to_menu;
+                    self.save_browser_return_to_menu = false;
+                    if reopen {
+                        self.open_ingame_menu()?;
+                    }
+                } else if self.object_menu.is_some() {
                     self.close_object_menu();
                 } else if !self.open_object_menu()? {
                     self.open_ingame_menu()?;
@@ -3956,6 +4169,13 @@ impl GameApp {
         if let Some(menu) = self.object_menu.as_mut() {
             if let Some(action) = menu.handle_command(command, kind) {
                 self.execute_object_menu_action(action)?;
+            }
+            return Ok(true);
+        }
+
+        if let Some(browser) = self.save_browser.as_mut() {
+            if let Some(action) = browser.handle_command(command, kind) {
+                self.execute_save_browser_action(action)?;
             }
             return Ok(true);
         }
@@ -4191,7 +4411,9 @@ impl GameApp {
             IngameMenuAction::QuickSave => match self.quick_save() {
                 Ok(_) => {
                     if let Some(menu) = self.ingame_menu.as_mut() {
-                        menu.set_quick_save_available(true);
+                        let quick_available = quick_save_exists();
+                        let saved_available = any_saved_games_exist();
+                        menu.update_save_options(quick_available, saved_available);
                     }
                 }
                 Err(err) => {
@@ -4208,11 +4430,226 @@ impl GameApp {
                     self.status_text = format!("Quick load failed: {err:#}");
                 }
             },
+            IngameMenuAction::SaveGame => {
+                if let Err(err) = self.open_save_browser() {
+                    tracing::error!(error = ?err, "failed to open save menu");
+                    self.status_text = format!("Save menu failed: {err:#}");
+                    self.open_ingame_menu()?;
+                }
+            }
+            IngameMenuAction::LoadGame => {
+                if let Err(err) = self.open_load_browser() {
+                    tracing::error!(error = ?err, "failed to open load menu");
+                    self.status_text = format!("Load menu failed: {err:#}");
+                    self.open_ingame_menu()?;
+                }
+            }
             IngameMenuAction::AbortToMenu => {
                 self.close_ingame_menu();
                 self.return_to_menu();
             }
         }
+        Ok(())
+    }
+
+    fn open_save_browser(&mut self) -> Result<()> {
+        let entries = self.collect_save_entries()?;
+        let suggested_label = self.generate_default_save_label();
+        let state = SaveBrowserState::new(SaveBrowserMode::Save { suggested_label }, entries);
+        self.save_browser = Some(state);
+        self.save_browser_return_to_menu = true;
+        self.ingame_menu = None;
+        self.object_menu = None;
+        Ok(())
+    }
+
+    fn open_load_browser(&mut self) -> Result<()> {
+        let entries = self.collect_save_entries()?;
+        if entries.is_empty() {
+            self.status_text = "No saved games found".to_string();
+        }
+        let state = SaveBrowserState::new(SaveBrowserMode::Load, entries);
+        self.save_browser = Some(state);
+        self.save_browser_return_to_menu = true;
+        self.ingame_menu = None;
+        self.object_menu = None;
+        Ok(())
+    }
+
+    fn dismiss_save_browser(&mut self, reopen_ingame_menu: bool) -> Result<(), EngineError> {
+        self.save_browser = None;
+        let reopen = reopen_ingame_menu && self.save_browser_return_to_menu;
+        self.save_browser_return_to_menu = false;
+        if reopen {
+            self.open_ingame_menu()?;
+        }
+        Ok(())
+    }
+
+    fn execute_save_browser_action(
+        &mut self,
+        action: SaveBrowserAction,
+    ) -> Result<(), EngineError> {
+        match action {
+            SaveBrowserAction::Close => {
+                self.dismiss_save_browser(true)?;
+            }
+            SaveBrowserAction::SaveNew { label } => match self.perform_named_save(&label, None) {
+                Ok(_) => {
+                    self.dismiss_save_browser(true)?;
+                }
+                Err(err) => {
+                    tracing::error!(error = ?err, "failed to save game");
+                    self.status_text = format!("Save failed: {err:#}");
+                }
+            },
+            SaveBrowserAction::SaveExisting { entry } => {
+                match self.perform_named_save(&entry.display_name, Some(entry.path.clone())) {
+                    Ok(_) => {
+                        self.dismiss_save_browser(true)?;
+                    }
+                    Err(err) => {
+                        tracing::error!(error = ?err, "failed to overwrite save");
+                        self.status_text = format!("Save failed: {err:#}");
+                    }
+                }
+            }
+            SaveBrowserAction::Load { entry } => {
+                match self.load_saved_game_from_path(&entry.path) {
+                    Ok(_) => {
+                        self.save_browser = None;
+                        self.save_browser_return_to_menu = false;
+                        self.close_ingame_menu();
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            error = ?err,
+                            path = %entry.path.display(),
+                            "failed to load saved game"
+                        );
+                        self.status_text = format!("Load failed: {err:#}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_save_entries(&self) -> Result<Vec<SaveEntry>> {
+        let dir = resolve_save_directory();
+        let mut entries = Vec::new();
+        let read_dir = match fs::read_dir(&dir) {
+            Ok(iter) => iter,
+            Err(_) => return Ok(entries),
+        };
+        for entry in read_dir {
+            let entry = match entry {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to iterate save directory entry");
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if !is_save_file(&path) {
+                continue;
+            }
+            match load_save_entry(&path) {
+                Ok(save_entry) => entries.push(save_entry),
+                Err(err) => {
+                    tracing::warn!(path = %path.display(), error = %err, "failed to read save metadata");
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    fn generate_default_save_label(&self) -> String {
+        let base = self
+            .active_scenario
+            .as_ref()
+            .map(|scenario| scenario.title.clone())
+            .unwrap_or_else(|| self.scenario_label.clone());
+        format!("{} {}", base, current_unix_timestamp())
+    }
+
+    fn perform_named_save(&mut self, label: &str, target: Option<PathBuf>) -> Result<PathBuf> {
+        if self.mode != AppMode::Running {
+            anyhow::bail!("cannot save while not running a scenario");
+        }
+
+        let scenario = self
+            .active_scenario
+            .clone()
+            .unwrap_or_else(FrontendScenario::fallback);
+        let engine_state = self.engine.capture_state();
+        let sanitized_label = if label.trim().is_empty() {
+            self.generate_default_save_label()
+        } else {
+            label.trim().to_string()
+        };
+
+        let saved = SavedGameFile {
+            version: SAVE_FILE_VERSION,
+            saved_at_seconds: current_unix_timestamp(),
+            scenario: SavedScenarioInfo::from_frontend(
+                &scenario,
+                &self.scenario_label,
+                self.fallback_ground,
+            ),
+            focus_id: self.focus_id,
+            user_label: Some(sanitized_label.clone()),
+            engine_state,
+        };
+
+        let dir = ensure_save_directory()?;
+        let path = match target {
+            Some(path) => path,
+            None => {
+                let base = sanitize_save_label(&sanitized_label);
+                unique_save_path(&dir, &base)
+            }
+        };
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create save directory at {}", parent.display())
+            })?;
+        }
+
+        let mut file = File::create(&path)
+            .with_context(|| format!("failed to create save file at {}", path.display()))?;
+        serde_json::to_writer_pretty(&mut file, &saved).context("failed to serialise save data")?;
+        file.flush().context("failed to flush save data")?;
+
+        self.write_save_thumbnail(&path)?;
+        self.last_save_path = Some(path.clone());
+        self.status_text = format!("Saved {}", saved.scenario.title);
+        Ok(path)
+    }
+
+    fn write_save_thumbnail(&mut self, path: &Path) -> Result<()> {
+        let surface = self.graphics.surface();
+        let encoded =
+            encode_surface_to_png(surface).context("failed to encode save thumbnail image")?;
+        let target = path.with_extension("png");
+        let mut file = File::create(&target)
+            .with_context(|| format!("failed to create thumbnail at {}", target.display()))?;
+        file.write_all(&encoded)
+            .context("failed to write save thumbnail")?;
+        file.flush()
+            .context("failed to flush save thumbnail to disk")?;
+        Ok(())
+    }
+
+    fn load_saved_game_from_path(&mut self, path: &Path) -> Result<()> {
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("failed to read save from {}", path.display()))?;
+        let save: SavedGameFile = serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse save data from {}", path.display()))?;
+        let save = migrate_save_file(save)?;
+        self.apply_loaded_game(save)?;
+        self.last_save_path = Some(path.to_path_buf());
         Ok(())
     }
 
@@ -5608,7 +6045,13 @@ impl GameApp {
             self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
         }
 
-        if let Some(menu) = self.object_menu.as_ref() {
+        if let Some(browser) = self.save_browser.as_ref() {
+            let font = self.assets.font_arc();
+            {
+                let surface = self.graphics.surface_mut();
+                browser.render(surface, font.as_ref());
+            }
+        } else if let Some(menu) = self.object_menu.as_ref() {
             let font = self.assets.font_arc();
             {
                 let surface = self.graphics.surface_mut();
@@ -6012,6 +6455,8 @@ impl GameApp {
     fn return_to_menu(&mut self) {
         self.close_ingame_menu();
         self.object_menu = None;
+        self.save_browser = None;
+        self.save_browser_return_to_menu = false;
         self.engine = Engine::new();
         self.apply_material_library();
         self.input = InputDispatcher::new();
@@ -6257,36 +6702,9 @@ impl GameApp {
     }
 
     fn quick_save(&mut self) -> Result<()> {
-        if self.mode != AppMode::Running {
-            anyhow::bail!("cannot quick save while not running a scenario");
-        }
-
-        let scenario = self
-            .active_scenario
-            .clone()
-            .unwrap_or_else(FrontendScenario::fallback);
-        let engine_state = self.engine.capture_state();
-        let saved = SavedGameFile {
-            version: SAVE_FILE_VERSION,
-            saved_at_seconds: current_unix_timestamp(),
-            scenario: SavedScenarioInfo::from_frontend(
-                &scenario,
-                &self.scenario_label,
-                self.fallback_ground,
-            ),
-            focus_id: self.focus_id,
-            engine_state,
-        };
-
         let dir = ensure_save_directory()?;
         let path = dir.join(QUICK_SAVE_FILE);
-        let mut file = File::create(&path)
-            .with_context(|| format!("failed to create quick save at {}", path.display()))?;
-        serde_json::to_writer_pretty(&mut file, &saved)
-            .context("failed to serialize quick save data")?;
-        file.flush().context("failed to flush quick save data")?;
-        self.last_save_path = Some(path.clone());
-        self.status_text = format!("Saved {}", saved.scenario.title);
+        self.perform_named_save("Quick Save", Some(path))?;
         Ok(())
     }
 
@@ -6312,14 +6730,7 @@ impl GameApp {
             }
         };
 
-        let contents = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read quick save from {}", path.display()))?;
-        let save: SavedGameFile =
-            serde_json::from_str(&contents).context("failed to parse quick save data")?;
-        let save =
-            migrate_save_file(save).context("failed to migrate quick save to current schema")?;
-        self.apply_loaded_game(save)?;
-        self.last_save_path = Some(path.clone());
+        self.load_saved_game_from_path(&path)?;
         Ok(())
     }
 
@@ -7725,6 +8136,7 @@ mod tests {
                 sandbox: true,
             },
             focus_id: None,
+            user_label: None,
             engine_state,
         };
 
@@ -8075,6 +8487,11 @@ mod tests {
                     .unwrap_or(false),
                 "quick save should note the save path"
             );
+            let thumbnail_path = resolve_save_directory().join("quicksave.png");
+            assert!(
+                thumbnail_path.exists(),
+                "expected quick save thumbnail to be written"
+            );
 
             for _ in 0..3 {
                 app.update().expect("advance after save");
@@ -8182,6 +8599,10 @@ mod tests {
                 assert!(
                     quicksave_path.exists(),
                     "expected quick save file to be written"
+                );
+                assert!(
+                    quicksave_path.with_extension("png").exists(),
+                    "expected quick save thumbnail to be written"
                 );
 
                 frame_before_save
@@ -8526,6 +8947,10 @@ mod tests {
         let path = dir.join(QUICK_SAVE_FILE);
         if path.exists() {
             let _ = std::fs::remove_file(&path);
+        }
+        let thumbnail = path.with_extension("png");
+        if thumbnail.exists() {
+            let _ = std::fs::remove_file(&thumbnail);
         }
     }
 }

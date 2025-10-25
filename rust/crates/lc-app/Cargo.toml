@@ -23,6 +23,8 @@ tokio = { version = "1.32", features = ["rt-multi-thread", "sync", "time", "net"
 winit = "0.28"
 tracing = "0.1"
 parking_lot = "0.12"
+png = "0.17"
+time = { version = "0.3", features = ["formatting", "macros"] }
 
 [dev-dependencies]
 rand = "0.8"
