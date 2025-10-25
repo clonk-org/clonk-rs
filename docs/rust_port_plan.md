@@ -87,9 +87,10 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - [x] Overlay graphics (ClonkGraphics, tool overlays)
 - [x] ColorByOwner player color modulation
 - [ ] Animation frame cycling
-- [ ] Z-order rendering (background → objects → overlays)
+- [x] Z-order rendering (background → objects → overlays)
 - [ ] Rotation and scaling for graphics
 
+**Progress (2025-11-18):** Graphics rendering now buckets snapshot objects into background, midground, foreground, and parallax lanes and sorts them by legacy `C4D_SortLimit` before drawing, matching the C++ draw order so static backs no longer overdraw crew sprites.
 **Progress (2025-11-15):** Frontend now applies `ColorByOwner` tint masks using player palette colors, with fallback hues when explicit player colors are unavailable, covering both ActMap slices and overlay sprites.
 **Progress (2025-11-12):** Added engine-side overlay state tracking (`GraphicsOverlayMode`, `ObjectGraphicsOverlay`) exposed through snapshots and wired to the `SetGraphics` host function so legacy scripts can create/remove tool overlays. Frontend now consumes the snapshot overlays and renders action/base layers above the parent object using existing ActMap metadata.
 **Progress (2025-11-07):** Manifest-backed definitions now load their full `.ocd` resources so sprite sheets come through via `Scenario::from_manifest`, ensuring every definition exposes `Graphics.png` to the frontend sprite cache.

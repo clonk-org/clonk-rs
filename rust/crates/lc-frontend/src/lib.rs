@@ -4,9 +4,9 @@ mod startup_menu;
 
 use lc_engine::{
     DefinitionActionGraphics, Direction, EnvironmentFrame, EnvironmentSettings,
-    GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, RgbColor,
-    SimulationSnapshot, SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot, Vector2,
-    WeatherEvent, OWNER_NONE,
+    GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus,
+    RgbColor, SimulationSnapshot, SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot,
+    Vector2, WeatherEvent, CATEGORY_SORT_LIMIT, OWNER_NONE,
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
@@ -46,6 +46,10 @@ const DEFAULT_PLAYER_COLORS: [Color; 12] = [
     Color::opaque(0xF8, 0x94, 0x00),
     Color::opaque(0xC0, 0x00, 0xBC),
 ];
+
+const CATEGORY_BACKGROUND_FLAG: i32 = 1 << 20;
+const CATEGORY_PARALLAX_FLAG: i32 = 1 << 21;
+const CATEGORY_FOREGROUND_FLAG: i32 = 1 << 23;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DefinitionSprite {
@@ -1238,7 +1242,52 @@ impl GraphicsSystem {
         lighting: f32,
         owner_colors: &HashMap<i32, Color>,
     ) {
+        let mut background = Vec::new();
+        let mut midground = Vec::new();
+        let mut foreground = Vec::new();
+        let mut parallax = Vec::new();
+
         for object in objects {
+            if object.status != ObjectStatus::Normal {
+                continue;
+            }
+            if object.category & CATEGORY_BACKGROUND_FLAG != 0 {
+                background.push(object);
+            } else if object.category & CATEGORY_FOREGROUND_FLAG != 0 {
+                if object.category & CATEGORY_PARALLAX_FLAG != 0 {
+                    parallax.push(object);
+                } else {
+                    foreground.push(object);
+                }
+            } else {
+                midground.push(object);
+            }
+        }
+
+        fn sort_for_render(list: &mut Vec<&ObjectSnapshot>) {
+            list.sort_by(|lhs, rhs| {
+                (lhs.category & CATEGORY_SORT_LIMIT)
+                    .cmp(&(rhs.category & CATEGORY_SORT_LIMIT))
+                    .then_with(|| lhs.position.y.cmp(&rhs.position.y))
+                    .then_with(|| lhs.position.x.cmp(&rhs.position.x))
+                    .then_with(|| lhs.id.as_u64().cmp(&rhs.id.as_u64()))
+            });
+        }
+
+        sort_for_render(&mut background);
+        sort_for_render(&mut midground);
+        sort_for_render(&mut foreground);
+        sort_for_render(&mut parallax);
+
+        for object in background
+            .into_iter()
+            .chain(midground.into_iter())
+            .chain(foreground.into_iter())
+        {
+            self.paint_object(object, lighting, owner_colors);
+        }
+
+        for object in parallax {
             self.paint_object(object, lighting, owner_colors);
         }
     }
