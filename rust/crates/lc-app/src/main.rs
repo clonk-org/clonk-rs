@@ -4850,6 +4850,10 @@ fn collect_player_overlays(
             .get(&player.owner)
             .map(|state| state.wealth)
             .unwrap_or(0);
+        let score = detail_map
+            .get(&player.owner)
+            .map(|state| state.points)
+            .unwrap_or(0);
         let owner_color = detail_map
             .get(&player.owner)
             .and_then(|state| state.color.map(|rgb| Color::opaque(rgb.r, rgb.g, rgb.b)))
@@ -4858,6 +4862,7 @@ fn collect_player_overlays(
             owner: player.owner,
             name,
             wealth,
+            score,
             cursor,
             eliminated: player.eliminated,
             owner_color,
@@ -5765,6 +5770,8 @@ mod tests {
                 crew: vec![listener.id],
                 focus: Some(listener.id),
                 eliminated: false,
+                wealth: 0,
+                score: 0,
             }],
         );
         let info = ChannelInfo {
@@ -5791,6 +5798,8 @@ mod tests {
                 crew: vec![listener.id],
                 focus: Some(listener.id),
                 eliminated: false,
+                wealth: 0,
+                score: 0,
             }],
         );
         let info = ChannelInfo {
@@ -5816,6 +5825,8 @@ mod tests {
                 crew: vec![listener.id],
                 focus: Some(listener.id),
                 eliminated: false,
+                wealth: 0,
+                score: 0,
             }],
         );
         let info = ChannelInfo {
@@ -6001,6 +6012,8 @@ mod tests {
                     crew: vec![focus, teammate],
                     focus: Some(focus),
                     eliminated: false,
+                    wealth: 120,
+                    score: 0,
                 }],
                 messages: Vec::new(),
             },

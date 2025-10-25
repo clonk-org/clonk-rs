@@ -126,15 +126,16 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
   - fctConstruction, fctArrow, fctExit, fctHand, fctBuild
   - fctFire, fctSelectMark
 - [x] Render crew portraits in top bar
-- [ ] Wealth/score counters
-- [ ] Construction menu with proper icons
-- [ ] Object selection highlighting
+- [x] Wealth/score counters
+- [x] Construction menu with proper icons
+- [x] Object selection highlighting
 - [ ] Message rendering with proper formatting
 - [ ] Energy/magic bar overlays on objects
 
 **Progress (2025-10-24):** Rust frontend now loads all HUD textures from `Graphics.c4g` and wires them through the shared graphics system, making the player/flag/score/energy assets available for upcoming UI rendering work.
 
 **Progress (2025-10-25):** HUD overlay now shows per-crew portraits using legacy definition pictures with owner-colored frames, highlights the focused unit, and falls back to the legacy Crew icon when portraits are missing.
+**Progress (2025-12-05):** HUD overlay now places score and wealth counters with the legacy iconography, renders selection rings inside the world view, and draws energy bars above active crew while the inventory/build menu shows each entry with its definition picture; magic overlays will follow once the engine surfaces mana values, and the message formatter still needs parity tweaks.
 
 **Files:** FrontendAssets::load(), GraphicsSystem HUD rendering
 

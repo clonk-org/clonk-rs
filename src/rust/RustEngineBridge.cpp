@@ -1310,6 +1310,8 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
         HudPlayerEntry hud_entry;
         hud_entry.snapshot.owner = owner;
         hud_entry.snapshot.eliminated = player->Eliminated != 0;
+        hud_entry.snapshot.wealth = static_cast<int32_t>(player->Wealth);
+        hud_entry.snapshot.score = static_cast<int32_t>(player->Score);
         if (player->Cursor && player->Cursor->Status) {
             hud_entry.snapshot.has_focus = true;
             hud_entry.snapshot.focus_object = static_cast<uint64_t>(player->Cursor->Number);

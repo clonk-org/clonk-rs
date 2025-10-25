@@ -118,6 +118,8 @@ pub struct LcEngineHudPlayerSnapshot {
     pub has_focus: bool,
     pub focus_object: u64,
     pub eliminated: bool,
+    pub wealth: i32,
+    pub score: i32,
 }
 
 #[repr(C)]
@@ -903,6 +905,8 @@ unsafe fn make_snapshot(
             crew,
             focus,
             eliminated: entry.eliminated,
+            wealth: entry.wealth,
+            score: entry.score,
         });
     }
 
@@ -2727,6 +2731,8 @@ global func Step(state, frame, random)
             has_focus: true,
             focus_object: 3,
             eliminated: true,
+            wealth: 125,
+            score: 42,
         }];
 
         let snapshot = unsafe {
@@ -2757,6 +2763,8 @@ global func Step(state, frame, random)
         let player = &snapshot.hud.players[0];
         assert_eq!(player.owner, 2);
         assert!(player.eliminated);
+        assert_eq!(player.wealth, 125);
+        assert_eq!(player.score, 42);
         let crew: Vec<_> = player.crew.iter().map(|id| id.as_u64()).collect();
         assert_eq!(crew, vec![5, 3]);
         assert_eq!(player.focus.map(|id| id.as_u64()), Some(3));
@@ -2913,6 +2921,8 @@ global func Step(state, frame, random)
             has_focus: false,
             focus_object: 0,
             eliminated: false,
+            wealth: 0,
+            score: 0,
         }];
 
         let snapshot = unsafe {

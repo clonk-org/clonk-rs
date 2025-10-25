@@ -840,6 +840,10 @@ pub struct HudPlayerSnapshot {
     pub focus: Option<ObjectId>,
     #[serde(default)]
     pub eliminated: bool,
+    #[serde(default)]
+    pub wealth: i32,
+    #[serde(default)]
+    pub score: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -7291,11 +7295,18 @@ impl Engine {
                 .get(&owner)
                 .and_then(|selection| selection.cursor());
             let eliminated = self.eliminated_crew_owners.contains(&owner);
+            let (wealth, score) = self
+                .players
+                .get(&owner)
+                .map(|player| (player.wealth(), player.points()))
+                .unwrap_or((0, 0));
             hud_players.push(HudPlayerSnapshot {
                 owner,
                 crew,
                 focus,
                 eliminated,
+                wealth,
+                score,
             });
         }
         let mut player_states: Vec<_> = self

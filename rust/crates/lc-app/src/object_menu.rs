@@ -4,6 +4,7 @@ use lc_engine::{
     CommandKind, ContextMenuEntry, ControlCommand, Engine, ObjectId, SimulationSnapshot, OWNER_NONE,
 };
 use lc_graphics::{Color, Rect, Surface, TextFont};
+use lc_gui::ImageData;
 
 const BACKDROP_COLOR: Color = Color::new(0, 0, 0, 172);
 const PANEL_COLOR: Color = Color::new(18, 28, 48, 240);
@@ -31,6 +32,7 @@ struct ObjectMenuItem {
     definition_id: String,
     instances: Vec<ObjectId>,
     description: Option<String>,
+    icon: Option<ImageData>,
 }
 
 impl ObjectMenuItem {
@@ -38,6 +40,7 @@ impl ObjectMenuItem {
         label: impl Into<String>,
         definition_id: impl Into<String>,
         description: Option<String>,
+        icon: Option<ImageData>,
         primary: ObjectId,
     ) -> Self {
         Self {
@@ -45,6 +48,7 @@ impl ObjectMenuItem {
             definition_id: definition_id.into(),
             instances: vec![primary],
             description,
+            icon,
         }
     }
 
@@ -67,6 +71,9 @@ trait MenuEntry {
     fn label(&self) -> &str;
     fn description(&self) -> Option<&str>;
     fn count(&self) -> usize;
+    fn icon(&self) -> Option<&ImageData> {
+        None
+    }
 }
 
 impl MenuEntry for ObjectMenuItem {
@@ -80,6 +87,10 @@ impl MenuEntry for ObjectMenuItem {
 
     fn count(&self) -> usize {
         self.count()
+    }
+
+    fn icon(&self) -> Option<&ImageData> {
+        self.icon.as_ref()
     }
 }
 
@@ -123,6 +134,7 @@ struct BuildMenuItem {
     label: String,
     description: Option<String>,
     available: u32,
+    icon: Option<ImageData>,
 }
 
 impl BuildMenuItem {
@@ -142,6 +154,10 @@ impl MenuEntry for BuildMenuItem {
 
     fn count(&self) -> usize {
         self.available as usize
+    }
+
+    fn icon(&self) -> Option<&ImageData> {
+        self.icon.as_ref()
     }
 }
 
@@ -508,9 +524,22 @@ impl ObjectMenuState {
             } else {
                 item.label().to_string()
             };
+
+            let mut text_x = row_rect.x + 12;
+            if let Some(icon) = item.icon() {
+                let icon_size = (ITEM_HEIGHT - 10).max(12) as u32;
+                let icon_rect = Rect::new(
+                    row_rect.x + 8,
+                    row_rect.y + (ITEM_HEIGHT - icon_size as i32) / 2,
+                    icon_size,
+                    icon_size,
+                );
+                draw_menu_icon(surface, icon_rect, icon);
+                text_x = icon_rect.x + icon_rect.width as i32 + 8;
+            }
             font.draw_text(
                 surface,
-                (row_rect.x + 12) as f32,
+                text_x as f32,
                 (row_rect.y + 8) as f32,
                 &label_text,
                 ITEM_FONT_SIZE,
@@ -520,7 +549,7 @@ impl ObjectMenuState {
             if let Some(description) = item.description() {
                 font.draw_text(
                     surface,
-                    (row_rect.x + 12) as f32,
+                    text_x as f32,
                     (row_rect.y + 22) as f32,
                     description,
                     DETAIL_FONT_SIZE,
@@ -730,13 +759,14 @@ fn collect_inventory(
             .definition_name(&child.definition_id)
             .unwrap_or(&child.definition_id);
         let description = build_definition_summary(engine, &child.definition_id);
+        let icon = definition_icon(engine, &child.definition_id);
         if let Some(index) = lookup.get(&child.definition_id).copied() {
             if let Some(entry) = order.get_mut(index) {
                 entry.push_instance(child.id);
             }
         } else {
             let index = order.len();
-            let entry = ObjectMenuItem::new(name, &child.definition_id, description, child.id);
+            let entry = ObjectMenuItem::new(name, &child.definition_id, description, icon, child.id);
             order.push(entry);
             lookup.insert(child.definition_id.clone(), index);
         }
@@ -774,15 +804,25 @@ fn collect_build_items(engine: &Engine, crew: &lc_engine::ObjectSnapshot) -> Vec
             .unwrap_or(definition_id)
             .to_string();
         let description = build_definition_summary(engine, definition_id);
+        let icon = definition_icon(engine, definition_id);
         entries.push(BuildMenuItem {
             definition_id: definition_id.clone(),
             label,
             description,
             available: *count,
+            icon,
         });
     }
     entries.sort_by(|a, b| a.label.cmp(&b.label));
     entries
+}
+
+fn definition_icon(engine: &Engine, definition_id: &str) -> Option<ImageData> {
+    engine.definition_picture_image(definition_id).map(|image| {
+        let width = image.width();
+        let height = image.height();
+        ImageData::from_arc(width, height, image.into_pixels())
+    })
 }
 
 fn build_definition_summary(engine: &Engine, definition_id: &str) -> Option<String> {
@@ -801,6 +841,54 @@ fn build_definition_summary(engine: &Engine, definition_id: &str) -> Option<Stri
         None
     } else {
         Some(parts.join(" • "))
+    }
+}
+
+fn draw_menu_icon(surface: &mut Surface, rect: Rect, icon: &ImageData) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let bounds = surface.bounds();
+    let src_width = icon.width();
+    let src_height = icon.height();
+    if src_width == 0 || src_height == 0 {
+        return;
+    }
+    let pixels = icon.pixels();
+    for dy in 0..rect.height {
+        let target_y = rect.y + dy as i32;
+        if target_y < bounds.y || target_y >= bounds.y + bounds.height as i32 {
+            continue;
+        }
+        let src_y = ((dy as u64) * src_height as u64 / rect.height as u64) as u32;
+        for dx in 0..rect.width {
+            let target_x = rect.x + dx as i32;
+            if target_x < bounds.x || target_x >= bounds.x + bounds.width as i32 {
+                continue;
+            }
+            let src_x = ((dx as u64) * src_width as u64 / rect.width as u64) as u32;
+            let idx = ((src_y * src_width + src_x) * 4) as usize;
+            if idx + 3 >= pixels.len() {
+                continue;
+            }
+            let color = Color::new(
+                pixels[idx],
+                pixels[idx + 1],
+                pixels[idx + 2],
+                pixels[idx + 3],
+            );
+            if color.a == 0 {
+                continue;
+            }
+            let result = if color.a == 255 {
+                surface.set_pixel(target_x as u32, target_y as u32, color)
+            } else {
+                surface.blend_pixel(target_x as u32, target_y as u32, color)
+            };
+            if result.is_err() {
+                break;
+            }
+        }
     }
 }
 

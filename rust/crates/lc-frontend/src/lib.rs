@@ -301,6 +301,7 @@ pub struct PlayerOverlay {
     pub owner: i32,
     pub name: String,
     pub wealth: i32,
+    pub score: i32,
     pub cursor: Option<ObjectId>,
     pub eliminated: bool,
     pub owner_color: Color,
@@ -321,6 +322,8 @@ struct PlayerWidgets {
     owner: i32,
     header_label: WidgetId,
     status_label: WidgetId,
+    wealth: PlayerStatWidgets,
+    score: PlayerStatWidgets,
     crew: Vec<CrewWidgets>,
 }
 
@@ -329,6 +332,12 @@ struct CrewWidgets {
     portrait: WidgetId,
     label: WidgetId,
     gauge: WidgetId,
+}
+
+#[derive(Debug)]
+struct PlayerStatWidgets {
+    icon: WidgetId,
+    label: WidgetId,
 }
 
 #[derive(Debug)]
@@ -518,6 +527,8 @@ impl GraphicsSystem {
         let portrait_focus_background = Color::opaque(32, 40, 56);
         let portrait_frame_neutral = Color::opaque(44, 58, 84);
         let fallback_portrait = self.hud_graphics.crew.clone();
+        let wealth_icon_image = self.hud_graphics.wealth.clone();
+        let score_icon_image = self.hud_graphics.score.clone();
 
         for (player_overlay, widgets) in overlay.players.iter().zip(self.player_widgets.iter()) {
             let header_text = if player_overlay.name.is_empty() {
@@ -528,6 +539,34 @@ impl GraphicsSystem {
             self.gui.set_label_text(widgets.header_label, header_text)?;
             self.gui
                 .set_label_color(widgets.header_label, header_color)?;
+
+            self.gui
+                .set_picture_image(widgets.wealth.icon, wealth_icon_image.clone())?;
+            self.gui
+                .set_picture_image(widgets.score.icon, score_icon_image.clone())?;
+
+            if player_overlay.eliminated {
+                self.gui
+                    .set_label_text(widgets.wealth.label, "--")?;
+                self.gui
+                    .set_label_color(widgets.wealth.label, eliminated_color)?;
+                self.gui
+                    .set_label_text(widgets.score.label, "--")?;
+                self.gui
+                    .set_label_color(widgets.score.label, eliminated_color)?;
+            } else {
+                let wealth_text = format!("{}", player_overlay.wealth);
+                self.gui
+                    .set_label_text(widgets.wealth.label, wealth_text)?;
+                self.gui
+                    .set_label_color(widgets.wealth.label, info_color)?;
+
+                let score_text = format!("{}", player_overlay.score);
+                self.gui
+                    .set_label_text(widgets.score.label, score_text)?;
+                self.gui
+                    .set_label_color(widgets.score.label, info_color)?;
+            }
 
             if player_overlay.eliminated {
                 self.gui
@@ -540,9 +579,16 @@ impl GraphicsSystem {
                 self.gui
                     .set_label_color(widgets.status_label, warning_color)?;
             } else {
-                let wealth_text = format!("Wealth {}", player_overlay.wealth);
-                self.gui.set_label_text(widgets.status_label, wealth_text)?;
-                self.gui.set_label_color(widgets.status_label, info_color)?;
+                let crew_count = player_overlay.crew.len();
+                let status_text = if crew_count == 1 {
+                    "Crew member ready".to_string()
+                } else {
+                    format!("Crew {crew_count}")
+                };
+                self.gui
+                    .set_label_text(widgets.status_label, status_text)?;
+                self.gui
+                    .set_label_color(widgets.status_label, info_color)?;
             }
 
             for (crew_overlay, crew_widgets) in player_overlay.crew.iter().zip(widgets.crew.iter())
@@ -755,6 +801,17 @@ impl GraphicsSystem {
             lighting,
         );
         self.draw_objects(&snapshot.objects, lighting, owner_colors);
+        let highlight_ids = Self::collect_highlight_ids(snapshot, input.owner, input.focus.id);
+        self.draw_object_energy_bars(
+            snapshot,
+            &highlight_ids,
+            owner_colors,
+            input.owner,
+            origin_x,
+            origin_y,
+            zoom,
+        );
+        self.draw_selection_marks(snapshot, &highlight_ids, origin_x, origin_y, zoom);
         self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom);
 
         let content_surface = std::mem::replace(&mut self.surface, main_surface);
@@ -784,6 +841,155 @@ impl GraphicsSystem {
             viewport_y: origin_y,
             zoom,
         });
+    }
+
+    fn collect_highlight_ids(
+        snapshot: &SimulationSnapshot,
+        owner: i32,
+        focus: ObjectId,
+    ) -> HashSet<ObjectId> {
+        let mut highlights: HashSet<ObjectId> = HashSet::new();
+        highlights.insert(focus);
+        if let Some(selection) = snapshot.crew_selection.get(&owner) {
+            if let Some(cursor) = selection.cursor {
+                highlights.insert(cursor);
+            }
+            highlights.extend(selection.selected.iter().copied());
+        }
+        if let Some(state) = snapshot.players.iter().find(|state| state.id == owner) {
+            if let Some(cursor) = state.cursor {
+                highlights.insert(cursor);
+            }
+        }
+        for player in &snapshot.hud.players {
+            if player.owner == owner {
+                if let Some(focus_id) = player.focus {
+                    highlights.insert(focus_id);
+                }
+            }
+        }
+        highlights
+    }
+
+    fn draw_object_energy_bars(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        highlights: &HashSet<ObjectId>,
+        owner_colors: &HashMap<i32, Color>,
+        owner: i32,
+        origin_x: f32,
+        origin_y: f32,
+        zoom: f32,
+    ) {
+        if self.hud_graphics.energy_bars.is_none() && self.hud_graphics.energy.is_none() {
+            return;
+        }
+        let surface_width = self.surface_width as f32;
+        let surface_height = self.surface_height as f32;
+        for object in &snapshot.objects {
+            if !object.crew_member || !object.status.is_active() || !object.alive {
+                continue;
+            }
+            let highlighted = highlights.contains(&object.id);
+            if object.owner != owner && !highlighted {
+                continue;
+            }
+
+            let screen_x = (object.position.x as f32 - origin_x) * zoom;
+            let screen_y = (object.position.y as f32 - origin_y) * zoom;
+            let margin = 48.0;
+            if screen_x < -margin
+                || screen_x > surface_width + margin
+                || screen_y < -margin
+                || screen_y > surface_height + margin
+            {
+                continue;
+            }
+
+            let base_width = 32.0f32;
+            let base_height = 4.0f32;
+            let width = (base_width * zoom).clamp(18.0, 64.0);
+            let height = (base_height * zoom).clamp(3.0, 10.0);
+            let offset_y = (18.0 * zoom).clamp(12.0, 32.0);
+            let origin = GuiPoint::new(screen_x - width / 2.0, screen_y - offset_y);
+            let bar_rect = GuiRect::from_origin_size(origin, GuiSize::new(width, height));
+
+            let background = Color::new(16, 24, 40, 210);
+            fill_rect(&mut self.surface, &bar_rect, background);
+
+            let fraction = (object.energy.max(0).min(100) as f32) / 100.0;
+            if fraction > 0.0 {
+                let fill_width = (width * fraction).max(1.0);
+                let energy_rect = GuiRect::from_origin_size(
+                    origin,
+                    GuiSize::new(fill_width, height),
+                );
+                let base_color = owner_colors
+                    .get(&object.owner)
+                    .copied()
+                    .unwrap_or_else(|| default_owner_color(object.owner));
+                let mut fill_color = if highlighted {
+                    base_color.modulate(1.2)
+                } else {
+                    base_color.modulate(0.85)
+                };
+                fill_color.a = if highlighted { 255 } else { 220 };
+                fill_rect(&mut self.surface, &energy_rect, fill_color);
+            }
+
+            if let Some(icon) = self.hud_graphics.energy.as_ref() {
+                let icon_scale = zoom.clamp(0.75, 1.25);
+                let icon_width = (icon.width() as f32 * icon_scale).clamp(14.0, 28.0);
+                let icon_height = (icon.height() as f32 * icon_scale).clamp(14.0, 28.0);
+                let icon_origin = GuiPoint::new(
+                    origin.x - icon_width - 6.0,
+                    origin.y - (icon_height - height) / 2.0,
+                );
+                let icon_rect = GuiRect::from_origin_size(
+                    icon_origin,
+                    GuiSize::new(icon_width, icon_height),
+                );
+                draw_image(&mut self.surface, &icon_rect, icon);
+            }
+        }
+    }
+
+    fn draw_selection_marks(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        highlights: &HashSet<ObjectId>,
+        origin_x: f32,
+        origin_y: f32,
+        zoom: f32,
+    ) {
+        let Some(image) = self.hud_graphics.select_mark.as_ref() else {
+            return;
+        };
+        let surface_width = self.surface_width as f32;
+        let surface_height = self.surface_height as f32;
+        let margin = (image.width().max(image.height()) as f32).max(16.0);
+        for id in highlights {
+            let Some(object) = snapshot.object(*id) else {
+                continue;
+            };
+            let screen_x = (object.position.x as f32 - origin_x) * zoom;
+            let screen_y = (object.position.y as f32 - origin_y) * zoom;
+            if screen_x < -margin
+                || screen_x > surface_width + margin
+                || screen_y < -margin
+                || screen_y > surface_height + margin
+            {
+                continue;
+            }
+
+            let width = image.width() as f32;
+            let height = image.height() as f32;
+            let rect = GuiRect::from_origin_size(
+                GuiPoint::new(screen_x - width / 2.0, screen_y - height / 2.0),
+                GuiSize::new(width, height),
+            );
+            draw_image(&mut self.surface, &rect, image);
+        }
     }
 
     fn layout_viewports(&self, count: usize) -> Vec<SurfaceRect> {
@@ -2026,12 +2232,18 @@ impl GraphicsSystem {
         const CREW_PORTRAIT_SIZE: f32 = 72.0;
         const CREW_GAUGE_WIDTH: f32 = 72.0;
         const CREW_GAUGE_HEIGHT: f32 = 12.0;
+        const STAT_ICON_SIZE: f32 = 20.0;
 
         let mut player_widgets = Vec::with_capacity(players.len());
         for player in players {
             let player_column = gui.add_column(players_container, true);
             let header_label = gui.add_label(player_column, "");
             let status_label = gui.add_label(player_column, "");
+            let stats_row = gui.add_row(player_column, false);
+            let wealth_icon = gui.add_picture(stats_row, STAT_ICON_SIZE, STAT_ICON_SIZE);
+            let wealth_label = gui.add_label(stats_row, "");
+            let score_icon = gui.add_picture(stats_row, STAT_ICON_SIZE, STAT_ICON_SIZE);
+            let score_label = gui.add_label(stats_row, "");
             let crew_row = gui.add_row(player_column, false);
             let mut crew_widgets = Vec::with_capacity(player.crew.len());
             for _ in &player.crew {
@@ -2051,6 +2263,14 @@ impl GraphicsSystem {
                 owner: player.owner,
                 header_label,
                 status_label,
+                wealth: PlayerStatWidgets {
+                    icon: wealth_icon,
+                    label: wealth_label,
+                },
+                score: PlayerStatWidgets {
+                    icon: score_icon,
+                    label: score_label,
+                },
                 crew: crew_widgets,
             });
         }
@@ -2964,6 +3184,7 @@ mod tests {
                 crew_member: true,
                 alive: true,
                 graphics_overlays: Vec::new(),
+                draw_transform: None,
             }],
             environment: EnvironmentFrame::default(),
             sky: None,
@@ -3315,6 +3536,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
+            empty_hud_graphics(),
         );
         let day_focus = &daytime.objects[0];
         let day_viewports = vec![ViewportInput::from_focus(day_focus)];

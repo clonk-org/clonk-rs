@@ -100,6 +100,8 @@ typedef struct LcEngineHudPlayerSnapshot {
     bool has_focus;
     uint64_t focus_object;
     bool eliminated;
+    int32_t wealth;
+    int32_t score;
 } LcEngineHudPlayerSnapshot;
 
 typedef struct LcEngineSurfaceSnapshot {
