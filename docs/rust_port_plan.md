@@ -187,7 +187,7 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - Needs testing
 
 **What's Needed:**
-- [ ] Verify ALL control inputs work:
+- [x] Verify ALL control inputs work:
   - [x] Movement (up/down/left/right)
   - [x] Actions (dig, throw, special, special2)
   - [x] Menu controls (open, navigate, select)
@@ -206,6 +206,7 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 **Progress (2025-12-21):** Double-tapping Down now routes through `InputDispatcher` to call the engine’s grab/drop helpers, while pressing Up at a structure requests `Engine::try_enter_nearby`, matching legacy grab/drop/enter behavior; covered by regression tests in `rust/crates/lc-frontend/src/input.rs` and `rust/crates/lc-engine/src/lib.rs`.
 **Progress (2025-12-22):** Opening inventory or pause menus now submits a `ClearPressed` control event (and network broadcast) before suppressing gameplay commands, so direction states reset immediately and no longer stick when menus absorb the matching key releases.
 **Progress (2025-12-23):** Added an in-game Control Options dialog that mirrors LegacyClonk's key customization flow; players can rebind, reset, and persist keyboard mappings through `control_options.rs`, the options UI in `startup_options.rs`, and the new startup view wiring in `rust/crates/lc-app/src/main.rs`.
+**Progress (2025-12-24):** Backfilled regression tests in `rust/crates/lc-frontend/src/input.rs` ensuring the frontend dispatches Throw/Dig/Special/Special2 commands into legacy `Control*` scripts, completing the verification pass for all primary inputs.
 
 **Files:** InputDispatcher, handle_key() in main.rs, lc-engine/src/input.rs
 

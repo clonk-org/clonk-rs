@@ -319,9 +319,11 @@ fn handle_down_interaction(engine: &mut Engine, owner: i32) -> Result<(), Engine
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use lc_engine::ocf;
     use lc_engine::{
-        ControlButton, Definition, MovementProfile, ObjectId, SpawnConfig, Vector2, OWNER_NONE,
+        ActionSpec, ActionState, ControlButton, Definition, MovementProfile, ObjectId,
+        PlayerConfig, SpawnConfig, Vector2, OWNER_NONE,
     };
 
     const WALKER_SCRIPT: &str = r#"
@@ -604,6 +606,129 @@ global func Step(state, frame, random) { return nil; }
 
         let crew_snapshot = engine.object_snapshot(crew).expect("crew snapshot");
         assert_eq!(crew_snapshot.container, Some(hut));
+        Ok(())
+    }
+
+    #[test]
+    fn command_events_update_actions_via_control_scripts() -> Result<(), EngineError> {
+        let script = r#"
+global func Initialize(state, random) { return nil; }
+public func ControlThrow() { SetAction("ThrowCtl"); return true; }
+public func ControlDig() { SetAction("DigCtl"); return true; }
+public func ControlSpecial() { SetAction("SpecialCtl"); return true; }
+public func ControlSpecial2() { SetAction("Special2Ctl"); return true; }
+"#;
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", script).expect("control script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
+            "ThrowCtl".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
+            "DigCtl".to_string(),
+            ActionSpec::default().with_procedure("dig"),
+        );
+        actions.insert(
+            "SpecialCtl".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
+            "Special2Ctl".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+        definition.set_movement_profile(MovementProfile::default());
+
+        let mut engine = Engine::new();
+        engine.register_definition(definition)?;
+        engine.register_player(PlayerConfig::new(1, "Test"))?;
+
+        let crew = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_action(ActionState::new("Idle")),
+            )
+            .expect("spawn crew");
+        engine.select_crew(1, vec![crew])?;
+        engine.set_crew_cursor(1, Some(crew))?;
+
+        let mut dispatcher = InputDispatcher::new();
+
+        dispatcher.handle_event(
+            &mut engine,
+            1,
+            ControlEvent::Command {
+                command: ControlCommand::Throw,
+                kind: CommandKind::Press,
+            },
+        )?;
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew snapshot after throw")
+                .action
+                .name,
+            "ThrowCtl"
+        );
+
+        dispatcher.handle_event(
+            &mut engine,
+            1,
+            ControlEvent::Command {
+                command: ControlCommand::Dig,
+                kind: CommandKind::Press,
+            },
+        )?;
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew snapshot after dig")
+                .action
+                .name,
+            "DigCtl"
+        );
+
+        dispatcher.handle_event(
+            &mut engine,
+            1,
+            ControlEvent::Command {
+                command: ControlCommand::Special,
+                kind: CommandKind::Press,
+            },
+        )?;
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew snapshot after special")
+                .action
+                .name,
+            "SpecialCtl"
+        );
+
+        dispatcher.handle_event(
+            &mut engine,
+            1,
+            ControlEvent::Command {
+                command: ControlCommand::Special2,
+                kind: CommandKind::Press,
+            },
+        )?;
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew snapshot after special2")
+                .action
+                .name,
+            "Special2Ctl"
+        );
+
         Ok(())
     }
 }
