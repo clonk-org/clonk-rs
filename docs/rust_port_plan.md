@@ -278,7 +278,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [x] Verify digging actually works in-game
 - [x] Verify blasting creates proper craters
 - [x] Material reactions (all combinations in Material.txt)
-- [ ] Fire spreading (Incindiary material behavior)
+- [x] Fire spreading (Incindiary material behavior)
 - [ ] Liquid flow physics
 - [ ] Temperature propagation
 - [ ] Material conversion (temperature-based)
@@ -289,6 +289,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2025-12-24):** Material particle settling prevents craters from deepening further and updated the landscape regression to reflect the behaviour.
 **Progress (2026-01-18):** Engine blast rasterization now mirrors LegacyClonk's scanline circle, raises column heights by the extra cleared pixel, and adds regression coverage so Blast2 reactions see the same removed material counts.
 **Progress (2026-01-19):** MaterialSet now precomputes reactions from Material.txt definitions (including Reverse/Inverse specs and Convert depth), so particle collisions follow every legacy reaction instead of defaulting to `Insert`/`Corrode` fallbacks.
+**Progress (2026-01-21):** Incindiary material particles now spawn legacy `FLAM` fire objects without shaving the terrain and refuse to stack when an existing flame covers the column, matching C++ spread; handled in `rust/crates/lc-engine/src/lib.rs:10248` and verified by the new regression in the same file.
 
 **Files:** lc-engine/src/landscape.rs, lc-engine/src/material.rs, lc-resources/src/material.rs
 

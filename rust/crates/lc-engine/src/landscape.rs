@@ -530,7 +530,7 @@ impl Landscape {
         if !self.can_incinerate(x, y, materials) {
             return false;
         }
-        self.remove_material_at(x, y)
+        true
     }
 
     pub fn path_is_clear(&self, start: Vector2, end: Vector2) -> bool {

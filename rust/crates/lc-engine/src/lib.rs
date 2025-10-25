@@ -112,6 +112,7 @@ pub type DefinitionId = String;
 
 pub const OWNER_NONE: i32 = -1;
 pub const FULL_CON: i32 = 100_000;
+const FIRE_DEFINITION_ID: &str = "FLAM";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GraphicsOverlayMode {
@@ -10228,19 +10229,7 @@ impl Engine {
                 .and_then(|landscape| landscape.first_collision_on_line(start, end));
 
             let keep = if let Some(hit) = collision {
-                let Some(landscape_mut) = self.landscape.as_mut() else {
-                    continue;
-                };
-                let materials = &self.materials;
-                let rng = &mut self.rng;
-                Self::resolve_material_particle_collision(
-                    materials,
-                    rng,
-                    &mut particle,
-                    hit,
-                    new_position,
-                    landscape_mut,
-                )
+                self.resolve_material_particle_collision(&mut particle, hit, new_position)
             } else {
                 particle.position = new_position;
                 true
@@ -10257,27 +10246,40 @@ impl Engine {
     }
 
     fn resolve_material_particle_collision(
-        materials: &MaterialSet,
-        rng: &mut ChaCha8Rng,
+        &mut self,
         particle: &mut MaterialParticle,
         hit: Vector2,
         target: FloatVector2,
-        landscape: &mut Landscape,
     ) -> bool {
-        let landscape_material = landscape.solid_material_at(hit.x);
-        let reaction = materials.reaction(Some(particle.material), landscape_material);
+        if self.materials.get_by_id(particle.material).is_none() {
+            return false;
+        }
+
+        let landscape_material = self
+            .landscape
+            .as_ref()
+            .and_then(|landscape| landscape.solid_material_at(hit.x));
+        let reaction = self
+            .materials
+            .reaction(Some(particle.material), landscape_material);
         match reaction {
             MaterialReactionKind::None => {
                 let mut deposited = false;
-                if let Some(current_height) = landscape.surface_height(hit.x) {
+                if let Some(current_height) = self
+                    .landscape
+                    .as_ref()
+                    .and_then(|landscape| landscape.surface_height(hit.x))
+                {
                     if current_height > 0 {
                         let desired_target = current_height.saturating_sub(1);
                         let deposit_y = desired_target.saturating_sub(1);
                         let before_height = current_height;
-                        if landscape.insert_material_at(hit.x, deposit_y, particle.material) {
-                            if let Some(after_height) = landscape.surface_height(hit.x) {
-                                if after_height <= before_height {
-                                    deposited = true;
+                        if let Some(landscape) = self.landscape.as_mut() {
+                            if landscape.insert_material_at(hit.x, deposit_y, particle.material) {
+                                if let Some(after_height) = landscape.surface_height(hit.x) {
+                                    if after_height <= before_height {
+                                        deposited = true;
+                                    }
                                 }
                             }
                         }
@@ -10303,11 +10305,27 @@ impl Engine {
             }
             MaterialReactionKind::Convert { target: None, .. } => false,
             MaterialReactionKind::Poof => {
-                landscape.remove_material_at(hit.x, hit.y);
+                if let Some(landscape) = self.landscape.as_mut() {
+                    landscape.remove_material_at(hit.x, hit.y);
+                }
                 false
             }
             MaterialReactionKind::Incinerate => {
-                let _ = landscape.incinerate_at(hit.x, hit.y, materials);
+                let can_incinerate = self
+                    .landscape
+                    .as_ref()
+                    .map(|landscape| landscape.can_incinerate(hit.x, hit.y, &self.materials))
+                    .unwrap_or(false);
+                if can_incinerate {
+                    let spawned = self.spawn_fire_at(hit.x, hit.y);
+                    if !spawned {
+                        if let Some(landscape) = self.landscape.as_mut() {
+                            landscape.insert_material_at(hit.x, hit.y, particle.material);
+                        }
+                    }
+                } else if let Some(landscape) = self.landscape.as_mut() {
+                    landscape.insert_material_at(hit.x, hit.y, particle.material);
+                }
                 false
             }
             MaterialReactionKind::Corrode {
@@ -10317,23 +10335,70 @@ impl Engine {
             } => {
                 let success = if let Some(probability) = corrosion_probability {
                     let clamped = probability.clamp(0, 100);
-                    rng.gen_range(0..100) < clamped
+                    self.rng.gen_range(0..100) < clamped
                 } else {
                     let resistance = corrode_resistance.max(1);
-                    rng.gen_range(0..=resistance) < corrosive_strength.max(1)
+                    self.rng.gen_range(0..=resistance) < corrosive_strength.max(1)
                 };
                 if success {
-                    landscape.remove_material_at(hit.x, hit.y);
-                } else {
+                    if let Some(landscape) = self.landscape.as_mut() {
+                        landscape.remove_material_at(hit.x, hit.y);
+                    }
+                } else if let Some(landscape) = self.landscape.as_mut() {
                     landscape.insert_material_at(hit.x, hit.y, particle.material);
                 }
                 false
             }
             MaterialReactionKind::Insert => {
-                landscape.insert_material_at(hit.x, hit.y, particle.material);
+                if let Some(landscape) = self.landscape.as_mut() {
+                    landscape.insert_material_at(hit.x, hit.y, particle.material);
+                }
                 false
             }
         }
+    }
+
+    fn spawn_fire_at(&mut self, x: i32, y: i32) -> bool {
+        if !self
+            .landscape
+            .as_ref()
+            .map(|landscape| landscape.can_incinerate(x, y, &self.materials))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
+        if !self.definitions.contains_key(FIRE_DEFINITION_ID) {
+            return false;
+        }
+
+        let left = x.saturating_sub(4);
+        let right = left.saturating_add(8);
+        let top = y.saturating_sub(1);
+        let bottom = top.saturating_add(20);
+
+        let has_existing = self.objects.iter().any(|object| {
+            if object.destroyed {
+                return false;
+            }
+            if object.definition_id != FIRE_DEFINITION_ID {
+                return false;
+            }
+            if !object.state.status.is_active() {
+                return false;
+            }
+            let pos = object.state.position;
+            pos.x >= left && pos.x < right && pos.y >= top && pos.y < bottom
+        });
+
+        if has_existing {
+            return false;
+        }
+
+        let result = self.spawn_object(
+            SpawnConfig::new(FIRE_DEFINITION_ID).with_position(Vector2::new(x, y)),
+        );
+        result.is_ok()
     }
 
     fn handle_particle_object_collisions(&mut self, particle: &MaterialParticle) -> bool {
@@ -12458,6 +12523,102 @@ mod tests {
             shifted_columns > 0,
             "expected blast to shift some columns to target material"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn incendiary_particles_spawn_fire_without_eroding_surface() -> Result<(), EngineError> {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Flame]
+            Name=Flame
+            Density=60
+            Friction=10
+            SplashRate=5
+            Incindiary=100
+
+            [Material Wood]
+            Name=Wood
+            Density=90
+            Friction=25
+            Inflammable=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let flame = materials.id_of("Flame").expect("flame exists");
+        let wood = materials.id_of("Wood").expect("wood exists");
+
+        let mut engine = Engine::with_seed(31);
+        engine.set_materials(materials);
+        engine
+            .register_definition(simple_definition(FIRE_DEFINITION_ID))
+            .expect("fire definition registers");
+        engine.set_landscape(Landscape::flat_with_material(17, 80, Some(wood)));
+
+        let column_x = 8;
+        let before_height = engine
+            .landscape()
+            .expect("landscape present")
+            .surface_height(column_x)
+            .expect("surface height available");
+
+        engine.material_particles.push(MaterialParticle::new(
+            flame,
+            FloatVector2::new(column_x as f32, (before_height - 8) as f32),
+            FloatVector2::new(0.0, 3.5),
+        ));
+
+        let mut flame_spawned = false;
+        for _ in 0..20 {
+            engine.tick_material_particles();
+            flame_spawned = engine
+                .objects
+                .iter()
+                .any(|object| {
+                    !object.destroyed
+                        && object.state.status.is_active()
+                        && object.definition_id == FIRE_DEFINITION_ID
+                });
+            if flame_spawned {
+                break;
+            }
+        }
+        assert!(flame_spawned, "expected a flame to spawn after particle collision");
+
+        let after_height = engine
+            .landscape()
+            .expect("landscape present")
+            .surface_height(column_x)
+            .expect("surface height available");
+        assert_eq!(
+            after_height, before_height,
+            "incineration should not erode the landscape surface"
+        );
+
+        engine.material_particles.push(MaterialParticle::new(
+            flame,
+            FloatVector2::new(column_x as f32, (before_height - 8) as f32),
+            FloatVector2::new(0.0, 3.5),
+        ));
+        for _ in 0..20 {
+            engine.tick_material_particles();
+        }
+
+        let capped_flame_count = engine
+            .objects
+            .iter()
+            .filter(|object| {
+                !object.destroyed
+                    && object.state.status.is_active()
+                    && object.definition_id == FIRE_DEFINITION_ID
+            })
+            .count();
+        assert_eq!(
+            capped_flame_count, 1,
+            "incineration should respect the fire density cap"
+        );
+
         Ok(())
     }
 
