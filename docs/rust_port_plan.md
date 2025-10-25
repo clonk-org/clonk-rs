@@ -349,7 +349,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **What's Needed:**
 - [x] Verify network synchronization works
 - [x] Player join during game
-- [ ] Player leave handling
+- [x] Player leave handling
 - [ ] Control input synchronization
 - [ ] Desync detection and recovery
 - [ ] Network lobby UI (pre-game)
@@ -360,6 +360,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 
 **Progress (2026-03-04):** Client network loop now retains a LegacyClonk-style control backlog and fulfills host resync requests so missing ticks replay deterministically; covered by the new `client_resends_backlog_when_requested` regression test in `rust/crates/lc-network/src/session.rs`.
 **Progress (2026-06-14):** Host session replays the synchronized control backlog to newly connected peers before syncing so mid-game joins catch up precisely; guarded by the `new_client_replays_backlog_on_join` test in `rust/crates/lc-network/src/session.rs`.
+**Progress (2026-10-25):** Host loop now drains waiting control batches when a client disconnects and rebroadcasts them so remaining players advance without stalling; guarded by the `host_continues_ready_after_client_disconnect` test in `rust/crates/lc-network/src/session.rs`.
 
 ---
 

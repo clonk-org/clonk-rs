@@ -583,7 +583,10 @@ async fn handle_client_disconnected(
     state: &mut HostState,
 ) {
     state.clients.remove(&client_id);
-    state.coordinator.remove_client(client_id).ok();
+    let ready_batches = state
+        .coordinator
+        .remove_client(client_id)
+        .unwrap_or_default();
     state.backlog.remove_client(client_id);
     state.scheduler.remove_client(client_id);
 
@@ -591,6 +594,16 @@ async fn handle_client_disconnected(
         .event_tx
         .send(HostEvent::ClientLeft { client_id })
         .await;
+
+    for batch in ready_batches {
+        state.backlog.record_ready_batch(&batch);
+        let aggregated = aggregate_batch(&batch);
+        broadcast_control(&aggregated, state).await;
+        let _ = state
+            .event_tx
+            .send(HostEvent::Ready { packet: aggregated })
+            .await;
+    }
 
     if let Some(reason) = reason {
         let _ = state
@@ -1015,6 +1028,52 @@ mod tests {
             .await
             .expect("second client shutdown");
         wait_for_client_departure(&mut host_events, Duration::from_secs(1)).await;
+
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_continues_ready_after_client_disconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(
+            listener,
+            HostConfig {
+                max_players: 4,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("start host");
+
+        let mut client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .expect("connect client");
+
+        let mut host_events = host.take_event_receiver();
+        let mut client_events = client.take_event_receiver();
+        drain_initial_exec_sync(&mut client_events).await;
+
+        submit_control_pair(&mut host, &client, 0, vec![0xA0], vec![0xB0]).await;
+        let ready0 = wait_for_host_ready(&mut host_events, Duration::from_secs(1)).await;
+        assert_eq!(ready0.tick(), 0);
+        assert_eq!(ready0.payload(), &[0xA0, 0xB0]);
+
+        let host_packet = ControlPacket::builder(0, 1)
+            .timestamp_ms(0)
+            .payload(vec![0xC0]);
+        host.submit_local_control(host_packet)
+            .await
+            .expect("host submit control");
+
+        client.shutdown().await.expect("client shutdown");
+        wait_for_client_departure(&mut host_events, Duration::from_secs(1)).await;
+
+        let ready1 = wait_for_host_ready(&mut host_events, Duration::from_secs(1)).await;
+        assert_eq!(ready1.tick(), 1);
+        assert_eq!(ready1.payload(), &[0xC0]);
 
         host.shutdown().await.expect("host shutdown");
     }
