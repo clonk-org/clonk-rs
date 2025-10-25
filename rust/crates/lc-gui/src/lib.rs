@@ -353,6 +353,15 @@ impl Gauge {
         }
     }
 
+    fn set_size(&mut self, min_width: f32, height: f32) {
+        if min_width.is_finite() && min_width > 0.0 {
+            self.min_width = min_width;
+        }
+        if height.is_finite() && height > 0.0 {
+            self.height = height;
+        }
+    }
+
     fn intrinsic_size(&self) -> Size {
         Size::new(self.min_width, self.height)
     }
@@ -682,11 +691,44 @@ impl Gui {
         }
     }
 
+    pub fn set_gauge_size(&mut self, id: WidgetId, width: f32, height: f32) -> GuiResult<()> {
+        let node = self.widget_mut(id)?;
+        match &mut node.kind {
+            WidgetKind::Gauge(gauge) => {
+                gauge.set_size(width, height);
+                Ok(())
+            }
+            kind => Err(wrong_widget_type(id, "gauge", kind)),
+        }
+    }
+
     pub fn set_picture_image(&mut self, id: WidgetId, image: Option<ImageData>) -> GuiResult<()> {
         let node = self.widget_mut(id)?;
         match &mut node.kind {
             WidgetKind::Picture(picture) => {
                 picture.image = image;
+                Ok(())
+            }
+            kind => Err(wrong_widget_type(id, "picture", kind)),
+        }
+    }
+
+    pub fn set_picture_frame_color(&mut self, id: WidgetId, color: Color) -> GuiResult<()> {
+        let node = self.widget_mut(id)?;
+        match &mut node.kind {
+            WidgetKind::Picture(picture) => {
+                picture.frame_color = color;
+                Ok(())
+            }
+            kind => Err(wrong_widget_type(id, "picture", kind)),
+        }
+    }
+
+    pub fn set_picture_background_color(&mut self, id: WidgetId, color: Color) -> GuiResult<()> {
+        let node = self.widget_mut(id)?;
+        match &mut node.kind {
+            WidgetKind::Picture(picture) => {
+                picture.background = color;
                 Ok(())
             }
             kind => Err(wrong_widget_type(id, "picture", kind)),

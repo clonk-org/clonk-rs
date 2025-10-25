@@ -5,7 +5,7 @@ mod network;
 mod object_menu;
 mod settings;
 
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, hash_map::Entry, HashMap, HashSet};
 use std::convert::TryFrom;
 use std::f32::consts::PI;
 use std::fmt;
@@ -40,10 +40,10 @@ use lc_engine::{
     FLAG_VCENTER, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
-    draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite, GraphicsOverlay,
-    GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher, KeyCode, MainMenuAction,
-    MainMenuItem, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu,
-    StartupMenu, StartupMenuAction, ViewportInput,
+    default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
+    GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher, KeyCode,
+    MainMenuAction, MainMenuItem, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState,
+    StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
 use lc_gui::ButtonTextures;
@@ -2661,6 +2661,40 @@ impl GameApp {
         }
     }
 
+    fn populate_crew_portraits(&self, players: &mut [PlayerOverlay]) {
+        let hud_graphics = self.graphics.hud_graphics();
+        let fallback_portrait = hud_graphics.crew.clone();
+        let mut cache: HashMap<String, ImageData> = HashMap::new();
+
+        for player in players.iter_mut() {
+            for crew in player.crew.iter_mut() {
+                let Some(object) = self.snapshot.object(crew.object_id) else {
+                    crew.portrait = fallback_portrait.clone();
+                    continue;
+                };
+
+                let definition_id = object.definition_id.clone();
+                if let Some(picture) = self.engine.definition_picture_image(&definition_id) {
+                    let image = match cache.entry(definition_id) {
+                        Entry::Occupied(entry) => entry.get().clone(),
+                        Entry::Vacant(entry) => {
+                            let image = ImageData::from_arc(
+                                picture.width(),
+                                picture.height(),
+                                picture.pixels(),
+                            );
+                            entry.insert(image.clone());
+                            image
+                        }
+                    };
+                    crew.portrait = Some(image);
+                } else {
+                    crew.portrait = fallback_portrait.clone();
+                }
+            }
+        }
+    }
+
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         if state == ElementState::Pressed {
             match key {
@@ -3854,7 +3888,8 @@ impl GameApp {
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
         let viewports = collect_viewport_inputs(&self.snapshot, self.local_owner, self.focus_id);
         if let Some(_focus) = self.focus_snapshot.as_ref() {
-            let players = collect_player_overlays(&self.snapshot, self.focus_id);
+            let mut players = collect_player_overlays(&self.snapshot, self.focus_id);
+            self.populate_crew_portraits(&mut players);
             let overlay = GraphicsOverlay {
                 frame_text: &self.frame_text,
                 status_text: &self.status_text,
@@ -4783,16 +4818,23 @@ fn collect_player_overlays(
         let mut crew = Vec::with_capacity(player.crew.len());
         let cursor = detail_map.get(&player.owner).and_then(|state| state.cursor);
         for object_id in &player.crew {
-            if let Some(object) = snapshot.object(*object_id) {
-                let label = format!("{} #{}", object.definition_id, object.id.as_u64());
-                let energy_fraction = (object.energy.max(0).min(100) as f32) / 100.0;
-                let is_focus = focus_id == Some(object.id) || cursor == Some(object.id);
-                crew.push(CrewOverlay {
-                    label,
-                    energy_fraction,
-                    is_focus,
-                });
-            }
+            let (label, energy_fraction, is_focus) =
+                if let Some(object) = snapshot.object(*object_id) {
+                    let label = format!("{} #{}", object.definition_id, object.id.as_u64());
+                    let energy_fraction = (object.energy.max(0).min(100) as f32) / 100.0;
+                    let is_focus = focus_id == Some(object.id) || cursor == Some(object.id);
+                    (label, energy_fraction, is_focus)
+                } else {
+                    let label = format!("Object #{}", object_id.as_u64());
+                    (label, 0.0, false)
+                };
+            crew.push(CrewOverlay {
+                object_id: *object_id,
+                label,
+                energy_fraction,
+                is_focus,
+                portrait: None,
+            });
         }
         let name = detail_map
             .get(&player.owner)
@@ -4808,12 +4850,17 @@ fn collect_player_overlays(
             .get(&player.owner)
             .map(|state| state.wealth)
             .unwrap_or(0);
+        let owner_color = detail_map
+            .get(&player.owner)
+            .and_then(|state| state.color.map(|rgb| Color::opaque(rgb.r, rgb.g, rgb.b)))
+            .unwrap_or_else(|| default_owner_color(player.owner));
         players.push(PlayerOverlay {
             owner: player.owner,
             name,
             wealth,
             cursor,
             eliminated: player.eliminated,
+            owner_color,
             crew,
         });
     }
@@ -5983,6 +6030,7 @@ mod tests {
         assert_eq!(player.cursor, Some(focus));
         assert!(!player.eliminated);
         assert_eq!(player.crew.len(), 2);
+        assert_eq!(player.owner_color, default_owner_color(1));
 
         let mut focused = player
             .crew
@@ -5993,6 +6041,8 @@ mod tests {
         let focus_entry = focused.pop().expect("focus highlight present");
         assert!(focus_entry.label.contains("Clonk"));
         assert!((focus_entry.energy_fraction - 0.8).abs() < f32::EPSILON);
+        assert_eq!(focus_entry.object_id, focus);
+        assert!(focus_entry.portrait.is_none());
 
         let other_entry = player
             .crew
@@ -6001,6 +6051,8 @@ mod tests {
             .expect("non-focus crew present");
         assert!(!other_entry.is_focus);
         assert!((other_entry.energy_fraction - 0.4).abs() < f32::EPSILON);
+        assert_eq!(other_entry.object_id, teammate);
+        assert!(other_entry.portrait.is_none());
     }
 
     #[test]

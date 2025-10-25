@@ -47,6 +47,14 @@ const DEFAULT_PLAYER_COLORS: [Color; 12] = [
     Color::opaque(0xC0, 0x00, 0xBC),
 ];
 
+pub fn default_owner_color(owner: i32) -> Color {
+    if owner <= 0 {
+        return Color::opaque(255, 255, 255);
+    }
+    let idx = ((owner - 1) as usize) % DEFAULT_PLAYER_COLORS.len();
+    DEFAULT_PLAYER_COLORS[idx]
+}
+
 const CATEGORY_BACKGROUND_FLAG: i32 = 1 << 20;
 const CATEGORY_PARALLAX_FLAG: i32 = 1 << 21;
 const CATEGORY_FOREGROUND_FLAG: i32 = 1 << 23;
@@ -295,14 +303,17 @@ pub struct PlayerOverlay {
     pub wealth: i32,
     pub cursor: Option<ObjectId>,
     pub eliminated: bool,
+    pub owner_color: Color,
     pub crew: Vec<CrewOverlay>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CrewOverlay {
+    pub object_id: ObjectId,
     pub label: String,
     pub energy_fraction: f32,
     pub is_focus: bool,
+    pub portrait: Option<ImageData>,
 }
 
 #[derive(Debug)]
@@ -315,6 +326,7 @@ struct PlayerWidgets {
 
 #[derive(Debug)]
 struct CrewWidgets {
+    portrait: WidgetId,
     label: WidgetId,
     gauge: WidgetId,
 }
@@ -502,6 +514,10 @@ impl GraphicsSystem {
         let eliminated_color = Color::opaque(224, 92, 92);
         let focus_color = Color::opaque(252, 242, 160);
         let crew_color = Color::opaque(212, 212, 212);
+        let portrait_background = Color::opaque(18, 26, 40);
+        let portrait_focus_background = Color::opaque(32, 40, 56);
+        let portrait_frame_neutral = Color::opaque(44, 58, 84);
+        let fallback_portrait = self.hud_graphics.crew.clone();
 
         for (player_overlay, widgets) in overlay.players.iter().zip(self.player_widgets.iter()) {
             let header_text = if player_overlay.name.is_empty() {
@@ -538,6 +554,27 @@ impl GraphicsSystem {
                 } else {
                     self.gui.set_label_color(crew_widgets.label, crew_color)?;
                 }
+                let image = crew_overlay
+                    .portrait
+                    .clone()
+                    .or_else(|| fallback_portrait.clone());
+                self.gui.set_picture_image(crew_widgets.portrait, image)?;
+                let frame_color = if crew_overlay.is_focus {
+                    focus_color
+                } else if player_overlay.owner_color.a > 0 {
+                    player_overlay.owner_color.modulate(0.85)
+                } else {
+                    portrait_frame_neutral
+                };
+                self.gui
+                    .set_picture_frame_color(crew_widgets.portrait, frame_color)?;
+                let background_color = if crew_overlay.is_focus {
+                    portrait_focus_background
+                } else {
+                    portrait_background
+                };
+                self.gui
+                    .set_picture_background_color(crew_widgets.portrait, background_color)?;
                 self.gui.set_gauge_fraction(
                     crew_widgets.gauge,
                     crew_overlay.energy_fraction.clamp(0.0, 1.0),
@@ -1986,6 +2023,10 @@ impl GraphicsSystem {
         gui.set_gauge_fraction(energy_gauge, 1.0)?;
         let players_container = gui.add_column(root, true);
 
+        const CREW_PORTRAIT_SIZE: f32 = 72.0;
+        const CREW_GAUGE_WIDTH: f32 = 72.0;
+        const CREW_GAUGE_HEIGHT: f32 = 12.0;
+
         let mut player_widgets = Vec::with_capacity(players.len());
         for player in players {
             let player_column = gui.add_column(players_container, true);
@@ -1995,10 +2036,16 @@ impl GraphicsSystem {
             let mut crew_widgets = Vec::with_capacity(player.crew.len());
             for _ in &player.crew {
                 let crew_column = gui.add_column(crew_row, false);
+                let portrait = gui.add_picture(crew_column, CREW_PORTRAIT_SIZE, CREW_PORTRAIT_SIZE);
                 let label = gui.add_label(crew_column, "");
                 let gauge = gui.add_gauge(crew_column);
                 gui.set_gauge_fraction(gauge, 1.0)?;
-                crew_widgets.push(CrewWidgets { label, gauge });
+                gui.set_gauge_size(gauge, CREW_GAUGE_WIDTH, CREW_GAUGE_HEIGHT)?;
+                crew_widgets.push(CrewWidgets {
+                    portrait,
+                    label,
+                    gauge,
+                });
             }
             player_widgets.push(PlayerWidgets {
                 owner: player.owner,
@@ -2083,18 +2130,10 @@ impl GraphicsSystem {
             }
             colors
                 .entry(owner)
-                .or_insert_with(|| Self::default_owner_color(owner));
+                .or_insert_with(|| default_owner_color(owner));
         }
 
         colors
-    }
-
-    fn default_owner_color(owner: i32) -> Color {
-        if owner <= 0 {
-            return Color::opaque(255, 255, 255);
-        }
-        let idx = ((owner - 1) as usize) % DEFAULT_PLAYER_COLORS.len();
-        DEFAULT_PLAYER_COLORS[idx]
     }
 
     fn collect_sprite_atlas(&self, snapshot: &SimulationSnapshot) -> Vec<EngineSurfaceSnapshot> {
