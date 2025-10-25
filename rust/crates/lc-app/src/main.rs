@@ -1,3 +1,4 @@
+mod control_options;
 mod gamepad;
 mod ingame_menu;
 mod input;
@@ -26,9 +27,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use control_options::{
+    binding_display_name, format_key_label, ControlOptionsCommand, ControlOptionsState,
+};
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
 use ingame_menu::{IngameMenuAction, IngameMenuState};
-use input::KeyboardBindings;
+use input::{ControlBindingId, KeyboardBindings};
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_core::std_config::Config;
 use lc_engine::scenario::LegacyDefinitionResolver;
@@ -1742,6 +1746,7 @@ struct GameApp {
     fallback_ground: i32,
     menu_state: MenuState,
     main_menu_state: MainMenuState,
+    control_options: Option<ControlOptionsState>,
     startup_view: StartupView,
     object_menu: Option<ObjectMenuState>,
     ingame_menu: Option<IngameMenuState>,
@@ -1790,6 +1795,7 @@ struct MainMenuState {
 enum StartupView {
     MainMenu,
     ScenarioBrowser,
+    Options,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2900,6 +2906,7 @@ impl GameApp {
             fallback_ground: DEFAULT_GROUND_HEIGHT,
             menu_state,
             main_menu_state,
+            control_options: None,
             startup_view: StartupView::MainMenu,
             object_menu: None,
             ingame_menu: None,
@@ -2949,6 +2956,10 @@ impl GameApp {
             self.menu_state.set_pointer_position(None);
             self.main_menu_state.resize(width_f, height_f);
             self.main_menu_state.set_pointer_position(None);
+            if let Some(options) = self.control_options.as_mut() {
+                options.resize(width_f, height_f);
+                options.set_pointer_position(None);
+            }
         }
         Ok(())
     }
@@ -3092,6 +3103,28 @@ impl GameApp {
 
         match self.mode {
             AppMode::Menu => {
+                if self.startup_view == StartupView::Options {
+                    if let Some(options) = self.control_options.as_mut() {
+                        let mut commands = Vec::new();
+                        if state == ElementState::Pressed {
+                            if let Some(command) =
+                                options.handle_virtual_key(key, &mut self.bindings)
+                            {
+                                commands.push(command);
+                            }
+                        }
+                        if let Some(gui_key) = map_key_code(key) {
+                            let action_commands = match state {
+                                ElementState::Pressed => options.handle_key_down(gui_key),
+                                ElementState::Released => options.handle_key_up(gui_key),
+                            };
+                            commands.extend(action_commands);
+                        }
+                        let _ = options;
+                        self.process_control_options_commands(commands)?;
+                    }
+                    return Ok(());
+                }
                 if let Some(gui_key) = map_key_code(key) {
                     match self.startup_view {
                         StartupView::ScenarioBrowser => match state {
@@ -3119,6 +3152,7 @@ impl GameApp {
                             };
                             self.process_main_menu_actions(actions)?;
                         }
+                        StartupView::Options => {}
                     }
                 }
                 Ok(())
@@ -3676,6 +3710,16 @@ impl GameApp {
                             };
                             self.process_main_menu_actions(actions)?;
                         }
+                        StartupView::Options => {
+                            if let Some(commands) =
+                                self.control_options.as_mut().map(|options| match state {
+                                    ElementState::Pressed => options.handle_key_down(key),
+                                    ElementState::Released => options.handle_key_up(key),
+                                })
+                            {
+                                self.process_control_options_commands(commands)?;
+                            }
+                        }
                     }
                 }
             }
@@ -3708,6 +3752,11 @@ impl GameApp {
                 };
                 self.process_main_menu_actions(actions)?;
             }
+            StartupView::Options => {
+                if state == ElementState::Pressed {
+                    self.process_control_options_command(ControlOptionsCommand::Close)?;
+                }
+            }
         }
         Ok(())
     }
@@ -3737,6 +3786,16 @@ impl GameApp {
                             }
                         };
                         self.process_main_menu_actions(actions)?;
+                    }
+                    StartupView::Options => {
+                        if let Some(commands) =
+                            self.control_options.as_mut().map(|options| match state {
+                                ElementState::Pressed => options.handle_key_down(KeyCode::Enter),
+                                ElementState::Released => options.handle_key_up(KeyCode::Enter),
+                            })
+                        {
+                            self.process_control_options_commands(commands)?;
+                        }
                     }
                 },
                 AppMode::Running | AppMode::Loading => {}
@@ -3778,6 +3837,19 @@ impl GameApp {
                     self.main_menu_state.set_pointer_position(Some(point));
                     let actions = self.main_menu_state.handle_pointer_move(point);
                     self.process_main_menu_actions(actions)
+                }
+                StartupView::Options => {
+                    let commands = if let Some(options) = self.control_options.as_mut() {
+                        options.set_pointer_position(Some(point));
+                        Some(options.handle_pointer_move(point))
+                    } else {
+                        None
+                    };
+                    if let Some(commands) = commands {
+                        self.process_control_options_commands(commands)
+                    } else {
+                        Ok(())
+                    }
                 }
             },
             AppMode::Running => {
@@ -3928,6 +4000,20 @@ impl GameApp {
                     }
                     Ok(())
                 }
+                StartupView::Options => {
+                    let commands = if let Some(options) = self.control_options.as_mut() {
+                        options.pointer_position().map(|point| match button_state {
+                            ElementState::Pressed => options.handle_pointer_down(point),
+                            ElementState::Released => options.handle_pointer_up(point),
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(commands) = commands {
+                        self.process_control_options_commands(commands)?;
+                    }
+                    Ok(())
+                }
             },
             AppMode::Running => self.handle_ingame_mouse_button(button_state),
             AppMode::Loading => Ok(()),
@@ -3978,6 +4064,27 @@ impl GameApp {
                 };
                 self.process_main_menu_actions(actions)
             }
+            StartupView::Options => {
+                let (commands, clear_pointer) = if let Some(options) = self.control_options.as_mut()
+                {
+                    options.set_pointer_position(Some(position));
+                    match phase {
+                        TouchPhase::Started => (options.handle_pointer_down(position), false),
+                        TouchPhase::Moved => (options.handle_pointer_move(position), false),
+                        TouchPhase::Ended => (options.handle_pointer_up(position), true),
+                        TouchPhase::Cancelled => (Vec::new(), true),
+                    }
+                } else {
+                    (
+                        Vec::new(),
+                        matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled),
+                    )
+                };
+                if clear_pointer {
+                    self.pointer_left();
+                }
+                self.process_control_options_commands(commands)
+            }
         }
     }
 
@@ -3989,6 +4096,11 @@ impl GameApp {
                 }
                 StartupView::MainMenu => {
                     self.main_menu_state.pointer_left();
+                }
+                StartupView::Options => {
+                    if let Some(options) = self.control_options.as_mut() {
+                        options.set_pointer_position(None);
+                    }
                 }
             },
             AppMode::Running => {
@@ -4126,6 +4238,67 @@ impl GameApp {
         Ok(())
     }
 
+    fn process_control_options_commands(
+        &mut self,
+        commands: Vec<ControlOptionsCommand>,
+    ) -> Result<(), EngineError> {
+        for command in commands {
+            self.process_control_options_command(command)?;
+        }
+        Ok(())
+    }
+
+    fn process_control_options_command(
+        &mut self,
+        command: ControlOptionsCommand,
+    ) -> Result<(), EngineError> {
+        match command {
+            ControlOptionsCommand::SelectionChanged(_) => {
+                self.status_text.clear();
+            }
+            ControlOptionsCommand::BeginRebind(binding) => {
+                self.status_text = format!(
+                    "Press a key for “{}” or Escape to cancel",
+                    binding_display_name(binding)
+                );
+            }
+            ControlOptionsCommand::BindingUpdated(binding) => {
+                if let Some(options) = self.control_options.as_mut() {
+                    options.apply_binding_change(binding, &self.bindings);
+                }
+                self.persist_control_bindings();
+                self.status_text =
+                    format!("Updated binding for “{}”", binding_display_name(binding));
+            }
+            ControlOptionsCommand::ResetAll => {
+                self.bindings.reset_all();
+                if let Some(options) = self.control_options.as_mut() {
+                    options.apply_reset_all(&self.bindings);
+                }
+                self.persist_control_bindings();
+                self.status_text = "Control bindings reset to defaults".to_string();
+            }
+            ControlOptionsCommand::Close => {
+                if let Some(options) = self.control_options.as_mut() {
+                    options.set_pointer_position(None);
+                    options.cancel_rebind();
+                }
+                self.show_main_menu();
+            }
+            ControlOptionsCommand::UnsupportedKey(key) => {
+                self.status_text =
+                    format!("“{}” cannot be used for controls", format_key_label(key));
+            }
+        }
+        Ok(())
+    }
+
+    fn persist_control_bindings(&self) {
+        if let Ok(paths) = cached_app_paths() {
+            self.bindings.save(paths.as_ref());
+        }
+    }
+
     fn handle_main_menu_activation(&mut self, item: MainMenuItem) -> Result<(), EngineError> {
         match item {
             MainMenuItem::LocalGame => {
@@ -4138,7 +4311,7 @@ impl GameApp {
                 self.status_text = "Player selection UI not yet implemented".to_string();
             }
             MainMenuItem::Options => {
-                self.status_text = "Options UI not yet implemented".to_string();
+                self.open_options_menu();
             }
             MainMenuItem::About => {
                 self.status_text = "LegacyClonk Rust Preview".to_string();
@@ -4161,12 +4334,34 @@ impl GameApp {
         self.status_text.clear();
     }
 
+    fn open_options_menu(&mut self) {
+        let width = self.graphics.surface().width() as f32;
+        let height = self.graphics.surface().height() as f32;
+        let mut state = self
+            .control_options
+            .take()
+            .unwrap_or_else(|| ControlOptionsState::new(self.assets.font_arc()));
+        state.resize(width, height);
+        state.refresh_from_bindings(&self.bindings);
+        if state.selected_binding().is_none() {
+            state.set_selected_binding(ControlBindingId::CursorLeft);
+        }
+        state.set_pointer_position(None);
+        self.control_options = Some(state);
+        self.startup_view = StartupView::Options;
+        self.status_text.clear();
+    }
+
     fn show_main_menu(&mut self) {
         self.startup_view = StartupView::MainMenu;
         self.main_menu_state.pointer_left();
         self.refresh_participants_label();
         self.scenario_label = DEFAULT_SCENARIO_LABEL.to_string();
         self.status_text.clear();
+        if let Some(options) = self.control_options.as_mut() {
+            options.set_pointer_position(None);
+            options.cancel_rebind();
+        }
     }
 
     fn refresh_participants_label(&mut self) {
@@ -4366,6 +4561,7 @@ impl GameApp {
                     self.assets.as_ref(),
                     &mut self.main_menu_state,
                     &mut self.menu_state,
+                    self.control_options.as_mut(),
                     self.startup_view,
                     frame,
                 );
@@ -5382,6 +5578,7 @@ fn render_startup_frame(
     assets: &FrontendAssets,
     main_menu: &mut MainMenuState,
     scenario_menu: &mut MenuState,
+    control_options: Option<&mut ControlOptionsState>,
     view: StartupView,
     frame: &mut [u8],
 ) {
@@ -5399,6 +5596,11 @@ fn render_startup_frame(
         match view {
             StartupView::MainMenu => main_menu.render(surface),
             StartupView::ScenarioBrowser => scenario_menu.menu().render(surface),
+            StartupView::Options => {
+                if let Some(options) = control_options {
+                    options.render(surface);
+                }
+            }
         }
     }
     let surface = graphics.surface();

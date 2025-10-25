@@ -1,6 +1,7 @@
 mod input;
 mod startup_main_menu;
 mod startup_menu;
+mod startup_options;
 
 use lc_engine::{
     DefinitionActionGraphics, Direction, DrawTransform, EnvironmentFrame, EnvironmentSettings,
@@ -26,6 +27,7 @@ pub use lc_gui::{
 };
 pub use startup_main_menu::{MainMenuAction, MainMenuItem, StartupMainMenu};
 pub use startup_menu::{ScenarioSummary, StartupMenu, StartupMenuAction};
+pub use startup_options::{ControlOptionItem, ControlOptionsAction, ControlOptionsView};
 
 const OVERLAY_HEIGHT: f32 = 120.0;
 const MIN_VIEWPORT_ZOOM: f32 = 0.125;

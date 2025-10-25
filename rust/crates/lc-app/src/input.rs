@@ -1,9 +1,56 @@
 use std::collections::{HashMap, HashSet};
+use std::io::ErrorKind;
 
 use lc_core::std_config::Config;
 use lc_engine::{CommandKind, ControlButton, ControlCommand, ControlEvent};
 use lc_platform::AppPaths;
 use winit::event::{ElementState, VirtualKeyCode};
+
+#[repr(usize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ControlBindingId {
+    CursorLeft = 0,
+    CursorToggle = 1,
+    CursorRight = 2,
+    Throw = 3,
+    Up = 4,
+    Dig = 5,
+    Left = 6,
+    Down = 7,
+    Right = 8,
+    PlayerMenu = 9,
+    Special = 10,
+    Special2 = 11,
+}
+
+impl ControlBindingId {
+    pub const ALL: [ControlBindingId; 12] = [
+        ControlBindingId::CursorLeft,
+        ControlBindingId::CursorToggle,
+        ControlBindingId::CursorRight,
+        ControlBindingId::Throw,
+        ControlBindingId::Up,
+        ControlBindingId::Dig,
+        ControlBindingId::Left,
+        ControlBindingId::Down,
+        ControlBindingId::Right,
+        ControlBindingId::PlayerMenu,
+        ControlBindingId::Special,
+        ControlBindingId::Special2,
+    ];
+
+    pub fn default_key(self) -> VirtualKeyCode {
+        self.spec().default_key
+    }
+
+    fn binding(self) -> Binding {
+        self.spec().binding
+    }
+
+    fn spec(self) -> &'static ControlBindingSpec {
+        &CONTROL_BINDING_SPECS[self as usize]
+    }
+}
 
 /// Keyboard control bindings backed by the legacy `Config.Controls` section.
 #[derive(Debug, Clone)]
@@ -65,14 +112,21 @@ impl Binding {
 
 #[derive(Debug, Clone, Copy)]
 struct ControlBindingSpec {
+    id: ControlBindingId,
     index: usize,
     default_key: VirtualKeyCode,
     binding: Binding,
 }
 
 impl ControlBindingSpec {
-    const fn new(index: usize, default_key: VirtualKeyCode, binding: Binding) -> Self {
+    const fn new(
+        id: ControlBindingId,
+        index: usize,
+        default_key: VirtualKeyCode,
+        binding: Binding,
+    ) -> Self {
         Self {
+            id,
             index,
             default_key,
             binding,
@@ -114,7 +168,7 @@ impl KeyboardBindings {
 
         for spec in CONTROL_BINDING_SPECS {
             if let Some(key) = read_keyboard_entry(config, 0, spec.index) {
-                bindings.set_binding(spec.binding, key);
+                bindings.assign_binding(spec.binding, key);
                 any_override = true;
             }
         }
@@ -161,7 +215,70 @@ impl KeyboardBindings {
         }
     }
 
-    fn set_binding(&mut self, binding: Binding, key: VirtualKeyCode) {
+    pub fn key_for(&self, id: ControlBindingId) -> Option<VirtualKeyCode> {
+        let target = id.binding();
+        self.bindings
+            .iter()
+            .find_map(|(key, binding)| if *binding == target { Some(*key) } else { None })
+    }
+
+    pub fn rebind(&mut self, id: ControlBindingId, key: VirtualKeyCode) {
+        self.assign_binding(id.binding(), key);
+    }
+
+    pub fn reset_binding(&mut self, id: ControlBindingId) {
+        let spec = id.spec();
+        self.assign_binding(spec.binding, spec.default_key);
+    }
+
+    pub fn reset_all(&mut self) {
+        for spec in CONTROL_BINDING_SPECS {
+            self.assign_binding(spec.binding, spec.default_key);
+        }
+    }
+
+    pub fn is_supported_key(key: VirtualKeyCode) -> bool {
+        encode_virtual_key_code(key).is_some()
+    }
+
+    pub fn save(&self, paths: &AppPaths) {
+        let config_path = paths.config_file();
+        let mut config = match Config::load(&config_path) {
+            Ok(existing) => existing,
+            Err(err) if err.kind() == ErrorKind::NotFound => Config::new(),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %config_path.display(),
+                    "failed to load config for saving controls"
+                );
+                return;
+            }
+        };
+
+        for spec in CONTROL_BINDING_SPECS {
+            let key_name = format!("Kbd{}Key{}", 1, spec.index + 1);
+            let keycode = self.key_for(spec.id).unwrap_or(spec.default_key);
+            if let Some(encoded) = encode_virtual_key_code(keycode) {
+                config.set_in(Some("Controls"), &key_name, encoded.to_string());
+            } else {
+                tracing::warn!(
+                    ?keycode,
+                    "skipping persistence for unsupported virtual key code"
+                );
+            }
+        }
+
+        if let Err(err) = config.save(&config_path) {
+            tracing::warn!(
+                error = %err,
+                path = %config_path.display(),
+                "failed to persist control bindings"
+            );
+        }
+    }
+
+    fn assign_binding(&mut self, binding: Binding, key: VirtualKeyCode) {
         self.bindings.remove(&key);
         self.bindings.retain(|_, mapped| *mapped != binding);
         self.bindings.insert(key, binding);
@@ -189,45 +306,73 @@ impl KeyboardBindings {
 
 const CONTROL_BINDING_SPECS: &[ControlBindingSpec] = &[
     ControlBindingSpec::new(
+        ControlBindingId::CursorLeft,
         0,
         VirtualKeyCode::Q,
         Binding::command(ControlCommand::CursorLeft, true),
     ),
     ControlBindingSpec::new(
+        ControlBindingId::CursorToggle,
         1,
         VirtualKeyCode::W,
         Binding::command(ControlCommand::CursorToggle, true),
     ),
     ControlBindingSpec::new(
+        ControlBindingId::CursorRight,
         2,
         VirtualKeyCode::E,
         Binding::command(ControlCommand::CursorRight, true),
     ),
     ControlBindingSpec::new(
+        ControlBindingId::Throw,
         3,
         VirtualKeyCode::A,
         Binding::command(ControlCommand::Throw, true),
     ),
-    ControlBindingSpec::new(4, VirtualKeyCode::S, Binding::button(ControlButton::Up)),
     ControlBindingSpec::new(
+        ControlBindingId::Up,
+        4,
+        VirtualKeyCode::S,
+        Binding::button(ControlButton::Up),
+    ),
+    ControlBindingSpec::new(
+        ControlBindingId::Dig,
         5,
         VirtualKeyCode::D,
         Binding::command(ControlCommand::Dig, true),
     ),
-    ControlBindingSpec::new(6, VirtualKeyCode::Z, Binding::button(ControlButton::Left)),
-    ControlBindingSpec::new(7, VirtualKeyCode::X, Binding::button(ControlButton::Down)),
-    ControlBindingSpec::new(8, VirtualKeyCode::C, Binding::button(ControlButton::Right)),
     ControlBindingSpec::new(
+        ControlBindingId::Left,
+        6,
+        VirtualKeyCode::Z,
+        Binding::button(ControlButton::Left),
+    ),
+    ControlBindingSpec::new(
+        ControlBindingId::Down,
+        7,
+        VirtualKeyCode::X,
+        Binding::button(ControlButton::Down),
+    ),
+    ControlBindingSpec::new(
+        ControlBindingId::Right,
+        8,
+        VirtualKeyCode::C,
+        Binding::button(ControlButton::Right),
+    ),
+    ControlBindingSpec::new(
+        ControlBindingId::PlayerMenu,
         9,
         VirtualKeyCode::R,
         Binding::command(ControlCommand::PlayerMenu, false),
     ),
     ControlBindingSpec::new(
+        ControlBindingId::Special,
         10,
         VirtualKeyCode::V,
         Binding::command(ControlCommand::Special, true),
     ),
     ControlBindingSpec::new(
+        ControlBindingId::Special2,
         11,
         VirtualKeyCode::F,
         Binding::command(ControlCommand::Special2, true),
@@ -401,6 +546,53 @@ fn insert_default_binding(
     bindings.insert(key, binding);
 }
 
+fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
+    match key {
+        VirtualKeyCode::A => Some('A' as i32),
+        VirtualKeyCode::B => Some('B' as i32),
+        VirtualKeyCode::C => Some('C' as i32),
+        VirtualKeyCode::D => Some('D' as i32),
+        VirtualKeyCode::E => Some('E' as i32),
+        VirtualKeyCode::F => Some('F' as i32),
+        VirtualKeyCode::G => Some('G' as i32),
+        VirtualKeyCode::H => Some('H' as i32),
+        VirtualKeyCode::I => Some('I' as i32),
+        VirtualKeyCode::J => Some('J' as i32),
+        VirtualKeyCode::K => Some('K' as i32),
+        VirtualKeyCode::L => Some('L' as i32),
+        VirtualKeyCode::M => Some('M' as i32),
+        VirtualKeyCode::N => Some('N' as i32),
+        VirtualKeyCode::O => Some('O' as i32),
+        VirtualKeyCode::P => Some('P' as i32),
+        VirtualKeyCode::Q => Some('Q' as i32),
+        VirtualKeyCode::R => Some('R' as i32),
+        VirtualKeyCode::S => Some('S' as i32),
+        VirtualKeyCode::T => Some('T' as i32),
+        VirtualKeyCode::U => Some('U' as i32),
+        VirtualKeyCode::V => Some('V' as i32),
+        VirtualKeyCode::W => Some('W' as i32),
+        VirtualKeyCode::X => Some('X' as i32),
+        VirtualKeyCode::Y => Some('Y' as i32),
+        VirtualKeyCode::Z => Some('Z' as i32),
+        VirtualKeyCode::Key0 => Some('0' as i32),
+        VirtualKeyCode::Key1 => Some('1' as i32),
+        VirtualKeyCode::Key2 => Some('2' as i32),
+        VirtualKeyCode::Key3 => Some('3' as i32),
+        VirtualKeyCode::Key4 => Some('4' as i32),
+        VirtualKeyCode::Key5 => Some('5' as i32),
+        VirtualKeyCode::Key6 => Some('6' as i32),
+        VirtualKeyCode::Key7 => Some('7' as i32),
+        VirtualKeyCode::Key8 => Some('8' as i32),
+        VirtualKeyCode::Key9 => Some('9' as i32),
+        VirtualKeyCode::Space => Some(0x20),
+        VirtualKeyCode::Left => Some(0x25),
+        VirtualKeyCode::Up => Some(0x26),
+        VirtualKeyCode::Right => Some(0x27),
+        VirtualKeyCode::Down => Some(0x28),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,5 +700,37 @@ mod tests {
             Some(VirtualKeyCode::Right),
             "SDL scancode for Right should parse"
         );
+    }
+
+    #[test]
+    fn rebind_updates_and_resets() {
+        let mut bindings = KeyboardBindings::default_bindings();
+        assert_eq!(
+            bindings.key_for(ControlBindingId::Throw),
+            Some(VirtualKeyCode::A)
+        );
+
+        bindings.rebind(ControlBindingId::Throw, VirtualKeyCode::Key1);
+        assert_eq!(
+            bindings.key_for(ControlBindingId::Throw),
+            Some(VirtualKeyCode::Key1)
+        );
+        assert_ne!(
+            bindings.key_for(ControlBindingId::Throw),
+            Some(VirtualKeyCode::A)
+        );
+
+        bindings.reset_binding(ControlBindingId::Throw);
+        assert_eq!(
+            bindings.key_for(ControlBindingId::Throw),
+            Some(ControlBindingId::Throw.default_key())
+        );
+    }
+
+    #[test]
+    fn supported_key_detection_matches_encoder() {
+        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Q));
+        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Space));
+        assert!(!KeyboardBindings::is_supported_key(VirtualKeyCode::F1));
     }
 }

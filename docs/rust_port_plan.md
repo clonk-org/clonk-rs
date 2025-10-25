@@ -196,7 +196,7 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - [x] Mouse controls (select, drag, throw)
 - [x] Gamepad support
 - [x] Control responsiveness (no lag)
-- [ ] Control customization
+- [x] Control customization
 
 **Progress (2025-11-30):** Engine now routes Dig/Throw/Special/Special2 commands through the legacy `Control*` scripts via `Engine::handle_control_command`, with both the frontend dispatcher and playback runtime invoking it so scripted behaviors (e.g. `ControlDig`) trigger identical to C++.
 **Progress (2025-12-15):** Rust frontend now mirrors LegacyClonk's mouse flow: left-click selection snaps the cursor to the clicked crew, keeps focus overlays in sync, and dragging from a selected crew synthesizes the directional control events plus throw command so inventory items launch in the dragged direction without using the keyboard. Pointer tracking halts while menus are open to avoid spamming commands.
@@ -205,6 +205,7 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 **Progress (2025-12-20):** Gamepad buttons now mirror the default keyboard bindings: face buttons trigger Throw/Dig/Special/Special2, shoulders/trigger manage cursor selection and clear commands, Start opens the player menu, and Back toggles the pause menu via `rust/crates/lc-app/src/gamepad.rs` and `rust/crates/lc-app/src/main.rs:3564`.
 **Progress (2025-12-21):** Double-tapping Down now routes through `InputDispatcher` to call the engine’s grab/drop helpers, while pressing Up at a structure requests `Engine::try_enter_nearby`, matching legacy grab/drop/enter behavior; covered by regression tests in `rust/crates/lc-frontend/src/input.rs` and `rust/crates/lc-engine/src/lib.rs`.
 **Progress (2025-12-22):** Opening inventory or pause menus now submits a `ClearPressed` control event (and network broadcast) before suppressing gameplay commands, so direction states reset immediately and no longer stick when menus absorb the matching key releases.
+**Progress (2025-12-23):** Added an in-game Control Options dialog that mirrors LegacyClonk's key customization flow; players can rebind, reset, and persist keyboard mappings through `control_options.rs`, the options UI in `startup_options.rs`, and the new startup view wiring in `rust/crates/lc-app/src/main.rs`.
 
 **Files:** InputDispatcher, handle_key() in main.rs, lc-engine/src/input.rs
 
