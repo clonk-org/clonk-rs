@@ -5,6 +5,16 @@ use crate::landscape::Landscape;
 use crate::{MaterialId, MaterialSet};
 
 const MAX_MASS_MOVERS: usize = 10_000;
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+fn fnv_update(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
 
 #[derive(Debug, Clone)]
 struct MassMover {
@@ -40,6 +50,24 @@ impl MassMoverSet {
     pub fn clear(&mut self) {
         self.movers.clear();
         self.spawn_queue.clear();
+    }
+
+    pub fn sync_signature(&self) -> i32 {
+        let mut hash = FNV_OFFSET_BASIS;
+        hash = fnv_update(hash, &(self.movers.len() as u32).to_le_bytes());
+        for mover in &self.movers {
+            hash = fnv_update(hash, &(mover.material.index() as u32).to_le_bytes());
+            hash = fnv_update(hash, &mover.x.to_le_bytes());
+            hash = fnv_update(hash, &mover.y.to_le_bytes());
+            hash = fnv_update(hash, &[mover.active as u8]);
+        }
+        hash = fnv_update(hash, &(self.spawn_queue.len() as u32).to_le_bytes());
+        for spawn in &self.spawn_queue {
+            hash = fnv_update(hash, &spawn.x.to_le_bytes());
+            hash = fnv_update(hash, &spawn.y.to_le_bytes());
+            hash = fnv_update(hash, &[spawn.execute_immediately as u8]);
+        }
+        (hash & 0xFFFF_FFFF) as i32
     }
 
     pub fn len(&self) -> usize {

@@ -41,9 +41,9 @@ use lc_engine::{
     ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, FloatVector2,
     Landscape, MaterialSet, MenuCommandKind, MenuCommandSelection, MessageKind, MovementProfile,
     ObjectId, ObjectSnapshot, ObjectUpdate, PlayerStatus, Scenario, ScenarioError,
-    SimulationSnapshot, SkyConfig, SpawnConfig, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT,
-    FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP,
-    FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
+    SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER,
+    FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK,
+    FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
     default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
@@ -113,6 +113,9 @@ struct RuntimeConfig {
     network: Option<NetworkMode>,
 }
 
+const SYNC_CHECK_RATE: u32 = if cfg!(debug_assertions) { 1 } else { 100 };
+const SYNC_CHECK_HISTORY: i32 = 50;
+
 const DEFAULT_LOADING_MESSAGE: &str = "Preparing scenario";
 
 enum ScenarioLoadingEvent {
@@ -145,6 +148,53 @@ impl ScenarioLoadingState {
         if !message.trim().is_empty() {
             self.message = message;
         }
+    }
+}
+
+struct SyncCheckState {
+    local: HashMap<i32, SyncCheckPacket>,
+    remote: HashMap<i32, SyncCheckPacket>,
+}
+
+impl SyncCheckState {
+    fn new() -> Self {
+        Self {
+            local: HashMap::new(),
+            remote: HashMap::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.local.clear();
+        self.remote.clear();
+    }
+
+    fn record_local(
+        &mut self,
+        check: SyncCheckPacket,
+    ) -> Option<(SyncCheckPacket, SyncCheckPacket)> {
+        let frame = check.frame;
+        let remote = self.remote.remove(&frame);
+        self.local.insert(frame, check.clone());
+        remote.map(|remote_check| (check, remote_check))
+    }
+
+    fn record_remote(
+        &mut self,
+        check: SyncCheckPacket,
+    ) -> Option<(SyncCheckPacket, SyncCheckPacket)> {
+        let frame = check.frame;
+        if let Some(local) = self.local.get(&frame).cloned() {
+            Some((local, check))
+        } else {
+            self.remote.insert(frame, check);
+            None
+        }
+    }
+
+    fn prune_before(&mut self, threshold: i32) {
+        self.local.retain(|&frame, _| frame >= threshold);
+        self.remote.retain(|&frame, _| frame >= threshold);
     }
 }
 
@@ -1757,6 +1807,8 @@ struct GameApp {
     assets: Arc<FrontendAssets>,
     material_library: Option<Arc<MaterialSet>>,
     network: Option<NetworkManager>,
+    network_mode: Option<NetworkMode>,
+    sync_checks: SyncCheckState,
     local_owner: i32,
     last_save_path: Option<PathBuf>,
     object_sprites: HashMap<String, DefinitionSprite>,
@@ -2841,7 +2893,8 @@ impl GameApp {
         paths: Option<&AppPaths>,
         runtime: RuntimeConfig,
     ) -> Result<Self> {
-        let network = match runtime.network {
+        let network_mode = runtime.network.clone();
+        let network = match network_mode.clone() {
             Some(mode) => Some(NetworkManager::for_mode(mode, runtime.player_owner)?),
             None => None,
         };
@@ -2916,9 +2969,11 @@ impl GameApp {
             audio,
             assets: assets.clone(),
             material_library: material_library.clone(),
-            last_save_path: None,
             network,
+            network_mode,
+            sync_checks: SyncCheckState::new(),
             local_owner: runtime.player_owner,
+            last_save_path: None,
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
             loading_state: None,
@@ -3621,6 +3676,9 @@ impl GameApp {
                             self.dispatch_control_event_for_owner(owner, event)?;
                         }
                     }
+                    NetworkEvent::SyncCheck { packet } => {
+                        self.handle_sync_check(packet);
+                    }
                     NetworkEvent::PeerConnected { client_id } => {
                         tracing::info!(%client_id, "network client connected");
                     }
@@ -3641,6 +3699,39 @@ impl GameApp {
             }
         }
         Ok(())
+    }
+
+    fn handle_sync_check(&mut self, packet: SyncCheckPacket) {
+        if matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return;
+        }
+        if let Some((local, remote)) = self.sync_checks.record_remote(packet) {
+            self.evaluate_sync_checks(local, remote);
+        }
+    }
+
+    fn evaluate_sync_checks(&mut self, local: SyncCheckPacket, remote: SyncCheckPacket) {
+        if local.matches(&remote) {
+            return;
+        }
+        self.handle_desync(local, remote);
+    }
+
+    fn handle_desync(&mut self, local: SyncCheckPacket, remote: SyncCheckPacket) {
+        tracing::error!(
+            frame = local.frame,
+            local = ?local,
+            host = ?remote,
+            "network desync detected"
+        );
+        self.sync_checks.clear();
+        if matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            self.status_text = "Network desync detected".to_string();
+            return;
+        }
+        self.network = None;
+        self.return_to_menu();
+        self.status_text = "Network desync detected; disconnected from host".to_string();
     }
 
     fn process_gamepad_events(&mut self) -> Result<(), EngineError> {
@@ -4441,6 +4532,7 @@ impl GameApp {
                 self.refresh_object_menu();
                 self.refresh_focus();
                 self.update_audio();
+                self.maybe_emit_sync_check();
             }
             AppMode::Loading => {
                 self.poll_loading()?;
@@ -4467,6 +4559,41 @@ impl GameApp {
                 viewport_center,
             );
         }
+    }
+
+    fn maybe_emit_sync_check(&mut self) {
+        let Some(local_client_id) = self
+            .network
+            .as_ref()
+            .map(|network| network.local_client_id())
+        else {
+            return;
+        };
+        if !matches!(self.mode, AppMode::Running) {
+            return;
+        }
+        let Ok(frame_i32) = i32::try_from(self.snapshot.frame) else {
+            return;
+        };
+        if frame_i32 < 0 {
+            return;
+        }
+        if frame_i32 % SYNC_CHECK_RATE as i32 != 0 {
+            self.sync_checks
+                .prune_before(frame_i32.saturating_sub(SYNC_CHECK_HISTORY));
+            return;
+        }
+        let client_id = i32::try_from(local_client_id).unwrap_or(0);
+        let check = self.engine.sync_check(client_id);
+        if let Some((local, remote)) = self.sync_checks.record_local(check.clone()) {
+            self.evaluate_sync_checks(local, remote);
+        }
+        let tick = u32::try_from(self.snapshot.frame).unwrap_or(u32::MAX);
+        if let Some(network) = self.network.as_ref() {
+            network.submit_sync_check(tick, check);
+        }
+        self.sync_checks
+            .prune_before(frame_i32.saturating_sub(SYNC_CHECK_HISTORY));
     }
 
     fn poll_loading(&mut self) -> Result<(), EngineError> {
@@ -5090,6 +5217,7 @@ impl GameApp {
         self.mouse_state = None;
         self.sky = None;
         self.snapshot = self.engine.snapshot();
+        self.sync_checks.clear();
         self.refresh_object_menu();
         self.focus_id = None;
         self.focus_snapshot = None;
@@ -5543,6 +5671,7 @@ impl GameApp {
         self.frame_text.clear();
         self.status_text.clear();
         self.energy_fraction = 0.0;
+        self.sync_checks.clear();
         self.menu_state.set_pointer_position(None);
         self.object_menu = None;
         self.ingame_menu = None;

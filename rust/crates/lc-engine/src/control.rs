@@ -22,6 +22,8 @@ impl ControlPacketId {
 pub enum ControlPacket {
     /// Player control command (`CID_PlrControl`).
     PlayerControl(PlayerControlData),
+    /// Deterministic state checksum used for desync detection (`CID_SyncCheck`).
+    SyncCheck(SyncCheckPacket),
     /// A control packet that is not yet interpreted by the Rust runtime.
     Unknown {
         id: ControlPacketId,
@@ -37,6 +39,36 @@ pub struct PlayerControlData {
     pub command: i32,
     pub data: i32,
     pub by_client: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncCheckPacket {
+    pub frame: i32,
+    pub control_tick: i32,
+    pub random3: i32,
+    pub random_count: i32,
+    pub crew_positions_sum: i32,
+    pub pxs_count: i32,
+    pub mass_mover_index: i32,
+    pub object_count: i32,
+    pub object_enumeration_index: i32,
+    pub sector_shape_sum: i32,
+    pub by_client: i32,
+}
+
+impl SyncCheckPacket {
+    pub fn matches(&self, other: &Self) -> bool {
+        self.frame == other.frame
+            && self.control_tick == other.control_tick
+            && self.random3 == other.random3
+            && self.random_count == other.random_count
+            && self.crew_positions_sum == other.crew_positions_sum
+            && self.pxs_count == other.pxs_count
+            && self.mass_mover_index == other.mass_mover_index
+            && self.object_count == other.object_count
+            && self.object_enumeration_index == other.object_enumeration_index
+            && self.sector_shape_sum == other.sector_shape_sum
+    }
 }
 
 pub const COM_SINGLE: u8 = 64;

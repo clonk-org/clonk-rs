@@ -24,11 +24,11 @@ pub use action::{
 };
 pub use control::{
     interpret_player_control_command, CommandKind, ControlButton, ControlCommand, ControlEvent,
-    ControlPacket, PlayerControlData, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT,
-    COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN,
-    COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT,
-    COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_PLAYER_MENU, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE,
-    COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
+    ControlPacket, PlayerControlData, SyncCheckPacket, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT,
+    COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE,
+    COM_MENU_DOWN, COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT,
+    COM_MENU_SELECT, COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_PLAYER_MENU, COM_RELEASE_OFFSET,
+    COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
 };
 pub use effect::EffectState;
 pub use input::PlayerInputState;
@@ -5151,11 +5151,40 @@ pub struct Engine {
     messages: MessageManager,
 }
 
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+fn fnv_update(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
 fn clamp_to_limit(value: i32, limit: i32) -> i32 {
     if limit <= 0 {
         0
     } else {
         value.clamp(-limit, limit)
+    }
+}
+
+fn saturating_i64_to_i32(value: i64) -> i32 {
+    if value > i64::from(i32::MAX) {
+        i32::MAX
+    } else if value < i64::from(i32::MIN) {
+        i32::MIN
+    } else {
+        value as i32
+    }
+}
+
+fn saturating_u64_to_i32(value: u64) -> i32 {
+    if value > i32::MAX as u64 {
+        i32::MAX
+    } else {
+        value as i32
     }
 }
 
@@ -7998,6 +8027,48 @@ impl Engine {
             transfer_zones: self.transfer_zones.states(),
             audio: Vec::new(),
         }
+    }
+
+    pub fn sync_check(&self, by_client: i32) -> SyncCheckPacket {
+        let frame = saturating_u64_to_i32(self.frame);
+        let control_tick = frame;
+        let (random3, random_count) = self.sync_rng_digest();
+        let crew_positions_sum = self
+            .objects
+            .iter()
+            .filter(|object| object.state.crew_member && object.state.status.is_active())
+            .fold(0i64, |acc, object| acc + i64::from(object.state.position.x));
+        let pxs_count = i32::try_from(self.material_particles.len()).unwrap_or(i32::MAX);
+        let mass_mover_index = self.mass_movers.sync_signature();
+        let object_count = i32::try_from(self.objects.len()).unwrap_or(i32::MAX);
+        let object_enumeration_index = saturating_u64_to_i32(self.next_object_id);
+        let sector_shape_sum = self
+            .landscape
+            .as_ref()
+            .map(|landscape| saturating_i64_to_i32(landscape.shape_sum()))
+            .unwrap_or(0);
+
+        SyncCheckPacket {
+            frame,
+            control_tick,
+            random3,
+            random_count,
+            crew_positions_sum: saturating_i64_to_i32(crew_positions_sum),
+            pxs_count,
+            mass_mover_index,
+            object_count,
+            object_enumeration_index,
+            sector_shape_sum,
+            by_client,
+        }
+    }
+
+    fn sync_rng_digest(&self) -> (i32, i32) {
+        let bytes = serde_json::to_vec(&self.rng).unwrap_or_default();
+        let mut hash = fnv_update(FNV_OFFSET_BASIS, &bytes);
+        let lower = (hash & 0xFFFF_FFFF) as i32;
+        let upper = ((hash >> 32) & 0xFFFF_FFFF) as i32;
+        (upper, lower)
     }
 
     pub fn capture_state(&self) -> EngineState {

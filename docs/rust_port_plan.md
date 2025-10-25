@@ -351,7 +351,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [x] Player join during game
 - [x] Player leave handling
 - [x] Control input synchronization
-- [ ] Desync detection and recovery
+- [x] Desync detection and recovery
 - [ ] Network lobby UI (pre-game)
 - [ ] Player list with ready status
 - [ ] Scenario selection in lobby
@@ -362,6 +362,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2026-03-04):** Client network loop now retains a LegacyClonk-style control backlog and fulfills host resync requests so missing ticks replay deterministically; covered by the new `client_resends_backlog_when_requested` regression test in `rust/crates/lc-network/src/session.rs`.
 **Progress (2026-06-14):** Host session replays the synchronized control backlog to newly connected peers before syncing so mid-game joins catch up precisely; guarded by the `new_client_replays_backlog_on_join` test in `rust/crates/lc-network/src/session.rs`.
 **Progress (2026-10-25):** Host loop now drains waiting control batches when a client disconnects and rebroadcasts them so remaining players advance without stalling; guarded by the `host_continues_ready_after_client_disconnect` test in `rust/crates/lc-network/src/session.rs`.
+**Progress (2027-03-07):** Frontend now emits legacy `CID_SyncCheck` packets at the original cadence, hashing engine state to detect divergence. Clients compare the host signature, surface a desync warning, and drop back to the menu instead of continuing with a mismatched world; implemented across `lc-engine`, `lc-network`, and the frontend network manager with regression coverage in `legacy::encode_and_decode_sync_check`.
 
 ---
 

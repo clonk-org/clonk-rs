@@ -1,9 +1,10 @@
-use lc_engine::{ControlPacket as EngineControlPacket, PlayerControlData};
+use lc_engine::{ControlPacket as EngineControlPacket, PlayerControlData, SyncCheckPacket};
 
 use crate::{ClientId, ControlPacket, Tick};
 
 const PID_NONE: u8 = 0x00;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
+const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
 const MAX_VARINT_BYTES: usize = 5;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -115,6 +116,7 @@ fn decode_control_list(
         }
         match id {
             CID_PLR_CONTROL => controls.push(decode_player_control(reader)?),
+            CID_SYNC_CHECK => controls.push(decode_sync_check(reader)?),
             other => return Err(LegacyControlError::UnsupportedPacket(other)),
         }
     }
@@ -132,6 +134,33 @@ fn decode_player_control(
         player,
         command,
         data,
+        by_client,
+    }))
+}
+
+fn decode_sync_check(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    let frame = reader.read_int32()?;
+    let control_tick = reader.read_int32()?;
+    let random3 = reader.read_int32()?;
+    let random_count = reader.read_int32()?;
+    let crew_positions_sum = reader.read_int32()?;
+    let pxs_count = reader.read_int32()?;
+    let mass_mover_index = reader.read_int32()?;
+    let object_count = reader.read_int32()?;
+    let object_enumeration_index = reader.read_int32()?;
+    let sector_shape_sum = reader.read_int32()?;
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::SyncCheck(SyncCheckPacket {
+        frame,
+        control_tick,
+        random3,
+        random_count,
+        crew_positions_sum,
+        pxs_count,
+        mass_mover_index,
+        object_count,
+        object_enumeration_index,
+        sector_shape_sum,
         by_client,
     }))
 }
@@ -219,6 +248,21 @@ fn encode_player_control(buffer: &mut Vec<u8>, data: &PlayerControlData) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_sync_check(buffer: &mut Vec<u8>, data: &SyncCheckPacket) {
+    buffer.push(CID_SYNC_CHECK);
+    append_int32(buffer, data.frame);
+    append_int32(buffer, data.control_tick);
+    append_int32(buffer, data.random3);
+    append_int32(buffer, data.random_count);
+    append_int32(buffer, data.crew_positions_sum);
+    append_int32(buffer, data.pxs_count);
+    append_int32(buffer, data.mass_mover_index);
+    append_int32(buffer, data.object_count);
+    append_int32(buffer, data.object_enumeration_index);
+    append_int32(buffer, data.sector_shape_sum);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_controls(
     controls: &[EngineControlPacket],
     buffer: &mut Vec<u8>,
@@ -226,6 +270,7 @@ fn encode_controls(
     for control in controls {
         match control {
             EngineControlPacket::PlayerControl(data) => encode_player_control(buffer, data),
+            EngineControlPacket::SyncCheck(data) => encode_sync_check(buffer, data),
             _ => return Err(LegacyEncodeError::UnsupportedPacket),
         }
     }
@@ -378,5 +423,40 @@ mod tests {
         assert_eq!(decoded.tick, frame.tick);
         assert_eq!(decoded.timestamp_ms, frame.timestamp_ms);
         assert_eq!(decoded.controls, frame.controls);
+    }
+
+    #[test]
+    fn encode_and_decode_sync_check() {
+        let sync = SyncCheckPacket {
+            frame: 120,
+            control_tick: 118,
+            random3: 33,
+            random_count: 77,
+            crew_positions_sum: 1024,
+            pxs_count: 45,
+            mass_mover_index: 12,
+            object_count: 256,
+            object_enumeration_index: 512,
+            sector_shape_sum: 2048,
+            by_client: 5,
+        };
+        let frame = LegacyControlFrame {
+            client_id: 5,
+            tick: 120,
+            timestamp_ms: 55,
+            controls: vec![EngineControlPacket::SyncCheck(sync.clone())],
+        };
+        let packet = encode_control_packet(&frame).expect("encode succeeds");
+        let decoded = decode_control_packet(&packet).expect("decode succeeds");
+        assert_eq!(decoded.client_id, frame.client_id);
+        assert_eq!(decoded.tick, frame.tick);
+        assert_eq!(decoded.timestamp_ms, frame.timestamp_ms);
+        assert_eq!(decoded.controls.len(), 1);
+        match &decoded.controls[0] {
+            EngineControlPacket::SyncCheck(decoded_sync) => {
+                assert_eq!(decoded_sync, &sync);
+            }
+            other => panic!("expected sync check control, got {other:?}"),
+        }
     }
 }

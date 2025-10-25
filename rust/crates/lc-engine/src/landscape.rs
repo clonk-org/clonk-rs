@@ -212,6 +212,10 @@ impl Landscape {
         &self.surface
     }
 
+    pub fn shape_sum(&self) -> i64 {
+        self.surface.iter().map(|&value| i64::from(value)).sum()
+    }
+
     pub fn liquids(&self) -> &[LiquidColumn] {
         &self.liquids
     }

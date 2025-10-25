@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use lc_engine::{
     interpret_player_control_command, CommandKind, ControlButton, ControlCommand, ControlEvent,
-    PlayerControlData, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT,
+    PlayerControlData, SyncCheckPacket, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT,
     COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN,
     COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT,
     COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_PLAYER_MENU, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE,
@@ -45,6 +45,7 @@ pub struct NetworkManager {
     command_tx: tokio_mpsc::Sender<NetworkCommand>,
     event_rx: Receiver<NetworkEvent>,
     worker: Option<thread::JoinHandle<()>>,
+    local_client_id: ClientId,
 }
 
 #[derive(Debug)]
@@ -52,6 +53,9 @@ pub enum NetworkEvent {
     Control {
         owner: i32,
         event: ControlEvent,
+    },
+    SyncCheck {
+        packet: SyncCheckPacket,
     },
     PeerConnected {
         client_id: ClientId,
@@ -69,6 +73,10 @@ enum NetworkCommand {
         owner: i32,
         event: ControlEvent,
         tick: Tick,
+    },
+    SubmitSyncCheck {
+        tick: Tick,
+        check: SyncCheckPacket,
     },
     FinalizeTick {
         tick: Tick,
@@ -159,32 +167,57 @@ impl NetworkManager {
     fn spawn(mode: WorkerMode) -> Result<Self> {
         let (command_tx, command_rx) = tokio_mpsc::channel(128);
         let (event_tx, event_rx) = mpsc::channel();
+        let (local_id_tx, local_id_rx) = mpsc::channel::<Result<ClientId, String>>();
         let thread_name = match mode {
             WorkerMode::Host { .. } => "lc-network-host",
             WorkerMode::Client { .. } => "lc-network-client",
         };
         let worker = thread::Builder::new()
             .name(thread_name.to_string())
-            .spawn(move || {
-                let runtime = RuntimeBuilder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .expect("failed to initialise tokio runtime");
-                if let Err(err) = runtime.block_on(run_worker(mode, command_rx, event_tx.clone())) {
-                    let _ = event_tx.send(NetworkEvent::Error(format!("{err:?}")));
+            .spawn({
+                let event_tx = event_tx.clone();
+                move || {
+                    let runtime = RuntimeBuilder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to initialise tokio runtime");
+                    if let Err(err) = runtime.block_on(run_worker(
+                        mode,
+                        command_rx,
+                        event_tx.clone(),
+                        local_id_tx,
+                    )) {
+                        let _ = event_tx.send(NetworkEvent::Error(format!("{err:?}")));
+                    }
                 }
             })
             .context("failed to spawn network worker thread")?;
+        let local_client_id = match local_id_rx
+            .recv()
+            .context("network worker did not report local client id")?
+        {
+            Ok(id) => id,
+            Err(err) => return Err(anyhow!(err)),
+        };
 
         Ok(Self {
             command_tx,
             event_rx,
             worker: Some(worker),
+            local_client_id,
         })
     }
 
     pub fn submit_local_control(&self, owner: i32, event: ControlEvent, tick: Tick) {
         let command = NetworkCommand::SubmitLocal { owner, event, tick };
+        let _ = self.command_tx.blocking_send(command);
+    }
+
+    pub fn submit_sync_check(&self, tick: Tick, mut check: SyncCheckPacket) {
+        if let Ok(id) = i32::try_from(self.local_client_id) {
+            check.by_client = id;
+        }
+        let command = NetworkCommand::SubmitSyncCheck { tick, check };
         let _ = self.command_tx.blocking_send(command);
     }
 
@@ -204,6 +237,10 @@ impl NetworkManager {
         }
         events
     }
+
+    pub fn local_client_id(&self) -> ClientId {
+        self.local_client_id
+    }
 }
 
 impl Drop for NetworkManager {
@@ -219,16 +256,35 @@ async fn run_worker(
     mode: WorkerMode,
     mut command_rx: tokio_mpsc::Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
+    local_id_tx: mpsc::Sender<Result<ClientId, String>>,
 ) -> Result<()> {
     match mode {
         WorkerMode::Host {
             settings,
             local_owner,
-        } => run_host_worker(settings, local_owner, &mut command_rx, event_tx).await,
+        } => {
+            run_host_worker(
+                settings,
+                local_owner,
+                &mut command_rx,
+                event_tx,
+                local_id_tx,
+            )
+            .await
+        }
         WorkerMode::Client {
             settings,
             local_owner,
-        } => run_client_worker(settings, local_owner, &mut command_rx, event_tx).await,
+        } => {
+            run_client_worker(
+                settings,
+                local_owner,
+                &mut command_rx,
+                event_tx,
+                local_id_tx,
+            )
+            .await
+        }
     }
 }
 
@@ -237,10 +293,19 @@ async fn run_host_worker(
     local_owner: i32,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
+    local_id_tx: mpsc::Sender<Result<ClientId, String>>,
 ) -> Result<()> {
-    let listener = TcpListener::bind(settings.bind_addr)
-        .await
-        .with_context(|| format!("failed to bind host socket at {}", settings.bind_addr))?;
+    let listener = match TcpListener::bind(settings.bind_addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            let message = format!(
+                "failed to bind host socket at {}: {err}",
+                settings.bind_addr
+            );
+            let _ = local_id_tx.send(Err(message.clone()));
+            return Err(anyhow!(message));
+        }
+    };
     let host_config = HostConfig {
         backlog_limit: 256,
         max_players: 8,
@@ -248,9 +313,15 @@ async fn run_host_worker(
         resync_cooldown: Duration::from_secs(2),
         start_tick: 0,
     };
-    let mut host = start_host(listener, host_config)
-        .await
-        .context("failed to start host session")?;
+    let mut host = match start_host(listener, host_config).await {
+        Ok(host) => host,
+        Err(err) => {
+            let message = format!("failed to start host session: {err}");
+            let _ = local_id_tx.send(Err(message.clone()));
+            return Err(anyhow!(message));
+        }
+    };
+    let _ = local_id_tx.send(Ok(HOST_CLIENT_ID));
     let mut host_events = host.take_event_receiver();
     let mut frame_builder = ControlFrameAccumulator::new(HOST_CLIENT_ID);
 
@@ -270,6 +341,13 @@ async fn run_host_worker(
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
                             frame_builder.record_control(tick, control, current_millis());
                         }
+                    }
+                    NetworkCommand::SubmitSyncCheck { tick, check } => {
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::SyncCheck(check),
+                            current_millis(),
+                        );
                     }
                     NetworkCommand::FinalizeTick { tick } => {
                         if let Some(frame) = frame_builder.finalize_tick(tick) {
@@ -323,14 +401,23 @@ async fn run_client_worker(
     local_owner: i32,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
+    local_id_tx: mpsc::Sender<Result<ClientId, String>>,
 ) -> Result<()> {
-    let mut client = connect_client(
+    let mut client = match connect_client(
         settings.server_addr,
         ClientConfig::new(settings.player_name, ParticipantKind::Player),
     )
     .await
-    .context("failed to connect to host")?;
+    {
+        Ok(client) => client,
+        Err(err) => {
+            let message = format!("failed to connect to host: {err}");
+            let _ = local_id_tx.send(Err(message.clone()));
+            return Err(anyhow!(message));
+        }
+    };
     let client_id = client.client_id();
+    let _ = local_id_tx.send(Ok(client_id));
     let mut client_events = client.take_event_receiver();
     let mut frame_builder = ControlFrameAccumulator::new(client_id);
 
@@ -350,6 +437,13 @@ async fn run_client_worker(
                         if let Some(control) = control_packet_for_event(owner, event, client_id) {
                             frame_builder.record_control(tick, control, current_millis());
                         }
+                    }
+                    NetworkCommand::SubmitSyncCheck { tick, check } => {
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::SyncCheck(check),
+                            current_millis(),
+                        );
                     }
                     NetworkCommand::FinalizeTick { tick } => {
                         if let Some(frame) = frame_builder.finalize_tick(tick) {
@@ -450,32 +544,25 @@ fn emit_frame_controls(
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
     for control in frame.controls {
-        if let Some(event) = control_event_from_packet(&control) {
-            if let Some(owner) = control_owner(&control) {
-                if owner == local_owner {
-                    continue;
+        match control {
+            lc_engine::ControlPacket::PlayerControl(data) => {
+                if let Some(event) = interpret_player_control_command(data.command) {
+                    if data.player == local_owner {
+                        continue;
+                    }
+                    let _ = event_tx.send(NetworkEvent::Control {
+                        owner: data.player,
+                        event,
+                    });
                 }
-                let _ = event_tx.send(NetworkEvent::Control { owner, event });
             }
+            lc_engine::ControlPacket::SyncCheck(packet) => {
+                let _ = event_tx.send(NetworkEvent::SyncCheck { packet });
+            }
+            lc_engine::ControlPacket::Unknown { .. } => {}
         }
     }
     Ok(())
-}
-
-fn control_event_from_packet(packet: &lc_engine::ControlPacket) -> Option<ControlEvent> {
-    match packet {
-        lc_engine::ControlPacket::PlayerControl(data) => {
-            interpret_player_control_command(data.command)
-        }
-        lc_engine::ControlPacket::Unknown { .. } => None,
-    }
-}
-
-fn control_owner(packet: &lc_engine::ControlPacket) -> Option<i32> {
-    match packet {
-        lc_engine::ControlPacket::PlayerControl(data) => Some(data.player),
-        lc_engine::ControlPacket::Unknown { .. } => None,
-    }
 }
 
 fn control_packet_for_event(
