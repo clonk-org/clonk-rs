@@ -8832,11 +8832,17 @@ impl Engine {
             return None;
         }
         let clamped_target = target_height.max(0);
-        if clamped_target <= previous_height {
-            return None;
-        }
+        let desired_target = if clamped_target <= previous_height {
+            let one_beyond = clamped_target.saturating_add(1);
+            if one_beyond <= previous_height {
+                return None;
+            }
+            previous_height.saturating_add(1)
+        } else {
+            clamped_target
+        };
 
-        landscape.ensure_surface_at_least(column, clamped_target);
+        landscape.ensure_surface_at_least(column, desired_target);
         let new_height = landscape.surface_height(column).unwrap_or(previous_height);
         let removed = new_height.saturating_sub(previous_height);
         if removed <= 0 {
@@ -14399,6 +14405,66 @@ func ControlDig() { SetAction("Dig"); return true; }
 
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.action.name, "Dig");
+    }
+
+    #[test]
+    fn dig_procedure_removes_surface_pixel_when_circle_touches_ground() -> Result<(), EngineError> {
+        let mut definition = Definition::from_script("DGRR", "Digger", PROCEDURE_MOVEMENT_SCRIPT)
+            .expect("script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Dig".to_string(),
+            ActionSpec::default().with_procedure("dig").with_dig_free(6),
+        );
+        definition.configure_actions(Some("Dig".to_string()), actions);
+
+        let material_source = r#"
+            [Material Earth]
+            Name=Earth
+            Density=80
+            Friction=25
+            DigFree=1
+        "#;
+        let library =
+            lc_resources::MaterialLibrary::parse(material_source).expect("material parses");
+        let mut materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut engine = Engine::with_seed(13);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(32, 20, Some(earth)));
+
+        let dig_radius = 6;
+        let position_y = 21 - dig_radius;
+        let column_x = 12;
+
+        engine
+            .spawn_object(
+                SpawnConfig::new("DGRR")
+                    .with_position(Vector2::new(column_x, position_y))
+                    .with_action(ActionState::new("Dig")),
+            )
+            .expect("spawn succeeds");
+
+        for _ in 0..12 {
+            engine.tick().expect("tick succeeds");
+        }
+
+        let snapshot = engine.snapshot();
+        let landscape = snapshot.landscape.as_ref().expect("landscape present");
+        let height = landscape
+            .surface()
+            .get(column_x as usize)
+            .copied()
+            .expect("column present");
+        assert!(
+            height > 20,
+            "expected dig to raise surface beyond 20, got {height}"
+        );
+        Ok(())
     }
 
     #[test]
