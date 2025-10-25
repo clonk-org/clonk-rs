@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use lc_engine::{
-    CommandDirection, CommandKind, ControlCommand, ControlEvent, CrewCommandTarget, Engine,
-    EngineError, ObjectUpdate, PlayerInputState,
+    CommandDirection, CommandKind, ControlButton, ControlCommand, ControlEvent, CrewCommandTarget,
+    Engine, EngineError, ObjectUpdate, PlayerInputState,
 };
 
 /// Centralises player input handling for the Rust frontend. Each player receives their own state
@@ -33,9 +33,28 @@ impl InputDispatcher {
             .entry(owner)
             .or_insert_with(PlayerInputContext::new);
         let maybe_direction = match event {
-            ControlEvent::Press(button) => context.directional.press(button),
+            ControlEvent::Press(button) => match button {
+                ControlButton::Down => {
+                    if context.interaction.register_down(frame) {
+                        handle_down_interaction(engine, owner)?;
+                    }
+                    context.directional.press(button)
+                }
+                ControlButton::Up => {
+                    if engine.try_enter_nearby(owner)? {
+                        context.interaction.clear();
+                        None
+                    } else {
+                        context.directional.press(button)
+                    }
+                }
+                _ => context.directional.press(button),
+            },
             ControlEvent::Release(button) => context.directional.release(button),
-            ControlEvent::ClearPressed => context.directional.clear(),
+            ControlEvent::ClearPressed => {
+                context.interaction.clear();
+                context.directional.clear()
+            }
             ControlEvent::Command { command, kind } => {
                 let handled = handle_command(engine, owner, context, command, kind, frame)?;
                 if !handled {
@@ -64,6 +83,7 @@ const DOUBLE_CLICK_WINDOW: u64 = 10;
 struct PlayerInputContext {
     directional: PlayerInputState,
     selection: SelectionControlState,
+    interaction: InteractionControlState,
 }
 
 impl PlayerInputContext {
@@ -71,6 +91,7 @@ impl PlayerInputContext {
         Self {
             directional: PlayerInputState::new(),
             selection: SelectionControlState::new(),
+            interaction: InteractionControlState::new(),
         }
     }
 }
@@ -108,6 +129,36 @@ impl SelectionControlState {
 enum ToggleOutcome {
     Single,
     Double,
+}
+
+#[derive(Debug)]
+struct InteractionControlState {
+    last_down_press: Option<u64>,
+}
+
+impl InteractionControlState {
+    fn new() -> Self {
+        Self {
+            last_down_press: None,
+        }
+    }
+
+    fn register_down(&mut self, frame: u64) -> bool {
+        match self.last_down_press {
+            Some(previous) if frame.saturating_sub(previous) <= DOUBLE_CLICK_WINDOW => {
+                self.last_down_press = None;
+                true
+            }
+            _ => {
+                self.last_down_press = Some(frame);
+                false
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.last_down_press = None;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -257,9 +308,18 @@ fn handle_command(
     Ok(false)
 }
 
+fn handle_down_interaction(engine: &mut Engine, owner: i32) -> Result<(), EngineError> {
+    if engine.try_grab_nearby(owner)? {
+        return Ok(());
+    }
+    let _ = engine.try_drop_held_object(owner)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lc_engine::ocf;
     use lc_engine::{
         ControlButton, Definition, MovementProfile, ObjectId, SpawnConfig, Vector2, OWNER_NONE,
     };
@@ -457,6 +517,93 @@ global func Step(state, frame, random) { return nil; }
             dispatcher.command_direction(OWNER_NONE),
             CommandDirection::Left
         );
+        Ok(())
+    }
+
+    #[test]
+    fn double_down_grabs_nearby_object() -> Result<(), EngineError> {
+        let mut engine = setup_engine();
+        let mut item_definition =
+            Definition::from_script("Gem", "Gem", WALKER_SCRIPT).expect("valid script");
+        item_definition.set_ocf_base(ocf::GRAB | ocf::CARRYABLE);
+        engine
+            .register_definition(item_definition)
+            .expect("register grabbable definition");
+        let crew = spawn_crew_member(&mut engine, 1, 0)?;
+        engine.select_crew(1, vec![crew])?;
+        engine.set_crew_cursor(1, Some(crew))?;
+        let item =
+            engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(6, 0)))?;
+        let mut dispatcher = InputDispatcher::new();
+
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Release(ControlButton::Down))?;
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
+
+        let snapshot = engine.object_snapshot(item).expect("item snapshot");
+        assert_eq!(snapshot.container, Some(crew));
+        Ok(())
+    }
+
+    #[test]
+    fn double_down_drops_carried_object() -> Result<(), EngineError> {
+        let mut engine = setup_engine();
+        let mut item_definition =
+            Definition::from_script("Gem", "Gem", WALKER_SCRIPT).expect("valid script");
+        item_definition.set_ocf_base(ocf::GRAB | ocf::CARRYABLE);
+        engine
+            .register_definition(item_definition)
+            .expect("register grabbable definition");
+        let crew = spawn_crew_member(&mut engine, 1, 0)?;
+        engine.select_crew(1, vec![crew])?;
+        engine.set_crew_cursor(1, Some(crew))?;
+        let item =
+            engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(6, 0)))?;
+        let mut dispatcher = InputDispatcher::new();
+
+        // Grab the item first.
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Release(ControlButton::Down))?;
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Release(ControlButton::Down))?;
+
+        // Drop it on the next double down.
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Release(ControlButton::Down))?;
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Down))?;
+
+        let crew_snapshot = engine.object_snapshot(crew).expect("crew snapshot");
+        let item_snapshot = engine.object_snapshot(item).expect("item snapshot");
+        assert!(
+            item_snapshot.container.is_none(),
+            "item should no longer be contained after drop"
+        );
+        assert_ne!(
+            item_snapshot.position, crew_snapshot.position,
+            "dropped item should not share crew position"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn press_up_enters_nearby_structure() -> Result<(), EngineError> {
+        let mut engine = setup_engine();
+        let mut structure_definition =
+            Definition::from_script("Hut", "Hut", WALKER_SCRIPT).expect("valid script");
+        structure_definition.set_ocf_base(ocf::ENTRANCE | ocf::CONTAINER);
+        engine
+            .register_definition(structure_definition)
+            .expect("register structure definition");
+        let crew = spawn_crew_member(&mut engine, 1, 0)?;
+        engine.select_crew(1, vec![crew])?;
+        engine.set_crew_cursor(1, Some(crew))?;
+        let hut = engine.spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(0, 0)))?;
+        let mut dispatcher = InputDispatcher::new();
+
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Up))?;
+
+        let crew_snapshot = engine.object_snapshot(crew).expect("crew snapshot");
+        assert_eq!(crew_snapshot.container, Some(hut));
         Ok(())
     }
 }

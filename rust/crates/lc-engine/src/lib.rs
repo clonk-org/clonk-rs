@@ -6063,6 +6063,95 @@ impl Engine {
         Ok(handled)
     }
 
+    pub fn try_grab_nearby(&mut self, owner: i32) -> Result<bool, EngineError> {
+        self.ensure_cursor(owner)?;
+        let Some(crew_id) = self.crew_cursor(owner) else {
+            return Ok(false);
+        };
+        let crew_index = match self.find_object_index(crew_id) {
+            Some(index) => index,
+            None => return Err(EngineError::UnknownObject(crew_id)),
+        };
+        if !self.objects[crew_index].state.status.is_active() {
+            return Ok(false);
+        }
+        let crew_position = self.objects[crew_index].state.position;
+        let Some((_, target_id)) =
+            self.find_nearby_object_with_mask(crew_id, crew_position, ocf::GRAB, 22, |object| {
+                object.state.container.is_none() && object.state.status.is_active()
+            })
+        else {
+            return Ok(false);
+        };
+        let update = ObjectUpdate::new()
+            .with_container(crew_id)
+            .with_position(crew_position)
+            .with_velocity(Vector2::ZERO);
+        self.apply_object_update(target_id, update)?;
+        Ok(true)
+    }
+
+    pub fn try_drop_held_object(&mut self, owner: i32) -> Result<bool, EngineError> {
+        self.ensure_cursor(owner)?;
+        let Some(crew_id) = self.crew_cursor(owner) else {
+            return Ok(false);
+        };
+        let crew_index = match self.find_object_index(crew_id) {
+            Some(index) => index,
+            None => return Err(EngineError::UnknownObject(crew_id)),
+        };
+        let crew_state = &self.objects[crew_index].state;
+        if !crew_state.status.is_active() {
+            return Ok(false);
+        }
+        let Some(item_id) = crew_state.contents.first().copied() else {
+            return Ok(false);
+        };
+        let offset = match crew_state.direction {
+            Direction::Left => -8,
+            Direction::Right => 8,
+        };
+        let drop_position = Vector2::new(crew_state.position.x + offset, crew_state.position.y);
+        let update = ObjectUpdate::new()
+            .clear_container()
+            .with_position(drop_position)
+            .with_velocity(Vector2::ZERO);
+        self.apply_object_update(item_id, update)?;
+        Ok(true)
+    }
+
+    pub fn try_enter_nearby(&mut self, owner: i32) -> Result<bool, EngineError> {
+        self.ensure_cursor(owner)?;
+        let Some(crew_id) = self.crew_cursor(owner) else {
+            return Ok(false);
+        };
+        let crew_index = match self.find_object_index(crew_id) {
+            Some(index) => index,
+            None => return Err(EngineError::UnknownObject(crew_id)),
+        };
+        let crew_state = &self.objects[crew_index].state;
+        if crew_state.container.is_some() || !crew_state.status.is_active() {
+            return Ok(false);
+        }
+        let crew_position = crew_state.position;
+        let Some((target_index, target_id)) = self.find_nearby_object_with_mask(
+            crew_id,
+            crew_position,
+            ocf::ENTRANCE,
+            24,
+            |object| object.state.status.is_active(),
+        ) else {
+            return Ok(false);
+        };
+        let target_position = self.objects[target_index].state.position;
+        let update = ObjectUpdate::new()
+            .with_container(target_id)
+            .with_position(target_position)
+            .with_velocity(Vector2::ZERO);
+        self.apply_object_update(crew_id, update)?;
+        Ok(true)
+    }
+
     pub fn set_crew_role(
         &mut self,
         owner: i32,
@@ -9150,6 +9239,62 @@ impl Engine {
         false
     }
 
+    fn object_ocf_at_index(&self, index: usize) -> u32 {
+        let object = &self.objects[index];
+        self.definitions
+            .get(&object.definition_id)
+            .map(|definition| definition.compute_ocf(&object.state))
+            .unwrap_or_else(|| {
+                crate::ocf::compute(
+                    OCF_NORMAL,
+                    object.state.crew_member,
+                    object.state.alive,
+                    object.state.status,
+                    object.state.container.is_some(),
+                )
+            })
+    }
+
+    fn object_has_ocf(&self, index: usize, mask: u32) -> bool {
+        self.object_ocf_at_index(index) & mask != 0
+    }
+
+    fn find_nearby_object_with_mask<F>(
+        &self,
+        origin_id: ObjectId,
+        origin_pos: Vector2,
+        mask: u32,
+        radius: i32,
+        mut filter: F,
+    ) -> Option<(usize, ObjectId)>
+    where
+        F: FnMut(&Object) -> bool,
+    {
+        if radius <= 0 {
+            return None;
+        }
+        let radius_sq = i64::from(radius) * i64::from(radius);
+        self.objects
+            .iter()
+            .enumerate()
+            .filter(|(_, object)| object.id != origin_id)
+            .filter_map(|(index, object)| {
+                if !self.object_has_ocf(index, mask) || !filter(object) {
+                    return None;
+                }
+                let dx = i64::from(object.state.position.x - origin_pos.x);
+                let dy = i64::from(object.state.position.y - origin_pos.y);
+                let distance_sq = dx * dx + dy * dy;
+                if distance_sq <= radius_sq {
+                    Some((index, object.id, distance_sq))
+                } else {
+                    None
+                }
+            })
+            .min_by_key(|(_, _, distance_sq)| *distance_sq)
+            .map(|(index, id, _)| (index, id))
+    }
+
     fn apply_container_change(
         &mut self,
         object_id: ObjectId,
@@ -11664,6 +11809,11 @@ mod tests {
             energy = energy
         };
     }
+    "#;
+
+    const BASIC_OBJECT_SCRIPT: &str = r#"
+    global func Initialize(state, random) { return nil; }
+    global func Step(state, frame, random) { return nil; }
     "#;
 
     #[test]
@@ -16662,6 +16812,101 @@ public func ControlDig() { SetAction(\"Dig\"); return true; }
         assert_eq!(landscape.solid_material_at(0), Some(water));
         assert_eq!(landscape.default_solid_material(), Some(water));
 
+        Ok(())
+    }
+
+    #[test]
+    fn try_grab_nearby_moves_object_into_inventory() -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        let mut crew_definition = Definition::from_script("Crew", "Crew", BASIC_OBJECT_SCRIPT)?;
+        crew_definition.set_crew_member(true);
+        crew_definition.set_movement_profile(MovementProfile::default());
+        engine.register_definition(crew_definition)?;
+
+        let mut item_definition = Definition::from_script("Gem", "Gem", BASIC_OBJECT_SCRIPT)?;
+        item_definition.set_ocf_base(ocf::GRAB | ocf::CARRYABLE);
+        engine.register_definition(item_definition)?;
+
+        let crew = engine.spawn_object(
+            SpawnConfig::new("Crew")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_position(Vector2::new(0, 0)),
+        )?;
+        engine.select_crew(1, vec![crew])?;
+        engine.set_crew_cursor(1, Some(crew))?;
+        let item =
+            engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(8, 0)))?;
+
+        assert!(engine.try_grab_nearby(1)?);
+        let snapshot = engine.object_snapshot(item).expect("item snapshot");
+        assert_eq!(snapshot.container, Some(crew));
+        Ok(())
+    }
+
+    #[test]
+    fn try_drop_held_object_places_item_next_to_crew() -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        let mut crew_definition = Definition::from_script("Crew", "Crew", BASIC_OBJECT_SCRIPT)?;
+        crew_definition.set_crew_member(true);
+        crew_definition.set_movement_profile(MovementProfile::default());
+        engine.register_definition(crew_definition)?;
+
+        let mut item_definition = Definition::from_script("Gem", "Gem", BASIC_OBJECT_SCRIPT)?;
+        item_definition.set_ocf_base(ocf::GRAB | ocf::CARRYABLE);
+        engine.register_definition(item_definition)?;
+
+        let crew = engine.spawn_object(
+            SpawnConfig::new("Crew")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_position(Vector2::new(0, 0)),
+        )?;
+        engine.select_crew(1, vec![crew])?;
+        engine.set_crew_cursor(1, Some(crew))?;
+        let item =
+            engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(6, 0)))?;
+
+        assert!(engine.try_grab_nearby(1)?);
+        let crew_before_drop = engine.object_snapshot(crew).expect("crew snapshot");
+        assert!(engine.try_drop_held_object(1)?);
+        let item_snapshot = engine.object_snapshot(item).expect("item snapshot");
+        assert!(
+            item_snapshot.container.is_none(),
+            "item should be released from inventory"
+        );
+        assert_ne!(
+            item_snapshot.position, crew_before_drop.position,
+            "item should be positioned away from crew after drop"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn try_enter_nearby_moves_crew_into_structure() -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        let mut crew_definition = Definition::from_script("Crew", "Crew", BASIC_OBJECT_SCRIPT)?;
+        crew_definition.set_crew_member(true);
+        crew_definition.set_movement_profile(MovementProfile::default());
+        engine.register_definition(crew_definition)?;
+
+        let mut structure_definition = Definition::from_script("Hut", "Hut", BASIC_OBJECT_SCRIPT)?;
+        structure_definition.set_ocf_base(ocf::ENTRANCE | ocf::CONTAINER);
+        engine.register_definition(structure_definition)?;
+
+        let crew = engine.spawn_object(
+            SpawnConfig::new("Crew")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_position(Vector2::new(0, 0)),
+        )?;
+        engine.select_crew(1, vec![crew])?;
+        engine.set_crew_cursor(1, Some(crew))?;
+        let hut = engine.spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(0, 0)))?;
+
+        assert!(engine.try_enter_nearby(1)?);
+        let crew_snapshot = engine.object_snapshot(crew).expect("crew snapshot");
+        assert_eq!(crew_snapshot.container, Some(hut));
         Ok(())
     }
 }
