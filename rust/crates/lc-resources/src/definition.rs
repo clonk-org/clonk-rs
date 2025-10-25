@@ -62,6 +62,10 @@ pub struct DefCore {
     pub mass: i32,
     pub picture: Option<PictureRect>,
     pub color_by_owner: bool,
+    pub shape: Option<PictureRect>,
+    pub collection: Option<PictureRect>,
+    pub collection_limit: Option<u32>,
+    pub collectible: bool,
 }
 
 impl DefCore {
@@ -186,6 +190,10 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut object_mass: i32 = 0;
     let mut picture: Option<PictureRect> = None;
     let mut color_by_owner = false;
+    let mut shape: Option<PictureRect> = None;
+    let mut collection: Option<PictureRect> = None;
+    let mut collection_limit: Option<u32> = None;
+    let mut collectible = false;
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -246,6 +254,21 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "colorbyowner" => {
                 color_by_owner = parse_i32(value).unwrap_or(0) != 0;
             }
+            "shape" => {
+                shape = parse_rect(value);
+            }
+            "collection" => {
+                collection = parse_rect(value).filter(|rect| rect.width > 0 && rect.height > 0);
+            }
+            "collectionlimit" => {
+                collection_limit = match parse_i32(value) {
+                    Some(limit) if limit > 0 => Some(limit as u32),
+                    _ => None,
+                };
+            }
+            "collectible" => {
+                collectible = parse_bool(value);
+            }
             _ => {}
         }
     }
@@ -265,6 +288,10 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         mass: object_mass,
         picture,
         color_by_owner,
+        shape,
+        collection,
+        collection_limit,
+        collectible,
     })
 }
 
@@ -1013,6 +1040,9 @@ mod tests {
         assert_eq!(parsed.name.as_deref(), Some("Clonk"));
         assert_eq!(parsed.category, (1 << 3) | (1 << 4));
         assert!(parsed.crew_member);
+        assert_eq!(parsed.collection, None);
+        assert_eq!(parsed.collection_limit, None);
+        assert!(!parsed.collectible);
     }
 
     #[test]
@@ -1098,6 +1128,39 @@ DigFree=24
                 height: 24
             })
         );
+    }
+
+    #[test]
+    fn parse_def_core_collection_fields() {
+        let data = br#"
+            [DefCore]
+            id=PACK
+            Shape=-10,-20,20,40
+            Collection=-5,-10,10,20
+            CollectionLimit=3
+            Collectible=1
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert_eq!(
+            parsed.shape,
+            Some(PictureRect {
+                x: -10,
+                y: -20,
+                width: 20,
+                height: 40
+            })
+        );
+        assert_eq!(
+            parsed.collection,
+            Some(PictureRect {
+                x: -5,
+                y: -10,
+                width: 10,
+                height: 20
+            })
+        );
+        assert_eq!(parsed.collection_limit, Some(3));
+        assert!(parsed.collectible);
     }
 
     #[test]

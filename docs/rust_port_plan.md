@@ -234,7 +234,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
   - [x] Walk / WalkTo / Hangle / Swim / Dive
   - [x] Dig / Push / Lift / Throw / Build
   - [x] Attach / Scale / Tumble / Dead
-- [ ] Object-to-object interaction (enter buildings, collect items)
+- [x] Object-to-object interaction (enter buildings, collect items)
 - [x] Inventory system (crew contents)
 - [ ] Production (buildings create items)
 - [ ] Construction (placing structures)
@@ -247,6 +247,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2025-12-27):** Added regression tests for WalkTo, Hangle, and Swim procedures plus Dive/Tumble/Dead procedure mapping so legacy movement matches C++ expectation.
 **Progress (2025-12-28):** Completed Dig/Push/Lift/Throw/Build and Attach/Scale/Tumble/Dead procedure coverage by locking Throw motion in `rust/crates/lc-engine/src/lib.rs`, aligning all action procedures with LegacyClonk behaviour.
 **Progress (2025-12-30):** Added legacy-compatible `Contents*` host functions and preserved insertion order for container inventories, enabling scripts and UI to enumerate crew contents with new parity tests in `rust/crates/lc-engine/src/compat.rs` and `lc-engine/src/lib.rs`.
+**Progress (2025-12-31):** Engine now auto-collects nearby carryable objects using DefCore `Shape`/`Collection` metadata and respects legacy collection limits, bringing passive pickups in line with the C++ runtime and covered by new regression tests in `rust/crates/lc-engine/src/lib.rs`.
 
 **Files:** lc-engine action system, lc-engine/tests
 

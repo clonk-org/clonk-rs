@@ -3123,6 +3123,47 @@ impl From<ResourcePictureRect> for DefinitionPicture {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefinitionRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl DefinitionRect {
+    pub const fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    pub fn is_positive(&self) -> bool {
+        self.width > 0 && self.height > 0
+    }
+
+    pub fn contains_offset(&self, dx: i32, dy: i32) -> bool {
+        let local_x = dx - self.x;
+        let local_y = dy - self.y;
+        if local_x < 0 || local_y < 0 {
+            return false;
+        }
+        if local_x >= self.width || local_y >= self.height {
+            return false;
+        }
+        true
+    }
+}
+
+impl From<ResourcePictureRect> for DefinitionRect {
+    fn from(rect: ResourcePictureRect) -> Self {
+        Self::new(rect.x, rect.y, rect.width, rect.height)
+    }
+}
+
 #[derive(Clone)]
 pub struct DefinitionPictureImage {
     width: u32,
@@ -3246,6 +3287,10 @@ pub struct Definition {
     picture: Option<DefinitionPicture>,
     picture_image: Option<DefinitionPictureImage>,
     sprite_image: Option<DefinitionSpriteImage>,
+    shape: Option<DefinitionRect>,
+    collection_rect: Option<DefinitionRect>,
+    collection_limit: Option<u32>,
+    collectible: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3303,6 +3348,10 @@ impl Definition {
             picture: None,
             picture_image: None,
             sprite_image: None,
+            shape: None,
+            collection_rect: None,
+            collection_limit: None,
+            collectible: false,
         })
     }
 
@@ -3355,6 +3404,10 @@ impl Definition {
             let mask = resource.color_by_owner_mask.as_ref();
             definition.set_sprite_image(Some(DefinitionSpriteImage::from_resource(image, mask)));
         }
+        definition.set_shape_rect(resource.core.shape.map(DefinitionRect::from));
+        definition.set_collection_rect(resource.core.collection.map(DefinitionRect::from));
+        definition.set_collection_limit(resource.core.collection_limit);
+        definition.set_collectible(resource.core.collectible);
         Ok(definition)
     }
 
@@ -3486,14 +3539,29 @@ impl Definition {
     }
 
     pub fn compute_ocf(&self, state: &ObjectState) -> u32 {
-        crate::ocf::compute(
+        let mut ocf = crate::ocf::compute(
             self.ocf_base,
             self.crew_member,
             state.alive,
             state.status,
             state.container.is_some(),
             state.construction,
-        )
+        );
+        if self.collectible {
+            ocf |= crate::ocf::CARRYABLE;
+        }
+        if let Some(rect) = self.collection_rect {
+            if rect.is_positive() {
+                let below_limit = self
+                    .collection_limit
+                    .map(|limit| state.contents.len() < limit as usize)
+                    .unwrap_or(true);
+                if below_limit {
+                    ocf |= crate::ocf::COLLECTION;
+                }
+            }
+        }
+        ocf
     }
 
     pub fn value(&self) -> i32 {
@@ -3534,6 +3602,38 @@ impl Definition {
 
     pub fn set_sprite_image(&mut self, image: Option<DefinitionSpriteImage>) {
         self.sprite_image = image;
+    }
+
+    pub fn shape_rect(&self) -> Option<DefinitionRect> {
+        self.shape
+    }
+
+    pub fn set_shape_rect(&mut self, rect: Option<DefinitionRect>) {
+        self.shape = rect;
+    }
+
+    pub fn collection_rect(&self) -> Option<DefinitionRect> {
+        self.collection_rect
+    }
+
+    pub fn set_collection_rect(&mut self, rect: Option<DefinitionRect>) {
+        self.collection_rect = rect.and_then(|r| if r.is_positive() { Some(r) } else { None });
+    }
+
+    pub fn collection_limit(&self) -> Option<u32> {
+        self.collection_limit
+    }
+
+    pub fn set_collection_limit(&mut self, limit: Option<u32>) {
+        self.collection_limit = limit.and_then(|value| if value > 0 { Some(value) } else { None });
+    }
+
+    pub fn is_collectible(&self) -> bool {
+        self.collectible
+    }
+
+    pub fn set_collectible(&mut self, collectible: bool) {
+        self.collectible = collectible;
     }
 
     fn call_initialize(
@@ -6754,6 +6854,7 @@ impl Engine {
             }
 
             self.apply_landscape_at_index(idx);
+            self.auto_collect_at_index(idx)?;
 
             let object_id = self.objects[idx].id;
             let state_snapshot = self.objects[idx].state.clone();
@@ -6925,6 +7026,7 @@ impl Engine {
             }
 
             self.apply_landscape_at_index(idx);
+            self.auto_collect_at_index(idx)?;
             spawn_requests.extend(spawns.into_iter());
         }
 
@@ -9320,6 +9422,121 @@ impl Engine {
                 object.apply_material_interaction(material);
             }
         }
+    }
+
+    fn auto_collect_at_index(&mut self, idx: usize) -> Result<(), EngineError> {
+        if idx >= self.objects.len() {
+            return Ok(());
+        }
+        if self.objects[idx].destroyed {
+            return Ok(());
+        }
+        if !self.objects[idx].state.status.is_active()
+            || self.objects[idx].state.container.is_some()
+        {
+            return Ok(());
+        }
+
+        let initial_contents = self.objects[idx].state.contents.len();
+        let collector_position = self.objects[idx].state.position;
+        let ocf = self.object_ocf_at_index(idx);
+        if ocf & crate::ocf::COLLECTION == 0 {
+            return Ok(());
+        }
+
+        let collector_id = self.objects[idx].id;
+        let definition_id = self.objects[idx].definition_id.clone();
+        let (collection_rect, shape_rect, collection_limit) = {
+            let definition = self
+                .definitions
+                .get(&definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+            (
+                definition.collection_rect(),
+                definition.shape_rect(),
+                definition.collection_limit(),
+            )
+        };
+
+        let Some(collection_rect) = collection_rect.filter(|rect| rect.is_positive()) else {
+            return Ok(());
+        };
+
+        if let Some(limit) = collection_limit {
+            if initial_contents >= limit as usize {
+                return Ok(());
+            }
+        }
+
+        let fallback_half_extents = if shape_rect.is_none() {
+            let (half_w, half_h) = Self::object_half_extents(&self.objects[idx]);
+            Some((half_w, half_h))
+        } else {
+            None
+        };
+
+        let mut candidates = Vec::new();
+        for (candidate_idx, candidate) in self.objects.iter().enumerate() {
+            if candidate_idx == idx || candidate.destroyed {
+                continue;
+            }
+            let candidate_state = &candidate.state;
+            if !candidate_state.status.is_active() || candidate_state.container.is_some() {
+                continue;
+            }
+            let candidate_ocf = self.object_ocf_at_index(candidate_idx);
+            if candidate_ocf & crate::ocf::CARRYABLE == 0 {
+                continue;
+            }
+            let dx = candidate_state.position.x - collector_position.x;
+            let dy = candidate_state.position.y - collector_position.y;
+            if let Some(shape) = shape_rect {
+                if !shape.contains_offset(dx, dy) {
+                    continue;
+                }
+            } else if let Some((half_w, half_h)) = fallback_half_extents {
+                if dx < -half_w || dx >= half_w || dy < -half_h || dy >= half_h {
+                    continue;
+                }
+            }
+            if !collection_rect.contains_offset(dx, dy) {
+                continue;
+            }
+            candidates.push(candidate.id);
+        }
+
+        if candidates.is_empty() {
+            return Ok(());
+        }
+
+        for candidate_id in candidates {
+            let collector_index = match self.find_object_index(collector_id) {
+                Some(index) => index,
+                None => return Err(EngineError::UnknownObject(collector_id)),
+            };
+            if let Some(limit) = collection_limit {
+                if self.objects[collector_index].state.contents.len() >= limit as usize {
+                    break;
+                }
+            }
+            if self.objects[collector_index].destroyed
+                || !self.objects[collector_index].state.status.is_active()
+            {
+                break;
+            }
+            let collector_position = self.objects[collector_index].state.position;
+            let update = ObjectUpdate::new()
+                .with_container(collector_id)
+                .with_position(collector_position)
+                .with_velocity(Vector2::ZERO);
+            match self.apply_object_update(candidate_id, update) {
+                Ok(_) => {}
+                Err(EngineError::UnknownObject(_)) => continue,
+                Err(err) => return Err(err),
+            }
+        }
+
+        Ok(())
     }
 
     fn apply_landscape_temperature_conversions(&mut self, ambient_temperature: i32) {
@@ -17059,6 +17276,77 @@ func ControlDig() { SetAction("Dig"); return true; }
             item_snapshot.position, crew_before_drop.position,
             "item should be positioned away from crew after drop"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn auto_collect_moves_carryable_into_inventory() -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        let mut crew_definition = Definition::from_script("Crew", "Crew", BASIC_OBJECT_SCRIPT)?;
+        crew_definition.set_crew_member(true);
+        crew_definition.set_shape_rect(Some(DefinitionRect::new(-8, -16, 16, 32)));
+        crew_definition.set_collection_rect(Some(DefinitionRect::new(-6, -12, 12, 24)));
+        engine.register_definition(crew_definition)?;
+
+        let mut item_definition = Definition::from_script("Gem", "Gem", BASIC_OBJECT_SCRIPT)?;
+        item_definition.set_collectible(true);
+        engine.register_definition(item_definition)?;
+
+        let crew = engine.spawn_object(
+            SpawnConfig::new("Crew")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_position(Vector2::new(0, 0)),
+        )?;
+        let item =
+            engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(2, 0)))?;
+
+        let _ = engine.tick()?;
+
+        let item_snapshot = engine.object_snapshot(item).expect("item snapshot");
+        assert_eq!(item_snapshot.container, Some(crew));
+        Ok(())
+    }
+
+    #[test]
+    fn auto_collect_respects_collection_limit() -> Result<(), EngineError> {
+        let mut engine = Engine::new();
+        let mut crew_definition = Definition::from_script("Crew", "Crew", BASIC_OBJECT_SCRIPT)?;
+        crew_definition.set_crew_member(true);
+        crew_definition.set_shape_rect(Some(DefinitionRect::new(-8, -16, 16, 32)));
+        crew_definition.set_collection_rect(Some(DefinitionRect::new(-6, -12, 12, 24)));
+        crew_definition.set_collection_limit(Some(1));
+        engine.register_definition(crew_definition)?;
+
+        let mut item_definition = Definition::from_script("Gem", "Gem", BASIC_OBJECT_SCRIPT)?;
+        item_definition.set_collectible(true);
+        engine.register_definition(item_definition)?;
+
+        let crew = engine.spawn_object(
+            SpawnConfig::new("Crew")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_position(Vector2::new(0, 0)),
+        )?;
+        let first =
+            engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(3, 0)))?;
+        let second =
+            engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(-3, 0)))?;
+
+        let _ = engine.tick()?;
+
+        let first_snapshot = engine.object_snapshot(first).expect("first item snapshot");
+        let second_snapshot = engine
+            .object_snapshot(second)
+            .expect("second item snapshot");
+        let collected = [first_snapshot.container, second_snapshot.container];
+        assert_eq!(
+            collected.iter().filter(|entry| entry.is_some()).count(),
+            1,
+            "exactly one item should be collected due to the limit"
+        );
+        assert_eq!(first_snapshot.container, Some(crew));
+        assert!(second_snapshot.container.is_none());
         Ok(())
     }
 
