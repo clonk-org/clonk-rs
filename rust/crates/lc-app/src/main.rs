@@ -7883,7 +7883,6 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
                         }
                     }
                     if !scenarios.is_empty() {
-                        scenarios.sort_by(|a, b| a.title.cmp(&b.title));
                         return scenarios;
                     }
                 }

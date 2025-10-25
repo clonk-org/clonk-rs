@@ -101,12 +101,25 @@ pub struct ScenarioEntry {
     pub is_playable: bool,
     pub preview: Option<ScenarioPreview>,
     pub children: Vec<ScenarioEntry>,
+    pub folder_index: Option<i32>,
+    pub icon_index: Option<i32>,
+    pub difficulty: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct LegacyCoreInfo {
     title: Option<String>,
     description: Option<String>,
+    icon: Option<i32>,
+    difficulty: Option<i32>,
+    save_game: Option<bool>,
+    replay: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LegacyFolderInfo {
+    title: Option<String>,
+    index: Option<i32>,
 }
 
 pub fn discover(root: impl AsRef<Path>) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
@@ -331,7 +344,13 @@ fn legacy_core_info(group: &Group) -> Result<Option<LegacyCoreInfo>, ScenarioDis
         })?;
 
     let info = parse_legacy_core_info(&text);
-    if info.title.is_none() && info.description.is_none() {
+    if info.title.is_none()
+        && info.description.is_none()
+        && info.icon.is_none()
+        && info.difficulty.is_none()
+        && info.save_game.is_none()
+        && info.replay.is_none()
+    {
         Ok(None)
     } else {
         Ok(Some(info))
@@ -378,13 +397,47 @@ fn parse_legacy_core_info(text: &str) -> LegacyCoreInfo {
             && (key.eq_ignore_ascii_case("description") || key.eq_ignore_ascii_case("desc"))
         {
             info.description = Some(value.to_string());
+        } else if info.icon.is_none() && key.eq_ignore_ascii_case("icon") {
+            if let Ok(parsed) = value.parse::<i32>() {
+                info.icon = Some(parsed);
+            }
+        } else if info.difficulty.is_none() && key.eq_ignore_ascii_case("difficulty") {
+            if let Ok(parsed) = value.parse::<i32>() {
+                info.difficulty = Some(parsed);
+            }
+        } else if info.save_game.is_none() && key.eq_ignore_ascii_case("savegame") {
+            if let Some(parsed) = parse_bool_flag(value) {
+                info.save_game = Some(parsed);
+            }
+        } else if info.replay.is_none() && key.eq_ignore_ascii_case("replay") {
+            if let Some(parsed) = parse_bool_flag(value) {
+                info.replay = Some(parsed);
+            }
         }
-        if info.title.is_some() && info.description.is_some() {
+        if info.title.is_some()
+            && info.description.is_some()
+            && info.icon.is_some()
+            && info.difficulty.is_some()
+            && info.save_game.is_some()
+            && info.replay.is_some()
+        {
             break;
         }
     }
 
     info
+}
+
+fn parse_bool_flag(value: &str) -> Option<bool> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    match normalized.as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn build_scenario_entry(
@@ -432,6 +485,14 @@ fn build_scenario_entry(
                 .filter(|desc| !desc.is_empty())
                 .map(|desc| desc.to_string())
         });
+    let icon_index = legacy.as_ref().and_then(|info| info.icon);
+    let difficulty = legacy.as_ref().and_then(|info| {
+        if info.save_game.unwrap_or(false) || info.replay.unwrap_or(false) {
+            None
+        } else {
+            info.difficulty
+        }
+    });
 
     Ok(ScenarioEntry {
         identifier,
@@ -443,6 +504,9 @@ fn build_scenario_entry(
         is_playable: true,
         preview,
         children: Vec::new(),
+        folder_index: None,
+        icon_index,
+        difficulty,
     })
 }
 
@@ -452,13 +516,17 @@ fn build_folder_entry(
 ) -> Result<ScenarioEntry, ScenarioDiscoveryError> {
     let fallback = fallback_title_for_path(group.root());
     let mut title = title_from_title_files(group)?;
+    let folder_info = folder_core_info(group)?;
     if title.is_none() {
-        title = title_from_folder_core(group)?;
+        if let Some(info) = folder_info.as_ref().and_then(|info| info.title.clone()) {
+            title = Some(info);
+        }
     }
 
     let title = title.unwrap_or(fallback);
     let preview = load_preview_image(group)?;
     let children = collect_children_from_group(group, &identifier)?;
+    let folder_index = folder_info.and_then(|info| info.index);
 
     Ok(ScenarioEntry {
         identifier,
@@ -470,6 +538,9 @@ fn build_folder_entry(
         is_playable: false,
         preview,
         children,
+        folder_index,
+        icon_index: None,
+        difficulty: None,
     })
 }
 
@@ -632,24 +703,72 @@ fn title_from_title_files(group: &Group) -> Result<Option<String>, ScenarioDisco
     Ok(None)
 }
 
-fn title_from_folder_core(group: &Group) -> Result<Option<String>, ScenarioDiscoveryError> {
+fn folder_core_info(group: &Group) -> Result<Option<LegacyFolderInfo>, ScenarioDiscoveryError> {
     if !group.exists("Folder.txt") {
         return Ok(None);
     }
     let data = group
         .read_file("Folder.txt")
         .map_err(|err| group_error(group.root(), err))?;
-    if let Ok(content) = std::str::from_utf8(&data) {
-        for line in content.lines() {
-            if let Some(value) = line.split('=').nth(1) {
-                let trimmed = value.trim();
-                if !trimmed.is_empty() {
-                    return Ok(Some(trimmed.to_string()));
-                }
+    let content = match std::str::from_utf8(&data) {
+        Ok(content) => content,
+        Err(_) => return Ok(None),
+    };
+    let info = parse_legacy_folder_core(content);
+    if info.title.is_none() && info.index.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some(info))
+    }
+}
+
+fn parse_legacy_folder_core(text: &str) -> LegacyFolderInfo {
+    let mut info = LegacyFolderInfo::default();
+    let mut current_section = String::from("head");
+
+    for raw_line in text.lines() {
+        let without_bom = raw_line.trim_start_matches('\u{feff}');
+        let mut line = without_bom.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with(';') || line.starts_with('#') || line.starts_with("//") {
+            continue;
+        }
+        if let Some(idx) = line.find("//") {
+            line = line[..idx].trim_end();
+            if line.is_empty() {
+                continue;
             }
         }
+        if line.starts_with('[') && line.ends_with(']') {
+            current_section = line[1..line.len() - 1].trim().to_ascii_lowercase();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !current_section.eq_ignore_ascii_case("head") {
+            continue;
+        }
+        let key = key.trim();
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if info.title.is_none() && key.eq_ignore_ascii_case("title") {
+            info.title = Some(value.to_string());
+        } else if info.index.is_none() && key.eq_ignore_ascii_case("index") {
+            if let Ok(parsed) = value.parse::<i32>() {
+                info.index = Some(parsed);
+            }
+        }
+        if info.title.is_some() && info.index.is_some() {
+            break;
+        }
     }
-    Ok(None)
+
+    info
 }
 
 fn fallback_title_for_path(path: &Path) -> String {
@@ -710,10 +829,69 @@ fn is_title_filename(name: &str) -> bool {
 }
 
 fn sort_entries(entries: &mut [ScenarioEntry]) {
-    entries.sort_by(|a, b| compare_case_insensitive(&a.title, &b.title));
+    entries.sort_by(compare_entries);
     for entry in entries.iter_mut() {
         sort_entries(&mut entry.children);
     }
+}
+
+fn compare_entries(a: &ScenarioEntry, b: &ScenarioEntry) -> Ordering {
+    let a_is_folder = matches!(a.kind, ScenarioEntryKind::Folder);
+    let b_is_folder = matches!(b.kind, ScenarioEntryKind::Folder);
+    if a_is_folder != b_is_folder {
+        return if a_is_folder {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+
+    let a_folder_index = a.folder_index.unwrap_or(0);
+    let b_folder_index = b.folder_index.unwrap_or(0);
+    if a_folder_index != 0 || b_folder_index != 0 {
+        if a_folder_index == 0 {
+            return Ordering::Greater;
+        }
+        if b_folder_index == 0 {
+            return Ordering::Less;
+        }
+        match a_folder_index.cmp(&b_folder_index) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+
+    if let Some(icon) = a.icon_index {
+        if (2..=11).contains(&icon) {
+            let other_icon = b.icon_index.unwrap_or(-1);
+            let diff = icon - other_icon;
+            if diff != 0 {
+                return diff.cmp(&0);
+            }
+        }
+    }
+
+    let a_difficulty = a.difficulty.unwrap_or(0);
+    let b_difficulty = b.difficulty.unwrap_or(0);
+    if a_difficulty != 0 || b_difficulty != 0 {
+        if a_difficulty == 0 {
+            return Ordering::Greater;
+        }
+        if b_difficulty == 0 {
+            return Ordering::Less;
+        }
+        match a_difficulty.cmp(&b_difficulty) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+
+    let name_order = compare_case_insensitive(&a.title, &b.title);
+    if name_order != Ordering::Equal {
+        return name_order;
+    }
+
+    compare_case_insensitive(&a.identifier, &b.identifier)
 }
 
 fn compare_case_insensitive(a: &str, b: &str) -> Ordering {
@@ -836,6 +1014,73 @@ mod tests {
         assert_eq!(folder_entry.kind, ScenarioEntryKind::Folder);
         assert_eq!(folder_entry.children.len(), 1);
         assert_eq!(folder_entry.children[0].title, "Packed Child");
+    }
+
+    #[test]
+    fn orders_entries_like_legacy_loader() {
+        let dir = tempdir().unwrap();
+
+        let indexed_folder = dir.path().join("Indexed.c4f");
+        fs::create_dir(&indexed_folder).unwrap();
+        fs::write(
+            indexed_folder.join("Folder.txt"),
+            "[Head]\nTitle=Indexed\nIndex=2\n",
+        )
+        .unwrap();
+
+        let unindexed_folder = dir.path().join("Unindexed.c4f");
+        fs::create_dir(&unindexed_folder).unwrap();
+        fs::write(
+            unindexed_folder.join("Folder.txt"),
+            "[Head]\nTitle=Unindexed\n",
+        )
+        .unwrap();
+
+        let challenging = dir.path().join("Challenging.c4s");
+        fs::create_dir(&challenging).unwrap();
+        fs::write(
+            challenging.join("Scenario.txt"),
+            "[Head]\nTitle=Challenging\nDifficulty=4\n",
+        )
+        .unwrap();
+
+        let free_play = dir.path().join("FreePlay.c4s");
+        fs::create_dir(&free_play).unwrap();
+        fs::write(
+            free_play.join("Scenario.txt"),
+            "[Head]\nTitle=FreePlay\nDifficulty=0\n",
+        )
+        .unwrap();
+
+        let mission_a = dir.path().join("MissionA.c4s");
+        fs::create_dir(&mission_a).unwrap();
+        fs::write(
+            mission_a.join("Scenario.txt"),
+            "[Head]\nTitle=Mission A\nIcon=2\nDifficulty=3\n",
+        )
+        .unwrap();
+
+        let mission_b = dir.path().join("MissionB.c4s");
+        fs::create_dir(&mission_b).unwrap();
+        fs::write(
+            mission_b.join("Scenario.txt"),
+            "[Head]\nTitle=Mission B\nIcon=5\nDifficulty=1\n",
+        )
+        .unwrap();
+
+        let entries = discover(dir.path()).expect("discover");
+        let titles: Vec<_> = entries.iter().map(|entry| entry.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec![
+                "Indexed",
+                "Unindexed",
+                "Challenging",
+                "FreePlay",
+                "Mission A",
+                "Mission B"
+            ]
+        );
     }
 
     #[test]
