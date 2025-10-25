@@ -4033,6 +4033,112 @@ impl Definition {
         Ok((handled, host_effects, audio_state, rng))
     }
 
+    fn call_control(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        function: &str,
+        rng: ChaCha8Rng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        audio: AudioRegistry,
+    ) -> Result<
+        (
+            bool,
+            compat::EffectContextOutcome,
+            AudioRegistry,
+            ChaCha8Rng,
+        ),
+        EngineError,
+    > {
+        if !self.script.has_function(function) {
+            let next_object_id = world.next_object_id();
+            return Ok((
+                false,
+                compat::EffectContextOutcome::empty(next_object_id, audio.clone()),
+                audio,
+                rng,
+            ));
+        }
+
+        let args: [Value; 0] = [];
+        let physics_guard = enter_physics_context(physics);
+        let env_guard = enter_environment_context(environment, frame);
+        let guard = enter_random_context(rng);
+        let next_object_id = world.next_object_id();
+        let audio_guard = enter_audio_context(audio);
+        let object_context = compat::HostObjectContext::with_category(
+            object_id,
+            state.container,
+            state.status,
+            state.energy,
+            state.damage,
+            state.owner,
+            state.position,
+            state.velocity,
+            state.rotation,
+            &state.effects,
+            state.action.name.clone(),
+            state.action.ticks,
+            state.action.data,
+            self.action_library.clone(),
+            state.direction,
+            state.command_direction,
+            state.action.target,
+            state.action.target2,
+            &state.vertices,
+            state.category,
+            self.ocf_base,
+            self.crew_member,
+            state.draw_transform,
+        )
+        .with_graphics_overlays(state.graphics_overlays.clone())
+        .with_alive(state.alive)
+        .with_ocf(self.compute_ocf(state));
+        let (result, mut host_effects) = compat::with_effect_context(
+            Some(object_context),
+            global_effects,
+            world,
+            next_object_id,
+            || self.script.call(function, &args),
+        );
+        let rng = guard.finish();
+        let physics_delta = physics_guard.finish();
+        let environment_delta = env_guard.finish();
+        let value = result.map_err(|source| EngineError::Script {
+            definition: self.id.clone(),
+            function: "Control",
+            source,
+        })?;
+        let handled = match value {
+            Value::Nil => false,
+            Value::Bool(flag) => flag,
+            other => {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: self.id.clone(),
+                    function: "Control",
+                    detail: format!(
+                        "control function `{function}` must return bool or nil (got {})",
+                        other.type_name()
+                    ),
+                })
+            }
+        };
+
+        if !environment_delta.is_empty() {
+            host_effects.environment = Some(environment_delta);
+        }
+        if !physics_delta.is_empty() {
+            host_effects.physics = Some(physics_delta);
+        }
+
+        let audio_state = audio_guard.finish();
+        Ok((handled, host_effects, audio_state, rng))
+    }
+
     fn call_menu_callback(
         &self,
         state: &ObjectState,
@@ -4732,6 +4838,28 @@ fn horizontal_span(vertices: &[ObjectVertex]) -> i32 {
         }
     }
     (max_x - min_x).abs()
+}
+
+fn control_function_name(command: ControlCommand, kind: CommandKind) -> Option<String> {
+    let base = match command {
+        ControlCommand::Throw => "Throw",
+        ControlCommand::Dig => "Dig",
+        ControlCommand::Special => "Special",
+        ControlCommand::Special2 => "Special2",
+        _ => return None,
+    };
+
+    let suffix = match kind {
+        CommandKind::Press => "",
+        CommandKind::Single => "Single",
+        CommandKind::Double => "Double",
+        CommandKind::Release => "Released",
+    };
+
+    let mut name = String::from("Control");
+    name.push_str(base);
+    name.push_str(suffix);
+    Some(name)
 }
 
 fn fight_distance_threshold(
@@ -5699,6 +5827,19 @@ impl Engine {
         Ok(())
     }
 
+    pub fn ensure_cursor(&mut self, owner: i32) -> Result<(), EngineError> {
+        if self.crew_cursor(owner).is_some() {
+            return Ok(());
+        }
+        let mut crew = self.crew_members(owner);
+        if crew.is_empty() {
+            return Ok(());
+        }
+        crew.sort_by_key(|id| id.as_u64());
+        let first = crew[0];
+        self.set_crew_cursor(owner, Some(first))
+    }
+
     pub fn context_menu_entries(
         &mut self,
         object_id: ObjectId,
@@ -5818,6 +5959,60 @@ impl Engine {
             outcome,
             &action_library,
             object_id,
+            &definition_id,
+        )?;
+        Ok(handled)
+    }
+
+    pub fn handle_control_command(
+        &mut self,
+        owner: i32,
+        command: ControlCommand,
+        kind: CommandKind,
+    ) -> Result<bool, EngineError> {
+        let Some(function_name) = control_function_name(command, kind) else {
+            return Ok(false);
+        };
+
+        self.ensure_cursor(owner)?;
+        let Some(cursor) = self.crew_cursor(owner) else {
+            return Ok(false);
+        };
+
+        let index = self
+            .objects
+            .iter()
+            .position(|object| object.id == cursor)
+            .ok_or(EngineError::UnknownObject(cursor))?;
+        let definition_id = self.objects[index].definition_id.clone();
+        let state_snapshot = self.objects[index].state.clone();
+        let definition = self
+            .definitions
+            .get(&definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let action_library = definition.action_library().clone();
+        let rng_state = self.rng.clone();
+        let global_view = self.global_effects.clone();
+        let world = self.host_world_context();
+        let (handled, outcome, audio_state, new_rng) = definition.call_control(
+            &state_snapshot,
+            cursor,
+            &function_name,
+            rng_state,
+            &global_view,
+            self.physics,
+            self.environment,
+            self.frame,
+            world,
+            self.audio_registry.clone(),
+        )?;
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        self.apply_action_callback_outcome(
+            index,
+            outcome,
+            &action_library,
+            cursor,
             &definition_id,
         )?;
         Ok(handled)
@@ -13347,6 +13542,49 @@ global func MenuCommand(state, kind, selection)
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity, Vector2::ZERO);
+    }
+
+    #[test]
+    fn control_command_invokes_object_script() -> Result<(), EngineError> {
+        let script = r#"
+global func Initialize(state, random) { return nil; }
+public func ControlDig() { SetAction(\"Dig\"); return true; }
+"#;
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", script).expect("control script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
+            "Dig".to_string(),
+            ActionSpec::default().with_procedure("dig"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+        definition.set_movement_profile(MovementProfile::default());
+
+        let mut engine = Engine::new();
+        engine.register_definition(definition)?;
+        engine.register_player(PlayerConfig::new(1, "Test"))?;
+
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_action(ActionState::new("Idle")),
+            )
+            .expect("spawn succeeds");
+
+        engine.set_crew_cursor(1, Some(object_id))?;
+        let handled = engine.handle_control_command(1, ControlCommand::Dig, CommandKind::Press)?;
+        assert!(handled, "control command should report handled");
+
+        let snapshot = engine.snapshot();
+        let object = snapshot.object(object_id).expect("object present");
+        assert_eq!(object.action.name, "Dig");
+        Ok(())
     }
 
     #[test]

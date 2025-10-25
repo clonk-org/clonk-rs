@@ -1,7 +1,8 @@
 use crate::pathfinder::Path;
 use crate::{
     control::{
-        interpret_player_control_command, parse_control_ini, ControlPacket, PlayerControlData,
+        interpret_player_control_command, parse_control_ini, CommandKind, ControlCommand,
+        ControlPacket, PlayerControlData,
     },
     ActionState, CommandDirection, CrewCommandTarget, CrewRole, CrewSelectionState, Direction,
     DrawTransform, EffectState, Engine, EngineError, EngineState, EnvironmentFrame, FloatVector2,
@@ -391,6 +392,11 @@ impl RuntimeHandle {
         };
         let state = self.player_controls.entry(player).or_default();
         let maybe_direction = state.handle_event(event);
+        if let ControlEvent::Command { command, kind } = event {
+            self.engine
+                .handle_control_command(player, command, kind)
+                .map_err(|error| error.to_string())?;
+        }
         if let Some(direction) = maybe_direction {
             self.set_player_command_direction(player, direction)
                 .map_err(|error| error.to_string())?;
@@ -414,7 +420,7 @@ impl RuntimeHandle {
         owner: i32,
         direction: CommandDirection,
     ) -> Result<(), EngineError> {
-        self.ensure_cursor(owner)?;
+        self.engine.ensure_cursor(owner)?;
         let update = ObjectUpdate::new().with_command_direction(direction);
         match self
             .engine
@@ -427,18 +433,6 @@ impl RuntimeHandle {
             }
             Err(error) => Err(error),
         }
-    }
-
-    fn ensure_cursor(&mut self, owner: i32) -> Result<(), EngineError> {
-        if self.engine.crew_cursor(owner).is_some() {
-            return Ok(());
-        }
-        let mut crew = self.engine.crew_members(owner);
-        crew.sort_by_key(|id| id.as_u64());
-        if let Some(first) = crew.first().copied() {
-            self.engine.set_crew_cursor(owner, Some(first))?;
-        }
-        Ok(())
     }
 
     fn advance_to_frame(&mut self, frame: u64) -> Result<(), String> {

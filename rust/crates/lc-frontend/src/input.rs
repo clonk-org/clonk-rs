@@ -37,7 +37,10 @@ impl InputDispatcher {
             ControlEvent::Release(button) => context.directional.release(button),
             ControlEvent::ClearPressed => context.directional.clear(),
             ControlEvent::Command { command, kind } => {
-                handle_command(engine, owner, context, command, kind, frame)?;
+                let handled = handle_command(engine, owner, context, command, kind, frame)?;
+                if !handled {
+                    let _ = engine.handle_control_command(owner, command, kind)?;
+                }
                 None
             }
         };
@@ -118,7 +121,7 @@ fn apply_direction(
     owner: i32,
     direction: CommandDirection,
 ) -> Result<(), EngineError> {
-    ensure_cursor(engine, owner)?;
+    engine.ensure_cursor(owner)?;
     let update = ObjectUpdate::new().with_command_direction(direction);
     match engine.apply_command(owner, CrewCommandTarget::cursor(), update.clone()) {
         Ok(()) => Ok(()),
@@ -127,18 +130,6 @@ fn apply_direction(
         }
         Err(error) => Err(error),
     }
-}
-
-fn ensure_cursor(engine: &mut Engine, owner: i32) -> Result<(), EngineError> {
-    if engine.crew_cursor(owner).is_some() {
-        return Ok(());
-    }
-    let mut crew = engine.crew_members(owner);
-    crew.sort_by_key(|id| id.as_u64());
-    if let Some(first) = crew.first().copied() {
-        engine.set_crew_cursor(owner, Some(first))?;
-    }
-    Ok(())
 }
 
 fn cycle_cursor(
@@ -175,7 +166,7 @@ fn cycle_cursor(
 }
 
 fn toggle_cursor_selection(engine: &mut Engine, owner: i32) -> Result<(), EngineError> {
-    ensure_cursor(engine, owner)?;
+    engine.ensure_cursor(owner)?;
     let Some(cursor) = engine.crew_cursor(owner) else {
         return Ok(());
     };
@@ -207,7 +198,7 @@ fn handle_command(
     command: ControlCommand,
     kind: CommandKind,
     frame: u64,
-) -> Result<(), EngineError> {
+) -> Result<bool, EngineError> {
     match command {
         ControlCommand::CursorLeft => {
             if matches!(
@@ -215,6 +206,7 @@ fn handle_command(
                 CommandKind::Press | CommandKind::Single | CommandKind::Double
             ) {
                 cycle_cursor(engine, owner, CycleDirection::Previous)?;
+                return Ok(true);
             }
         }
         ControlCommand::CursorRight => {
@@ -223,13 +215,15 @@ fn handle_command(
                 CommandKind::Press | CommandKind::Single | CommandKind::Double
             ) {
                 cycle_cursor(engine, owner, CycleDirection::Next)?;
+                return Ok(true);
             }
         }
         ControlCommand::CursorToggle => match kind {
-            CommandKind::Release => {}
+            CommandKind::Release => return Ok(true),
             CommandKind::Double => {
                 select_all_crew(engine, owner)?;
                 context.selection.clear();
+                return Ok(true);
             }
             CommandKind::Press | CommandKind::Single => {
                 match context.selection.register_toggle(frame) {
@@ -239,16 +233,18 @@ fn handle_command(
                         context.selection.clear();
                     }
                 }
+                return Ok(true);
             }
         },
         ControlCommand::PlayerMenu => {
             if matches!(kind, CommandKind::Press) {
                 // Menu system not yet implemented in Rust frontend.
+                return Ok(true);
             }
         }
         _ => {}
     }
-    Ok(())
+    Ok(false)
 }
 
 #[cfg(test)]

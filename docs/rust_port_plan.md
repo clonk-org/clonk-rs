@@ -180,7 +180,7 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 **What's Needed:**
 - [ ] Verify ALL control inputs work:
   - Movement (up/down/left/right)
-  - Actions (dig, throw, special, special2)
+  - [x] Actions (dig, throw, special, special2)
   - Menu controls (open, navigate, select)
   - Object interaction (grab, drop, enter)
   - Cursor cycling
@@ -188,6 +188,8 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - [ ] Gamepad support
 - [ ] Control responsiveness (no lag)
 - [ ] Control customization
+
+**Progress (2025-11-30):** Engine now routes Dig/Throw/Special/Special2 commands through the legacy `Control*` scripts via `Engine::handle_control_command`, with both the frontend dispatcher and playback runtime invoking it so scripted behaviors (e.g. `ControlDig`) trigger identical to C++.
 
 **Files:** InputDispatcher, handle_key() in main.rs, lc-engine/src/input.rs
 
