@@ -58,6 +58,30 @@ pub struct DefinitionSprite {
     pub color_mask: Option<ColorByOwnerMask>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HudGraphics {
+    pub player: Option<ImageData>,
+    pub flag: Option<ImageData>,
+    pub crew: Option<ImageData>,
+    pub score: Option<ImageData>,
+    pub wealth: Option<ImageData>,
+    pub rank: Option<ImageData>,
+    pub captain: Option<ImageData>,
+    pub fire: Option<ImageData>,
+    pub menu: Option<ImageData>,
+    pub upper_board: Option<ImageData>,
+    pub logo: Option<ImageData>,
+    pub construction: Option<ImageData>,
+    pub energy: Option<ImageData>,
+    pub magic: Option<ImageData>,
+    pub arrow: Option<ImageData>,
+    pub exit: Option<ImageData>,
+    pub hand: Option<ImageData>,
+    pub build: Option<ImageData>,
+    pub energy_bars: Option<ImageData>,
+    pub select_mark: Option<ImageData>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColorByOwnerMask {
     width: u32,
@@ -355,6 +379,7 @@ pub struct GraphicsSystem {
     world_height: i32,
     object_sprites: Arc<HashMap<String, DefinitionSprite>>,
     cursor_atlas: Arc<CursorAtlas>,
+    hud_graphics: Arc<HudGraphics>,
     active_viewports: Vec<ActiveViewport>,
     camera_states: HashMap<CameraKey, CameraState>,
     sky: Option<SkyRenderState>,
@@ -369,6 +394,7 @@ impl GraphicsSystem {
         font: Arc<dyn TextFont>,
         object_sprites: Arc<HashMap<String, DefinitionSprite>>,
         cursor_atlas: Arc<CursorAtlas>,
+        hud_graphics: Arc<HudGraphics>,
     ) -> Self {
         let mut gui = Gui::new(font.clone());
         let root = gui.root();
@@ -408,6 +434,7 @@ impl GraphicsSystem {
             world_height: fallback_ground_height.max(surface_height as i32).max(0),
             object_sprites,
             cursor_atlas,
+            hud_graphics,
             active_viewports: Vec::new(),
             camera_states: HashMap::new(),
             sky: None,
@@ -433,6 +460,10 @@ impl GraphicsSystem {
 
     pub fn set_sky(&mut self, sky: Option<SkyRenderState>) {
         self.sky = sky;
+    }
+
+    pub fn hud_graphics(&self) -> Arc<HudGraphics> {
+        Arc::clone(&self.hud_graphics)
     }
 
     pub fn surface(&self) -> &Surface {
@@ -2864,6 +2895,10 @@ mod tests {
         Arc::new(CursorAtlas::empty())
     }
 
+    fn empty_hud_graphics() -> Arc<HudGraphics> {
+        Arc::new(HudGraphics::default())
+    }
+
     fn make_snapshot() -> SimulationSnapshot {
         SimulationSnapshot {
             frame: 0,
@@ -2925,6 +2960,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
+            empty_hud_graphics(),
         );
         graphics.set_world_width(256);
 
@@ -2948,6 +2984,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
+            empty_hud_graphics(),
         );
         graphics
             .update_overlay(&GraphicsOverlay {
@@ -2980,6 +3017,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
+            empty_hud_graphics(),
         );
 
         let viewports = vec![ViewportInput::from_focus(focus)];
@@ -3007,6 +3045,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
+            empty_hud_graphics(),
         );
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
@@ -3029,6 +3068,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
+            empty_hud_graphics(),
         );
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
@@ -3047,6 +3087,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
+            empty_hud_graphics(),
         );
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
@@ -3103,6 +3144,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
+            empty_hud_graphics(),
         );
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
@@ -3150,6 +3192,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             cursor_atlas,
+            empty_hud_graphics(),
         );
         let focus = &snapshot.objects[0];
         let viewports = vec![ViewportInput::from_focus(focus)];
@@ -3184,6 +3227,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
+            empty_hud_graphics(),
         );
         let day_viewports = vec![ViewportInput::from_focus(focus)];
         day_view.render_frame(&daytime, &day_viewports);
@@ -3199,6 +3243,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
+            empty_hud_graphics(),
         );
         let night_focus = &nighttime.objects[0];
         let night_viewports = vec![ViewportInput::from_focus(night_focus)];
@@ -3253,6 +3298,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
+            empty_hud_graphics(),
         );
         let night_focus = &nighttime.objects[0];
         let night_viewports = vec![ViewportInput::from_focus(night_focus)];
@@ -3295,6 +3341,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
+            empty_hud_graphics(),
         );
         let viewports = vec![ViewportInput::new(0, Vector2::new(20, 20), 1.0, focus)];
         graphics.render_frame(&snapshot, &viewports);
@@ -3330,6 +3377,7 @@ mod tests {
             test_font(),
             empty_sprites(),
             empty_cursor_atlas(),
+            empty_hud_graphics(),
         );
         let viewports = vec![ViewportInput::from_focus(focus)];
         graphics.render_frame(&snapshot, &viewports);

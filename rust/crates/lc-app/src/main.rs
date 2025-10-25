@@ -41,9 +41,9 @@ use lc_engine::{
 };
 use lc_frontend::{
     draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite, GraphicsOverlay,
-    GraphicsSystem, GuiPoint, ImageData, InputDispatcher, KeyCode, MainMenuAction, MainMenuItem,
-    PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu,
-    StartupMenuAction, ViewportInput,
+    GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher, KeyCode, MainMenuAction,
+    MainMenuItem, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu,
+    StartupMenu, StartupMenuAction, ViewportInput,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
 use lc_gui::ButtonTextures;
@@ -145,6 +145,7 @@ struct FrontendAssets {
     button_textures: Option<ButtonTextures>,
     base_sprites: HashMap<String, DefinitionSprite>,
     cursor_atlas: Arc<CursorAtlas>,
+    hud_graphics: Arc<HudGraphics>,
 }
 
 impl FrontendAssets {
@@ -154,6 +155,7 @@ impl FrontendAssets {
         let mut button_textures = None;
         let mut sprites = HashMap::new();
         let mut cursor_atlas = CursorAtlas::empty();
+        let mut hud_graphics = HudGraphics::default();
 
         if let Some(paths) = paths {
             let graphics_path = paths.planet_dir().join("Graphics.c4g");
@@ -176,6 +178,7 @@ impl FrontendAssets {
                         );
                     }
                     cursor_atlas = Self::load_cursor_atlas(&graphics);
+                    hud_graphics = Self::load_hud_graphics(&graphics);
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -193,6 +196,7 @@ impl FrontendAssets {
             button_textures,
             base_sprites: sprites,
             cursor_atlas: Arc::new(cursor_atlas),
+            hud_graphics: Arc::new(hud_graphics),
         }
     }
 
@@ -242,8 +246,63 @@ impl FrontendAssets {
         Arc::clone(&self.cursor_atlas)
     }
 
+    fn hud_graphics(&self) -> Arc<HudGraphics> {
+        Arc::clone(&self.hud_graphics)
+    }
+
     fn base_sprite_map(&self) -> &HashMap<String, DefinitionSprite> {
         &self.base_sprites
+    }
+
+    fn load_hud_graphics(graphics: &GraphicsResource) -> HudGraphics {
+        let mut missing = Vec::new();
+        let mut load = |name: &str| Self::load_hud_image(graphics, name, &mut missing);
+
+        let hud = HudGraphics {
+            player: load("Player.png"),
+            flag: load("Flag.png"),
+            crew: load("Crew.png"),
+            score: load("Score.png"),
+            wealth: load("Wealth.png"),
+            rank: load("Rank.png"),
+            captain: load("Captain.png"),
+            fire: load("Fire.png"),
+            menu: load("Menu.png"),
+            upper_board: load("UpperBoard.png"),
+            logo: load("Logo.png"),
+            construction: load("Construction.png"),
+            energy: load("Energy.png"),
+            magic: load("Magic.png"),
+            arrow: load("Arrow.png"),
+            exit: load("Exit.png"),
+            hand: load("Hand.png"),
+            build: load("Build.png"),
+            energy_bars: load("EnergyBars.png"),
+            select_mark: load("SelectMark.png"),
+        };
+
+        if !missing.is_empty() {
+            tracing::warn!(
+                files = ?missing,
+                "failed to load one or more HUD graphics from Graphics.c4g"
+            );
+        }
+
+        hud
+    }
+
+    fn load_hud_image(
+        graphics: &GraphicsResource,
+        name: &str,
+        missing: &mut Vec<String>,
+    ) -> Option<ImageData> {
+        match graphics.load_image(name) {
+            Ok(image) => Some(Self::image_to_data(image)),
+            Err(err) => {
+                missing.push(format!("{name}: {err}"));
+                None
+            }
+        }
     }
 
     fn load_button_textures(graphics: &GraphicsResource) -> Option<ButtonTextures> {
@@ -2425,6 +2484,7 @@ impl GameApp {
             assets.font_arc(),
             Arc::clone(&sprite_cache),
             assets.cursor_atlas(),
+            assets.hud_graphics(),
         );
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
 
@@ -2500,6 +2560,7 @@ impl GameApp {
             self.assets.font_arc(),
             Arc::clone(&self.sprite_cache),
             self.assets.cursor_atlas(),
+            self.assets.hud_graphics(),
         );
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics = graphics;
@@ -4155,6 +4216,7 @@ impl GameApp {
             self.assets.font_arc(),
             Arc::clone(&self.sprite_cache),
             self.assets.cursor_atlas(),
+            self.assets.hud_graphics(),
         );
         self.graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics.set_sky(self.sky.clone());
@@ -4559,6 +4621,7 @@ impl GameApp {
             self.assets.font_arc(),
             Arc::clone(&self.sprite_cache),
             self.assets.cursor_atlas(),
+            self.assets.hud_graphics(),
         );
         self.graphics.surface_mut().fill(Color::opaque(12, 24, 40));
         self.graphics.set_sky(self.sky.clone());

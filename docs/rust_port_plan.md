@@ -119,7 +119,7 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - May not display correctly
 
 **What's Needed:**
-- [ ] Load ALL HUD graphics from Graphics.c4g:
+- [x] Load ALL HUD graphics from Graphics.c4g:
   - fctPlayer, fctFlag, fctCrew, fctScore, fctWealth, fctRank
   - fctCaptain, fctEnergy, fctMagic, fctEnergyBars
   - fctMenu, fctUpperBoard, fctLogo
@@ -131,6 +131,8 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - [ ] Object selection highlighting
 - [ ] Message rendering with proper formatting
 - [ ] Energy/magic bar overlays on objects
+
+**Progress (2025-10-24):** Rust frontend now loads all HUD textures from `Graphics.c4g` and wires them through the shared graphics system, making the player/flag/score/energy assets available for upcoming UI rendering work.
 
 **Files:** FrontendAssets::load(), GraphicsSystem HUD rendering
 
