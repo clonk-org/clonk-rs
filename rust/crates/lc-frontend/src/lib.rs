@@ -3,7 +3,7 @@ mod startup_main_menu;
 mod startup_menu;
 
 use lc_engine::{
-    DefinitionActionGraphics, Direction, EnvironmentFrame, EnvironmentSettings,
+    DefinitionActionGraphics, Direction, DrawTransform, EnvironmentFrame, EnvironmentSettings,
     GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus,
     RgbColor, SimulationSnapshot, SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot,
     Vector2, WeatherEvent, CATEGORY_SORT_LIMIT, OWNER_NONE,
@@ -1303,6 +1303,7 @@ impl GraphicsSystem {
         let content_height = self.surface_height as f32;
         let color = object_color(object).modulate(lighting);
         let owner_color = owner_colors.get(&object.owner).copied();
+        let rotation_degrees = (object.rotation.rem_euclid(360)) as f32;
         if object.vertices.len() >= 3 {
             let mut points = Vec::with_capacity(object.vertices.len());
             let mut min_x = f32::MAX;
@@ -1341,22 +1342,105 @@ impl GraphicsSystem {
             return;
         }
 
+        let base_transform = object.draw_transform;
         if let Some(sprite) = self.object_sprites.get(&object.definition_id).cloned() {
-            if self.draw_action_sprite(object, &sprite, owner_color, screen_x, screen_y, zoom) {
-                self.draw_object_overlays(object, owner_color, screen_x, screen_y, zoom);
+            if self.draw_action_sprite(
+                object,
+                &sprite,
+                owner_color,
+                screen_x,
+                screen_y,
+                zoom,
+                rotation_degrees,
+                base_transform,
+            ) {
+                self.draw_object_overlays(
+                    object,
+                    owner_color,
+                    screen_x,
+                    screen_y,
+                    zoom,
+                    rotation_degrees,
+                    base_transform,
+                );
                 return;
             }
-            let sprite_width = (sprite.image.width() as f32 * zoom).max(1.0);
-            let sprite_height = (sprite.image.height() as f32 * zoom).max(1.0);
-            let rect = GuiRect::from_origin_size(
-                GuiPoint::new(
-                    screen_x - sprite_width / 2.0,
-                    screen_y - sprite_height / 2.0,
-                ),
-                GuiSize::new(sprite_width, sprite_height),
+            let source_rect = SourceRect::new(
+                0,
+                0,
+                sprite.image.width() as i32,
+                sprite.image.height() as i32,
             );
-            draw_image(&mut self.surface, &rect, &sprite.image);
-            self.draw_object_overlays(object, owner_color, screen_x, screen_y, zoom);
+            if !Self::source_within_image(&sprite.image, &source_rect) {
+                return;
+            }
+            let mut scale_x = 1.0f32;
+            let mut scale_y = 1.0f32;
+            let mut offset_x = 0.0f32;
+            let mut offset_y = 0.0f32;
+            let mut flip_x = false;
+            if let Some(transform) = base_transform {
+                if (transform.scale_x).abs() > f32::EPSILON {
+                    scale_x = transform.scale_x;
+                }
+                if (transform.scale_y).abs() > f32::EPSILON {
+                    scale_y = transform.scale_y;
+                }
+                offset_x = transform.offset_x;
+                offset_y = transform.offset_y;
+            }
+            let mut final_screen_x = screen_x + offset_x * zoom;
+            let mut final_screen_y = screen_y + offset_y * zoom;
+            if scale_x < 0.0 {
+                flip_x = !flip_x;
+                scale_x = -scale_x;
+            }
+            if scale_y < 0.0 {
+                scale_y = -scale_y;
+            }
+            let sprite_width = (sprite.image.width() as f32 * zoom * scale_x).max(1.0);
+            let sprite_height = (sprite.image.height() as f32 * zoom * scale_y).max(1.0);
+            if rotation_degrees.abs() <= f32::EPSILON {
+                let rect = GuiRect::from_origin_size(
+                    GuiPoint::new(
+                        final_screen_x - sprite_width / 2.0,
+                        final_screen_y - sprite_height / 2.0,
+                    ),
+                    GuiSize::new(sprite_width, sprite_height),
+                );
+                draw_image_region(
+                    &mut self.surface,
+                    &rect,
+                    &sprite.image,
+                    sprite.color_mask.as_ref(),
+                    &source_rect,
+                    flip_x,
+                    owner_color,
+                );
+            } else {
+                draw_image_region_rotated(
+                    &mut self.surface,
+                    final_screen_x,
+                    final_screen_y,
+                    sprite_width,
+                    sprite_height,
+                    &sprite.image,
+                    sprite.color_mask.as_ref(),
+                    &source_rect,
+                    flip_x,
+                    owner_color,
+                    rotation_degrees,
+                );
+            }
+            self.draw_object_overlays(
+                object,
+                owner_color,
+                screen_x,
+                screen_y,
+                zoom,
+                rotation_degrees,
+                base_transform,
+            );
             return;
         }
 
@@ -1369,7 +1453,15 @@ impl GraphicsSystem {
             GuiSize::new(size, size),
         );
         fill_rect(&mut self.surface, &rect, color);
-        self.draw_object_overlays(object, owner_color, screen_x, screen_y, zoom);
+        self.draw_object_overlays(
+            object,
+            owner_color,
+            screen_x,
+            screen_y,
+            zoom,
+            rotation_degrees,
+            base_transform,
+        );
     }
 
     fn draw_action_sprite(
@@ -1380,6 +1472,8 @@ impl GraphicsSystem {
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
+        rotation_degrees: f32,
+        transform: Option<DrawTransform>,
     ) -> bool {
         self.draw_action_graphic(
             sprite,
@@ -1390,6 +1484,8 @@ impl GraphicsSystem {
             screen_x,
             screen_y,
             zoom,
+            rotation_degrees,
+            transform,
         )
     }
 
@@ -1403,6 +1499,8 @@ impl GraphicsSystem {
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
+        rotation_degrees: f32,
+        transform: Option<DrawTransform>,
     ) -> bool {
         let Some(graphics) = sprite.actions.get(action_name) else {
             return false;
@@ -1425,10 +1523,24 @@ impl GraphicsSystem {
             return false;
         }
 
-        let mut frame_index = phase.rem_euclid(frame_count_i32);
-        if graphics.reverse {
-            frame_index = frame_count_i32 - 1 - frame_index;
-        }
+        let frame_index = if graphics.reverse && frame_count_i32 > 1 {
+            let cycle = frame_count_i32.saturating_mul(2).saturating_sub(2);
+            if cycle <= 0 {
+                0
+            } else {
+                let cycle_i64 = i64::from(cycle);
+                let phase_i64 = i64::from(phase);
+                let pos = ((phase_i64 % cycle_i64) + cycle_i64) % cycle_i64;
+                let pos_i32 = pos as i32;
+                if pos_i32 >= frame_count_i32 {
+                    cycle - pos_i32
+                } else {
+                    pos_i32
+                }
+            }
+        } else {
+            phase.rem_euclid(frame_count_i32)
+        };
 
         let direction_index = match direction {
             Direction::Left => 0,
@@ -1447,25 +1559,74 @@ impl GraphicsSystem {
             return false;
         }
 
-        let dest_width = facet.width as f32 * zoom;
-        let dest_height = facet.height as f32 * zoom;
+        let mut scale_x = 1.0f32;
+        let mut scale_y = 1.0f32;
+        let mut offset_x = 0.0f32;
+        let mut offset_y = 0.0f32;
+        let mut transform_flipped = false;
+
+        if let Some(transform) = transform {
+            if (transform.scale_x).abs() > f32::EPSILON {
+                scale_x = transform.scale_x;
+            }
+            if (transform.scale_y).abs() > f32::EPSILON {
+                scale_y = transform.scale_y;
+            }
+            offset_x = transform.offset_x;
+            offset_y = transform.offset_y;
+        }
+
+        let mut final_screen_x = screen_x + offset_x * zoom;
+        let mut final_screen_y = screen_y + offset_y * zoom;
+
+        if scale_x < 0.0 {
+            transform_flipped = !transform_flipped;
+            scale_x = -scale_x;
+        }
+        if scale_y < 0.0 {
+            scale_y = -scale_y;
+        }
+
+        let dest_width = facet.width as f32 * zoom * scale_x;
+        let dest_height = facet.height as f32 * zoom * scale_y;
         if dest_width <= 0.0 || dest_height <= 0.0 {
             return false;
         }
 
-        let dest_rect = GuiRect::from_origin_size(
-            GuiPoint::new(screen_x - dest_width / 2.0, screen_y - dest_height / 2.0),
-            GuiSize::new(dest_width, dest_height),
-        );
-        draw_image_region(
-            &mut self.surface,
-            &dest_rect,
-            &sprite.image,
-            sprite.color_mask.as_ref(),
-            &source_rect,
-            flipped,
-            owner_color,
-        );
+        let final_flipped = flipped ^ transform_flipped;
+
+        if rotation_degrees.abs() <= f32::EPSILON {
+            let dest_rect = GuiRect::from_origin_size(
+                GuiPoint::new(
+                    final_screen_x - dest_width / 2.0,
+                    final_screen_y - dest_height / 2.0,
+                ),
+                GuiSize::new(dest_width, dest_height),
+            );
+            draw_image_region(
+                &mut self.surface,
+                &dest_rect,
+                &sprite.image,
+                sprite.color_mask.as_ref(),
+                &source_rect,
+                final_flipped,
+                owner_color,
+            );
+        } else {
+            draw_image_region_rotated(
+                &mut self.surface,
+                final_screen_x,
+                final_screen_y,
+                dest_width,
+                dest_height,
+                &sprite.image,
+                sprite.color_mask.as_ref(),
+                &source_rect,
+                final_flipped,
+                owner_color,
+                rotation_degrees,
+            );
+        }
         true
     }
 
@@ -1476,18 +1637,40 @@ impl GraphicsSystem {
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
+        rotation_degrees: f32,
+        base_transform: Option<DrawTransform>,
     ) {
         if object.graphics_overlays.is_empty() {
             return;
         }
         for overlay in &object.graphics_overlays {
+            let combined_transform = match (base_transform, overlay.transform) {
+                (Some(base), Some(local)) => Some(base.combined(local)),
+                (Some(base), None) => Some(base),
+                (None, Some(local)) => Some(local),
+                (None, None) => None,
+            };
             match overlay.mode {
-                GraphicsOverlayMode::Action => {
-                    self.draw_overlay_action(object, overlay, owner_color, screen_x, screen_y, zoom)
-                }
-                GraphicsOverlayMode::Base => {
-                    self.draw_overlay_base(object, overlay, owner_color, screen_x, screen_y, zoom)
-                }
+                GraphicsOverlayMode::Action => self.draw_overlay_action(
+                    object,
+                    overlay,
+                    owner_color,
+                    screen_x,
+                    screen_y,
+                    zoom,
+                    rotation_degrees,
+                    combined_transform,
+                ),
+                GraphicsOverlayMode::Base => self.draw_overlay_base(
+                    object,
+                    overlay,
+                    owner_color,
+                    screen_x,
+                    screen_y,
+                    zoom,
+                    rotation_degrees,
+                    combined_transform,
+                ),
                 _ => {}
             }
         }
@@ -1501,6 +1684,8 @@ impl GraphicsSystem {
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
+        rotation_degrees: f32,
+        transform: Option<DrawTransform>,
     ) {
         let definition_id = overlay
             .definition
@@ -1527,6 +1712,8 @@ impl GraphicsSystem {
             screen_x,
             screen_y,
             zoom,
+            rotation_degrees,
+            transform,
         );
     }
 
@@ -1538,6 +1725,8 @@ impl GraphicsSystem {
         screen_x: f32,
         screen_y: f32,
         zoom: f32,
+        rotation_degrees: f32,
+        transform: Option<DrawTransform>,
     ) {
         let definition_id = overlay
             .definition
@@ -1548,28 +1737,81 @@ impl GraphicsSystem {
         };
         let sprite_width = (sprite.image.width() as f32 * zoom).max(1.0);
         let sprite_height = (sprite.image.height() as f32 * zoom).max(1.0);
-        let rect = GuiRect::from_origin_size(
-            GuiPoint::new(
-                screen_x - sprite_width / 2.0,
-                screen_y - sprite_height / 2.0,
-            ),
-            GuiSize::new(sprite_width, sprite_height),
-        );
         let source_rect = SourceRect::new(
             0,
             0,
             sprite.image.width() as i32,
             sprite.image.height() as i32,
         );
-        draw_image_region(
-            &mut self.surface,
-            &rect,
-            &sprite.image,
-            sprite.color_mask.as_ref(),
-            &source_rect,
-            false,
-            owner_color,
-        );
+        if !Self::source_within_image(&sprite.image, &source_rect) {
+            return;
+        }
+
+        let mut scale_x = 1.0f32;
+        let mut scale_y = 1.0f32;
+        let mut offset_x = 0.0f32;
+        let mut offset_y = 0.0f32;
+        let mut flip_x = false;
+
+        if let Some(transform) = transform {
+            if (transform.scale_x).abs() > f32::EPSILON {
+                scale_x = transform.scale_x;
+            }
+            if (transform.scale_y).abs() > f32::EPSILON {
+                scale_y = transform.scale_y;
+            }
+            offset_x = transform.offset_x;
+            offset_y = transform.offset_y;
+        }
+
+        let mut final_screen_x = screen_x + offset_x * zoom;
+        let mut final_screen_y = screen_y + offset_y * zoom;
+        if scale_x < 0.0 {
+            flip_x = !flip_x;
+            scale_x = -scale_x;
+        }
+        if scale_y < 0.0 {
+            scale_y = -scale_y;
+        }
+
+        let dest_width = sprite_width * scale_x;
+        let dest_height = sprite_height * scale_y;
+        if dest_width <= 0.0 || dest_height <= 0.0 {
+            return;
+        }
+
+        if rotation_degrees.abs() <= f32::EPSILON {
+            let rect = GuiRect::from_origin_size(
+                GuiPoint::new(
+                    final_screen_x - dest_width / 2.0,
+                    final_screen_y - dest_height / 2.0,
+                ),
+                GuiSize::new(dest_width, dest_height),
+            );
+            draw_image_region(
+                &mut self.surface,
+                &rect,
+                &sprite.image,
+                sprite.color_mask.as_ref(),
+                &source_rect,
+                flip_x,
+                owner_color,
+            );
+        } else {
+            draw_image_region_rotated(
+                &mut self.surface,
+                final_screen_x,
+                final_screen_y,
+                dest_width,
+                dest_height,
+                &sprite.image,
+                sprite.color_mask.as_ref(),
+                &source_rect,
+                flip_x,
+                owner_color,
+                rotation_degrees,
+            );
+        }
     }
 
     fn resolve_draw_direction(graphics: &DefinitionActionGraphics, direction: u32) -> (u32, bool) {
@@ -2332,6 +2574,156 @@ fn draw_image_region(
     }
 }
 
+fn draw_image_region_rotated(
+    surface: &mut Surface,
+    center_x: f32,
+    center_y: f32,
+    dest_width: f32,
+    dest_height: f32,
+    image: &ImageData,
+    mask: Option<&ColorByOwnerMask>,
+    source: &SourceRect,
+    flip_x: bool,
+    owner_color: Option<Color>,
+    rotation_degrees: f32,
+) {
+    if dest_width <= 0.0 || dest_height <= 0.0 {
+        return;
+    }
+    if source.width <= 0 || source.height <= 0 {
+        return;
+    }
+    if image.width() == 0 || image.height() == 0 {
+        return;
+    }
+
+    let bounds = surface.bounds();
+    if bounds.width == 0 || bounds.height == 0 {
+        return;
+    }
+
+    let half_w = dest_width / 2.0;
+    let half_h = dest_height / 2.0;
+    let angle_rad = rotation_degrees.to_radians();
+    let cos_theta = angle_rad.cos();
+    let sin_theta = angle_rad.sin();
+
+    let corners = [
+        (-half_w, -half_h),
+        (half_w, -half_h),
+        (-half_w, half_h),
+        (half_w, half_h),
+    ];
+
+    let mut min_x = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut min_y = f32::MAX;
+    let mut max_y = f32::MIN;
+    for (x, y) in corners {
+        let rotated_x = x * cos_theta - y * sin_theta;
+        let rotated_y = x * sin_theta + y * cos_theta;
+        min_x = min_x.min(rotated_x);
+        max_x = max_x.max(rotated_x);
+        min_y = min_y.min(rotated_y);
+        max_y = max_y.max(rotated_y);
+    }
+
+    let surface_min_x = bounds.x;
+    let surface_min_y = bounds.y;
+    let surface_max_x = bounds.x + bounds.width as i32 - 1;
+    let surface_max_y = bounds.y + bounds.height as i32 - 1;
+
+    let min_px = ((center_x + min_x).floor() as i32).clamp(surface_min_x, surface_max_x);
+    let max_px = ((center_x + max_x).ceil() as i32).clamp(surface_min_x, surface_max_x);
+    let min_py = ((center_y + min_y).floor() as i32).clamp(surface_min_y, surface_max_y);
+    let max_py = ((center_y + max_y).ceil() as i32).clamp(surface_min_y, surface_max_y);
+
+    if min_px > max_px || min_py > max_py {
+        return;
+    }
+
+    let src_width = source.width as f32;
+    let src_height = source.height as f32;
+    let pixels = image.pixels();
+
+    for y in min_py..=max_py {
+        for x in min_px..=max_px {
+            let dx = (x as f32) - center_x;
+            let dy = (y as f32) - center_y;
+
+            let local_x = dx * cos_theta + dy * sin_theta;
+            let local_y = -dx * sin_theta + dy * cos_theta;
+
+            if local_x < -half_w || local_x > half_w || local_y < -half_h || local_y > half_h {
+                continue;
+            }
+
+            let normalized_x = (local_x + half_w) / dest_width;
+            let normalized_y = (local_y + half_h) / dest_height;
+
+            if normalized_x < 0.0 || normalized_x > 1.0 || normalized_y < 0.0 || normalized_y > 1.0
+            {
+                continue;
+            }
+
+            let src_x_float = (normalized_x * (src_width - 1.0)).clamp(0.0, src_width - 1.0);
+            let src_y_float = (normalized_y * (src_height - 1.0)).clamp(0.0, src_height - 1.0);
+
+            let src_x_local = src_x_float.floor() as i32;
+            let src_y_local = src_y_float.floor() as i32;
+
+            let src_x_offset = if flip_x {
+                (source.width - 1).saturating_sub(src_x_local)
+            } else {
+                src_x_local
+            };
+            let sample_x = source.x + src_x_offset;
+            let sample_y = source.y + src_y_local;
+
+            if sample_x < 0
+                || sample_y < 0
+                || sample_x >= image.width() as i32
+                || sample_y >= image.height() as i32
+            {
+                continue;
+            }
+
+            let idx =
+                ((sample_y as usize * image.width() as usize + sample_x as usize) * 4) as usize;
+            if idx + 3 >= pixels.len() {
+                continue;
+            }
+
+            let mut color = Color::new(
+                pixels[idx],
+                pixels[idx + 1],
+                pixels[idx + 2],
+                pixels[idx + 3],
+            );
+
+            if let (Some(mask_map), Some(owner)) = (mask, owner_color) {
+                if sample_x >= 0 && sample_y >= 0 {
+                    let mask_value = mask_map.value_at(sample_x as u32, sample_y as u32);
+                    if mask_value != 0 {
+                        color = blend_color_by_owner(color, mask_value, owner);
+                    }
+                }
+            }
+
+            if color.a == 0 {
+                continue;
+            }
+
+            if color.a < 255 {
+                let background = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
+                color = blend_colors(color, background);
+            }
+
+            let _ = surface.set_pixel(x as u32, y as u32, color);
+        }
+    }
+}
+
 pub fn draw_image(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
         return;
@@ -2481,6 +2873,7 @@ mod tests {
                 definition_id: "TestObject".to_string(),
                 position: Vector2::new(100, 100),
                 velocity: Vector2::ZERO,
+                rotation: 0,
                 energy: 100,
                 damage: 0,
                 action: Default::default(),

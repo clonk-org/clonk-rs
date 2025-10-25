@@ -14,7 +14,7 @@ use crate::ocf;
 use crate::LiquidSegment;
 use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, AudioCommand,
-    CommandDirection, DefinitionId, Direction, EnvironmentSettings, FloatVector2,
+    CommandDirection, DefinitionId, Direction, DrawTransform, EnvironmentSettings, FloatVector2,
     GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectStatus, ObjectUpdate,
     ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder,
     PhysicsSettings, PlayerState, QueuedCommand, SpawnConfig, TransferZoneCommand,
@@ -61,11 +61,13 @@ pub(crate) struct HostWorldObject {
     pub position: Vector2,
     #[allow(dead_code)]
     pub velocity: Vector2,
+    pub rotation: i32,
     pub vertices: Vec<ObjectVertex>,
     #[allow(dead_code)]
     pub action_data: i32,
     pub action_ticks: u32,
     container: Option<ObjectId>,
+    pub draw_transform: Option<DrawTransform>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -110,10 +112,12 @@ impl HostWorldObject {
             0,
             position,
             velocity,
+            0,
             vertices,
             action_data,
             action_ticks,
             container,
+            None,
         )
     }
 
@@ -131,10 +135,12 @@ impl HostWorldObject {
         damage: i32,
         position: Vector2,
         velocity: Vector2,
+        rotation: i32,
         vertices: Vec<ObjectVertex>,
         action_data: i32,
         action_ticks: u32,
         container: Option<ObjectId>,
+        draw_transform: Option<DrawTransform>,
     ) -> Self {
         Self {
             id,
@@ -152,10 +158,12 @@ impl HostWorldObject {
             ocf: ocf::NORMAL,
             position,
             velocity,
+            rotation,
             vertices,
             action_data,
             action_ticks,
             container,
+            draw_transform,
         }
     }
 
@@ -1158,6 +1166,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetDir", get_dir);
     script.register_host_function("SetComDir", set_com_dir);
     script.register_host_function("GetComDir", get_com_dir);
+    script.register_host_function("SetR", set_r);
+    script.register_host_function("GetR", get_r);
     script.register_host_function("SetXDir", set_x_dir);
     script.register_host_function("GetXDir", get_x_dir);
     script.register_host_function("SetYDir", set_y_dir);
@@ -1184,6 +1194,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetObjectStatus", get_object_status);
     script.register_host_function("GetOCF", get_ocf);
     script.register_host_function("SetGraphics", set_graphics);
+    script.register_host_function("SetObjDrawTransform", set_obj_draw_transform);
+    script.register_host_function("SetObjDrawTransform2", set_obj_draw_transform2);
     script.register_host_function("RemoveObject", remove_object);
     script.register_host_function("GetEnergy", get_energy);
     script.register_host_function("DoEnergy", do_energy);
@@ -1364,6 +1376,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub crew_member: bool,
     pub position: Vector2,
     pub velocity: Vector2,
+    pub rotation: i32,
     pub effects: &'a [EffectState],
     pub action_name: String,
     pub action_ticks: u32,
@@ -1375,6 +1388,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub action_target2: Option<ObjectId>,
     pub vertices: &'a [ObjectVertex],
     pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
+    pub draw_transform: Option<DrawTransform>,
 }
 
 impl<'a> HostObjectContext<'a> {
@@ -1407,6 +1421,7 @@ impl<'a> HostObjectContext<'a> {
             owner,
             position,
             velocity,
+            0,
             effects,
             action_name,
             action_ticks,
@@ -1420,6 +1435,7 @@ impl<'a> HostObjectContext<'a> {
             DEFAULT_CATEGORY,
             ocf::NORMAL,
             false,
+            None,
         )
     }
 
@@ -1432,6 +1448,7 @@ impl<'a> HostObjectContext<'a> {
         owner: i32,
         position: Vector2,
         velocity: Vector2,
+        rotation: i32,
         effects: &'a [EffectState],
         action_name: impl Into<String>,
         action_ticks: u32,
@@ -1445,6 +1462,7 @@ impl<'a> HostObjectContext<'a> {
         category: i32,
         ocf_base: u32,
         crew_member: bool,
+        draw_transform: Option<DrawTransform>,
     ) -> Self {
         Self {
             id,
@@ -1460,6 +1478,7 @@ impl<'a> HostObjectContext<'a> {
             crew_member,
             position,
             velocity,
+            rotation,
             effects,
             action_name: action_name.into(),
             action_ticks,
@@ -1471,6 +1490,7 @@ impl<'a> HostObjectContext<'a> {
             action_target2,
             vertices,
             graphics_overlays: Vec::new(),
+            draw_transform,
         }
     }
 
@@ -1481,6 +1501,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_graphics_overlays(mut self, overlays: Vec<ObjectGraphicsOverlay>) -> Self {
         self.graphics_overlays = overlays;
+        self
+    }
+
+    pub fn with_draw_transform(mut self, transform: Option<DrawTransform>) -> Self {
+        self.draw_transform = transform;
         self
     }
 
@@ -4447,6 +4472,85 @@ fn get_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn set_r(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetR expects at least 1 argument: rotation",
+        ));
+    }
+
+    let rotation = value_to_i32(&args[0], "SetR", "rotation")?;
+
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(index) {
+        target_id = parse_object_reference_argument(arg, "SetR", "object")?;
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetR: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetR requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        object.set_rotation(rotation);
+        Ok(Value::Bool(true))
+    })
+}
+
+fn get_r(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new("GetR expects at most 1 argument: target"));
+    }
+
+    let target_id =
+        parse_object_reference_argument(args.get(0).unwrap_or(&Value::Nil), "GetR", "target")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if object.id() == target {
+                    return Ok(Value::Int(object.rotation()));
+                }
+            }
+            if let Some(other) = context.get_world_object(target) {
+                return Ok(Value::Int(other.rotation.rem_euclid(360)));
+            }
+            return Ok(Value::Nil);
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+
+        Ok(Value::Int(object.rotation()))
+    })
+}
+
 fn set_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() {
         return Err(RuntimeError::new(
@@ -5156,9 +5260,11 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             0,
             position,
             Vector2::ZERO,
+            0,
             Vec::new(),
             0,
             0,
+            None,
             None,
         )
         .with_ocf(preview_ocf);
@@ -5605,6 +5711,171 @@ fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
 
         let changed = object.set_graphics_overlay(overlay);
         Ok(Value::Bool(changed))
+    })
+}
+
+fn parse_draw_transform_components(
+    args: &[Value],
+    function: &str,
+) -> Result<[i32; 6], RuntimeError> {
+    if args.len() < 6 {
+        return Err(RuntimeError::new(format!(
+            "{function} expects at least 6 arguments: a, b, c, d, e, f"
+        )));
+    }
+    Ok([
+        value_to_i32(&args[0], function, "a")?,
+        value_to_i32(&args[1], function, "b")?,
+        value_to_i32(&args[2], function, "c")?,
+        value_to_i32(&args[3], function, "d")?,
+        value_to_i32(&args[4], function, "e")?,
+        value_to_i32(&args[5], function, "f")?,
+    ])
+}
+
+fn parse_draw_transform_matrix(args: &[Value], function: &str) -> Result<[i32; 9], RuntimeError> {
+    if args.len() < 9 {
+        return Err(RuntimeError::new(format!(
+            "{function} expects at least 9 arguments: a, b, c, d, e, f, g, h, i"
+        )));
+    }
+    Ok([
+        value_to_i32(&args[0], function, "a")?,
+        value_to_i32(&args[1], function, "b")?,
+        value_to_i32(&args[2], function, "c")?,
+        value_to_i32(&args[3], function, "d")?,
+        value_to_i32(&args[4], function, "e")?,
+        value_to_i32(&args[5], function, "f")?,
+        value_to_i32(&args[6], function, "g")?,
+        value_to_i32(&args[7], function, "h")?,
+        value_to_i32(&args[8], function, "i")?,
+    ])
+}
+
+fn normalize_draw_transform(transform: DrawTransform) -> Option<DrawTransform> {
+    if transform.is_identity() {
+        None
+    } else {
+        Some(transform)
+    }
+}
+
+fn set_obj_draw_transform(args: &[Value]) -> Result<Value, RuntimeError> {
+    let components = parse_draw_transform_components(args, "SetObjDrawTransform")?;
+    let mut index = 6;
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(index) {
+        target_id = parse_object_reference_argument(arg, "SetObjDrawTransform", "object")?;
+        index += 1;
+    }
+    let overlay_id = if let Some(arg) = args.get(index) {
+        let value = value_to_i32(arg, "SetObjDrawTransform", "overlay")?;
+        index += 1;
+        value
+    } else {
+        0
+    };
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetObjDrawTransform: additional arguments are not supported",
+        ));
+    }
+
+    let transform = DrawTransform::from_components(
+        components[0] as f32 / 1000.0,
+        components[4] as f32 / 1000.0,
+        components[2] as f32 / 1000.0,
+        components[5] as f32 / 1000.0,
+    );
+    let normalized = normalize_draw_transform(transform);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("SetObjDrawTransform requires an active engine context")
+        })?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        if overlay_id <= 0 {
+            object.set_draw_transform(normalized);
+            Ok(Value::Bool(true))
+        } else {
+            let changed = object.set_overlay_transform(overlay_id, normalized);
+            Ok(Value::Bool(changed))
+        }
+    })
+}
+
+fn set_obj_draw_transform2(args: &[Value]) -> Result<Value, RuntimeError> {
+    let matrix = parse_draw_transform_matrix(args, "SetObjDrawTransform2")?;
+    let mut index = 9;
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(index) {
+        target_id = parse_object_reference_argument(arg, "SetObjDrawTransform2", "object")?;
+        index += 1;
+    }
+    let overlay_id = if let Some(arg) = args.get(index) {
+        let value = value_to_i32(arg, "SetObjDrawTransform2", "overlay")?;
+        index += 1;
+        value
+    } else {
+        0
+    };
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetObjDrawTransform2: additional arguments are not supported",
+        ));
+    }
+
+    let delta = DrawTransform::from_components(
+        matrix[0] as f32 / 1000.0,
+        matrix[4] as f32 / 1000.0,
+        matrix[2] as f32 / 1000.0,
+        matrix[5] as f32 / 1000.0,
+    );
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("SetObjDrawTransform2 requires an active engine context")
+        })?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        if overlay_id <= 0 {
+            let current = object.draw_transform().unwrap_or(DrawTransform::identity());
+            let combined = current.combined(delta);
+            object.set_draw_transform(normalize_draw_transform(combined));
+            Ok(Value::Bool(true))
+        } else {
+            let existing = match object.overlay_transform(overlay_id) {
+                Some(transform) => transform.unwrap_or(DrawTransform::identity()),
+                None => return Ok(Value::Bool(false)),
+            };
+            let combined = existing.combined(delta);
+            let changed =
+                object.set_overlay_transform(overlay_id, normalize_draw_transform(combined));
+            Ok(Value::Bool(changed))
+        }
     })
 }
 
@@ -6487,6 +6758,7 @@ impl EffectHostContext {
                 owner,
                 position,
                 velocity,
+                rotation,
                 effects,
                 action_name,
                 action_ticks,
@@ -6502,6 +6774,7 @@ impl EffectHostContext {
                 ocf: _,
                 ocf_base,
                 crew_member,
+                draw_transform,
             } = ctx;
             ObjectScopeContext::new(
                 id,
@@ -6514,6 +6787,7 @@ impl EffectHostContext {
                 category,
                 position,
                 velocity,
+                rotation,
                 effects.to_vec(),
                 action_library,
                 action_name,
@@ -6527,6 +6801,7 @@ impl EffectHostContext {
                 ocf_base,
                 crew_member,
                 graphics_overlays,
+                draw_transform,
             )
         });
         let global = Some(EffectScopeContext::new(global_effects));
@@ -6844,8 +7119,10 @@ struct ObjectScopeContext {
     current_command_direction: CommandDirection,
     current_position: Vector2,
     current_velocity: Vector2,
+    current_rotation: i32,
     vertices: Vec<ObjectVertex>,
     graphics_overlays: Vec<ObjectGraphicsOverlay>,
+    current_draw_transform: Option<DrawTransform>,
 }
 
 impl ObjectScopeContext {
@@ -6860,6 +7137,7 @@ impl ObjectScopeContext {
         category: i32,
         position: Vector2,
         velocity: Vector2,
+        rotation: i32,
         effects: Vec<EffectState>,
         action_library: ActionLibrary,
         action_name: String,
@@ -6873,6 +7151,7 @@ impl ObjectScopeContext {
         ocf_base: u32,
         crew_member: bool,
         graphics_overlays: Vec<ObjectGraphicsOverlay>,
+        draw_transform: Option<DrawTransform>,
     ) -> Self {
         let blocks_other_actions = action_library.blocks_other_actions(&action_name);
         let max_energy = energy.max(DEFAULT_MAX_ENERGY);
@@ -6904,8 +7183,10 @@ impl ObjectScopeContext {
             current_command_direction: command_direction,
             current_position: position,
             current_velocity: velocity,
+            current_rotation: rotation.rem_euclid(360),
             vertices,
             graphics_overlays,
+            current_draw_transform: draw_transform,
         }
     }
 
@@ -7150,6 +7431,21 @@ impl ObjectScopeContext {
         self.pending_update.direction = Some(direction);
     }
 
+    fn rotation(&self) -> i32 {
+        self.pending_update
+            .rotation
+            .unwrap_or(self.current_rotation)
+    }
+
+    fn set_rotation(&mut self, rotation: i32) {
+        let normalized = rotation.rem_euclid(360);
+        if self.rotation() == normalized {
+            return;
+        }
+        self.current_rotation = normalized;
+        self.pending_update.rotation = Some(normalized);
+    }
+
     fn command_direction(&self) -> CommandDirection {
         self.pending_update
             .command_direction
@@ -7232,6 +7528,48 @@ impl ObjectScopeContext {
         } else {
             false
         }
+    }
+
+    fn draw_transform(&self) -> Option<DrawTransform> {
+        self.pending_update
+            .draw_transform
+            .unwrap_or(self.current_draw_transform)
+    }
+
+    fn set_draw_transform(&mut self, transform: Option<DrawTransform>) {
+        if self.draw_transform() == transform {
+            return;
+        }
+        self.current_draw_transform = transform;
+        self.pending_update.draw_transform = Some(transform);
+    }
+
+    fn set_overlay_transform(&mut self, id: i32, transform: Option<DrawTransform>) -> bool {
+        let mut changed = false;
+        if let Some(existing) = self
+            .graphics_overlays
+            .iter_mut()
+            .find(|overlay| overlay.id == id)
+        {
+            if existing.transform != transform {
+                existing.transform = transform;
+                changed = true;
+            }
+        } else {
+            return false;
+        }
+
+        if changed {
+            self.pending_update.graphics_overlays = Some(self.graphics_overlays.clone());
+        }
+        true
+    }
+
+    fn overlay_transform(&self, id: i32) -> Option<Option<DrawTransform>> {
+        self.graphics_overlays
+            .iter()
+            .find(|overlay| overlay.id == id)
+            .map(|overlay| overlay.transform)
     }
 
     fn set_action_target(&mut self, index: usize, target: Option<ObjectId>) {
@@ -10776,6 +11114,7 @@ mod tests {
             OWNER_NONE,
             Vector2::ZERO,
             Vector2::ZERO,
+            0,
             &[],
             "Idle",
             0,
@@ -10789,6 +11128,7 @@ mod tests {
             DEFAULT_CATEGORY,
             ocf::NORMAL,
             false,
+            None,
         )
         .with_alive(true)
         .with_ocf(ocf_mask);
@@ -10816,6 +11156,7 @@ mod tests {
             OWNER_NONE,
             Vector2::ZERO,
             Vector2::ZERO,
+            0,
             &[],
             "Idle",
             0,
@@ -10829,6 +11170,7 @@ mod tests {
             DEFAULT_CATEGORY,
             ocf::NORMAL,
             false,
+            None,
         )
         .with_graphics_overlays(Vec::new());
 
@@ -10876,6 +11218,7 @@ mod tests {
             OWNER_NONE,
             Vector2::ZERO,
             Vector2::ZERO,
+            0,
             &[],
             "Idle",
             0,
@@ -10889,6 +11232,7 @@ mod tests {
             DEFAULT_CATEGORY,
             ocf::NORMAL,
             false,
+            None,
         )
         .with_graphics_overlays(vec![overlay]);
 
@@ -10914,6 +11258,138 @@ mod tests {
             .graphics_overlays
             .expect("graphics overlay update expected");
         assert!(overlays.is_empty());
+    }
+
+    #[test]
+    fn set_obj_draw_transform_updates_object_transform() {
+        let object_id = ObjectId::new(1);
+        let object_context = HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            0,
+            0,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            0,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+            None,
+        );
+
+        let (result, outcome) = with_effect_context(
+            Some(object_context),
+            &[],
+            HostWorldContext::default(),
+            100,
+            || {
+                set_obj_draw_transform(&[
+                    Value::Int(2000),
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Int(1500),
+                    Value::Int(0),
+                ])
+            },
+        );
+
+        assert_eq!(
+            result.expect("SetObjDrawTransform succeeds"),
+            Value::Bool(true)
+        );
+        let update = outcome.object_update.expect("object update expected");
+        let transform = update
+            .draw_transform
+            .expect("transform update expected")
+            .expect("transform set");
+        assert!((transform.scale_x - 2.0).abs() < f32::EPSILON);
+        assert!((transform.scale_y - 1.5).abs() < f32::EPSILON);
+        assert!(transform.offset_x.abs() < f32::EPSILON);
+        assert!(transform.offset_y.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn set_obj_draw_transform_updates_overlay_transform() {
+        let object_id = ObjectId::new(5);
+        let overlay = ObjectGraphicsOverlay::new(2, GraphicsOverlayMode::Base);
+        let object_context = HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            0,
+            0,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            0,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+            None,
+        )
+        .with_graphics_overlays(vec![overlay]);
+
+        let (result, outcome) = with_effect_context(
+            Some(object_context),
+            &[],
+            HostWorldContext::default(),
+            100,
+            || {
+                set_obj_draw_transform(&[
+                    Value::Int(1000),
+                    Value::Int(0),
+                    Value::Int(500),
+                    Value::Int(0),
+                    Value::Int(1000),
+                    Value::Int(-250),
+                    Value::Proplist({
+                        let mut map = HashMap::new();
+                        map.insert("id".into(), Value::Int(object_id.as_u64() as i32));
+                        map
+                    }),
+                    Value::Int(2),
+                ])
+            },
+        );
+
+        assert_eq!(
+            result.expect("SetObjDrawTransform succeeds"),
+            Value::Bool(true)
+        );
+        let update = outcome.object_update.expect("object update expected");
+        let overlays = update
+            .graphics_overlays
+            .expect("graphics overlay update expected");
+        let overlay = overlays
+            .iter()
+            .find(|overlay| overlay.id == 2)
+            .expect("overlay present");
+        let transform = overlay.transform.expect("overlay transform set");
+        assert!((transform.offset_x - 0.5).abs() < f32::EPSILON);
+        assert!((transform.offset_y + 0.25).abs() < f32::EPSILON);
     }
 
     #[test]

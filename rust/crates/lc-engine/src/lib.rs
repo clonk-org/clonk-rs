@@ -137,7 +137,65 @@ impl GraphicsOverlayMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DrawTransform {
+    pub scale_x: f32,
+    pub scale_y: f32,
+    pub offset_x: f32,
+    pub offset_y: f32,
+}
+
+impl DrawTransform {
+    pub fn identity() -> Self {
+        Self {
+            scale_x: 1.0,
+            scale_y: 1.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
+        }
+    }
+
+    pub fn is_identity(&self) -> bool {
+        (self.scale_x - 1.0).abs() <= f32::EPSILON
+            && (self.scale_y - 1.0).abs() <= f32::EPSILON
+            && self.offset_x.abs() <= f32::EPSILON
+            && self.offset_y.abs() <= f32::EPSILON
+    }
+
+    pub fn from_components(scale_x: f32, scale_y: f32, offset_x: f32, offset_y: f32) -> Self {
+        Self {
+            scale_x,
+            scale_y,
+            offset_x,
+            offset_y,
+        }
+    }
+
+    pub fn combined(self, other: Self) -> Self {
+        let delta_scale_x = other.scale_x;
+        let delta_scale_y = other.scale_y;
+        let delta_offset_x = other.offset_x;
+        let delta_offset_y = other.offset_y;
+
+        let mut combined = Self {
+            scale_x: self.scale_x * delta_scale_x,
+            scale_y: self.scale_y * delta_scale_y,
+            offset_x: self.offset_x + self.scale_x * delta_offset_x,
+            offset_y: self.offset_y + self.scale_y * delta_offset_y,
+        };
+
+        if combined.scale_x.abs() <= f32::EPSILON {
+            combined.scale_x = 0.0;
+        }
+        if combined.scale_y.abs() <= f32::EPSILON {
+            combined.scale_y = 0.0;
+        }
+
+        combined
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectGraphicsOverlay {
     pub id: i32,
     pub mode: GraphicsOverlayMode,
@@ -155,6 +213,8 @@ pub struct ObjectGraphicsOverlay {
     pub color_modulation: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay_object: Option<ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<DrawTransform>,
 }
 
 impl ObjectGraphicsOverlay {
@@ -169,6 +229,7 @@ impl ObjectGraphicsOverlay {
             blit_mode: 0,
             color_modulation: 0x00ff_ffff,
             overlay_object: None,
+            transform: None,
         }
     }
 
@@ -194,6 +255,11 @@ impl ObjectGraphicsOverlay {
 
     pub fn with_overlay_object(mut self, overlay_object: Option<ObjectId>) -> Self {
         self.overlay_object = overlay_object;
+        self
+    }
+
+    pub fn with_transform(mut self, transform: Option<DrawTransform>) -> Self {
+        self.transform = transform;
         self
     }
 }
@@ -1635,10 +1701,12 @@ fn default_alive() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectState {
     pub position: Vector2,
     pub velocity: Vector2,
+    #[serde(default)]
+    pub rotation: i32,
     pub energy: i32,
     #[serde(default)]
     pub damage: i32,
@@ -1666,6 +1734,8 @@ pub struct ObjectState {
     pub alive: bool,
     #[serde(default)]
     pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_transform: Option<DrawTransform>,
 }
 
 #[derive(Debug, Clone)]
@@ -1697,6 +1767,9 @@ impl ObjectState {
         if let Some(velocity) = delta.velocity {
             self.velocity = velocity;
         }
+        if let Some(rotation) = delta.rotation {
+            self.rotation = rotation.rem_euclid(360);
+        }
         if let Some(energy) = delta.energy {
             self.energy = energy;
         }
@@ -1727,6 +1800,9 @@ impl ObjectState {
         }
         if let Some(overlays) = &delta.graphics_overlays {
             self.graphics_overlays = overlays.clone();
+        }
+        if let Some(transform) = &delta.draw_transform {
+            self.draw_transform = transform.clone();
         }
         if let Some(owner) = delta.owner {
             self.owner = owner;
@@ -1764,10 +1840,11 @@ impl ObjectState {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct ObjectDelta {
     position: Option<Vector2>,
     velocity: Option<Vector2>,
+    rotation: Option<i32>,
     energy: Option<i32>,
     damage: Option<i32>,
     direction: Option<Direction>,
@@ -1781,6 +1858,7 @@ struct ObjectDelta {
     container: Option<Option<ObjectId>>,
     vertices: Option<Vec<ObjectVertex>>,
     graphics_overlays: Option<Vec<ObjectGraphicsOverlay>>,
+    draw_transform: Option<Option<DrawTransform>>,
 }
 
 impl ObjectDelta {
@@ -1790,6 +1868,9 @@ impl ObjectDelta {
         }
         if let Some(velocity) = update.velocity {
             self.velocity = Some(velocity);
+        }
+        if let Some(rotation) = update.rotation {
+            self.rotation = Some(rotation);
         }
         if let Some(energy) = update.energy {
             self.energy = Some(energy);
@@ -1827,6 +1908,9 @@ impl ObjectDelta {
         if let Some(overlays) = update.graphics_overlays {
             self.graphics_overlays = Some(overlays);
         }
+        if let Some(transform) = update.draw_transform {
+            self.draw_transform = Some(transform);
+        }
         if let Some(action) = update.action {
             match &mut self.action {
                 Some(existing) => existing.merge(action),
@@ -1841,6 +1925,7 @@ impl From<ObjectUpdate> for ObjectDelta {
         Self {
             position: update.position,
             velocity: update.velocity,
+            rotation: update.rotation,
             energy: update.energy,
             damage: update.damage,
             direction: update.direction,
@@ -1854,14 +1939,17 @@ impl From<ObjectUpdate> for ObjectDelta {
             container: update.container,
             vertices: update.vertices,
             graphics_overlays: update.graphics_overlays,
+            draw_transform: update.draw_transform,
         }
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ObjectUpdate {
     pub position: Option<Vector2>,
     pub velocity: Option<Vector2>,
+    #[serde(default)]
+    pub rotation: Option<i32>,
     pub energy: Option<i32>,
     #[serde(default)]
     pub damage: Option<i32>,
@@ -1886,6 +1974,8 @@ pub struct ObjectUpdate {
     pub vertices: Option<Vec<ObjectVertex>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphics_overlays: Option<Vec<ObjectGraphicsOverlay>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_transform: Option<Option<DrawTransform>>,
 }
 
 impl ObjectUpdate {
@@ -1900,6 +1990,11 @@ impl ObjectUpdate {
 
     pub fn with_velocity(mut self, velocity: Vector2) -> Self {
         self.velocity = Some(velocity);
+        self
+    }
+
+    pub fn with_rotation(mut self, rotation: i32) -> Self {
+        self.rotation = Some(rotation);
         self
     }
 
@@ -2014,7 +2109,7 @@ impl ObjectUpdate {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueuedCommand {
     pub delay: u32,
     pub update: ObjectUpdate,
@@ -2263,6 +2358,7 @@ impl Object {
             definition_id: self.definition_id.clone(),
             position: self.state.position,
             velocity: self.state.velocity,
+            rotation: self.state.rotation.rem_euclid(360),
             energy: self.state.energy,
             damage: self.state.damage,
             action: self.state.action.clone(),
@@ -2279,6 +2375,7 @@ impl Object {
             crew_member: self.state.crew_member,
             alive: self.state.alive,
             graphics_overlays: self.state.graphics_overlays.clone(),
+            draw_transform: self.state.draw_transform,
         }
     }
 
@@ -2572,6 +2669,8 @@ pub struct SpawnConfig {
     pub definition_id: DefinitionId,
     pub position: Vector2,
     pub velocity: Vector2,
+    #[serde(default)]
+    pub rotation: i32,
     pub energy: i32,
     pub action: Option<ActionState>,
     #[serde(default)]
@@ -2602,6 +2701,7 @@ impl SpawnConfig {
             definition_id: definition_id.into(),
             position: Vector2::ZERO,
             velocity: Vector2::ZERO,
+            rotation: 0,
             energy: 0,
             action: None,
             direction: Direction::default(),
@@ -2619,6 +2719,11 @@ impl SpawnConfig {
 
     pub fn with_position(mut self, position: Vector2) -> Self {
         self.position = position;
+        self
+    }
+
+    pub fn with_rotation(mut self, rotation: i32) -> Self {
+        self.rotation = rotation;
         self
     }
 
@@ -2703,12 +2808,14 @@ impl SpawnConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectSnapshot {
     pub id: ObjectId,
     pub definition_id: DefinitionId,
     pub position: Vector2,
     pub velocity: Vector2,
+    #[serde(default)]
+    pub rotation: i32,
     pub energy: i32,
     #[serde(default)]
     pub damage: i32,
@@ -2740,6 +2847,8 @@ pub struct ObjectSnapshot {
     pub alive: bool,
     #[serde(default)]
     pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_transform: Option<DrawTransform>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2794,7 +2903,7 @@ impl SimulationSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedObject {
     pub snapshot: ObjectSnapshot,
     #[serde(default)]
@@ -3382,6 +3491,7 @@ impl Definition {
                     state.owner,
                     state.position,
                     state.velocity,
+                    state.rotation,
                     &state.effects,
                     state.action.name.clone(),
                     state.action.ticks,
@@ -3395,6 +3505,7 @@ impl Definition {
                     state.category,
                     self.ocf_base,
                     self.crew_member,
+                    state.draw_transform,
                 )
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_alive(state.alive)
@@ -3517,6 +3628,7 @@ impl Definition {
                     state.owner,
                     state.position,
                     state.velocity,
+                    state.rotation,
                     &state.effects,
                     state.action.name.clone(),
                     state.action.ticks,
@@ -3530,6 +3642,7 @@ impl Definition {
                     state.category,
                     self.ocf_base,
                     self.crew_member,
+                    state.draw_transform,
                 )
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_alive(state.alive)
@@ -3653,6 +3766,7 @@ impl Definition {
                     state.owner,
                     state.position,
                     state.velocity,
+                    state.rotation,
                     &state.effects,
                     state.action.name.clone(),
                     state.action.ticks,
@@ -3666,6 +3780,7 @@ impl Definition {
                     state.category,
                     self.ocf_base,
                     self.crew_member,
+                    state.draw_transform,
                 )
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_alive(state.alive)
@@ -3745,6 +3860,7 @@ impl Definition {
             state.owner,
             state.position,
             state.velocity,
+            state.rotation,
             &state.effects,
             state.action.name.clone(),
             state.action.ticks,
@@ -3758,6 +3874,7 @@ impl Definition {
             state.category,
             self.ocf_base,
             self.crew_member,
+            state.draw_transform,
         )
         .with_alive(state.alive)
         .with_ocf(self.compute_ocf(state));
@@ -3860,6 +3977,7 @@ impl Definition {
             state.owner,
             state.position,
             state.velocity,
+            state.rotation,
             &state.effects,
             state.action.name.clone(),
             state.action.ticks,
@@ -3873,6 +3991,7 @@ impl Definition {
             state.category,
             self.ocf_base,
             self.crew_member,
+            state.draw_transform,
         )
         .with_alive(state.alive)
         .with_ocf(self.compute_ocf(state));
@@ -3968,6 +4087,7 @@ impl Definition {
             state.owner,
             state.position,
             state.velocity,
+            state.rotation,
             &state.effects,
             state.action.name.clone(),
             state.action.ticks,
@@ -3981,6 +4101,7 @@ impl Definition {
             state.category,
             self.ocf_base,
             self.crew_member,
+            state.draw_transform,
         )
         .with_alive(state.alive)
         .with_ocf(self.compute_ocf(state));
@@ -4260,6 +4381,7 @@ impl Definition {
                     state.owner,
                     state.position,
                     state.velocity,
+                    state.rotation,
                     &state.effects,
                     state.action.name.clone(),
                     state.action.ticks,
@@ -4273,6 +4395,7 @@ impl Definition {
                     state.category,
                     self.ocf_base,
                     self.crew_member,
+                    state.draw_transform,
                 )
                 .with_alive(state.alive)
                 .with_ocf(self.compute_ocf(state)),
@@ -5327,10 +5450,12 @@ impl Engine {
                     object.state.damage,
                     object.state.position,
                     object.state.velocity,
+                    object.state.rotation,
                     object.state.vertices.clone(),
                     object.state.action.data,
                     object.state.action.ticks,
                     object.state.container,
+                    object.state.draw_transform,
                 )
                 .with_alive(object.state.alive)
                 .with_ocf(ocf)
@@ -7187,6 +7312,7 @@ impl Engine {
                 ObjectState {
                     position: snapshot.position,
                     velocity: snapshot.velocity,
+                    rotation: snapshot.rotation.rem_euclid(360),
                     energy: snapshot.energy,
                     damage: snapshot.damage,
                     action: snapshot.action.clone(),
@@ -7202,6 +7328,7 @@ impl Engine {
                     crew_member: snapshot.crew_member,
                     alive: snapshot.alive,
                     graphics_overlays: snapshot.graphics_overlays.clone(),
+                    draw_transform: snapshot.draw_transform,
                 },
             );
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
@@ -9427,6 +9554,7 @@ impl Engine {
             definition_id,
             position,
             velocity,
+            rotation,
             energy,
             action,
             direction,
@@ -9483,6 +9611,7 @@ impl Engine {
             ObjectState {
                 position,
                 velocity,
+                rotation: rotation.rem_euclid(360),
                 energy,
                 damage: 0,
                 action: initial_action,
@@ -9498,6 +9627,7 @@ impl Engine {
                 crew_member: initial_crew_member,
                 alive: alive.unwrap_or(true),
                 graphics_overlays: Vec::new(),
+                draw_transform: None,
             },
         );
         object.ensure_material_capacity(self.materials.len());
@@ -9817,6 +9947,10 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
     );
     map.insert("position".into(), snapshot.position.to_value());
     map.insert("velocity".into(), snapshot.velocity.to_value());
+    map.insert(
+        "rotation".into(),
+        Value::Int(snapshot.rotation.rem_euclid(360)),
+    );
     map.insert("energy".into(), Value::Int(snapshot.energy));
     map.insert("damage".into(), Value::Int(snapshot.damage));
     map.insert(
@@ -9933,10 +10067,12 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.damage,
                 object.position,
                 object.velocity,
+                object.rotation,
                 object.vertices.clone(),
                 object.action.data,
                 object.action.ticks,
                 object.container,
+                object.draw_transform,
             )
         }),
         snapshot.landscape.clone(),

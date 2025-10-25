@@ -5529,6 +5529,7 @@ mod tests {
             definition_id: definition.to_string(),
             position,
             velocity: Vector2::new(0, 0),
+            rotation: 0,
             energy: 100,
             damage: 0,
             action: ActionState::default(),
@@ -5545,6 +5546,7 @@ mod tests {
             crew_member: true,
             alive: true,
             graphics_overlays: Vec::new(),
+            draw_transform: None,
         }
     }
 
@@ -5821,6 +5823,7 @@ mod tests {
                 definition_id: "Clonk".into(),
                 position: Vector2::new(0, 0),
                 velocity: Vector2::ZERO,
+                rotation: 0,
                 energy: 80,
                 damage: 0,
                 action: ActionState::default(),
@@ -5837,12 +5840,14 @@ mod tests {
                 crew_member: true,
                 alive: true,
                 graphics_overlays: Vec::new(),
+                draw_transform: None,
             },
             ObjectSnapshot {
                 id: teammate,
                 definition_id: "Balloon".into(),
                 position: Vector2::new(10, 0),
                 velocity: Vector2::ZERO,
+                rotation: 0,
                 energy: 40,
                 damage: 0,
                 action: ActionState::default(),
@@ -5859,6 +5864,7 @@ mod tests {
                 crew_member: true,
                 alive: true,
                 graphics_overlays: Vec::new(),
+                draw_transform: None,
             },
         ];
 

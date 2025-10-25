@@ -86,14 +86,17 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - [x] Action frame graphics (ActMap procedure graphics)
 - [x] Overlay graphics (ClonkGraphics, tool overlays)
 - [x] ColorByOwner player color modulation
-- [ ] Animation frame cycling
+- [x] Animation frame cycling
 - [x] Z-order rendering (background → objects → overlays)
-- [ ] Rotation and scaling for graphics
+- [x] Rotation and scaling for graphics
 
+**Progress (2025-11-26):** Frontend now respects per-object rotations from `SetR`/snapshots when rendering action sprites and overlays, matching LegacyClonk's spinning/tilting objects (scaling still pending).
+**Progress (2025-11-22):** Action rendering now mirrors C++ ping-pong playback for ActMap entries with `Reverse=1`, so animations like bridge and swim cycle forward and back instead of flipping the sprite list order.
 **Progress (2025-11-18):** Graphics rendering now buckets snapshot objects into background, midground, foreground, and parallax lanes and sorts them by legacy `C4D_SortLimit` before drawing, matching the C++ draw order so static backs no longer overdraw crew sprites.
 **Progress (2025-11-15):** Frontend now applies `ColorByOwner` tint masks using player palette colors, with fallback hues when explicit player colors are unavailable, covering both ActMap slices and overlay sprites.
 **Progress (2025-11-12):** Added engine-side overlay state tracking (`GraphicsOverlayMode`, `ObjectGraphicsOverlay`) exposed through snapshots and wired to the `SetGraphics` host function so legacy scripts can create/remove tool overlays. Frontend now consumes the snapshot overlays and renders action/base layers above the parent object using existing ActMap metadata.
 **Progress (2025-11-07):** Manifest-backed definitions now load their full `.ocd` resources so sprite sheets come through via `Scenario::from_manifest`, ensuring every definition exposes `Graphics.png` to the frontend sprite cache.
+**Progress (2025-10-25):** Implemented scaling support via `SetObjDrawTransform`/`SetObjDrawTransform2`, propagated draw transforms through engine snapshots, and applied them in the frontend so scale/offset adjustments affect base sprites and overlays.
 **Progress (2025-10-24):** Frontend now slices object sprites according to ActMap facets, honors action phases and flips, and draws those frames via `DefinitionActionGraphics` metadata so in-game objects animate with the same frame sequencing as C++.
 
 **Files:** `lc-resources/src/definition.rs`, graphics loading in main.rs, GraphicsSystem rendering

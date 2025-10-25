@@ -851,6 +851,7 @@ mod tests {
             definition_id: definition.to_string(),
             position: Vector2::new(0, 0),
             velocity: Vector2::new(0, 0),
+            rotation: 0,
             energy: 100,
             damage: 0,
             action: Default::default(),
@@ -867,6 +868,7 @@ mod tests {
             crew_member: false,
             alive: true,
             graphics_overlays: Vec::new(),
+            draw_transform: None,
         }
     }
 

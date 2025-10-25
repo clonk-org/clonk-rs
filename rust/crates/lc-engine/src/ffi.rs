@@ -4,7 +4,7 @@ use crate::{
         interpret_player_control_command, parse_control_ini, ControlPacket, PlayerControlData,
     },
     ActionState, CommandDirection, CrewCommandTarget, CrewRole, CrewSelectionState, Direction,
-    EffectState, Engine, EngineError, EngineState, EnvironmentFrame, FloatVector2,
+    DrawTransform, EffectState, Engine, EngineError, EngineState, EnvironmentFrame, FloatVector2,
     HudPlayerSnapshot, HudSnapshot, Landscape, NetworkPacketDirection, NetworkPacketSnapshot,
     ObjectId, ObjectSnapshot, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleLayer,
     ParticleSnapshot, Playback, PlayerInputState, Recorder, Recording, Scenario,
@@ -80,6 +80,11 @@ pub struct LcEngineObjectSnapshot {
     pub container_id: u64,
     pub contents: *const u64,
     pub contents_len: usize,
+    pub has_draw_transform: bool,
+    pub draw_scale_x: f32,
+    pub draw_scale_y: f32,
+    pub draw_offset_x: f32,
+    pub draw_offset_y: f32,
 }
 
 #[repr(C)]
@@ -237,6 +242,11 @@ pub struct LcEngineRuntimeObjectState {
     pub container_id: u64,
     pub contents: *const u64,
     pub contents_len: usize,
+    pub has_draw_transform: bool,
+    pub draw_scale_x: f32,
+    pub draw_scale_y: f32,
+    pub draw_offset_x: f32,
+    pub draw_offset_y: f32,
 }
 
 #[repr(C)]
@@ -550,6 +560,23 @@ impl LcEngineRuntimeObjectStateArray {
                 container_id,
                 contents: contents_ptr,
                 contents_len,
+                has_draw_transform: object.draw_transform.is_some(),
+                draw_scale_x: object
+                    .draw_transform
+                    .map(|transform| transform.scale_x)
+                    .unwrap_or(1.0),
+                draw_scale_y: object
+                    .draw_transform
+                    .map(|transform| transform.scale_y)
+                    .unwrap_or(1.0),
+                draw_offset_x: object
+                    .draw_transform
+                    .map(|transform| transform.offset_x)
+                    .unwrap_or(0.0),
+                draw_offset_y: object
+                    .draw_transform
+                    .map(|transform| transform.offset_y)
+                    .unwrap_or(0.0),
             });
         }
 
@@ -693,6 +720,7 @@ unsafe fn make_snapshot(
             definition_id,
             position: Vector2::new(entry.position_x, entry.position_y),
             velocity: Vector2::new(entry.velocity_x, entry.velocity_y),
+            rotation: 0,
             energy: entry.energy,
             damage: entry.damage,
             action,
@@ -708,6 +736,17 @@ unsafe fn make_snapshot(
             category: entry.category,
             crew_member: entry.crew_member,
             alive: entry.alive,
+            graphics_overlays: Vec::new(),
+            draw_transform: if entry.has_draw_transform {
+                Some(DrawTransform::from_components(
+                    entry.draw_scale_x,
+                    entry.draw_scale_y,
+                    entry.draw_offset_x,
+                    entry.draw_offset_y,
+                ))
+            } else {
+                None
+            },
         });
     }
     snapshots.sort_by_key(|object| object.id);
@@ -2322,6 +2361,11 @@ global func Step(state, frame, random)
             container_id: 0,
             contents: ptr::null(),
             contents_len: 0,
+            has_draw_transform: false,
+            draw_scale_x: 1.0,
+            draw_scale_y: 1.0,
+            draw_offset_x: 0.0,
+            draw_offset_y: 0.0,
         };
 
         let snapshot = unsafe {
@@ -2408,6 +2452,11 @@ global func Step(state, frame, random)
             container_id: 0,
             contents: ptr::null(),
             contents_len: 0,
+            has_draw_transform: false,
+            draw_scale_x: 1.0,
+            draw_scale_y: 1.0,
+            draw_offset_x: 0.0,
+            draw_offset_y: 0.0,
         };
 
         let snapshot = unsafe {
@@ -2588,6 +2637,11 @@ global func Step(state, frame, random)
             container_id: 0,
             contents: container_contents.as_ptr(),
             contents_len: container_contents.len(),
+            has_draw_transform: false,
+            draw_scale_x: 1.0,
+            draw_scale_y: 1.0,
+            draw_offset_x: 0.0,
+            draw_offset_y: 0.0,
         };
 
         let child_snapshot = LcEngineObjectSnapshot {
@@ -2617,6 +2671,11 @@ global func Step(state, frame, random)
             container_id: 1,
             contents: ptr::null(),
             contents_len: 0,
+            has_draw_transform: false,
+            draw_scale_x: 1.0,
+            draw_scale_y: 1.0,
+            draw_offset_x: 0.0,
+            draw_offset_y: 0.0,
         };
 
         let objects = [container_snapshot, child_snapshot];
