@@ -766,7 +766,8 @@ fn collect_inventory(
             }
         } else {
             let index = order.len();
-            let entry = ObjectMenuItem::new(name, &child.definition_id, description, icon, child.id);
+            let entry =
+                ObjectMenuItem::new(name, &child.definition_id, description, icon, child.id);
             order.push(entry);
             lookup.insert(child.definition_id.clone(), index);
         }

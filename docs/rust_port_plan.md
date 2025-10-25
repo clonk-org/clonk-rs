@@ -189,12 +189,13 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
   - Menu controls (open, navigate, select)
   - Object interaction (grab, drop, enter)
   - Cursor cycling
-- [ ] Mouse controls (select, drag, throw)
+- [x] Mouse controls (select, drag, throw)
 - [ ] Gamepad support
 - [ ] Control responsiveness (no lag)
 - [ ] Control customization
 
 **Progress (2025-11-30):** Engine now routes Dig/Throw/Special/Special2 commands through the legacy `Control*` scripts via `Engine::handle_control_command`, with both the frontend dispatcher and playback runtime invoking it so scripted behaviors (e.g. `ControlDig`) trigger identical to C++.
+**Progress (2025-12-15):** Rust frontend now mirrors LegacyClonk's mouse flow: left-click selection snaps the cursor to the clicked crew, keeps focus overlays in sync, and dragging from a selected crew synthesizes the directional control events plus throw command so inventory items launch in the dragged direction without using the keyboard. Pointer tracking halts while menus are open to avoid spamming commands.
 
 **Files:** InputDispatcher, handle_key() in main.rs, lc-engine/src/input.rs
 

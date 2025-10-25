@@ -4,9 +4,10 @@ mod startup_menu;
 
 use lc_engine::{
     DefinitionActionGraphics, Direction, DrawTransform, EnvironmentFrame, EnvironmentSettings,
-    GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus,
-    RgbColor, SimulationSnapshot, SkyFrame, SkySettings, SurfaceSnapshot as EngineSurfaceSnapshot,
-    Vector2, WeatherEvent, CATEGORY_SORT_LIMIT, OWNER_NONE,
+    FloatVector2, GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot,
+    ObjectStatus, RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
+    SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent, CATEGORY_SORT_LIMIT,
+    OWNER_NONE,
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
@@ -32,6 +33,7 @@ const MAX_VIEWPORT_ZOOM: f32 = 4.0;
 const CAMERA_SMOOTHING_ALPHA: f32 = 0.2;
 const CAMERA_SNAP_THRESHOLD: f32 = 1.0;
 const CAMERA_JUMP_THRESHOLD: f32 = 256.0;
+const PICK_TOLERANCE: f32 = 6.0;
 const DEFAULT_PLAYER_COLORS: [Color; 12] = [
     Color::opaque(0xE8, 0x00, 0x00),
     Color::opaque(0x00, 0x00, 0xF4),
@@ -133,6 +135,13 @@ fn blend_color_by_owner(base: Color, mask_value: u8, owner_color: Color) -> Colo
         mix_channel(base.b, owner_color.b),
         base.a,
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewportPointer {
+    pub owner: i32,
+    pub world: FloatVector2,
+    pub screen: GuiPoint,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -508,6 +517,68 @@ impl GraphicsSystem {
             })
     }
 
+    pub fn viewport_point_at(&self, point: GuiPoint) -> Option<ViewportPointer> {
+        let viewport = self.viewport_for_point(point)?;
+        let zoom = viewport.zoom.max(MIN_VIEWPORT_ZOOM);
+        let base_x = viewport.content_rect.x as f32;
+        let base_y = viewport.content_rect.y as f32;
+        let world_x = (point.x - base_x) / zoom + viewport.viewport_x;
+        let world_y = (point.y - base_y) / zoom + viewport.viewport_y;
+        Some(ViewportPointer {
+            owner: viewport.owner,
+            world: FloatVector2::new(world_x, world_y),
+            screen: point,
+        })
+    }
+
+    pub fn crew_at_point(
+        &self,
+        snapshot: &SimulationSnapshot,
+        owner: i32,
+        point: GuiPoint,
+    ) -> Option<ObjectId> {
+        let viewport = self.viewport_for_point(point)?;
+        if viewport.owner != owner {
+            return None;
+        }
+
+        let mut best: Option<(ObjectId, f32)> = None;
+        for object in &snapshot.objects {
+            if object.owner != owner
+                || !object.crew_member
+                || !object.status.is_active()
+                || !object.alive
+            {
+                continue;
+            }
+            if let Some(rect) = self.object_screen_rect_for_viewport(object, viewport) {
+                if rect_contains(rect, point, PICK_TOLERANCE) {
+                    let center_x = rect.x as f32 + rect.width as f32 * 0.5;
+                    let center_y = rect.y as f32 + rect.height as f32 * 0.5;
+                    let dx = point.x - center_x;
+                    let dy = point.y - center_y;
+                    let distance_sq = dx * dx + dy * dy;
+                    match best {
+                        Some((_, best_dist)) if distance_sq >= best_dist => {}
+                        _ => best = Some((object.id, distance_sq)),
+                    }
+                }
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
+    fn viewport_for_point(&self, point: GuiPoint) -> Option<&ActiveViewport> {
+        self.active_viewports.iter().rev().find(|viewport| {
+            let rect = viewport.content_rect;
+            let left = rect.x as f32;
+            let top = rect.y as f32;
+            let right = left + rect.width as f32;
+            let bottom = top + rect.height as f32;
+            point.x >= left && point.x < right && point.y >= top && point.y < bottom
+        })
+    }
+
     pub fn update_overlay(&mut self, overlay: &GraphicsOverlay<'_>) -> GuiResult<()> {
         self.ensure_player_widgets(&overlay.players)?;
         self.gui
@@ -546,26 +617,20 @@ impl GraphicsSystem {
                 .set_picture_image(widgets.score.icon, score_icon_image.clone())?;
 
             if player_overlay.eliminated {
-                self.gui
-                    .set_label_text(widgets.wealth.label, "--")?;
+                self.gui.set_label_text(widgets.wealth.label, "--")?;
                 self.gui
                     .set_label_color(widgets.wealth.label, eliminated_color)?;
-                self.gui
-                    .set_label_text(widgets.score.label, "--")?;
+                self.gui.set_label_text(widgets.score.label, "--")?;
                 self.gui
                     .set_label_color(widgets.score.label, eliminated_color)?;
             } else {
                 let wealth_text = format!("{}", player_overlay.wealth);
-                self.gui
-                    .set_label_text(widgets.wealth.label, wealth_text)?;
-                self.gui
-                    .set_label_color(widgets.wealth.label, info_color)?;
+                self.gui.set_label_text(widgets.wealth.label, wealth_text)?;
+                self.gui.set_label_color(widgets.wealth.label, info_color)?;
 
                 let score_text = format!("{}", player_overlay.score);
-                self.gui
-                    .set_label_text(widgets.score.label, score_text)?;
-                self.gui
-                    .set_label_color(widgets.score.label, info_color)?;
+                self.gui.set_label_text(widgets.score.label, score_text)?;
+                self.gui.set_label_color(widgets.score.label, info_color)?;
             }
 
             if player_overlay.eliminated {
@@ -585,10 +650,8 @@ impl GraphicsSystem {
                 } else {
                     format!("Crew {crew_count}")
                 };
-                self.gui
-                    .set_label_text(widgets.status_label, status_text)?;
-                self.gui
-                    .set_label_color(widgets.status_label, info_color)?;
+                self.gui.set_label_text(widgets.status_label, status_text)?;
+                self.gui.set_label_color(widgets.status_label, info_color)?;
             }
 
             for (crew_overlay, crew_widgets) in player_overlay.crew.iter().zip(widgets.crew.iter())
@@ -920,10 +983,8 @@ impl GraphicsSystem {
             let fraction = (object.energy.max(0).min(100) as f32) / 100.0;
             if fraction > 0.0 {
                 let fill_width = (width * fraction).max(1.0);
-                let energy_rect = GuiRect::from_origin_size(
-                    origin,
-                    GuiSize::new(fill_width, height),
-                );
+                let energy_rect =
+                    GuiRect::from_origin_size(origin, GuiSize::new(fill_width, height));
                 let base_color = owner_colors
                     .get(&object.owner)
                     .copied()
@@ -945,10 +1006,8 @@ impl GraphicsSystem {
                     origin.x - icon_width - 6.0,
                     origin.y - (icon_height - height) / 2.0,
                 );
-                let icon_rect = GuiRect::from_origin_size(
-                    icon_origin,
-                    GuiSize::new(icon_width, icon_height),
-                );
+                let icon_rect =
+                    GuiRect::from_origin_size(icon_origin, GuiSize::new(icon_width, icon_height));
                 draw_image(&mut self.surface, &icon_rect, icon);
             }
         }
@@ -3130,6 +3189,14 @@ pub(crate) fn draw_text(
     font.draw_text(surface, origin_x, origin_y, text, font_size.max(1.0), color);
 }
 
+fn rect_contains(rect: SurfaceRect, point: GuiPoint, tolerance: f32) -> bool {
+    let left = rect.x as f32 - tolerance;
+    let top = rect.y as f32 - tolerance;
+    let right = rect.x as f32 + rect.width as f32 + tolerance;
+    let bottom = rect.y as f32 + rect.height as f32 + tolerance;
+    point.x >= left && point.x < right && point.y >= top && point.y < bottom
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3206,6 +3273,75 @@ mod tests {
             transfer_zones: Vec::new(),
             audio: Vec::new(),
         }
+    }
+
+    #[test]
+    fn viewport_point_at_maps_screen_to_world() {
+        let snapshot = make_snapshot();
+        let focus = &snapshot.objects[0];
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Viewport Test",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let (screen_x, screen_y) = graphics
+            .world_to_screen(focus.owner, focus.position)
+            .expect("screen coordinates available");
+        let pointer = graphics
+            .viewport_point_at(GuiPoint::new(screen_x, screen_y))
+            .expect("viewport pointer available");
+        assert_eq!(pointer.owner, focus.owner);
+        assert!(
+            (pointer.world.x - focus.position.x as f32).abs() < 0.5,
+            "expected world x close to focus, got {}",
+            pointer.world.x
+        );
+        assert!(
+            (pointer.world.y - focus.position.y as f32).abs() < 0.5,
+            "expected world y close to focus, got {}",
+            pointer.world.y
+        );
+    }
+
+    #[test]
+    fn crew_at_point_returns_local_crew() {
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].owner = 1;
+        let focus = &snapshot.objects[0];
+
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Crew Pick",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let viewports = vec![ViewportInput::from_focus(focus)];
+        graphics.render_frame(&snapshot, &viewports);
+
+        let (screen_x, screen_y) = graphics
+            .world_to_screen(1, focus.position)
+            .expect("screen coordinates available");
+        let point = GuiPoint::new(screen_x, screen_y);
+
+        let picked = graphics.crew_at_point(&snapshot, 1, point);
+        assert_eq!(picked, Some(focus.id));
+        assert_eq!(
+            graphics.crew_at_point(&snapshot, 2, point),
+            None,
+            "other owners should not pick crew"
+        );
     }
 
     #[test]

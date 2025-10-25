@@ -33,17 +33,17 @@ use lc_core::std_config::Config;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
-    ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, Landscape,
-    MaterialSet, MenuCommandKind, MenuCommandSelection, MessageKind, MovementProfile, ObjectId,
-    ObjectSnapshot, ObjectUpdate, PlayerStatus, Scenario, ScenarioError, SimulationSnapshot,
-    SkyConfig, SpawnConfig, Vector2, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_RIGHT, FLAG_TOP,
-    FLAG_VCENTER, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
+    ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, FloatVector2,
+    Landscape, MaterialSet, MenuCommandKind, MenuCommandSelection, MessageKind, MovementProfile,
+    ObjectId, ObjectSnapshot, ObjectUpdate, PlayerStatus, Scenario, ScenarioError,
+    SimulationSnapshot, SkyConfig, SpawnConfig, Vector2, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT,
+    FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
     default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
     GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher, KeyCode,
     MainMenuAction, MainMenuItem, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState,
-    StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput,
+    StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput, ViewportPointer,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
 use lc_gui::ButtonTextures;
@@ -80,6 +80,8 @@ const BACK_ENTRY_TITLE: &str = "← Back";
 const SAVE_DIR_NAME: &str = "Savegames";
 const QUICK_SAVE_FILE: &str = "quicksave.lcsave";
 const SAVE_FILE_VERSION: SaveFileVersion = SaveFileVersion::new(1, 0, 0);
+const MOUSE_DRAG_THRESHOLD: f32 = 6.0;
+const MIN_THROW_DRAG_DISTANCE: f32 = 12.0;
 static APP_PATH_CACHE: Mutex<Option<std::result::Result<Arc<AppPaths>, PathsError>>> =
     Mutex::new(None);
 
@@ -1420,6 +1422,8 @@ struct GameApp {
     object_sprites: HashMap<String, DefinitionSprite>,
     sprite_cache: Arc<HashMap<String, DefinitionSprite>>,
     loading_state: Option<ScenarioLoadingState>,
+    ingame_pointer: Option<ViewportPointer>,
+    mouse_state: Option<IngameMouseState>,
     exit_requested: bool,
 }
 
@@ -1451,6 +1455,41 @@ struct MainMenuState {
 enum StartupView {
     MainMenu,
     ScenarioBrowser,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IngameMouseState {
+    start: ViewportPointer,
+    last: ViewportPointer,
+    moved: bool,
+}
+
+impl IngameMouseState {
+    fn new(start: ViewportPointer) -> Self {
+        Self {
+            start,
+            last: start,
+            moved: false,
+        }
+    }
+
+    fn update(&mut self, pointer: ViewportPointer) {
+        self.last = pointer;
+        if !self.moved {
+            let dx = (self.last.world.x - self.start.world.x).abs();
+            let dy = (self.last.world.y - self.start.world.y).abs();
+            if dx >= MOUSE_DRAG_THRESHOLD || dy >= MOUSE_DRAG_THRESHOLD {
+                self.moved = true;
+            }
+        }
+    }
+
+    fn delta(&self) -> FloatVector2 {
+        FloatVector2::new(
+            self.last.world.x - self.start.world.x,
+            self.last.world.y - self.start.world.y,
+        )
+    }
 }
 
 impl MenuLayer {
@@ -2541,6 +2580,8 @@ impl GameApp {
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
             loading_state: None,
+            ingame_pointer: None,
+            mouse_state: None,
             exit_requested: false,
         };
         if let Some(existing) = existing_quick_save_path() {
@@ -3334,50 +3375,169 @@ impl GameApp {
 
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
         let point = gui_point_from_position(position);
-        if self.mode != AppMode::Menu {
-            return Ok(());
-        }
-        match self.startup_view {
-            StartupView::ScenarioBrowser => self.handle_menu_input(|state| {
-                state.set_pointer_position(Some(point));
-                state.menu().handle_pointer_move(point)
-            }),
-            StartupView::MainMenu => {
-                self.main_menu_state.set_pointer_position(Some(point));
-                let actions = self.main_menu_state.handle_pointer_move(point);
-                self.process_main_menu_actions(actions)
+        match self.mode {
+            AppMode::Menu => match self.startup_view {
+                StartupView::ScenarioBrowser => self.handle_menu_input(|state| {
+                    state.set_pointer_position(Some(point));
+                    state.menu().handle_pointer_move(point)
+                }),
+                StartupView::MainMenu => {
+                    self.main_menu_state.set_pointer_position(Some(point));
+                    let actions = self.main_menu_state.handle_pointer_move(point);
+                    self.process_main_menu_actions(actions)
+                }
+            },
+            AppMode::Running => {
+                self.update_ingame_pointer(point);
+                Ok(())
             }
+            AppMode::Loading => Ok(()),
         }
     }
 
-    fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
-        if self.mode != AppMode::Menu {
+    fn update_ingame_pointer(&mut self, point: GuiPoint) {
+        if let Some(pointer) = self.graphics.viewport_point_at(point) {
+            if let Some(state) = self.mouse_state.as_mut() {
+                state.update(pointer);
+            }
+            self.ingame_pointer = Some(pointer);
+        } else {
+            if let Some(state) = self.mouse_state.as_mut() {
+                state.moved = true;
+            }
+            self.ingame_pointer = None;
+        }
+    }
+
+    fn handle_ingame_mouse_button(
+        &mut self,
+        button_state: ElementState,
+    ) -> Result<(), EngineError> {
+        match button_state {
+            ElementState::Pressed => self.on_ingame_mouse_down(),
+            ElementState::Released => self.on_ingame_mouse_up(),
+        }
+    }
+
+    fn on_ingame_mouse_down(&mut self) -> Result<(), EngineError> {
+        let Some(pointer) = self.ingame_pointer else {
+            self.mouse_state = None;
+            return Ok(());
+        };
+        self.mouse_state = Some(IngameMouseState::new(pointer));
+
+        if pointer.owner != self.local_owner {
             return Ok(());
         }
-        match self.startup_view {
-            StartupView::ScenarioBrowser => {
-                if let Some(point) = self.menu_state.pointer_position() {
-                    match button_state {
-                        ElementState::Pressed => {
-                            self.handle_menu_input(|state| state.menu().handle_pointer_down(point))?
-                        }
-                        ElementState::Released => {
-                            self.handle_menu_input(|state| state.menu().handle_pointer_up(point))?
+
+        if let Some(crew_id) =
+            self.graphics
+                .crew_at_point(&self.snapshot, self.local_owner, pointer.screen)
+        {
+            self.engine.select_crew(self.local_owner, [crew_id])?;
+            self.engine
+                .set_crew_cursor(self.local_owner, Some(crew_id))?;
+            self.focus_id = Some(crew_id);
+            self.snapshot = self.engine.snapshot();
+            self.refresh_object_menu();
+            self.refresh_focus();
+        }
+        Ok(())
+    }
+
+    fn on_ingame_mouse_up(&mut self) -> Result<(), EngineError> {
+        let Some(state) = self.mouse_state.take() else {
+            return Ok(());
+        };
+        if state.start.owner != self.local_owner {
+            return Ok(());
+        }
+        if state.moved {
+            self.handle_mouse_drag(state)?;
+        }
+        Ok(())
+    }
+
+    fn handle_mouse_drag(&mut self, state: IngameMouseState) -> Result<(), EngineError> {
+        if !matches!(self.mode, AppMode::Running) {
+            return Ok(());
+        }
+        let Some(selection) = self.snapshot.crew_selection.get(&self.local_owner) else {
+            return Ok(());
+        };
+        if selection.selected.is_empty() && selection.cursor.is_none() {
+            return Ok(());
+        }
+        let crew_id = selection
+            .cursor
+            .or_else(|| selection.selected.first().copied());
+        let Some(crew_id) = crew_id else {
+            return Ok(());
+        };
+        let Some(crew) = self.snapshot.object(crew_id) else {
+            return Ok(());
+        };
+        if crew.contents.is_empty() {
+            return Ok(());
+        }
+
+        let delta = state.delta();
+        let buttons = drag_direction_buttons(delta);
+        if buttons.is_empty() {
+            return Ok(());
+        }
+
+        for button in &buttons {
+            self.dispatch_control_event(ControlEvent::Press(*button))?;
+        }
+        self.dispatch_control_event(ControlEvent::Command {
+            command: ControlCommand::Throw,
+            kind: CommandKind::Press,
+        })?;
+        self.dispatch_control_event(ControlEvent::Command {
+            command: ControlCommand::Throw,
+            kind: CommandKind::Release,
+        })?;
+        for button in buttons.into_iter().rev() {
+            self.dispatch_control_event(ControlEvent::Release(button))?;
+        }
+
+        self.snapshot = self.engine.snapshot();
+        self.refresh_object_menu();
+        self.refresh_focus();
+        Ok(())
+    }
+
+    fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
+        match self.mode {
+            AppMode::Menu => match self.startup_view {
+                StartupView::ScenarioBrowser => {
+                    if let Some(point) = self.menu_state.pointer_position() {
+                        match button_state {
+                            ElementState::Pressed => self.handle_menu_input(|state| {
+                                state.menu().handle_pointer_down(point)
+                            })?,
+                            ElementState::Released => self
+                                .handle_menu_input(|state| state.menu().handle_pointer_up(point))?,
                         }
                     }
+                    Ok(())
                 }
-                Ok(())
-            }
-            StartupView::MainMenu => {
-                if let Some(point) = self.main_menu_state.pointer_position() {
-                    let actions = match button_state {
-                        ElementState::Pressed => self.main_menu_state.handle_pointer_down(point),
-                        ElementState::Released => self.main_menu_state.handle_pointer_up(point),
-                    };
-                    self.process_main_menu_actions(actions)?;
+                StartupView::MainMenu => {
+                    if let Some(point) = self.main_menu_state.pointer_position() {
+                        let actions = match button_state {
+                            ElementState::Pressed => {
+                                self.main_menu_state.handle_pointer_down(point)
+                            }
+                            ElementState::Released => self.main_menu_state.handle_pointer_up(point),
+                        };
+                        self.process_main_menu_actions(actions)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
+            },
+            AppMode::Running => self.handle_ingame_mouse_button(button_state),
+            AppMode::Loading => Ok(()),
         }
     }
 
@@ -3429,15 +3589,22 @@ impl GameApp {
     }
 
     fn pointer_left(&mut self) {
-        if self.mode == AppMode::Menu {
-            match self.startup_view {
+        match self.mode {
+            AppMode::Menu => match self.startup_view {
                 StartupView::ScenarioBrowser => {
                     self.menu_state.set_pointer_position(None);
                 }
                 StartupView::MainMenu => {
                     self.main_menu_state.pointer_left();
                 }
+            },
+            AppMode::Running => {
+                if let Some(state) = self.mouse_state.as_mut() {
+                    state.moved = true;
+                }
+                self.ingame_pointer = None;
             }
+            AppMode::Loading => {}
         }
     }
 
@@ -4220,6 +4387,8 @@ impl GameApp {
         self.engine = Engine::new();
         self.apply_material_library();
         self.input = InputDispatcher::new();
+        self.ingame_pointer = None;
+        self.mouse_state = None;
         self.sky = None;
         self.snapshot = self.engine.snapshot();
         self.refresh_object_menu();
@@ -4380,6 +4549,8 @@ impl GameApp {
 
         self.engine = engine;
         self.input = InputDispatcher::new();
+        self.ingame_pointer = None;
+        self.mouse_state = None;
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(Some(&path));
             audio.reset_sfx();
@@ -4422,6 +4593,8 @@ impl GameApp {
         self.engine = Engine::new();
         self.apply_material_library();
         self.input = InputDispatcher::new();
+        self.ingame_pointer = None;
+        self.mouse_state = None;
         self.sky = None;
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(None);
@@ -4528,6 +4701,8 @@ impl GameApp {
         self.engine = Engine::new();
         self.apply_material_library();
         self.input = InputDispatcher::new();
+        self.ingame_pointer = None;
+        self.mouse_state = None;
 
         if scenario_info.sandbox {
             match self.audio.as_mut() {
@@ -4936,6 +5111,25 @@ fn menu_key_from_control_button(button: ControlButton) -> Option<KeyCode> {
 
 fn gui_point_from_position(position: PhysicalPosition<f64>) -> GuiPoint {
     GuiPoint::new(position.x as f32, position.y as f32)
+}
+
+fn drag_direction_buttons(delta: FloatVector2) -> Vec<ControlButton> {
+    let mut buttons = Vec::new();
+    if delta.x.abs() >= MIN_THROW_DRAG_DISTANCE {
+        if delta.x > 0.0 {
+            buttons.push(ControlButton::Right);
+        } else {
+            buttons.push(ControlButton::Left);
+        }
+    }
+    if delta.y.abs() >= MIN_THROW_DRAG_DISTANCE {
+        if delta.y > 0.0 {
+            buttons.push(ControlButton::Down);
+        } else {
+            buttons.push(ControlButton::Up);
+        }
+    }
+    buttons
 }
 
 fn build_menu_entries(entries: &[FrontendScenario], include_back: bool) -> Vec<ScenarioEntry> {
