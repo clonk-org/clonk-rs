@@ -1119,6 +1119,12 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
         entry.snapshot.velocity_y = fixtoi(object->ydir);
         entry.snapshot.energy = object->Energy;
         entry.snapshot.damage = object->Damage;
+        entry.snapshot.magic_energy = object->MagicEnergy;
+        if (const auto *physical = object->GetPhysical()) {
+            entry.snapshot.magic_capacity = physical->Magic;
+        } else {
+            entry.snapshot.magic_capacity = 0;
+        }
         entry.snapshot.owner = static_cast<int32_t>(object->Owner);
         entry.snapshot.category = object->Category;
         entry.snapshot.crew_member = (object->OCF & OCF_CrewMember) != 0;

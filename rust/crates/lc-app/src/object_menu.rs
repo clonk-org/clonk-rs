@@ -943,6 +943,8 @@ mod tests {
             rotation: 0,
             energy: 100,
             damage: 0,
+            magic_energy: 0,
+            magic_capacity: 0,
             action: Default::default(),
             direction: Default::default(),
             command_direction: Default::default(),

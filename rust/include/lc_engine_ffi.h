@@ -49,6 +49,8 @@ typedef struct LcEngineObjectSnapshot {
     int32_t velocity_y;
     int32_t energy;
     int32_t damage;
+    int32_t magic_energy;
+    int32_t magic_capacity;
     int32_t owner;
     int32_t category;
     bool crew_member;

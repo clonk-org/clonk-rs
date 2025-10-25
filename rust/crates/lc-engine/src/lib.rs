@@ -1715,6 +1715,10 @@ pub struct ObjectState {
     pub energy: i32,
     #[serde(default)]
     pub damage: i32,
+    #[serde(default)]
+    pub magic_energy: i32,
+    #[serde(default)]
+    pub magic_capacity: i32,
     pub action: ActionState,
     #[serde(default)]
     pub direction: Direction,
@@ -1780,6 +1784,12 @@ impl ObjectState {
         }
         if let Some(damage) = delta.damage {
             self.damage = damage.max(0);
+        }
+        if let Some(magic_energy) = delta.magic_energy {
+            self.magic_energy = magic_energy.max(0);
+        }
+        if let Some(magic_capacity) = delta.magic_capacity {
+            self.magic_capacity = magic_capacity.max(0);
         }
         if let Some(direction) = delta.direction {
             self.direction = direction;
@@ -1852,6 +1862,8 @@ struct ObjectDelta {
     rotation: Option<i32>,
     energy: Option<i32>,
     damage: Option<i32>,
+    magic_energy: Option<i32>,
+    magic_capacity: Option<i32>,
     direction: Option<Direction>,
     command_direction: Option<CommandDirection>,
     action: Option<ActionUpdate>,
@@ -1882,6 +1894,12 @@ impl ObjectDelta {
         }
         if let Some(damage) = update.damage {
             self.damage = Some(damage);
+        }
+        if let Some(magic_energy) = update.magic_energy {
+            self.magic_energy = Some(magic_energy);
+        }
+        if let Some(magic_capacity) = update.magic_capacity {
+            self.magic_capacity = Some(magic_capacity);
         }
         if let Some(direction) = update.direction {
             self.direction = Some(direction);
@@ -1933,6 +1951,8 @@ impl From<ObjectUpdate> for ObjectDelta {
             rotation: update.rotation,
             energy: update.energy,
             damage: update.damage,
+            magic_energy: update.magic_energy,
+            magic_capacity: update.magic_capacity,
             direction: update.direction,
             command_direction: update.command_direction,
             action: update.action,
@@ -1958,6 +1978,10 @@ pub struct ObjectUpdate {
     pub energy: Option<i32>,
     #[serde(default)]
     pub damage: Option<i32>,
+    #[serde(default)]
+    pub magic_energy: Option<i32>,
+    #[serde(default)]
+    pub magic_capacity: Option<i32>,
     pub action: Option<ActionUpdate>,
     #[serde(default)]
     pub direction: Option<Direction>,
@@ -2010,6 +2034,16 @@ impl ObjectUpdate {
 
     pub fn with_damage(mut self, damage: i32) -> Self {
         self.damage = Some(damage);
+        self
+    }
+
+    pub fn with_magic_energy(mut self, magic_energy: i32) -> Self {
+        self.magic_energy = Some(magic_energy);
+        self
+    }
+
+    pub fn with_magic_capacity(mut self, magic_capacity: i32) -> Self {
+        self.magic_capacity = Some(magic_capacity);
         self
     }
 
@@ -2366,6 +2400,8 @@ impl Object {
             rotation: self.state.rotation.rem_euclid(360),
             energy: self.state.energy,
             damage: self.state.damage,
+            magic_energy: self.state.magic_energy,
+            magic_capacity: self.state.magic_capacity,
             action: self.state.action.clone(),
             direction: self.state.direction,
             command_direction: self.state.command_direction,
@@ -2824,6 +2860,10 @@ pub struct ObjectSnapshot {
     pub energy: i32,
     #[serde(default)]
     pub damage: i32,
+    #[serde(default)]
+    pub magic_energy: i32,
+    #[serde(default)]
+    pub magic_capacity: i32,
     #[serde(default)]
     pub action: ActionState,
     #[serde(default)]
@@ -7522,6 +7562,8 @@ impl Engine {
                     rotation: snapshot.rotation.rem_euclid(360),
                     energy: snapshot.energy,
                     damage: snapshot.damage,
+                    magic_energy: snapshot.magic_energy,
+                    magic_capacity: snapshot.magic_capacity,
                     action: snapshot.action.clone(),
                     direction: snapshot.direction,
                     command_direction: snapshot.command_direction,
@@ -9821,6 +9863,8 @@ impl Engine {
                 rotation: rotation.rem_euclid(360),
                 energy,
                 damage: 0,
+                magic_energy: 0,
+                magic_capacity: 0,
                 action: initial_action,
                 direction,
                 command_direction,

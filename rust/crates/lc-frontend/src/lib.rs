@@ -974,41 +974,74 @@ impl GraphicsSystem {
             let width = (base_width * zoom).clamp(18.0, 64.0);
             let height = (base_height * zoom).clamp(3.0, 10.0);
             let offset_y = (18.0 * zoom).clamp(12.0, 32.0);
-            let origin = GuiPoint::new(screen_x - width / 2.0, screen_y - offset_y);
-            let bar_rect = GuiRect::from_origin_size(origin, GuiSize::new(width, height));
+            let base_origin = GuiPoint::new(screen_x - width / 2.0, screen_y - offset_y);
 
-            let background = Color::new(16, 24, 40, 210);
-            fill_rect(&mut self.surface, &bar_rect, background);
+            let alpha = if highlighted { 255 } else { 220 };
+            let owner_color = owner_colors
+                .get(&object.owner)
+                .copied()
+                .unwrap_or_else(|| default_owner_color(object.owner));
+            let mut energy_fill = if highlighted {
+                owner_color.modulate(1.2)
+            } else {
+                owner_color.modulate(0.85)
+            };
+            energy_fill.a = alpha;
+            let energy_fraction = (object.energy.max(0).min(100) as f32) / 100.0;
 
-            let fraction = (object.energy.max(0).min(100) as f32) / 100.0;
-            if fraction > 0.0 {
-                let fill_width = (width * fraction).max(1.0);
-                let energy_rect =
-                    GuiRect::from_origin_size(origin, GuiSize::new(fill_width, height));
-                let base_color = owner_colors
-                    .get(&object.owner)
-                    .copied()
-                    .unwrap_or_else(|| default_owner_color(object.owner));
-                let mut fill_color = if highlighted {
-                    base_color.modulate(1.2)
-                } else {
-                    base_color.modulate(0.85)
-                };
-                fill_color.a = if highlighted { 255 } else { 220 };
-                fill_rect(&mut self.surface, &energy_rect, fill_color);
+            let mut bars: Vec<(f32, Option<&ImageData>, Color)> = Vec::with_capacity(2);
+            bars.push((
+                energy_fraction.clamp(0.0, 1.0),
+                self.hud_graphics.energy.as_ref(),
+                energy_fill,
+            ));
+
+            if object.magic_capacity > 0 {
+                let capacity = object.magic_capacity.max(1);
+                let magic_fraction =
+                    (object.magic_energy.max(0).min(capacity) as f32) / (capacity as f32);
+                let mut magic_fill = Color::opaque(96, 148, 252);
+                if highlighted {
+                    magic_fill = magic_fill.modulate(1.15);
+                }
+                magic_fill.a = alpha;
+                bars.push((
+                    magic_fraction.clamp(0.0, 1.0),
+                    self.hud_graphics.magic.as_ref(),
+                    magic_fill,
+                ));
             }
 
-            if let Some(icon) = self.hud_graphics.energy.as_ref() {
-                let icon_scale = zoom.clamp(0.75, 1.25);
-                let icon_width = (icon.width() as f32 * icon_scale).clamp(14.0, 28.0);
-                let icon_height = (icon.height() as f32 * icon_scale).clamp(14.0, 28.0);
-                let icon_origin = GuiPoint::new(
-                    origin.x - icon_width - 6.0,
-                    origin.y - (icon_height - height) / 2.0,
-                );
-                let icon_rect =
-                    GuiRect::from_origin_size(icon_origin, GuiSize::new(icon_width, icon_height));
-                draw_image(&mut self.surface, &icon_rect, icon);
+            let gap = (height * 0.6).clamp(2.0, 6.0);
+            let background = Color::new(16, 24, 40, 210);
+
+            for (index, &(fraction, icon, fill_color)) in bars.iter().enumerate() {
+                let origin_y = base_origin.y + index as f32 * (height + gap);
+                let origin = GuiPoint::new(base_origin.x, origin_y);
+                let bar_rect = GuiRect::from_origin_size(origin, GuiSize::new(width, height));
+                fill_rect(&mut self.surface, &bar_rect, background);
+
+                if fraction > 0.0 {
+                    let fill_width = (width * fraction).max(1.0);
+                    let energy_rect =
+                        GuiRect::from_origin_size(origin, GuiSize::new(fill_width, height));
+                    fill_rect(&mut self.surface, &energy_rect, fill_color);
+                }
+
+                if let Some(icon) = icon {
+                    let icon_scale = zoom.clamp(0.75, 1.25);
+                    let icon_width = (icon.width() as f32 * icon_scale).clamp(14.0, 28.0);
+                    let icon_height = (icon.height() as f32 * icon_scale).clamp(14.0, 28.0);
+                    let icon_origin = GuiPoint::new(
+                        origin.x - icon_width - 6.0,
+                        origin.y - (icon_height - height) / 2.0,
+                    );
+                    let icon_rect = GuiRect::from_origin_size(
+                        icon_origin,
+                        GuiSize::new(icon_width, icon_height),
+                    );
+                    draw_image(&mut self.surface, &icon_rect, icon);
+                }
             }
         }
     }
@@ -3237,6 +3270,8 @@ mod tests {
                 rotation: 0,
                 energy: 100,
                 damage: 0,
+                magic_energy: 0,
+                magic_capacity: 0,
                 action: Default::default(),
                 direction: Default::default(),
                 command_direction: Default::default(),

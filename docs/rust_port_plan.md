@@ -130,13 +130,14 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - [x] Construction menu with proper icons
 - [x] Object selection highlighting
 - [x] Message rendering with proper formatting
-- [ ] Energy/magic bar overlays on objects
+- [x] Energy/magic bar overlays on objects
 
 **Progress (2025-10-24):** Rust frontend now loads all HUD textures from `Graphics.c4g` and wires them through the shared graphics system, making the player/flag/score/energy assets available for upcoming UI rendering work.
 
 **Progress (2025-10-25):** HUD overlay now shows per-crew portraits using legacy definition pictures with owner-colored frames, highlights the focused unit, and falls back to the legacy Crew icon when portraits are missing.
 **Progress (2025-12-08):** Message rendering now mirrors LegacyClonk markup and layout rules: global/target messages parse `<c>` color tags, ignore sandbox-only icons, wrap to legacy width hints (including relative widths), honor alignment flags, and size HUD frames around portrait placeholders so mission briefings and in-world callouts match C++ placement. Implemented in `rust/crates/lc-app/src/main.rs:4520`.
 **Progress (2025-12-05):** HUD overlay now places score and wealth counters with the legacy iconography, renders selection rings inside the world view, and draws energy bars above active crew while the inventory/build menu shows each entry with its definition picture; magic overlays will follow once the engine surfaces mana values, and the message formatter still needs parity tweaks.
+**Progress (2025-12-12):** Object overlays now pull per-crew magic totals from engine snapshots (`lc-engine/src/lib.rs`, `ffi.rs`, `RustEngineBridge.cpp`), expose them through the frontend, and draw stacked energy/magic gauges using the HUD icons so highlighted Clonks show both stats without owner-color discrepancies.
 
 **Files:** `rust/crates/lc-app/src/main.rs`, FrontendAssets::load(), GraphicsSystem HUD rendering
 
