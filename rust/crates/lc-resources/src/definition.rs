@@ -66,6 +66,9 @@ pub struct DefCore {
     pub collection: Option<PictureRect>,
     pub collection_limit: Option<u32>,
     pub collectible: bool,
+    pub constructable: bool,
+    pub con_size_off: i32,
+    pub basement: i32,
 }
 
 impl DefCore {
@@ -194,6 +197,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut collection: Option<PictureRect> = None;
     let mut collection_limit: Option<u32> = None;
     let mut collectible = false;
+    let mut constructable = false;
+    let mut con_size_off: i32 = 0;
+    let mut basement: i32 = 0;
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -269,6 +275,15 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "collectible" => {
                 collectible = parse_bool(value);
             }
+            "construction" => {
+                constructable = parse_bool(value);
+            }
+            "consizeoff" => {
+                con_size_off = parse_i32(value).unwrap_or(0).max(0);
+            }
+            "basement" => {
+                basement = parse_i32(value).unwrap_or(0).max(0);
+            }
             _ => {}
         }
     }
@@ -292,6 +307,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         collection,
         collection_limit,
         collectible,
+        constructable,
+        con_size_off,
+        basement,
     })
 }
 

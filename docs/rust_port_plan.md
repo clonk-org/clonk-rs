@@ -237,7 +237,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [x] Object-to-object interaction (enter buildings, collect items)
 - [x] Inventory system (crew contents)
 - [x] Production (buildings create items)
-- [ ] Construction (placing structures)
+ - [x] Construction (placing structures)
 - [ ] Script callbacks (all C4Aul host functions)
 - [ ] FindObject queries
 - [ ] CreateObject spawning
@@ -249,6 +249,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2025-12-30):** Added legacy-compatible `Contents*` host functions and preserved insertion order for container inventories, enabling scripts and UI to enumerate crew contents with new parity tests in `rust/crates/lc-engine/src/compat.rs` and `lc-engine/src/lib.rs`.
 **Progress (2025-12-31):** Engine now auto-collects nearby carryable objects using DefCore `Shape`/`Collection` metadata and respects legacy collection limits, bringing passive pickups in line with the C++ runtime and covered by new regression tests in `rust/crates/lc-engine/src/lib.rs`.
 **Progress (2026-01-03):** Wired LegacyClonk `Do/GetHomebaseMaterial` and `Do/GetHomebaseProduction` host functions in the Rust runtime, queueing player home base updates through command batches and applying them in the engine so building production adjusts stock exactly like the C++ implementation.
+**Progress (2026-01-08):** Added full CreateConstruction parity to the compatibility layer, mirroring C++ site checks for terrain support and structural overlap, and covered it with Rust-side regression tests so structures place only when legacy rules pass. Implemented in `rust/crates/lc-engine/src/compat.rs`.
 
 **Files:** lc-engine action system, lc-engine/tests
 

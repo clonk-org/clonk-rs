@@ -3291,6 +3291,9 @@ pub struct Definition {
     collection_rect: Option<DefinitionRect>,
     collection_limit: Option<u32>,
     collectible: bool,
+    constructable: bool,
+    construction_offset: i32,
+    basement: i32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3352,6 +3355,9 @@ impl Definition {
             collection_rect: None,
             collection_limit: None,
             collectible: false,
+            constructable: false,
+            construction_offset: 0,
+            basement: 0,
         })
     }
 
@@ -3408,6 +3414,9 @@ impl Definition {
         definition.set_collection_rect(resource.core.collection.map(DefinitionRect::from));
         definition.set_collection_limit(resource.core.collection_limit);
         definition.set_collectible(resource.core.collectible);
+        definition.set_constructable(resource.core.constructable);
+        definition.set_construction_offset(resource.core.con_size_off);
+        definition.set_basement(resource.core.basement);
         Ok(definition)
     }
 
@@ -3634,6 +3643,30 @@ impl Definition {
 
     pub fn set_collectible(&mut self, collectible: bool) {
         self.collectible = collectible;
+    }
+
+    pub fn is_constructable(&self) -> bool {
+        self.constructable
+    }
+
+    pub fn set_constructable(&mut self, constructable: bool) {
+        self.constructable = constructable;
+    }
+
+    pub fn construction_offset(&self) -> i32 {
+        self.construction_offset
+    }
+
+    pub fn set_construction_offset(&mut self, offset: i32) {
+        self.construction_offset = offset.max(0);
+    }
+
+    pub fn basement(&self) -> i32 {
+        self.basement
+    }
+
+    pub fn set_basement(&mut self, basement: i32) {
+        self.basement = basement.max(0);
     }
 
     fn call_initialize(
@@ -5750,6 +5783,10 @@ impl Engine {
                         crew_member: definition.is_crew(),
                         value: definition.value(),
                         mass: definition.mass(),
+                        constructable: definition.is_constructable(),
+                        shape: definition.shape_rect(),
+                        construction_offset: definition.construction_offset(),
+                        basement: definition.basement(),
                     },
                 )
             })
@@ -10904,6 +10941,10 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     crew_member: false,
                     value: 0,
                     mass: 0,
+                    constructable: false,
+                    shape: None,
+                    construction_offset: 0,
+                    basement: 0,
                 },
             )
         })

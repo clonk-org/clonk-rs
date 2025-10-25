@@ -14,12 +14,12 @@ use crate::ocf;
 use crate::LiquidSegment;
 use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, AudioCommand,
-    CommandDirection, DefinitionId, Direction, DrawTransform, EnvironmentSettings, FloatVector2,
-    GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectStatus, ObjectUpdate,
-    ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder,
-    PhysicsSettings, PlayerState, QueuedCommand, SpawnConfig, TransferZoneCommand,
-    TransferZoneRect, TransferZoneState, Vector2, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT,
-    CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
+    CommandDirection, DefinitionId, DefinitionRect, Direction, DrawTransform, EnvironmentSettings,
+    FloatVector2, GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectStatus,
+    ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope,
+    PathFinder, PhysicsSettings, PlayerState, QueuedCommand, SpawnConfig, TransferZoneCommand,
+    TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER,
+    CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -79,6 +79,10 @@ pub(crate) struct DefinitionMetadata {
     pub crew_member: bool,
     pub value: i32,
     pub mass: i32,
+    pub constructable: bool,
+    pub shape: Option<DefinitionRect>,
+    pub construction_offset: i32,
+    pub basement: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -1580,6 +1584,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetY", get_y);
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
+    script.register_host_function("CreateConstruction", create_construction);
     script.register_host_function("CreateParticle", create_particle);
     script.register_host_function("ClearParticles", clear_particles);
     script.register_host_function("CustomMessage", custom_message);
@@ -5729,6 +5734,10 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 crew_member: false,
                 value: 0,
                 mass: 0,
+                constructable: false,
+                shape: None,
+                construction_offset: 0,
+                basement: 0,
             });
         let definition_category = metadata.category;
 
@@ -5790,6 +5799,334 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         context.register_spawn(spawn, preview);
         Ok(object_reference_value(id))
     })
+}
+
+fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "CreateConstruction expects at least 1 argument: definition",
+        ));
+    }
+
+    let definition = match &args[0] {
+        Value::String(name) if !name.is_empty() => name.clone(),
+        Value::String(_) | Value::Nil => return Ok(Value::Nil),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "CreateConstruction: expected string for definition, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let mut index = 1;
+
+    let x_offset = if let Some(arg) = args.get(index) {
+        let value = value_to_i32(arg, "CreateConstruction", "x")?;
+        index += 1;
+        value
+    } else {
+        0
+    };
+
+    let y_offset = if let Some(arg) = args.get(index) {
+        let value = value_to_i32(arg, "CreateConstruction", "y")?;
+        index += 1;
+        value
+    } else {
+        0
+    };
+
+    let mut owner_override: Option<i32> = None;
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Int(value) => {
+                owner_override = Some(*value);
+                index += 1;
+            }
+            Value::Nil => {
+                owner_override = Some(OWNER_NONE);
+                index += 1;
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "CreateConstruction: expected int or nil for owner, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    let completion_percent = if let Some(arg) = args.get(index) {
+        let value = value_to_i32(arg, "CreateConstruction", "completion")?;
+        index += 1;
+        value
+    } else {
+        0
+    };
+
+    let _terrain_flag = if let Some(arg) = args.get(index) {
+        let flag = value_to_bool(arg, "CreateConstruction", "terrain")?;
+        index += 1;
+        flag
+    } else {
+        false
+    };
+
+    let check_site = if let Some(arg) = args.get(index) {
+        let flag = value_to_bool(arg, "CreateConstruction", "check_site")?;
+        index += 1;
+        flag
+    } else {
+        false
+    };
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "CreateConstruction: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("CreateConstruction requires an active engine context")
+        })?;
+
+        let metadata = context
+            .definition_metadata(&definition)
+            .cloned()
+            .unwrap_or_else(|| DefinitionMetadata {
+                category: context
+                    .definition_category(&definition)
+                    .unwrap_or(DEFAULT_CATEGORY),
+                ocf_base: ocf::NORMAL,
+                crew_member: false,
+                value: 0,
+                mass: 0,
+                constructable: true,
+                shape: None,
+                construction_offset: 0,
+                basement: 0,
+            });
+        let definition_category = metadata.category;
+
+        let base_position = context
+            .object_context()
+            .map(|object| object.effective_position())
+            .unwrap_or(Vector2::ZERO);
+        let base_owner = context
+            .object_context()
+            .map(|object| object.owner())
+            .unwrap_or(OWNER_NONE);
+
+        let owner = owner_override.unwrap_or(base_owner);
+        let position = Vector2::new(
+            base_position.x.saturating_add(x_offset),
+            base_position.y.saturating_add(y_offset),
+        );
+
+        let completion = completion_percent.clamp(0, 100);
+        let construction_value = ((i64::from(completion) * i64::from(FULL_CON)) / 100)
+            .clamp(0, i64::from(FULL_CON)) as i32;
+
+        if check_site && !construction_check(context, &definition, &metadata, position)? {
+            return Ok(Value::Nil);
+        }
+
+        let id = context.allocate_object_id();
+
+        let spawn = SpawnConfig::new(definition.clone())
+            .with_position(position)
+            .with_owner(owner)
+            .with_category(definition_category)
+            .with_construction(construction_value)
+            .with_id(id);
+
+        let preview_ocf = ocf::compute(
+            metadata.ocf_base,
+            metadata.crew_member,
+            true,
+            ObjectStatus::Normal,
+            false,
+            construction_value,
+        );
+        let preview = HostWorldObject::with_category(
+            id,
+            definition,
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            owner,
+            definition_category,
+            0,
+            construction_value,
+            0,
+            position,
+            Vector2::ZERO,
+            0,
+            Vec::new(),
+            0,
+            0,
+            None,
+            None,
+        )
+        .with_ocf(preview_ocf);
+
+        context.register_spawn(spawn, preview);
+        Ok(object_reference_value(id))
+    })
+}
+
+fn construction_check(
+    context: &EffectHostContext,
+    definition_id: &str,
+    metadata: &DefinitionMetadata,
+    position: Vector2,
+) -> Result<bool, RuntimeError> {
+    if !metadata.constructable {
+        return Ok(false);
+    }
+
+    let (raw_width, raw_height) = metadata
+        .shape
+        .map(|rect| (rect.width, rect.height))
+        .unwrap_or((20, 40));
+    let width = raw_width.max(1);
+    let height = raw_height.max(1);
+    let effective_height = height.saturating_sub(metadata.construction_offset).max(1);
+
+    let rect_left = position.x - width / 2;
+    let rect_right = rect_left + width;
+    let rect_top = position.y - effective_height;
+    let rect_bottom = position.y;
+
+    let Some(landscape) = context.landscape_ref() else {
+        return Ok(true);
+    };
+
+    let landscape_width = landscape.width() as i32;
+    if rect_left < 0 || rect_right > landscape_width {
+        return Ok(false);
+    }
+
+    let mut solid_count: i32 = 0;
+    let mut support_count: i32 = 0;
+    for column in rect_left..rect_right {
+        let surface = match landscape.surface_height(column) {
+            Some(height) => height,
+            None => return Ok(false),
+        };
+        let overlap_start = rect_top.max(surface);
+        let overlap_height = (rect_bottom - overlap_start).max(0);
+        solid_count = solid_count.saturating_add(overlap_height);
+
+        let support_start = rect_bottom.max(surface);
+        let support_height = (rect_bottom + 5 - support_start).max(0);
+        support_count = support_count.saturating_add(support_height);
+    }
+
+    let area_threshold = ((i64::from(width) * i64::from(effective_height)) / 20)
+        .clamp(0, i64::from(i32::MAX)) as i32;
+    if solid_count > area_threshold {
+        return Ok(false);
+    }
+
+    if support_count < width.saturating_mul(2) {
+        return Ok(false);
+    }
+
+    let overlap_mask = metadata.category & CATEGORY_SORT_LIMIT;
+    if overlap_mask == 0 {
+        return Ok(true);
+    }
+
+    let current_object_id = context.object_context().map(|object| object.id());
+    for object_id in context.world_object_ids() {
+        let Some(other) = context.get_world_object(object_id) else {
+            continue;
+        };
+        if Some(other.id) == current_object_id {
+            continue;
+        }
+        if !other.is_present() || !other.status().is_active() {
+            continue;
+        }
+        if other.container().is_some() {
+            continue;
+        }
+        if other.category() & overlap_mask & CATEGORY_SORT_LIMIT == 0 {
+            continue;
+        }
+        let other_metadata = if other.definition_id() == definition_id {
+            Some(metadata)
+        } else {
+            context.definition_metadata(other.definition_id())
+        };
+        if let Some(bounds) = compute_object_bounds(&other, other_metadata) {
+            if rectangles_overlap((rect_left, rect_top, rect_right, rect_bottom), bounds) {
+                return Ok(false);
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+fn compute_object_bounds(
+    object: &HostWorldObject,
+    metadata: Option<&DefinitionMetadata>,
+) -> Option<(i32, i32, i32, i32)> {
+    if let Some(meta) = metadata {
+        if let Some(shape) = meta.shape {
+            let position = object.position();
+            let left = position.x + shape.x;
+            let top = position.y + shape.y;
+            let right = left + shape.width;
+            let bottom = top + shape.height;
+            return Some((left, top, right, bottom));
+        }
+    }
+
+    let vertices = object.vertices();
+    if vertices.is_empty() {
+        return None;
+    }
+
+    let mut min_x = vertices[0].x;
+    let mut max_x = min_x;
+    let mut min_y = vertices[0].y;
+    let mut max_y = min_y;
+    for vertex in vertices.iter().skip(1) {
+        if vertex.x < min_x {
+            min_x = vertex.x;
+        }
+        if vertex.x > max_x {
+            max_x = vertex.x;
+        }
+        if vertex.y < min_y {
+            min_y = vertex.y;
+        }
+        if vertex.y > max_y {
+            max_y = vertex.y;
+        }
+    }
+
+    let position = object.position();
+    Some((
+        position.x + min_x,
+        position.y + min_y,
+        position.x + max_x,
+        position.y + max_y,
+    ))
+}
+
+fn rectangles_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
+    let (a_left, a_top, a_right, a_bottom) = a;
+    let (b_left, b_top, b_right, b_bottom) = b;
+    a_left < b_right && a_right > b_left && a_top < b_bottom && a_bottom > b_top
 }
 
 fn create_particle(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -8517,6 +8854,7 @@ mod tests {
             Vec::new(),
             HashMap::new(),
             1,
+            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_solid(&[Value::Int(5), Value::Int(12)])
@@ -8535,6 +8873,7 @@ mod tests {
             Vec::new(),
             HashMap::new(),
             1,
+            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_solid(&[Value::Int(3), Value::Int(15)])
@@ -8554,6 +8893,7 @@ mod tests {
             Vec::new(),
             HashMap::new(),
             8,
+            false,
         );
         let object_context = HostObjectContext::new(
             object_id,
@@ -8592,6 +8932,7 @@ mod tests {
             Vec::new(),
             HashMap::new(),
             1,
+            false,
         );
         let (solid, _) = with_effect_context(None, &[], world.clone(), 1, || {
             g_back_solid(&[Value::Int(2), Value::Int(2)])
@@ -8617,6 +8958,7 @@ mod tests {
             Vec::new(),
             HashMap::new(),
             1,
+            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_liquid(&[Value::Int(1), Value::Int(6)])
@@ -8636,6 +8978,7 @@ mod tests {
             Vec::new(),
             HashMap::new(),
             1,
+            false,
         );
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             g_back_liquid(&[Value::Int(1), Value::Int(6)])
@@ -8787,6 +9130,10 @@ mod tests {
                 crew_member: false,
                 value: 0,
                 mass: 0,
+                constructable: false,
+                shape: None,
+                construction_offset: 0,
+                basement: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -8817,6 +9164,10 @@ mod tests {
                 crew_member: false,
                 value: 0,
                 mass: 0,
+                constructable: false,
+                shape: None,
+                construction_offset: 0,
+                basement: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -8863,6 +9214,10 @@ mod tests {
                 crew_member: false,
                 value: 0,
                 mass: 0,
+                constructable: false,
+                shape: None,
+                construction_offset: 0,
+                basement: 0,
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -8924,6 +9279,7 @@ mod tests {
             Vec::new(),
             HashMap::new(),
             1,
+            false,
         );
         let (result, outcome) =
             with_object_host_context_with_world(world, || set_transfer_zone(&args));
@@ -8967,6 +9323,7 @@ mod tests {
             Vec::new(),
             HashMap::new(),
             1,
+            false,
         );
         let (result, outcome) = with_object_host_context_with_world(world, || {
             set_transfer_zone(&[Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(10)])
@@ -10168,6 +10525,7 @@ mod tests {
             Vec::new(),
             HashMap::new(),
             1,
+            false,
         );
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
@@ -10214,6 +10572,7 @@ mod tests {
             Vec::new(),
             HashMap::new(),
             1,
+            false,
         );
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
@@ -10826,6 +11185,7 @@ mod tests {
             Vec::new(),
             HashMap::new(),
             1,
+            false,
         );
         let args = [
             Value::Int(10),
@@ -11639,6 +11999,121 @@ mod tests {
         assert_eq!(spawn.owner, OWNER_NONE);
         assert_eq!(spawn.id, Some(ObjectId::new(1)));
         assert_eq!(outcome.next_object_id, 2);
+    }
+
+    #[test]
+    fn create_construction_registers_spawn_when_site_valid() {
+        let landscape = Landscape::flat(64, 50);
+        let definitions = HashMap::from([(
+            "Workshop".to_string(),
+            DefinitionMetadata {
+                category: crate::CATEGORY_STRUCTURE,
+                ocf_base: ocf::NORMAL,
+                crew_member: false,
+                value: 0,
+                mass: 100,
+                constructable: true,
+                shape: Some(DefinitionRect::new(-10, -40, 20, 40)),
+                construction_offset: 0,
+                basement: 0,
+            },
+        )]);
+        let world = HostWorldContext::with_landscape(
+            Vec::new(),
+            Some(landscape),
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let args = [
+            Value::String("Workshop".into()),
+            Value::Int(32),
+            Value::Int(50),
+            Value::Int(1),
+            Value::Int(0),
+            Value::Bool(false),
+            Value::Bool(true),
+        ];
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || create_construction(&args));
+        let value = result.expect("CreateConstruction succeeds");
+        assert_eq!(value, object_reference_value(ObjectId::new(1)));
+        assert_eq!(outcome.spawns.len(), 1);
+        let spawn = &outcome.spawns[0];
+        assert_eq!(spawn.definition_id, "Workshop");
+        assert_eq!(spawn.position, Vector2::new(32, 50));
+        assert_eq!(spawn.owner, 1);
+        assert_eq!(spawn.construction, 0);
+        assert_eq!(spawn.category, Some(crate::CATEGORY_STRUCTURE));
+        assert_eq!(outcome.next_object_id, 2);
+    }
+
+    #[test]
+    fn create_construction_returns_nil_when_site_blocked() {
+        let landscape = Landscape::flat(64, 50);
+        let workshop_metadata = DefinitionMetadata {
+            category: crate::CATEGORY_STRUCTURE,
+            ocf_base: ocf::NORMAL,
+            crew_member: false,
+            value: 0,
+            mass: 100,
+            constructable: true,
+            shape: Some(DefinitionRect::new(-10, -40, 20, 40)),
+            construction_offset: 0,
+            basement: 0,
+        };
+        let definitions = HashMap::from([
+            ("Workshop".to_string(), workshop_metadata.clone()),
+            ("Existing".to_string(), workshop_metadata),
+        ]);
+        let existing = HostWorldObject::with_category(
+            ObjectId::new(10),
+            "Existing",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            crate::CATEGORY_STRUCTURE,
+            0,
+            crate::FULL_CON,
+            0,
+            Vector2::new(32, 50),
+            Vector2::ZERO,
+            0,
+            Vec::new(),
+            0,
+            0,
+            None,
+            None,
+        );
+        let world = HostWorldContext::with_landscape(
+            vec![existing],
+            Some(landscape),
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let args = [
+            Value::String("Workshop".into()),
+            Value::Int(32),
+            Value::Int(50),
+            Value::Int(1),
+            Value::Int(0),
+            Value::Bool(false),
+            Value::Bool(true),
+        ];
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || create_construction(&args));
+        let value = result.expect("CreateConstruction completes");
+        assert_eq!(value, Value::Nil);
+        assert!(outcome.spawns.is_empty());
+        assert_eq!(outcome.next_object_id, 1);
     }
 
     #[test]
