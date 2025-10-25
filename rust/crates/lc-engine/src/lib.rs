@@ -10023,12 +10023,16 @@ impl Engine {
                 }
                 let owner = controller.unwrap_or(OWNER_NONE);
                 for _ in 0..spawn_count {
-                    let velocity =
-                        Vector2::new(self.rng.gen_range(-3..=3), self.rng.gen_range(-7..=-1));
+                    let rotation = self.rng.gen_range(0..360);
+                    let velocity = Vector2::new(
+                        self.rng.gen_range(-30..=30),
+                        self.rng.gen_range(-40..=20),
+                    );
                     spawn_requests.push(
                         SpawnConfig::new(definition_id.clone())
                             .with_position(center)
                             .with_velocity(velocity)
+                            .with_rotation(rotation)
                             .with_owner(owner),
                     );
                 }
@@ -12392,7 +12396,7 @@ mod tests {
     use lc_script::Value;
     use rand::Rng;
     use rand_chacha::ChaCha8Rng;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
 
@@ -12491,9 +12495,15 @@ mod tests {
             .expect("gem definition registers");
         engine.set_landscape(Landscape::flat_with_material(17, 40, Some(rock)));
 
-        let before = engine.snapshot().objects.len();
+        let controller = 1;
+        let before_snapshot = engine.snapshot();
+        let existing_ids: HashSet<_> = before_snapshot
+            .objects
+            .iter()
+            .map(|object| object.id)
+            .collect();
         let result = engine
-            .blast_circle(Vector2::new(8, 40), 4, Some(1))
+            .blast_circle(Vector2::new(8, 40), 4, Some(controller))
             .expect("blast applies");
         let removed = result
             .removed_by_material
@@ -12502,11 +12512,47 @@ mod tests {
             .unwrap_or_default();
         assert!(removed > 0, "expected blast to remove rock material");
 
-        let after = engine.snapshot().objects.len();
+        let ratio = 2;
+        let expected_spawns = (removed / ratio).max(0);
         assert!(
-            after > before,
-            "expected blast to spawn objects for blast reaction"
+            expected_spawns > 0,
+            "expected blast to spawn objects when material is removed"
         );
+        let after_snapshot = engine.snapshot();
+        let new_objects: Vec<_> = after_snapshot
+            .objects
+            .iter()
+            .filter(|object| !existing_ids.contains(&object.id))
+            .collect();
+        assert_eq!(
+            new_objects.len() as i32,
+            expected_spawns,
+            "blast should spawn one object per {:?} removed pixels",
+            ratio
+        );
+
+        for object in new_objects {
+            assert_eq!(
+                object.definition_id, "GEM0",
+                "blast should spawn configured definition"
+            );
+            assert!(
+                (-30..=30).contains(&object.velocity.x),
+                "expected horizontal velocity to follow legacy FIXED10 distribution"
+            );
+            assert!(
+                (-40..=20).contains(&object.velocity.y),
+                "expected vertical velocity to follow legacy FIXED10 distribution"
+            );
+            assert!(
+                (0..360).contains(&object.rotation),
+                "expected rotation to be normalised"
+            );
+            assert_eq!(
+                object.owner, controller,
+                "expected spawned object owner to match controller"
+            );
+        }
         Ok(())
     }
 
