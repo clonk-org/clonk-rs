@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use std::convert::TryFrom;
 use std::rc::Rc;
 
@@ -79,6 +79,20 @@ pub(crate) struct DefinitionMetadata {
     pub crew_member: bool,
     pub value: i32,
     pub mass: i32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PlayerCommand {
+    AdjustHomeBaseMaterial {
+        player_id: i32,
+        definition_id: DefinitionId,
+        delta: i32,
+    },
+    AdjustHomeBaseProduction {
+        player_id: i32,
+        definition_id: DefinitionId,
+        delta: i32,
+    },
 }
 
 impl HostWorldObject {
@@ -285,6 +299,7 @@ pub(crate) struct HostWorldContext {
     players: Rc<HashMap<i32, PlayerState>>,
     player_order: Rc<Vec<i32>>,
     next_object_id: u64,
+    team_home_base_rule: bool,
 }
 
 impl Default for HostWorldContext {
@@ -298,6 +313,7 @@ impl Default for HostWorldContext {
             players: Rc::new(HashMap::new()),
             player_order: Rc::new(Vec::new()),
             next_object_id: 1,
+            team_home_base_rule: false,
         }
     }
 }
@@ -308,7 +324,15 @@ impl HostWorldContext {
     where
         I: IntoIterator<Item = HostWorldObject>,
     {
-        Self::with_landscape(objects, None, HashMap::new(), Vec::new(), HashMap::new(), 1)
+        Self::with_landscape(
+            objects,
+            None,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            1,
+            false,
+        )
     }
 
     #[cfg(test)]
@@ -321,7 +345,7 @@ impl HostWorldContext {
             .into_iter()
             .map(|state| (state.id, state))
             .collect::<HashMap<_, _>>();
-        Self::with_landscape(objects, None, HashMap::new(), Vec::new(), map, 1)
+        Self::with_landscape(objects, None, HashMap::new(), Vec::new(), map, 1, false)
     }
 
     pub(crate) fn with_landscape<I>(
@@ -331,6 +355,7 @@ impl HostWorldContext {
         transfer_zones: Vec<TransferZoneState>,
         players: HashMap<i32, PlayerState>,
         next_object_id: u64,
+        team_home_base_rule: bool,
     ) -> Self
     where
         I: IntoIterator<Item = HostWorldObject>,
@@ -356,6 +381,7 @@ impl HostWorldContext {
             }),
             players: Rc::new(players),
             next_object_id,
+            team_home_base_rule,
         }
     }
 
@@ -377,6 +403,10 @@ impl HostWorldContext {
 
     pub(crate) fn next_object_id(&self) -> u64 {
         self.next_object_id
+    }
+
+    pub(crate) fn team_home_base_rule(&self) -> bool {
+        self.team_home_base_rule
     }
 
     pub(crate) fn definition_category(&self, id: &str) -> Option<i32> {
@@ -725,6 +755,262 @@ fn get_plr_value_gain(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn get_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "GetHomebaseMaterial expects at least 1 argument: player",
+        ));
+    }
+
+    let player_id = value_to_i32(&args[0], "GetHomebaseMaterial", "player")?;
+    let definition = parse_definition_argument(args.get(1), "GetHomebaseMaterial")?;
+    let index = match args.get(2) {
+        Some(Value::Nil) | None => None,
+        Some(value) => Some(value_to_i32(value, "GetHomebaseMaterial", "index")?),
+    };
+    let category = match args.get(3) {
+        Some(Value::Nil) | None => None,
+        Some(value) => {
+            let mask = value_to_i32(value, "GetHomebaseMaterial", "category")?;
+            if mask <= 0 {
+                None
+            } else {
+                Some(mask)
+            }
+        }
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+
+        if let Some(definition) = definition {
+            if context.definition_metadata(&definition).is_none()
+                && context.definition_category(&definition).is_none()
+            {
+                return Ok(Value::Nil);
+            }
+            let count = player
+                .home_base_material
+                .get(&definition)
+                .copied()
+                .unwrap_or(0);
+            return Ok(Value::Int(count as i32));
+        }
+
+        let Some(index) = index else {
+            return Ok(Value::Nil);
+        };
+        if index < 0 {
+            return Ok(Value::Nil);
+        }
+
+        let entries =
+            collect_home_base_entries(player.home_base_material.iter(), category, context);
+        let idx = index as usize;
+        if idx >= entries.len() {
+            return Ok(Value::Nil);
+        }
+        Ok(Value::String(entries[idx].clone()))
+    })
+}
+
+fn get_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "GetHomebaseProduction expects at least 1 argument: player",
+        ));
+    }
+
+    let player_id = value_to_i32(&args[0], "GetHomebaseProduction", "player")?;
+    let definition = parse_definition_argument(args.get(1), "GetHomebaseProduction")?;
+    let index = match args.get(2) {
+        Some(Value::Nil) | None => None,
+        Some(value) => Some(value_to_i32(value, "GetHomebaseProduction", "index")?),
+    };
+    let category = match args.get(3) {
+        Some(Value::Nil) | None => None,
+        Some(value) => {
+            let mask = value_to_i32(value, "GetHomebaseProduction", "category")?;
+            if mask <= 0 {
+                None
+            } else {
+                Some(mask)
+            }
+        }
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+
+        if let Some(definition) = definition {
+            if context.definition_metadata(&definition).is_none()
+                && context.definition_category(&definition).is_none()
+            {
+                return Ok(Value::Nil);
+            }
+            let count = player
+                .home_base_production
+                .get(&definition)
+                .copied()
+                .unwrap_or(0);
+            return Ok(Value::Int(count as i32));
+        }
+
+        let Some(index) = index else {
+            return Ok(Value::Nil);
+        };
+        if index < 0 {
+            return Ok(Value::Nil);
+        }
+
+        let entries =
+            collect_home_base_entries(player.home_base_production.iter(), category, context);
+        let idx = index as usize;
+        if idx >= entries.len() {
+            return Ok(Value::Nil);
+        }
+        Ok(Value::String(entries[idx].clone()))
+    })
+}
+
+fn do_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 3 {
+        return Err(RuntimeError::new(
+            "DoHomebaseMaterial expects 3 arguments: player, definition, change",
+        ));
+    }
+
+    let player_id = value_to_i32(&args[0], "DoHomebaseMaterial", "player")?;
+    let definition = match parse_definition_argument(args.get(1), "DoHomebaseMaterial")? {
+        Some(id) => id,
+        None => return Ok(Value::Bool(false)),
+    };
+    let change = match args.get(2) {
+        Some(Value::Nil) | None => 0,
+        Some(value) => value_to_i32(value, "DoHomebaseMaterial", "change")?,
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+
+        if context.definition_metadata(&definition).is_none()
+            && context.definition_category(&definition).is_none()
+        {
+            return Ok(Value::Bool(false));
+        }
+
+        let (team_id, updated_material) = {
+            let player = match context.player_state_mut(player_id) {
+                Some(player) => player,
+                None => return Ok(Value::Bool(false)),
+            };
+            adjust_id_count(
+                &mut player.home_base_material,
+                &definition,
+                change,
+                Some(crate::player::MAX_HOME_BASE_MATERIAL),
+            );
+            (player.team, player.home_base_material.clone())
+        };
+
+        if context.team_home_base_rule() {
+            if let Some(team) = team_id {
+                let teammates: Vec<i32> = context
+                    .player_ids()
+                    .iter()
+                    .copied()
+                    .filter(|other_id| {
+                        *other_id != player_id
+                            && context.player_state(*other_id).and_then(|state| state.team)
+                                == Some(team)
+                    })
+                    .collect();
+                for other_id in teammates {
+                    if let Some(member) = context.player_state_mut(other_id) {
+                        member.home_base_material = updated_material.clone();
+                    }
+                }
+            }
+        }
+
+        if change != 0 {
+            context.record_player_command(PlayerCommand::AdjustHomeBaseMaterial {
+                player_id,
+                definition_id: definition,
+                delta: change,
+            });
+        }
+
+        Ok(Value::Bool(true))
+    })
+}
+
+fn do_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 3 {
+        return Err(RuntimeError::new(
+            "DoHomebaseProduction expects 3 arguments: player, definition, change",
+        ));
+    }
+
+    let player_id = value_to_i32(&args[0], "DoHomebaseProduction", "player")?;
+    let definition = match parse_definition_argument(args.get(1), "DoHomebaseProduction")? {
+        Some(id) => id,
+        None => return Ok(Value::Bool(false)),
+    };
+    let change = match args.get(2) {
+        Some(Value::Nil) | None => 0,
+        Some(value) => value_to_i32(value, "DoHomebaseProduction", "change")?,
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+
+        if context.definition_metadata(&definition).is_none()
+            && context.definition_category(&definition).is_none()
+        {
+            return Ok(Value::Bool(false));
+        }
+
+        if context
+            .player_state_mut(player_id)
+            .map(|player| {
+                adjust_id_count(&mut player.home_base_production, &definition, change, None);
+            })
+            .is_none()
+        {
+            return Ok(Value::Bool(false));
+        }
+
+        if change != 0 {
+            context.record_player_command(PlayerCommand::AdjustHomeBaseProduction {
+                player_id,
+                definition_id: definition,
+                delta: change,
+            });
+        }
+
+        Ok(Value::Bool(true))
+    })
+}
+
 fn value_to_bool(value: &Value, function: &str, parameter: &str) -> Result<bool, RuntimeError> {
     match value {
         Value::Bool(flag) => Ok(*flag),
@@ -821,6 +1107,87 @@ fn parse_definition_argument(
             function,
             other.type_name()
         ))),
+    }
+}
+
+fn collect_home_base_entries<'a>(
+    entries: impl Iterator<Item = (&'a DefinitionId, &'a u32)>,
+    category: Option<i32>,
+    context: &EffectHostContext,
+) -> Vec<DefinitionId> {
+    let mut filtered: Vec<DefinitionId> = entries
+        .filter_map(|(definition_id, &count)| {
+            if count == 0 {
+                return None;
+            }
+            if let Some(mask) = category {
+                let metadata = context.definition_metadata(definition_id.as_str());
+                if metadata
+                    .map(|meta| meta.category & mask != 0)
+                    .unwrap_or(false)
+                {
+                    Some(definition_id.clone())
+                } else {
+                    None
+                }
+            } else {
+                Some(definition_id.clone())
+            }
+        })
+        .collect();
+    filtered.sort();
+    filtered
+}
+
+fn adjust_id_count(
+    map: &mut HashMap<DefinitionId, u32>,
+    definition_id: &DefinitionId,
+    delta: i32,
+    max: Option<u32>,
+) -> u32 {
+    match map.entry(definition_id.clone()) {
+        Entry::Occupied(mut occupied) => {
+            if delta >= 0 {
+                let mut new_value = occupied.get().saturating_add(delta as u32);
+                if let Some(limit) = max {
+                    new_value = new_value.min(limit);
+                }
+                if new_value == 0 {
+                    occupied.remove();
+                    0
+                } else {
+                    occupied.insert(new_value);
+                    new_value
+                }
+            } else {
+                let current = *occupied.get();
+                let decrease = delta.saturating_abs() as u32;
+                if current <= decrease {
+                    occupied.remove();
+                    0
+                } else {
+                    let new_value = current - decrease;
+                    occupied.insert(new_value);
+                    new_value
+                }
+            }
+        }
+        Entry::Vacant(vacant) => {
+            if delta <= 0 {
+                0
+            } else {
+                let mut new_value = delta as u32;
+                if let Some(limit) = max {
+                    new_value = new_value.min(limit);
+                }
+                if new_value == 0 {
+                    0
+                } else {
+                    vacant.insert(new_value);
+                    new_value
+                }
+            }
+        }
     }
 }
 
@@ -1239,9 +1606,13 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetCon", get_con);
     script.register_host_function("DoCon", do_con);
     script.register_host_function("DoDamage", do_damage);
+    script.register_host_function("DoHomebaseMaterial", do_homebase_material);
+    script.register_host_function("DoHomebaseProduction", do_homebase_production);
     script.register_host_function("Random", random);
     script.register_host_function("SetGravity", set_gravity);
     script.register_host_function("GetGravity", get_gravity);
+    script.register_host_function("GetHomebaseMaterial", get_homebase_material);
+    script.register_host_function("GetHomebaseProduction", get_homebase_production);
     script.register_host_function("SetWind", set_wind);
     script.register_host_function("GetWind", get_wind);
     script.register_host_function("SetTemperature", set_temperature);
@@ -1843,6 +2214,7 @@ pub(crate) struct EffectContextOutcome {
     pub particles: Vec<ParticleCommand>,
     pub transfer_zones: Vec<TransferZoneCommand>,
     pub messages: Vec<MessageCommand>,
+    pub player_commands: Vec<PlayerCommand>,
     pub audio: AudioOutcome,
     pub next_object_id: u64,
 }
@@ -1859,6 +2231,7 @@ impl EffectContextOutcome {
         spawns: Vec<SpawnConfig>,
         transfer_zones: Vec<TransferZoneCommand>,
         messages: Vec<MessageCommand>,
+        player_commands: Vec<PlayerCommand>,
         audio: AudioOutcome,
         next_object_id: u64,
     ) -> Self {
@@ -1874,6 +2247,7 @@ impl EffectContextOutcome {
             particles: Vec::new(),
             transfer_zones,
             messages,
+            player_commands,
             audio,
             next_object_id,
         }
@@ -1892,6 +2266,7 @@ impl EffectContextOutcome {
             particles: Vec::new(),
             transfer_zones: Vec::new(),
             messages: Vec::new(),
+            player_commands: Vec::new(),
             audio: AudioOutcome {
                 state: audio,
                 events: Vec::new(),
@@ -7102,6 +7477,9 @@ struct EffectHostContext {
     object: Option<ObjectScopeContext>,
     global: Option<EffectScopeContext>,
     world: HostWorldContext,
+    player_overrides: HashMap<i32, PlayerState>,
+    player_commands: Vec<PlayerCommand>,
+    team_home_base_rule: bool,
     pending_spawns: Vec<SpawnConfig>,
     pending_objects: HashMap<ObjectId, HostWorldObject>,
     pending_order: Vec<ObjectId>,
@@ -7120,6 +7498,7 @@ impl EffectHostContext {
         next_object_id: u64,
         audio: AudioRegistry,
     ) -> Self {
+        let team_home_base_rule = world.team_home_base_rule();
         let object = object.map(|ctx| {
             let HostObjectContext {
                 id,
@@ -7184,6 +7563,9 @@ impl EffectHostContext {
             object,
             global,
             world,
+            player_overrides: HashMap::new(),
+            player_commands: Vec::new(),
+            team_home_base_rule,
             pending_spawns: Vec::new(),
             pending_objects: HashMap::new(),
             pending_order: Vec::new(),
@@ -7278,7 +7660,25 @@ impl EffectHostContext {
     }
 
     fn player_state(&self, id: i32) -> Option<&PlayerState> {
-        self.world.player(id)
+        self.player_overrides
+            .get(&id)
+            .or_else(|| self.world.player(id))
+    }
+
+    fn player_state_mut(&mut self, id: i32) -> Option<&mut PlayerState> {
+        if !self.player_overrides.contains_key(&id) {
+            let state = self.world.player(id)?.clone();
+            self.player_overrides.insert(id, state);
+        }
+        self.player_overrides.get_mut(&id)
+    }
+
+    fn record_player_command(&mut self, command: PlayerCommand) {
+        self.player_commands.push(command);
+    }
+
+    fn team_home_base_rule(&self) -> bool {
+        self.team_home_base_rule
     }
 
     fn object_context_mut(&mut self) -> Option<&mut ObjectScopeContext> {
@@ -7332,6 +7732,7 @@ impl EffectHostContext {
             self.pending_spawns,
             self.transfer_zone_commands,
             self.pending_messages,
+            self.player_commands,
             AudioOutcome {
                 state: self.audio,
                 events: audio_events,
@@ -8371,6 +8772,129 @@ mod tests {
         let args = [Value::Int(9)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_plr_value_gain(&args));
         assert_eq!(result.expect("GetPlrValueGain succeeds"), Value::Int(45));
+    }
+
+    #[test]
+    fn get_homebase_material_returns_count_for_definition() {
+        let mut player = PlayerState::default();
+        player.id = 1;
+        player.home_base_material.insert("Brick".to_string(), 3_u32);
+        let definitions = HashMap::from([(
+            "Brick".to_string(),
+            DefinitionMetadata {
+                category: 1,
+                ocf_base: 0,
+                crew_member: false,
+                value: 0,
+                mass: 0,
+            },
+        )]);
+        let world = HostWorldContext::with_landscape(
+            Vec::new(),
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::from([(1, player)]),
+            1,
+            false,
+        );
+        let args = [Value::Int(1), Value::String("Brick".into())];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_homebase_material(&args));
+
+        assert_eq!(result.expect("GetHomebaseMaterial succeeds"), Value::Int(3));
+    }
+
+    #[test]
+    fn do_homebase_material_records_player_command() {
+        let mut player = PlayerState::default();
+        player.id = 1;
+        player.home_base_material.insert("Brick".to_string(), 1_u32);
+        let definitions = HashMap::from([(
+            "Brick".to_string(),
+            DefinitionMetadata {
+                category: 1,
+                ocf_base: 0,
+                crew_member: false,
+                value: 0,
+                mass: 0,
+            },
+        )]);
+        let world = HostWorldContext::with_landscape(
+            Vec::new(),
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::from([(1, player)]),
+            1,
+            false,
+        );
+        let args = [Value::Int(1), Value::String("Brick".into()), Value::Int(2)];
+        let (result, outcome) =
+            with_effect_context(None, &[], world, 1, || do_homebase_material(&args));
+
+        assert_eq!(
+            result.expect("DoHomebaseMaterial succeeds"),
+            Value::Bool(true)
+        );
+        assert_eq!(outcome.player_commands.len(), 1);
+        match &outcome.player_commands[0] {
+            PlayerCommand::AdjustHomeBaseMaterial {
+                player_id,
+                definition_id,
+                delta,
+            } => {
+                assert_eq!(*player_id, 1);
+                assert_eq!(definition_id, "Brick");
+                assert_eq!(*delta, 2);
+            }
+            other => panic!("unexpected player command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn do_homebase_production_records_player_command() {
+        let mut player = PlayerState::default();
+        player.id = 1;
+        let definitions = HashMap::from([(
+            "Brick".to_string(),
+            DefinitionMetadata {
+                category: 1,
+                ocf_base: 0,
+                crew_member: false,
+                value: 0,
+                mass: 0,
+            },
+        )]);
+        let world = HostWorldContext::with_landscape(
+            Vec::new(),
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::from([(1, player)]),
+            1,
+            false,
+        );
+        let args = [Value::Int(1), Value::String("Brick".into()), Value::Int(1)];
+        let (result, outcome) =
+            with_effect_context(None, &[], world, 1, || do_homebase_production(&args));
+
+        assert_eq!(
+            result.expect("DoHomebaseProduction succeeds"),
+            Value::Bool(true)
+        );
+        assert_eq!(outcome.player_commands.len(), 1);
+        match &outcome.player_commands[0] {
+            PlayerCommand::AdjustHomeBaseProduction {
+                player_id,
+                definition_id,
+                delta,
+            } => {
+                assert_eq!(*player_id, 1);
+                assert_eq!(definition_id, "Brick");
+                assert_eq!(*delta, 1);
+            }
+            other => panic!("unexpected player command: {other:?}"),
+        }
     }
 
     #[test]

@@ -80,7 +80,7 @@ pub struct ContextMenuEntry {
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
     AudioRegistry, DefinitionMetadata, EffectContextOutcome, EnvironmentDelta, HostWorldContext,
-    HostWorldObject, PhysicsDelta,
+    HostWorldObject, PhysicsDelta, PlayerCommand,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use material::MaterialReactionKind;
@@ -3719,10 +3719,14 @@ impl Definition {
             particles: host_particles,
             transfer_zones: host_transfer_zones,
             messages: host_messages,
+            player_commands: host_player_commands,
             audio: host_audio,
             next_object_id,
         } = host_effects;
         batch.audio.extend(host_audio.events);
+        if !host_player_commands.is_empty() {
+            batch.player_commands.extend(host_player_commands);
+        }
 
         if let Some(delta) = physics_from_host {
             merge_physics_delta(&mut physics_delta, &delta);
@@ -3857,10 +3861,14 @@ impl Definition {
             particles: host_particles,
             transfer_zones: host_transfer_zones,
             messages: host_messages,
+            player_commands: host_player_commands,
             audio: host_audio,
             next_object_id,
         } = host_effects;
         batch.audio.extend(host_audio.events);
+        if !host_player_commands.is_empty() {
+            batch.player_commands.extend(host_player_commands);
+        }
 
         if let Some(delta) = environment_from_host {
             merge_environment_delta(&mut environment_delta, &delta);
@@ -4866,6 +4874,7 @@ impl ScenarioScript {
             particles: host_particles,
             transfer_zones: host_transfer_zones,
             messages: host_messages,
+            player_commands: host_player_commands,
             audio: host_audio,
             next_object_id: _,
         } = host_effects;
@@ -4883,6 +4892,9 @@ impl ScenarioScript {
         }
 
         let mut batch = parse_scenario_command(&self.name, function, result)?;
+        if !host_player_commands.is_empty() {
+            batch.player_commands.extend(host_player_commands);
+        }
         if !host_global_effects.is_empty() {
             batch.global_effects.extend(host_global_effects);
         }
@@ -4947,6 +4959,7 @@ struct CommandBatch {
     transfer_zones: Vec<TransferZoneCommand>,
     audio: Vec<AudioCommand>,
     messages: Vec<MessageCommand>,
+    player_commands: Vec<PlayerCommand>,
 }
 
 #[derive(Debug, Default)]
@@ -4960,6 +4973,7 @@ struct ScenarioBatch {
     transfer_zones: Vec<TransferZoneCommand>,
     audio: Vec<AudioCommand>,
     messages: Vec<MessageCommand>,
+    player_commands: Vec<PlayerCommand>,
 }
 
 pub struct Engine {
@@ -5568,8 +5582,22 @@ impl Engine {
         definition_id: DefinitionId,
         delta: i32,
     ) -> Result<u32, EngineError> {
+        let count = {
+            let player = self.player_mut(id)?;
+            player.adjust_home_base_material(definition_id, delta)
+        };
+        self.sync_team_home_base_for(id);
+        Ok(count)
+    }
+
+    pub fn adjust_player_home_base_production(
+        &mut self,
+        id: i32,
+        definition_id: DefinitionId,
+        delta: i32,
+    ) -> Result<u32, EngineError> {
         let player = self.player_mut(id)?;
-        Ok(player.adjust_home_base_material(definition_id, delta))
+        Ok(player.adjust_home_base_production(definition_id, delta))
     }
 
     pub fn set_materials(&mut self, materials: MaterialSet) {
@@ -5785,6 +5813,7 @@ impl Engine {
             transfer_zones,
             players,
             self.next_object_id,
+            self.team_home_base_rule,
         )
     }
 
@@ -5829,7 +5858,12 @@ impl Engine {
             transfer_zones,
             audio,
             messages,
+            player_commands,
         } = batch;
+
+        if !player_commands.is_empty() {
+            self.apply_player_commands(player_commands)?;
+        }
 
         if let Some(delta) = environment {
             delta.apply(&mut self.environment);
@@ -6699,6 +6733,7 @@ impl Engine {
                     physics_delta,
                     audio_events,
                     event_messages,
+                    player_commands,
                     audio_state,
                     new_rng,
                 ) = {
@@ -6723,6 +6758,9 @@ impl Engine {
                 };
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
+                if !player_commands.is_empty() {
+                    self.apply_player_commands(player_commands)?;
+                }
                 if !audio_events.is_empty() {
                     self.pending_audio.extend(audio_events);
                 }
@@ -6768,6 +6806,7 @@ impl Engine {
                     physics_delta,
                     audio_events,
                     event_messages,
+                    player_commands,
                     audio_state,
                     new_rng,
                 ) = {
@@ -6792,6 +6831,9 @@ impl Engine {
                 };
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
+                if !player_commands.is_empty() {
+                    self.apply_player_commands(player_commands)?;
+                }
                 if !audio_events.is_empty() {
                     self.pending_audio.extend(audio_events);
                 }
@@ -6896,7 +6938,12 @@ impl Engine {
                 transfer_zones,
                 audio,
                 messages,
+                player_commands,
             } = command;
+
+            if !player_commands.is_empty() {
+                self.apply_player_commands(player_commands)?;
+            }
 
             if let Some(update) = environment {
                 update.apply(&mut self.environment);
@@ -6959,7 +7006,14 @@ impl Engine {
             if !effect_events.is_empty() {
                 let previous_container = self.objects[idx].state.container;
                 let world = self.host_world_context();
-                let (global_cmds, emitted_particles, physics_delta, audio_events, event_messages) = {
+                let (
+                    global_cmds,
+                    emitted_particles,
+                    physics_delta,
+                    audio_events,
+                    event_messages,
+                    player_commands,
+                ) = {
                     let definition = self
                         .definitions
                         .get(&definition_id)
@@ -6973,6 +7027,7 @@ impl Engine {
                         physics_delta,
                         audio_events,
                         event_messages,
+                        player_commands,
                         audio_state,
                         new_rng,
                     ) = Self::run_effect_events_for_object(
@@ -6996,8 +7051,12 @@ impl Engine {
                         physics_delta,
                         audio_events,
                         event_messages,
+                        player_commands,
                     )
                 };
+                if !player_commands.is_empty() {
+                    self.apply_player_commands(player_commands)?;
+                }
                 if !audio_events.is_empty() {
                     self.pending_audio.extend(audio_events);
                 }
@@ -7340,9 +7399,14 @@ impl Engine {
             particles,
             transfer_zones,
             messages,
+            player_commands,
             audio: outcome_audio,
             next_object_id,
         } = outcome;
+
+        if !player_commands.is_empty() {
+            self.apply_player_commands(player_commands)?;
+        }
 
         if let Some(update) = environment {
             update.apply(&mut self.environment);
@@ -7443,6 +7507,7 @@ impl Engine {
                 physics_delta,
                 audio_events,
                 event_messages,
+                player_commands,
                 audio_state,
                 new_rng,
             ) = Self::run_effect_events_for_object(
@@ -7460,6 +7525,9 @@ impl Engine {
             )?;
             self.rng = new_rng;
             self.audio_registry = audio_state;
+            if !player_commands.is_empty() {
+                self.apply_player_commands(player_commands)?;
+            }
             if !audio_events.is_empty() {
                 self.pending_audio.extend(audio_events);
             }
@@ -7912,6 +7980,7 @@ impl Engine {
             PhysicsDelta,
             Vec<AudioCommand>,
             Vec<MessageCommand>,
+            Vec<PlayerCommand>,
             AudioRegistry,
             ChaCha8Rng,
         ),
@@ -7922,6 +7991,7 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 PhysicsDelta::default(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 audio,
@@ -7939,6 +8009,7 @@ impl Engine {
         let mut pending_audio = Vec::new();
         let mut pending_messages = Vec::new();
         let mut current_audio = audio;
+        let mut pending_player_commands = Vec::new();
 
         while let Some(event) = queue.pop_front() {
             let snapshot_for_call = state_snapshot.clone();
@@ -7994,9 +8065,14 @@ impl Engine {
                 physics: physics_update,
                 particles: mut emitted_particles,
                 messages: event_messages,
+                player_commands: effect_player_commands,
                 audio: outcome_audio,
                 ..
             } = outcome;
+
+            if !effect_player_commands.is_empty() {
+                pending_player_commands.extend(effect_player_commands);
+            }
 
             if let Some(update) = environment_update {
                 update.apply(&mut current_environment);
@@ -8062,6 +8138,7 @@ impl Engine {
             accumulated_physics,
             pending_audio,
             pending_messages,
+            pending_player_commands,
             current_audio,
             rng,
         ))
@@ -8158,6 +8235,28 @@ impl Engine {
         for owner in owners {
             self.sync_player_cursor(owner);
         }
+    }
+
+    fn apply_player_commands(&mut self, commands: Vec<PlayerCommand>) -> Result<(), EngineError> {
+        for command in commands {
+            match command {
+                PlayerCommand::AdjustHomeBaseMaterial {
+                    player_id,
+                    definition_id,
+                    delta,
+                } => {
+                    self.adjust_player_home_base_material(player_id, definition_id, delta)?;
+                }
+                PlayerCommand::AdjustHomeBaseProduction {
+                    player_id,
+                    definition_id,
+                    delta,
+                } => {
+                    self.adjust_player_home_base_production(player_id, definition_id, delta)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn sync_team_home_base_for(&mut self, id: i32) {
@@ -10422,6 +10521,7 @@ impl Engine {
                     transfer_zones,
                     audio,
                     messages,
+                    player_commands,
                 },
                 audio_state,
                 new_rng,
@@ -10452,6 +10552,9 @@ impl Engine {
             }
             if let Some(delta) = physics {
                 self.apply_physics_delta(delta);
+            }
+            if !player_commands.is_empty() {
+                self.apply_player_commands(player_commands)?;
             }
             if destroy {
                 return Err(EngineError::InvalidScriptOutput {
@@ -10506,6 +10609,7 @@ impl Engine {
                 physics_delta,
                 audio_events,
                 event_messages,
+                player_commands,
                 audio_state,
                 new_rng,
             ) = Self::run_effect_events_for_object(
@@ -10523,6 +10627,9 @@ impl Engine {
             )?;
             self.rng = new_rng;
             self.audio_registry = audio_state;
+            if !player_commands.is_empty() {
+                self.apply_player_commands(player_commands)?;
+            }
             if !audio_events.is_empty() {
                 self.pending_audio.extend(audio_events);
             }
@@ -10836,6 +10943,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         snapshot.transfer_zones.clone(),
         players,
         next_object_id,
+        false,
     )
 }
 
@@ -12754,6 +12862,51 @@ global func MenuCommand(state, kind, selection)
 
         let follower_after = engine.player(2).expect("follower present");
         assert_eq!(follower_after.home_base_material().get("Brick"), Some(&1));
+    }
+
+    #[test]
+    fn apply_player_commands_updates_home_base_material() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(PlayerConfig::new(1, "Leader"))
+            .expect("player registered");
+
+        engine
+            .apply_player_commands(vec![PlayerCommand::AdjustHomeBaseMaterial {
+                player_id: 1,
+                definition_id: "Brick".to_string(),
+                delta: 3,
+            }])
+            .expect("commands applied");
+
+        let player = engine.player(1).expect("player present");
+        assert_eq!(player.home_base_material().get("Brick"), Some(&3));
+    }
+
+    #[test]
+    fn apply_player_commands_synchronizes_team_materials_when_rule_enabled() {
+        let mut engine = Engine::new();
+        engine.set_team_home_base_rule(true);
+
+        engine
+            .register_player(PlayerConfig::new(1, "Leader").with_team(Some(1)))
+            .expect("leader registered");
+        engine
+            .register_player(PlayerConfig::new(2, "Follower").with_team(Some(1)))
+            .expect("follower registered");
+
+        engine
+            .apply_player_commands(vec![PlayerCommand::AdjustHomeBaseMaterial {
+                player_id: 1,
+                definition_id: "Brick".to_string(),
+                delta: 2,
+            }])
+            .expect("commands applied");
+
+        let leader = engine.player(1).expect("leader present");
+        let follower = engine.player(2).expect("follower present");
+        assert_eq!(leader.home_base_material().get("Brick"), Some(&2));
+        assert_eq!(follower.home_base_material().get("Brick"), Some(&2));
     }
 
     #[test]

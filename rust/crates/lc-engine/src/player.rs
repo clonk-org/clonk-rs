@@ -2,7 +2,7 @@ use crate::{DefinitionId, ObjectId, RgbColor, Vector2};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-const MAX_HOME_BASE_MATERIAL: u32 = 25;
+pub(crate) const MAX_HOME_BASE_MATERIAL: u32 = 25;
 const MAX_SET_WEALTH: i32 = 100_000;
 const MAX_WEALTH_ADJUSTMENT: i32 = 10_000;
 const MAX_SCORE: i32 = 100_000;
@@ -514,6 +514,36 @@ impl Player {
             if let Some(entry) = self.home_base_material.get_mut(&definition_id) {
                 if *entry <= decrease {
                     self.home_base_material.remove(&definition_id);
+                    0
+                } else {
+                    *entry -= decrease;
+                    *entry
+                }
+            } else {
+                0
+            }
+        }
+    }
+
+    pub fn adjust_home_base_production(&mut self, definition_id: DefinitionId, delta: i32) -> u32 {
+        if delta >= 0 {
+            let entry = self
+                .home_base_production
+                .entry(definition_id.clone())
+                .or_insert(0);
+            let added = delta as u32;
+            *entry = entry.saturating_add(added);
+            if *entry == 0 {
+                self.home_base_production.remove(&definition_id);
+                0
+            } else {
+                *entry
+            }
+        } else {
+            let decrease = delta.saturating_abs() as u32;
+            if let Some(entry) = self.home_base_production.get_mut(&definition_id) {
+                if *entry <= decrease {
+                    self.home_base_production.remove(&definition_id);
                     0
                 } else {
                     *entry -= decrease;
