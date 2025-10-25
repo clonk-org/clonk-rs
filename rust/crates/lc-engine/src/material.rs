@@ -1,10 +1,14 @@
-use lc_resources::{MaterialDefinition as ResourceMaterialDefinition, MaterialLibrary};
+use lc_resources::{
+    material::MaterialReactionDefinition, MaterialDefinition as ResourceMaterialDefinition,
+    MaterialLibrary,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 const C4M_SOLID: i32 = 50;
 const C4M_LIQUID: i32 = 25;
 const SKY_KEY: &str = "sky";
+const MATERIAL_EXEC_PXS_MOVE_MASK: u32 = 1 << 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemperatureDirection {
@@ -101,6 +105,7 @@ pub enum MaterialReactionKind {
     Corrode {
         corrosive_strength: i32,
         corrode_resistance: i32,
+        corrosion_probability: Option<i32>,
     },
     Insert,
 }
@@ -166,6 +171,11 @@ fn parse_blast_shift_to(value: Option<&str>) -> (Option<String>, bool) {
 #[inline]
 fn density_is_solid(density: i32) -> bool {
     density >= C4M_SOLID
+}
+
+#[inline]
+fn density_is_semi_solid(density: i32) -> bool {
+    density >= C4M_LIQUID
 }
 
 #[inline]
@@ -573,6 +583,7 @@ impl Material {
 pub struct MaterialSet {
     materials: Vec<Material>,
     by_name: HashMap<String, MaterialId>,
+    custom_reactions: Vec<Option<MaterialReactionKind>>,
 }
 
 impl MaterialSet {
@@ -599,7 +610,12 @@ impl MaterialSet {
         for material in &mut materials {
             material.resolve_relations(&by_name);
         }
-        Self { materials, by_name }
+        let custom_reactions = build_custom_reactions(&materials, &by_name);
+        Self {
+            materials,
+            by_name,
+            custom_reactions,
+        }
     }
 
     pub fn push(&mut self, mut material: Material) {
@@ -612,7 +628,12 @@ impl MaterialSet {
             self.by_name.insert(key, id);
             material.resolve_relations(&self.by_name);
             self.materials.push(material);
+            self.rebuild_custom_reactions();
         }
+    }
+
+    fn rebuild_custom_reactions(&mut self) {
+        self.custom_reactions = build_custom_reactions(&self.materials, &self.by_name);
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Material> {
@@ -656,11 +677,31 @@ impl MaterialSet {
             .map(|material| material.id())
     }
 
+    fn custom_reaction(
+        &self,
+        pxs_material: Option<MaterialId>,
+        landscape_material: Option<MaterialId>,
+    ) -> Option<MaterialReactionKind> {
+        if self.custom_reactions.is_empty() {
+            return None;
+        }
+        let width = self.materials.len() + 1;
+        let pxs_index = option_to_index(pxs_material);
+        let landscape_index = option_to_index(landscape_material);
+        self.custom_reactions
+            .get(landscape_index * width + pxs_index)
+            .copied()
+            .flatten()
+    }
+
     pub fn reaction(
         &self,
         pxs_material: Option<MaterialId>,
         landscape_material: Option<MaterialId>,
     ) -> MaterialReactionKind {
+        if let Some(custom) = self.custom_reaction(pxs_material, landscape_material) {
+            return custom;
+        }
         let Some(pxs_id) = pxs_material else {
             return MaterialReactionKind::None;
         };
@@ -694,6 +735,7 @@ impl MaterialSet {
             return MaterialReactionKind::Corrode {
                 corrosive_strength: pxs_mat.corrosive(),
                 corrode_resistance: landscape.corrode(),
+                corrosion_probability: None,
             };
         }
         MaterialReactionKind::Insert
@@ -714,6 +756,220 @@ impl MaterialSet {
 
     pub fn materials(&self) -> &[Material] {
         &self.materials
+    }
+}
+
+fn option_to_index(material: Option<MaterialId>) -> usize {
+    material.map(|id| id.index() + 1).unwrap_or(0)
+}
+
+fn build_custom_reactions(
+    materials: &[Material],
+    by_name: &HashMap<String, MaterialId>,
+) -> Vec<Option<MaterialReactionKind>> {
+    let width = materials.len() + 1;
+    let mut entries = vec![None; width * width];
+    if materials.is_empty() {
+        return entries;
+    }
+
+    for material in materials {
+        let pxs_id = material.id();
+        for reaction_def in material.definition().reactions() {
+            let exec_mask = reaction_def
+                .int("execmask")
+                .map(|value| value as u32)
+                .unwrap_or(u32::MAX);
+            if exec_mask & MATERIAL_EXEC_PXS_MOVE_MASK == 0 {
+                continue;
+            }
+
+            let Some(kind) = parse_custom_reaction_kind(reaction_def, by_name) else {
+                continue;
+            };
+
+            let Some(target_raw) = reaction_def
+                .value("targetspec")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+
+            let inverse = reaction_def.bool_flag("inversespec").unwrap_or(false);
+            let reverse = reaction_def.bool_flag("reverse").unwrap_or(false);
+
+            let targets = resolve_reaction_targets(target_raw, inverse, materials, by_name);
+            if targets.is_empty() {
+                continue;
+            }
+
+            for target in targets {
+                set_custom_reaction(&mut entries, width, Some(pxs_id), target, kind, reverse);
+            }
+        }
+    }
+
+    entries
+}
+
+fn parse_custom_reaction_kind(
+    definition: &MaterialReactionDefinition,
+    by_name: &HashMap<String, MaterialId>,
+) -> Option<MaterialReactionKind> {
+    let reaction_type = normalize_key(definition.value("type")?);
+    match reaction_type.as_str() {
+        "convert" => {
+            let depth = definition.int("depth").filter(|value| *value > 0);
+            let target = definition
+                .value("convertmat")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|raw| normalize_key(raw))
+                .and_then(|name| {
+                    if name == SKY_KEY {
+                        Some(None)
+                    } else {
+                        by_name.get(&name).copied().map(Some)
+                    }
+                })
+                .unwrap_or(None);
+            Some(MaterialReactionKind::Convert { target, depth })
+        }
+        "poof" => Some(MaterialReactionKind::Poof),
+        "incinerate" => Some(MaterialReactionKind::Incinerate),
+        "insert" => Some(MaterialReactionKind::Insert),
+        "corrode" => {
+            let rate = definition.int("corrosionrate").unwrap_or(100).clamp(0, 100);
+            Some(MaterialReactionKind::Corrode {
+                corrosive_strength: rate,
+                corrode_resistance: 100,
+                corrosion_probability: Some(rate),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn resolve_reaction_targets(
+    target_spec: &str,
+    inverse: bool,
+    materials: &[Material],
+    by_name: &HashMap<String, MaterialId>,
+) -> Vec<Option<MaterialId>> {
+    let normalized = normalize_key(target_spec);
+    match normalized.as_str() {
+        "all" => {
+            if inverse {
+                Vec::new()
+            } else {
+                let mut targets = Vec::with_capacity(materials.len() + 1);
+                targets.push(None);
+                targets.extend(materials.iter().map(|material| Some(material.id())));
+                targets
+            }
+        }
+        "solid" => collect_targets_by_predicate(materials, inverse, true, |mat| {
+            density_is_solid(mat.density())
+        }),
+        "semisolid" => collect_targets_by_predicate(materials, inverse, true, |mat| {
+            density_is_semi_solid(mat.density())
+        }),
+        "background" => {
+            let mut targets = Vec::new();
+            if !inverse {
+                targets.push(None);
+            }
+            for material in materials {
+                if (material.density() == 0) != inverse {
+                    targets.push(Some(material.id()));
+                }
+            }
+            targets
+        }
+        "sky" => {
+            if inverse {
+                materials
+                    .iter()
+                    .map(|material| Some(material.id()))
+                    .collect()
+            } else {
+                vec![None]
+            }
+        }
+        "incindiary" => {
+            collect_targets_by_predicate(materials, inverse, true, |mat| mat.incindiary() > 0)
+        }
+        "extinguisher" => {
+            collect_targets_by_predicate(materials, inverse, true, |mat| mat.extinguisher() > 0)
+        }
+        "inflammable" => {
+            collect_targets_by_predicate(materials, inverse, true, |mat| mat.inflammable() > 0)
+        }
+        "corrosive" => {
+            collect_targets_by_predicate(materials, inverse, true, |mat| mat.corrosive() > 0)
+        }
+        "corrode" => {
+            collect_targets_by_predicate(materials, inverse, true, |mat| mat.corrode() > 0)
+        }
+        _ => {
+            if let Some(&id) = by_name.get(&normalized) {
+                if inverse {
+                    let mut targets = Vec::with_capacity(materials.len() + 1);
+                    targets.push(None);
+                    targets.extend(materials.iter().filter_map(|material| {
+                        let candidate = material.id();
+                        if candidate == id {
+                            None
+                        } else {
+                            Some(Some(candidate))
+                        }
+                    }));
+                    targets
+                } else {
+                    vec![Some(id)]
+                }
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
+fn collect_targets_by_predicate(
+    materials: &[Material],
+    inverse: bool,
+    include_sky_on_inverse: bool,
+    predicate: impl Fn(&Material) -> bool,
+) -> Vec<Option<MaterialId>> {
+    let mut targets = Vec::new();
+    if inverse && include_sky_on_inverse {
+        targets.push(None);
+    }
+    for material in materials {
+        if predicate(material) != inverse {
+            targets.push(Some(material.id()));
+        }
+    }
+    targets
+}
+
+fn set_custom_reaction(
+    entries: &mut [Option<MaterialReactionKind>],
+    width: usize,
+    pxs_material: Option<MaterialId>,
+    landscape_material: Option<MaterialId>,
+    reaction: MaterialReactionKind,
+    reverse: bool,
+) {
+    let mut pxs_index = option_to_index(pxs_material);
+    let mut landscape_index = option_to_index(landscape_material);
+    if reverse {
+        std::mem::swap(&mut pxs_index, &mut landscape_index);
+    }
+    let slot = landscape_index * width + pxs_index;
+    if let Some(entry) = entries.get_mut(slot) {
+        *entry = Some(reaction);
     }
 }
 
@@ -805,6 +1061,7 @@ mod tests {
             MaterialReactionKind::Corrode {
                 corrosive_strength: 75,
                 corrode_resistance: 50,
+                corrosion_probability: None,
             }
         );
     }
@@ -876,6 +1133,113 @@ mod tests {
             set.evaluate_temperature_conversion(steam, TemperatureDirection::Upwards, 40)
                 .is_none(),
             "temperature above threshold should not trigger below conversion"
+        );
+    }
+
+    #[test]
+    fn custom_reaction_poof_with_reverse_category_target() {
+        let set = build_material_set(
+            r#"
+            [Material Fire]
+            Name=Fire
+            Density=20
+            Incindiary=100
+
+            [Material Snow]
+            Name=Snow
+            Density=50
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=Incindiary
+            Reverse=1
+            "#,
+        );
+        let fire = set.id_of("Fire").expect("fire material");
+        let snow = set.id_of("Snow").expect("snow material");
+        assert_eq!(
+            set.reaction(Some(fire), Some(snow)),
+            MaterialReactionKind::Poof,
+            "reverse category reaction should apply to incoming incendiary material",
+        );
+    }
+
+    #[test]
+    fn custom_reaction_convert_with_depth_override() {
+        let set = build_material_set(
+            r#"
+            [Material Acid]
+            Name=Acid
+            Density=30
+
+            [Reaction]
+            Type=Convert
+            TargetSpec=Rock
+            ConvertMat=Water
+            Depth=2
+
+            [Material Rock]
+            Name=Rock
+            Density=80
+
+            [Material Water]
+            Name=Water
+            Density=25
+            "#,
+        );
+        let acid = set.id_of("Acid").expect("acid material");
+        let rock = set.id_of("Rock").expect("rock material");
+        let water = set.id_of("Water").expect("water material");
+        assert_eq!(
+            set.reaction(Some(acid), Some(rock)),
+            MaterialReactionKind::Convert {
+                target: Some(water),
+                depth: Some(2),
+            },
+            "explicit convert reaction should override default behavior",
+        );
+    }
+
+    #[test]
+    fn custom_reaction_applies_to_sky_target() {
+        let set = build_material_set(
+            r#"
+            [Material Steam]
+            Name=Steam
+            Density=5
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=Sky
+            "#,
+        );
+        let steam = set.id_of("Steam").expect("steam material");
+        assert_eq!(
+            set.reaction(Some(steam), None),
+            MaterialReactionKind::Poof,
+            "reaction targeting sky should trigger when no landscape material is present",
+        );
+    }
+
+    #[test]
+    fn custom_reaction_exec_mask_without_pxs_move_is_ignored() {
+        let set = build_material_set(
+            r#"
+            [Material Mist]
+            Name=Mist
+            Density=5
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=Sky
+            ExecMask=1
+            "#,
+        );
+        let mist = set.id_of("Mist").expect("mist material");
+        assert_eq!(
+            set.reaction(Some(mist), None),
+            MaterialReactionKind::None,
+            "reaction without PXSMove bit should not apply to particle movement",
         );
     }
 }

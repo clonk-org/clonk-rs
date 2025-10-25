@@ -10313,9 +10313,15 @@ impl Engine {
             MaterialReactionKind::Corrode {
                 corrosive_strength,
                 corrode_resistance,
+                corrosion_probability,
             } => {
-                let resistance = corrode_resistance.max(1);
-                let success = rng.gen_range(0..=resistance) < corrosive_strength.max(1);
+                let success = if let Some(probability) = corrosion_probability {
+                    let clamped = probability.clamp(0, 100);
+                    rng.gen_range(0..100) < clamped
+                } else {
+                    let resistance = corrode_resistance.max(1);
+                    rng.gen_range(0..=resistance) < corrosive_strength.max(1)
+                };
                 if success {
                     landscape.remove_material_at(hit.x, hit.y);
                 } else {

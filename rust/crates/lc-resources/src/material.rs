@@ -9,6 +9,8 @@ pub enum MaterialError {
     Resources(#[from] GroupError),
     #[error("material data is not valid UTF-8")]
     Encoding,
+    #[error("reaction section encountered before any material definition")]
+    ReactionBeforeMaterial,
     #[error("material entry missing required name (index {index})")]
     MissingName { index: usize },
     #[error("duplicate material `{0}`")]
@@ -73,6 +75,7 @@ impl MaterialLibrary {
 pub struct MaterialDefinition {
     name: String,
     properties: HashMap<String, Vec<String>>,
+    reactions: Vec<MaterialReactionDefinition>,
 }
 
 impl MaterialDefinition {
@@ -113,10 +116,45 @@ impl MaterialDefinition {
     pub fn raw_properties(&self) -> &HashMap<String, Vec<String>> {
         &self.properties
     }
+
+    pub fn reactions(&self) -> &[MaterialReactionDefinition] {
+        &self.reactions
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MaterialReactionDefinition {
+    properties: HashMap<String, Vec<String>>,
+}
+
+impl MaterialReactionDefinition {
+    pub fn value(&self, key: &str) -> Option<&str> {
+        self.properties
+            .get(&normalize_key(key))
+            .and_then(|values| values.first().map(|s| s.as_str()))
+    }
+
+    pub fn int(&self, key: &str) -> Option<i32> {
+        self.value(key).and_then(parse_i32)
+    }
+
+    pub fn bool_flag(&self, key: &str) -> Option<bool> {
+        self.value(key).and_then(parse_bool_flag)
+    }
+
+    pub fn raw_properties(&self) -> &HashMap<String, Vec<String>> {
+        &self.properties
+    }
 }
 
 struct MaterialRecord {
     name_hint: Option<String>,
+    properties: HashMap<String, Vec<String>>,
+    reactions: Vec<ReactionRecord>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ReactionRecord {
     properties: HashMap<String, Vec<String>>,
 }
 
@@ -124,6 +162,7 @@ struct MaterialParser<'a> {
     source: &'a str,
     records: Vec<MaterialRecord>,
     current: Option<MaterialRecord>,
+    current_reaction: Option<ReactionRecord>,
 }
 
 impl<'a> MaterialParser<'a> {
@@ -132,6 +171,7 @@ impl<'a> MaterialParser<'a> {
             source,
             records: Vec::new(),
             current: None,
+            current_reaction: None,
         }
     }
 
@@ -147,27 +187,45 @@ impl<'a> MaterialParser<'a> {
             }
 
             if let Some(section) = parse_section_header(line) {
-                self.finish_current()?;
-                self.current = Some(MaterialRecord {
-                    name_hint: section,
-                    properties: HashMap::new(),
-                });
+                match section {
+                    SectionHeader::Material(name_hint) => {
+                        self.finish_current()?;
+                        self.current = Some(MaterialRecord {
+                            name_hint,
+                            properties: HashMap::new(),
+                            reactions: Vec::new(),
+                        });
+                    }
+                    SectionHeader::Reaction => {
+                        if self.current.is_none() {
+                            return Err(MaterialError::ReactionBeforeMaterial);
+                        }
+                        self.finish_current_reaction()?;
+                        self.current_reaction = Some(ReactionRecord::default());
+                    }
+                }
                 continue;
             }
 
             if let Some((key, value)) = parse_key_value(line) {
-                let entry = self.current.get_or_insert_with(|| MaterialRecord {
-                    name_hint: None,
-                    properties: HashMap::new(),
-                });
+                let target = if let Some(reaction) = self.current_reaction.as_mut() {
+                    &mut reaction.properties
+                } else {
+                    let entry = self.current.get_or_insert_with(|| MaterialRecord {
+                        name_hint: None,
+                        properties: HashMap::new(),
+                        reactions: Vec::new(),
+                    });
+                    &mut entry.properties
+                };
                 let normalized_key = normalize_key(key);
-                entry
-                    .properties
+                target
                     .entry(normalized_key)
                     .or_insert_with(Vec::new)
                     .push(value.trim().to_string());
             }
         }
+        self.finish_current_reaction()?;
         self.finish_current()?;
 
         let mut definitions = Vec::with_capacity(self.records.len());
@@ -183,17 +241,37 @@ impl<'a> MaterialParser<'a> {
             let Some(name) = name else {
                 return Err(MaterialError::MissingName { index });
             };
+            let reactions = record
+                .reactions
+                .into_iter()
+                .map(|reaction| MaterialReactionDefinition {
+                    properties: reaction.properties,
+                })
+                .collect();
             definitions.push(MaterialDefinition {
                 name,
                 properties: record.properties,
+                reactions,
             });
         }
         Ok(definitions)
     }
 
     fn finish_current(&mut self) -> Result<(), MaterialError> {
+        self.finish_current_reaction()?;
         if let Some(record) = self.current.take() {
             self.records.push(record);
+        }
+        Ok(())
+    }
+
+    fn finish_current_reaction(&mut self) -> Result<(), MaterialError> {
+        if let Some(reaction) = self.current_reaction.take() {
+            if let Some(current) = self.current.as_mut() {
+                current.reactions.push(reaction);
+            } else {
+                return Err(MaterialError::ReactionBeforeMaterial);
+            }
         }
         Ok(())
     }
@@ -247,21 +325,29 @@ fn is_material_candidate(path: &Path) -> bool {
     }
 }
 
-fn parse_section_header(line: &str) -> Option<Option<String>> {
+enum SectionHeader {
+    Material(Option<String>),
+    Reaction,
+}
+
+fn parse_section_header(line: &str) -> Option<SectionHeader> {
     if !line.starts_with('[') || !line.ends_with(']') {
         return None;
     }
     let inner = &line[1..line.len() - 1];
     let mut parts = inner.split_whitespace();
     let section = parts.next()?.trim();
-    if !section.eq_ignore_ascii_case("material") {
-        return None;
-    }
-    let rest: Vec<&str> = parts.collect();
-    if rest.is_empty() {
-        Some(None)
+    if section.eq_ignore_ascii_case("material") {
+        let rest: Vec<&str> = parts.collect();
+        if rest.is_empty() {
+            Some(SectionHeader::Material(None))
+        } else {
+            Some(SectionHeader::Material(Some(rest.join(" "))))
+        }
+    } else if section.eq_ignore_ascii_case("reaction") {
+        Some(SectionHeader::Reaction)
     } else {
-        Some(Some(rest.join(" ")))
+        None
     }
 }
 
@@ -454,5 +540,26 @@ mod tests {
         let library = MaterialLibrary::parse(source).expect("parse");
         let mat = library.get("hexmat").expect("hex");
         assert_eq!(mat.int("density"), Some(16));
+    }
+
+    #[test]
+    fn parse_material_with_reaction_sections() {
+        let source = r#"
+        [Material]
+        Name=Snow
+        Density=50
+
+        [Reaction]
+        Type=Poof
+        TargetSpec=Incindiary
+        Reverse=1
+        "#;
+        let library = MaterialLibrary::parse(source).expect("parse");
+        let snow = library.get("snow").expect("snow");
+        assert_eq!(snow.reactions().len(), 1);
+        let reaction = &snow.reactions()[0];
+        assert_eq!(reaction.value("type"), Some("Poof"));
+        assert_eq!(reaction.value("targetspec"), Some("Incindiary"));
+        assert_eq!(reaction.bool_flag("reverse"), Some(true));
     }
 }
