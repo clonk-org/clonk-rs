@@ -748,6 +748,29 @@ impl AudioContext {
         self.system.music_is_playing()
     }
 
+    fn play_ui_sound(&mut self, name: &str) {
+        if !self.options.sound_enabled || !self.options.menu_sound_enabled {
+            return;
+        }
+        let handle = match self.ensure_sound(name) {
+            Ok(Some(handle)) => handle,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::error!(sound = %name, error = %err, "failed to load ui sound");
+                return;
+            }
+        };
+        match self.system.play_sound(&handle, false) {
+            Ok(channel) => {
+                self.system
+                    .channel_set_volume_and_pan(channel, self.options.sound_volume, 0.0);
+            }
+            Err(err) => {
+                tracing::error!(sound = %name, error = %err, "failed to play ui sound");
+            }
+        }
+    }
+
     fn handle_events(
         &mut self,
         events: &[AudioCommand],
@@ -3998,12 +4021,16 @@ impl GameApp {
 
         for action in actions {
             match action {
-                StartupMenuAction::SelectionChanged(_) => {}
+                StartupMenuAction::SelectionChanged(_) => {
+                    self.play_ui_sound("Command");
+                }
                 StartupMenuAction::StartScenario(summary) => {
+                    self.play_ui_sound("Click");
                     start_identifier = Some(summary.identifier);
                 }
                 StartupMenuAction::OpenEntry(summary) => {
                     if summary.identifier == BACK_ENTRY_IDENTIFIER {
+                        self.play_ui_sound("DoorClose");
                         if self.menu_state.stack.len() <= 1 {
                             self.show_main_menu();
                         } else {
@@ -4022,13 +4049,16 @@ impl GameApp {
 
                     match entry_kind {
                         Some(ScenarioKind::Folder) => {
+                            self.play_ui_sound("DoorOpen");
                             self.menu_state.enter_folder(&summary.identifier);
                             updated_label = Some(self.menu_state.label_path());
                         }
                         Some(ScenarioKind::Scenario) => {
+                            self.play_ui_sound("Click");
                             start_identifier = Some(summary.identifier);
                         }
                         Some(ScenarioKind::Editor) => {
+                            self.play_ui_sound("Click");
                             if let Err(err) = self.launch_editor_by_identifier(&summary.identifier)
                             {
                                 tracing::error!(
@@ -4039,12 +4069,14 @@ impl GameApp {
                             }
                         }
                         None => {
+                            self.play_ui_sound("DoorOpen");
                             self.menu_state.enter_folder(&summary.identifier);
                             updated_label = Some(self.menu_state.label_path());
                         }
                     }
                 }
                 StartupMenuAction::EditEntry(summary) => {
+                    self.play_ui_sound("Click");
                     if let Err(err) = self.launch_editor_by_identifier(&summary.identifier) {
                         tracing::error!(
                             scenario = %summary.identifier,
@@ -4065,8 +4097,11 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         for action in actions {
             match action {
-                MainMenuAction::SelectionChanged(_) => {}
+                MainMenuAction::SelectionChanged(_) => {
+                    self.play_ui_sound("Command");
+                }
                 MainMenuAction::Activate(item) => {
+                    self.play_ui_sound("Click");
                     self.handle_main_menu_activation(item)?;
                 }
             }
@@ -5218,6 +5253,12 @@ impl GameApp {
 
         self.status_text = format!("Loaded {}", scenario_info.title);
         Ok(())
+    }
+
+    fn play_ui_sound(&mut self, name: &str) {
+        if let Some(audio) = self.audio.as_mut() {
+            audio.play_ui_sound(name);
+        }
     }
 
     fn play_scenario_audio(&mut self, path: &Path) {

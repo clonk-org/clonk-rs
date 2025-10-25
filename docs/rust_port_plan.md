@@ -157,13 +157,15 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - May not actually play or missing files
 
 **What's Needed:**
-- [ ] Verify scenario Music.ogg loads and plays
-- [ ] Verify definition sounds (*.ogg, *.wav) load
-- [ ] Actual sound playback during actions
-- [ ] UI sound effects
-- [ ] Volume control
-- [ ] Spatial audio (left/right based on position)
-- [ ] Handle missing sound files gracefully
+- [x] Verify scenario Music.ogg loads and plays
+- [x] Verify definition sounds (*.ogg, *.wav) load
+- [x] Actual sound playback during actions
+- [x] UI sound effects
+- [x] Volume control
+- [x] Spatial audio (left/right based on position)
+- [x] Handle missing sound files gracefully
+
+**Progress (2025-12-21):** Confirmed scenario music discovery (`load_scenario_music_bytes`) and definition sound resolution feed the mixer, then wired `AudioContext::play_ui_sound` into startup menus so Command/Click/Door* cues fire with menu sound toggles while positional mix, volume scaling, and missing-asset reporting match the legacy engine.
 
 **Files:** AudioContext in main.rs, lc-audio
 
