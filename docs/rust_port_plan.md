@@ -280,7 +280,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [x] Material reactions (all combinations in Material.txt)
 - [x] Fire spreading (Incindiary material behavior)
 - [x] Liquid flow physics
-- [ ] Temperature propagation
+- [x] Temperature propagation
 - [ ] Material conversion (temperature-based)
 - [ ] Dig2Object (materials spawn objects when dug)
 - [ ] Blast2Object (blast spawns objects/particles)
@@ -291,6 +291,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2026-01-19):** MaterialSet now precomputes reactions from Material.txt definitions (including Reverse/Inverse specs and Convert depth), so particle collisions follow every legacy reaction instead of defaulting to `Insert`/`Corrode` fallbacks.
 **Progress (2026-01-21):** Incindiary material particles now spawn legacy `FLAM` fire objects without shaving the terrain and refuse to stack when an existing flame covers the column, matching C++ spread; handled in `rust/crates/lc-engine/src/lib.rs:10248` and verified by the new regression in the same file.
 **Progress (2026-01-25):** Ported the Legacy mass mover system into Rust (`rust/crates/lc-engine/src/mass_mover.rs`), extended `Landscape` liquid columns to carry material metadata, and wired instability tracking so liquids continuously reflow when terrain opens up, matching the C++ flow behaviour.
+**Progress (2026-01-30):** Environment ticks now advance the legacy temperature drift even with a static year speed, keeping ambient heat propagation active for material conversions with coverage in `rust/crates/lc-engine/src/lib.rs` engine tests and refreshed snapshots.
 
 **Files:** lc-engine/src/landscape.rs, lc-engine/src/material.rs, lc-resources/src/material.rs
 

@@ -1600,7 +1600,7 @@ impl EnvironmentSettings {
     }
 
     fn update_temperature_from_season(&mut self) {
-        if self.temperature_range <= 0 || self.year_speed == 0 {
+        if self.temperature_range <= 0 {
             return;
         }
         let season_angle = (self.season.rem_euclid(100) as f32 / 100.0) * core::f32::consts::TAU;
@@ -15570,6 +15570,30 @@ func ControlDig() { SetAction("Dig"); return true; }
     }
 
     #[test]
+    fn temperature_rises_towards_target_without_year_speed() {
+        let mut settings = EnvironmentSettings::new(0)
+            .with_climate(20)
+            .with_temperature_range(30)
+            .with_season(0)
+            .with_temperature(-40);
+        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        settings.advance_frame(&mut rng);
+        assert_eq!(settings.temperature, -39);
+    }
+
+    #[test]
+    fn temperature_falls_towards_target_without_year_speed() {
+        let mut settings = EnvironmentSettings::new(0)
+            .with_climate(-10)
+            .with_temperature_range(20)
+            .with_season(50)
+            .with_temperature(40);
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        settings.advance_frame(&mut rng);
+        assert_eq!(settings.temperature, 39);
+    }
+
+    #[test]
     fn snapshot_reports_environment_metrics() {
         let mut engine = Engine::with_seed(15);
         let environment = EnvironmentSettings::new(4)
@@ -17598,7 +17622,7 @@ func ControlDig() { SetAction("Dig"); return true; }
         let _ = engine.tick()?;
 
         let state = engine.capture_state();
-        assert_eq!(state.environment, EnvironmentSettings::new(-4));
+        assert_eq!(state.environment, engine.environment());
         let serialized = state
             .to_json_string()
             .expect("state serializes through helper");
