@@ -37,8 +37,9 @@ pub use landscape::{
 };
 pub use material::{Material, MaterialId, MaterialSet};
 pub use message::{
-    MessageKind, MessageSnapshot, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_RIGHT, FLAG_TOP,
-    FLAG_VCENTER, FLAG_X_REL, FLAG_Y_REL,
+    MessageKind, MessageSnapshot, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT,
+    FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER,
+    FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL,
 };
 pub use pathfinder::{PathFinder, PathWaypoint};
 pub use player::{Player, PlayerConfig, PlayerState, PlayerStatus, PlayerViewport};

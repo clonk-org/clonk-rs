@@ -36,8 +36,9 @@ use lc_engine::{
     ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, FloatVector2,
     Landscape, MaterialSet, MenuCommandKind, MenuCommandSelection, MessageKind, MovementProfile,
     ObjectId, ObjectSnapshot, ObjectUpdate, PlayerStatus, Scenario, ScenarioError,
-    SimulationSnapshot, SkyConfig, SpawnConfig, Vector2, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT,
-    FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
+    SimulationSnapshot, SkyConfig, SpawnConfig, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT,
+    FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP,
+    FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
     default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
@@ -1388,6 +1389,315 @@ fn extension_rank(ext: Option<&str>) -> usize {
         Some(ref ext) if ext == "mp3" => 2,
         _ => 3,
     }
+}
+
+#[derive(Clone)]
+struct MessageTextSpan {
+    text: String,
+    color: Color,
+}
+
+#[derive(Clone)]
+struct MessageWordSegment {
+    text: String,
+    color: Color,
+    width: f32,
+}
+
+#[derive(Clone)]
+struct MessageLineLayout {
+    segments: Vec<MessageWordSegment>,
+    width: f32,
+}
+
+#[derive(Clone)]
+enum MessageWordUnit {
+    Segment(MessageWordSegment),
+    ForcedBreak,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HorizontalAlignment {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VerticalAlignment {
+    Top,
+    Center,
+    Bottom,
+    Baseline,
+}
+
+fn parse_message_spans(line: &str, base_color: Color) -> Vec<MessageTextSpan> {
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut color_stack = vec![base_color];
+    let mut pos = 0usize;
+    let line_len = line.len();
+
+    while pos < line_len {
+        let rest = &line[pos..];
+        if rest.starts_with('<') {
+            let mut handled = false;
+            if let Some(close) = rest.find('>') {
+                let raw_tag = &rest[1..close];
+                if !raw_tag.is_empty() {
+                    if raw_tag.starts_with('/') {
+                        let name = raw_tag[1..].trim().to_ascii_lowercase();
+                        if !current.is_empty() {
+                            let text = std::mem::take(&mut current);
+                            spans.push(MessageTextSpan {
+                                text,
+                                color: *color_stack.last().unwrap_or(&base_color),
+                            });
+                        }
+                        match name.as_str() {
+                            "c" => {
+                                if color_stack.len() > 1 {
+                                    color_stack.pop();
+                                }
+                                handled = true;
+                            }
+                            "i" => {
+                                handled = true;
+                            }
+                            _ => {
+                                // treat as literal
+                            }
+                        }
+                    } else {
+                        let mut parts = raw_tag.splitn(2, ' ');
+                        let name = parts.next().unwrap_or("").trim();
+                        let params = parts.next().map(str::trim);
+                        let name_lower = name.to_ascii_lowercase();
+                        match name_lower.as_str() {
+                            "c" => {
+                                if let Some(param) = params {
+                                    if let Some(color) = parse_markup_color(param) {
+                                        if !current.is_empty() {
+                                            let text = std::mem::take(&mut current);
+                                            spans.push(MessageTextSpan {
+                                                text,
+                                                color: *color_stack.last().unwrap_or(&base_color),
+                                            });
+                                        }
+                                        color_stack.push(color);
+                                        handled = true;
+                                    }
+                                }
+                            }
+                            "i" => {
+                                if !current.is_empty() {
+                                    let text = std::mem::take(&mut current);
+                                    spans.push(MessageTextSpan {
+                                        text,
+                                        color: *color_stack.last().unwrap_or(&base_color),
+                                    });
+                                }
+                                handled = true;
+                            }
+                            _ => {
+                                // unknown tag: treat as literal
+                            }
+                        }
+                    }
+                }
+                if handled {
+                    pos += close + 1;
+                    continue;
+                }
+            }
+        }
+
+        if rest.starts_with("{{") {
+            if rest.len() > 2 && !rest[2..].starts_with('{') {
+                if let Some(end) = rest[2..].find("}}") {
+                    current.push(' ');
+                    pos += 2 + end + 2;
+                    continue;
+                }
+            }
+        }
+
+        if let Some(ch) = rest.chars().next() {
+            current.push(ch);
+            pos += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    if !current.is_empty() {
+        spans.push(MessageTextSpan {
+            text: current,
+            color: *color_stack.last().unwrap_or(&base_color),
+        });
+    }
+
+    spans
+}
+
+fn parse_markup_color(param: &str) -> Option<Color> {
+    let token = param.trim();
+    if token.is_empty() || token.len() > 8 || !token.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut value = u32::from_str_radix(token, 16).ok()?;
+    if token.len() <= 6 {
+        value |= 0xff00_0000;
+    }
+    let inverted = (value & 0x00ff_ffff) | ((255 - ((value >> 24) & 0xff)) << 24);
+    Some(Color::new(
+        ((inverted >> 16) & 0xff) as u8,
+        ((inverted >> 8) & 0xff) as u8,
+        (inverted & 0xff) as u8,
+        ((inverted >> 24) & 0xff) as u8,
+    ))
+}
+
+fn split_span_into_segments(
+    span: MessageTextSpan,
+    font: &dyn TextFont,
+    font_size: f32,
+) -> Vec<MessageWordSegment> {
+    if span.text.is_empty() {
+        return Vec::new();
+    }
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    for ch in span.text.chars() {
+        current.push(ch);
+        if ch.is_whitespace() {
+            let width = font.measure_text(&current, font_size).width;
+            segments.push(MessageWordSegment {
+                text: std::mem::take(&mut current),
+                color: span.color,
+                width,
+            });
+        }
+    }
+    if !current.is_empty() {
+        let width = font.measure_text(&current, font_size).width;
+        segments.push(MessageWordSegment {
+            text: current,
+            color: span.color,
+            width,
+        });
+    }
+    segments
+}
+
+fn split_segment_to_fit(
+    segment: MessageWordSegment,
+    max_width: f32,
+    font: &dyn TextFont,
+    font_size: f32,
+) -> Vec<MessageWordSegment> {
+    if max_width <= 0.0 || segment.width <= max_width {
+        return vec![segment];
+    }
+
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+
+    for ch in segment.text.chars() {
+        current.push(ch);
+        let width = font.measure_text(&current, font_size).width;
+        if width > max_width && current.len() > ch.len_utf8() {
+            current.pop();
+            let chunk = std::mem::take(&mut current);
+            if !chunk.is_empty() {
+                let chunk_width = font.measure_text(&chunk, font_size).width;
+                pieces.push(MessageWordSegment {
+                    text: chunk,
+                    color: segment.color,
+                    width: chunk_width,
+                });
+            }
+            current.push(ch);
+        }
+    }
+
+    if !current.is_empty() {
+        let width = font.measure_text(&current, font_size).width;
+        pieces.push(MessageWordSegment {
+            text: current,
+            color: segment.color,
+            width,
+        });
+    }
+
+    if pieces.is_empty() {
+        pieces.push(segment);
+    }
+
+    pieces
+}
+
+fn wrap_word_units(
+    units: Vec<MessageWordUnit>,
+    max_width: Option<f32>,
+    font: &dyn TextFont,
+    font_size: f32,
+) -> Vec<MessageLineLayout> {
+    let mut lines = Vec::new();
+    let mut current_segments: Vec<MessageWordSegment> = Vec::new();
+    let mut current_width = 0.0f32;
+
+    let push_line = |lines: &mut Vec<MessageLineLayout>,
+                     segments: &mut Vec<MessageWordSegment>,
+                     width: &mut f32| {
+        lines.push(MessageLineLayout {
+            width: *width,
+            segments: std::mem::take(segments),
+        });
+        *width = 0.0;
+    };
+
+    let last_is_break = matches!(units.last(), Some(MessageWordUnit::ForcedBreak));
+
+    for unit in units.into_iter() {
+        match unit {
+            MessageWordUnit::ForcedBreak => {
+                push_line(&mut lines, &mut current_segments, &mut current_width);
+            }
+            MessageWordUnit::Segment(segment) => {
+                if let Some(limit) = max_width {
+                    let limit = if limit < 0.0 { 0.0 } else { limit };
+                    let parts = split_segment_to_fit(segment, limit, font, font_size);
+                    for piece in parts {
+                        let piece_width = piece.width;
+                        if limit > 0.0
+                            && current_width + piece_width > limit
+                            && !current_segments.is_empty()
+                        {
+                            push_line(&mut lines, &mut current_segments, &mut current_width);
+                        }
+                        if piece.text.trim().is_empty() && current_segments.is_empty() {
+                            continue;
+                        }
+                        current_width += piece_width;
+                        current_segments.push(piece);
+                    }
+                } else {
+                    if segment.text.trim().is_empty() && current_segments.is_empty() {
+                        continue;
+                    }
+                    current_width += segment.width;
+                    current_segments.push(segment);
+                }
+            }
+        }
+    }
+
+    if !current_segments.is_empty() || last_is_break {
+        push_line(&mut lines, &mut current_segments, &mut current_width);
+    }
+
+    lines
 }
 
 struct GameApp {
@@ -4106,13 +4416,27 @@ impl GameApp {
 
         let surface_width = self.graphics.surface().width() as f32;
         let surface_height = self.graphics.surface().height() as f32;
+
         struct PreparedMessage {
             anchor: (f32, f32),
-            lines: Vec<String>,
-            color: Color,
+            lines: Vec<MessageLineLayout>,
             has_frame: bool,
             portrait: Option<Color>,
+            alignment: HorizontalAlignment,
+            vertical_align: VerticalAlignment,
+            base_color: Color,
+            max_line_width: f32,
         }
+
+        let font = self.assets.font_arc();
+        let font_ref = font.as_ref();
+        let line_height = 20.0;
+        let frame_background = Color::new(12, 20, 36, 192);
+
+        const FONT_SIZE: f32 = 18.0;
+        const FRAME_PADDING: f32 = 8.0;
+        const PORTRAIT_SIZE: f32 = 42.0;
+        const PORTRAIT_GAP: f32 = 8.0;
 
         let mut prepared: Vec<PreparedMessage> = Vec::new();
 
@@ -4123,73 +4447,45 @@ impl GameApp {
                 }
             }
 
-            let color = Color::new(
+            let base_color = Color::new(
                 ((message.color >> 16) & 0xff) as u8,
                 ((message.color >> 8) & 0xff) as u8,
                 (message.color & 0xff) as u8,
                 ((message.color >> 24) & 0xff) as u8,
             );
 
-            match message.kind {
-                MessageKind::Global | MessageKind::GlobalPlayer => {
-                    let mut x = if (message.flags & FLAG_X_REL) != 0 {
-                        surface_width * (message.offset.x as f32 / 100.0)
-                    } else if message.offset.x >= 0 {
-                        message.offset.x as f32
-                    } else {
-                        surface_width * 0.5
-                    };
-                    let mut y = if (message.flags & FLAG_Y_REL) != 0 {
-                        surface_height * (message.offset.y as f32 / 100.0)
-                    } else if message.offset.y >= 0 {
-                        message.offset.y as f32
-                    } else {
-                        surface_height * 0.66
-                    };
+            let mut anchor_x = if (message.flags & FLAG_X_REL) != 0 {
+                surface_width * (message.offset.x as f32 / 100.0)
+            } else if message.offset.x >= 0 {
+                message.offset.x as f32
+            } else {
+                surface_width * 0.5
+            };
+            let mut anchor_y = if (message.flags & FLAG_Y_REL) != 0 {
+                surface_height * (message.offset.y as f32 / 100.0)
+            } else if message.offset.y >= 0 {
+                message.offset.y as f32
+            } else {
+                surface_height * 0.66
+            };
 
-                    if (message.flags & FLAG_HCENTER) != 0 {
-                        x = surface_width * 0.5;
-                    } else if (message.flags & FLAG_LEFT) != 0 {
-                        x = 32.0;
-                    } else if (message.flags & FLAG_RIGHT) != 0 {
-                        x = surface_width - 196.0;
-                    }
+            if (message.flags & FLAG_HCENTER) != 0 {
+                anchor_x = surface_width * 0.5;
+            } else if (message.flags & FLAG_LEFT) != 0 {
+                anchor_x = 32.0;
+            } else if (message.flags & FLAG_RIGHT) != 0 {
+                anchor_x = surface_width - 196.0;
+            }
 
-                    if (message.flags & FLAG_VCENTER) != 0 {
-                        y = surface_height * 0.5;
-                    } else if (message.flags & FLAG_TOP) != 0 {
-                        y = 48.0;
-                    } else if (message.flags & FLAG_BOTTOM) != 0 {
-                        y = surface_height - 160.0;
-                    }
+            if (message.flags & FLAG_VCENTER) != 0 {
+                anchor_y = surface_height * 0.5;
+            } else if (message.flags & FLAG_TOP) != 0 {
+                anchor_y = 48.0;
+            } else if (message.flags & FLAG_BOTTOM) != 0 {
+                anchor_y = surface_height - 160.0;
+            }
 
-                    let has_decoration = message
-                        .decoration
-                        .as_ref()
-                        .map(|decor| !decor.trim().is_empty())
-                        .unwrap_or(false);
-                    let has_portrait = message.portrait.is_some();
-                    let portrait_color = message
-                        .portrait
-                        .as_ref()
-                        .and_then(|spec| Self::parse_portrait_color(spec))
-                        .or_else(|| {
-                            if has_portrait {
-                                Some(Color::new(color.r, color.g, color.b, 255))
-                            } else {
-                                None
-                            }
-                        });
-                    let has_frame = has_portrait || has_decoration;
-
-                    prepared.push(PreparedMessage {
-                        anchor: (x, y),
-                        lines: message.lines.clone(),
-                        color,
-                        has_frame,
-                        portrait: portrait_color,
-                    });
-                }
+            let (anchor_x, anchor_y) = match message.kind {
                 MessageKind::Target | MessageKind::TargetPlayer => {
                     let target_id = match message.target {
                         Some(id) => id,
@@ -4203,88 +4499,165 @@ impl GameApp {
                         target.position.y + message.offset.y,
                     );
                     let owner = message.player.unwrap_or(self.local_owner);
-                    let Some((screen_x, screen_y)) =
-                        self.graphics.world_to_screen(owner, base_position)
-                    else {
-                        continue;
-                    };
-                    let has_decoration = message
-                        .decoration
-                        .as_ref()
-                        .map(|decor| !decor.trim().is_empty())
-                        .unwrap_or(false);
-                    let has_portrait = message.portrait.is_some();
-                    let portrait_color = message
-                        .portrait
-                        .as_ref()
-                        .and_then(|spec| Self::parse_portrait_color(spec))
-                        .or_else(|| {
-                            if has_portrait {
-                                Some(Color::new(color.r, color.g, color.b, 255))
-                            } else {
-                                None
-                            }
-                        });
-                    let has_frame = has_portrait || has_decoration;
+                    match self.graphics.world_to_screen(owner, base_position) {
+                        Some(coords) => coords,
+                        None => continue,
+                    }
+                }
+                MessageKind::Global | MessageKind::GlobalPlayer => (anchor_x, anchor_y),
+            };
 
-                    prepared.push(PreparedMessage {
-                        anchor: (screen_x, screen_y),
-                        lines: message.lines.clone(),
-                        color,
-                        has_frame,
-                        portrait: portrait_color,
-                    });
+            let has_decoration = message
+                .decoration
+                .as_ref()
+                .map(|decor| !decor.trim().is_empty())
+                .unwrap_or(false);
+            let portrait_color = message
+                .portrait
+                .as_ref()
+                .and_then(|spec| Self::parse_portrait_color(spec))
+                .or_else(|| {
+                    if message.portrait.is_some() {
+                        Some(Color::new(base_color.r, base_color.g, base_color.b, 255))
+                    } else {
+                        None
+                    }
+                });
+            let has_frame = portrait_color.is_some() || has_decoration;
+
+            let default_alignment = if has_frame {
+                HorizontalAlignment::Left
+            } else {
+                HorizontalAlignment::Center
+            };
+            let alignment = if (message.flags & FLAG_ALIGN_LEFT) != 0 {
+                HorizontalAlignment::Left
+            } else if (message.flags & FLAG_ALIGN_RIGHT) != 0 {
+                HorizontalAlignment::Right
+            } else if (message.flags & FLAG_ALIGN_CENTER) != 0 {
+                HorizontalAlignment::Center
+            } else {
+                default_alignment
+            };
+            let vertical_align = if (message.flags & FLAG_TOP) != 0 {
+                VerticalAlignment::Top
+            } else if (message.flags & FLAG_BOTTOM) != 0 {
+                VerticalAlignment::Bottom
+            } else if (message.flags & FLAG_VCENTER) != 0 {
+                VerticalAlignment::Center
+            } else {
+                VerticalAlignment::Baseline
+            };
+
+            let mut width_hint = message.width.map(|raw| raw as f32);
+            if let Some(value) = width_hint.as_mut() {
+                if (message.flags & FLAG_WIDTH_REL) != 0 {
+                    *value = surface_width * (*value / 100.0);
                 }
             }
+
+            let wrap_width = if (message.flags & FLAG_NO_BREAK) != 0 {
+                None
+            } else {
+                let fallback = || {
+                    let max_width = (surface_width - 10.0).min(500.0).max(50.0);
+                    if has_frame {
+                        if portrait_color.is_some() {
+                            Some((surface_width * 0.5).clamp(50.0, max_width))
+                        } else {
+                            Some((surface_width - 50.0).clamp(50.0, max_width))
+                        }
+                    } else {
+                        Some((surface_width - 50.0).clamp(50.0, max_width))
+                    }
+                };
+                width_hint.or_else(fallback).filter(|value| *value > 0.0)
+            };
+
+            let mut units = Vec::new();
+            for (idx, line) in message.lines.iter().enumerate() {
+                let spans = parse_message_spans(line, base_color);
+                for span in spans {
+                    for segment in split_span_into_segments(span, font_ref, FONT_SIZE) {
+                        if !segment.text.is_empty() {
+                            units.push(MessageWordUnit::Segment(segment));
+                        }
+                    }
+                }
+                if idx + 1 < message.lines.len() {
+                    units.push(MessageWordUnit::ForcedBreak);
+                }
+            }
+
+            let mut lines = wrap_word_units(units, wrap_width, font_ref, FONT_SIZE);
+            if lines.is_empty() {
+                lines.push(MessageLineLayout {
+                    segments: Vec::new(),
+                    width: 0.0,
+                });
+            }
+            let max_line_width = lines.iter().fold(0.0f32, |acc, line| acc.max(line.width));
+
+            prepared.push(PreparedMessage {
+                anchor: (anchor_x, anchor_y),
+                lines,
+                has_frame,
+                portrait: portrait_color,
+                alignment,
+                vertical_align,
+                base_color,
+                max_line_width,
+            });
         }
 
         if prepared.is_empty() {
             return;
         }
 
-        let font = self.assets.font_arc();
-        let line_height = 20.0;
-
-        const FONT_SIZE: f32 = 18.0;
-        const FRAME_PADDING: f32 = 8.0;
-        const PORTRAIT_SIZE: f32 = 42.0;
-        const PORTRAIT_GAP: f32 = 8.0;
-
         {
             let surface = self.graphics.surface_mut();
             for message in prepared {
+                if message.lines.is_empty() {
+                    continue;
+                }
+
+                let text_height = (message.lines.len() as f32) * line_height;
+                let portrait_space = if message.portrait.is_some() {
+                    PORTRAIT_SIZE + PORTRAIT_GAP
+                } else {
+                    0.0
+                };
+                let text_block_width = message.max_line_width;
+
                 if message.has_frame {
-                    let portrait_space = if message.portrait.is_some() {
-                        PORTRAIT_SIZE + PORTRAIT_GAP
-                    } else {
-                        0.0
+                    let frame_width =
+                        (text_block_width + portrait_space + FRAME_PADDING * 2.0).max(1.0);
+                    let frame_height = (text_height + FRAME_PADDING * 2.0).max(1.0);
+
+                    let frame_x = match message.alignment {
+                        HorizontalAlignment::Left => message.anchor.0,
+                        HorizontalAlignment::Center => message.anchor.0 - frame_width * 0.5,
+                        HorizontalAlignment::Right => message.anchor.0 - frame_width,
+                    };
+                    let frame_y = match message.vertical_align {
+                        VerticalAlignment::Top => message.anchor.1,
+                        VerticalAlignment::Center => message.anchor.1 - frame_height * 0.5,
+                        VerticalAlignment::Bottom => message.anchor.1 - frame_height,
+                        VerticalAlignment::Baseline => message.anchor.1,
                     };
 
-                    let mut text_width = 0.0f32;
-                    for line in &message.lines {
-                        let width = font.measure_text(line, FONT_SIZE).width;
-                        text_width = text_width.max(width);
-                    }
-                    let text_height = message.lines.len() as f32 * line_height;
-
-                    let frame_width = (text_width + portrait_space + FRAME_PADDING * 2.0)
-                        .max(1.0)
-                        .ceil();
-                    let frame_height = (text_height + FRAME_PADDING * 2.0).max(1.0).ceil();
-
                     let rect = Rect::new(
-                        (message.anchor.0 - portrait_space - FRAME_PADDING).floor() as i32,
-                        (message.anchor.1 - FRAME_PADDING).floor() as i32,
-                        frame_width as u32,
-                        frame_height as u32,
+                        frame_x.floor() as i32,
+                        frame_y.floor() as i32,
+                        frame_width.ceil() as u32,
+                        frame_height.ceil() as u32,
                     );
 
-                    let background = Color::new(12, 20, 36, 192);
-                    Self::fill_rect(surface, rect, background);
+                    Self::fill_rect(surface, rect, frame_background);
                     let border = Color::new(
-                        message.color.r.saturating_add(24),
-                        message.color.g.saturating_add(24),
-                        message.color.b.saturating_add(24),
+                        message.base_color.r.saturating_add(24),
+                        message.base_color.g.saturating_add(24),
+                        message.base_color.b.saturating_add(24),
                         255,
                     );
                     Self::draw_border(surface, rect, border);
@@ -4300,31 +4673,61 @@ impl GameApp {
                         Self::draw_border(surface, portrait_rect, border);
                     }
 
-                    let text_x = rect.x as f32
-                        + FRAME_PADDING
-                        + if message.portrait.is_some() {
-                            PORTRAIT_SIZE + PORTRAIT_GAP
-                        } else {
-                            0.0
-                        };
-                    let mut text_y = rect.y as f32 + FRAME_PADDING;
+                    let text_base_x = frame_x + FRAME_PADDING + portrait_space;
+                    let mut text_y = frame_y + FRAME_PADDING;
 
                     for line in &message.lines {
-                        font.draw_text(surface, text_x, text_y, line, FONT_SIZE, message.color);
+                        let line_offset = match message.alignment {
+                            HorizontalAlignment::Left => 0.0,
+                            HorizontalAlignment::Center => (text_block_width - line.width) * 0.5,
+                            HorizontalAlignment::Right => text_block_width - line.width,
+                        };
+                        let mut cursor_x = text_base_x + line_offset;
+                        for segment in &line.segments {
+                            font_ref.draw_text(
+                                surface,
+                                cursor_x,
+                                text_y,
+                                &segment.text,
+                                FONT_SIZE,
+                                segment.color,
+                            );
+                            cursor_x += segment.width;
+                        }
                         text_y += line_height;
                     }
                 } else {
-                    let mut y = message.anchor.1;
+                    let text_base_x = match message.alignment {
+                        HorizontalAlignment::Left => message.anchor.0,
+                        HorizontalAlignment::Center => message.anchor.0 - text_block_width * 0.5,
+                        HorizontalAlignment::Right => message.anchor.0 - text_block_width,
+                    };
+                    let mut text_y = match message.vertical_align {
+                        VerticalAlignment::Top => message.anchor.1,
+                        VerticalAlignment::Center => message.anchor.1 - text_height * 0.5,
+                        VerticalAlignment::Bottom => message.anchor.1 - text_height,
+                        VerticalAlignment::Baseline => message.anchor.1,
+                    };
+
                     for line in &message.lines {
-                        font.draw_text(
-                            surface,
-                            message.anchor.0,
-                            y,
-                            line,
-                            FONT_SIZE,
-                            message.color,
-                        );
-                        y += line_height;
+                        let line_offset = match message.alignment {
+                            HorizontalAlignment::Left => 0.0,
+                            HorizontalAlignment::Center => (text_block_width - line.width) * 0.5,
+                            HorizontalAlignment::Right => text_block_width - line.width,
+                        };
+                        let mut cursor_x = text_base_x + line_offset;
+                        for segment in &line.segments {
+                            font_ref.draw_text(
+                                surface,
+                                cursor_x,
+                                text_y,
+                                &segment.text,
+                                FONT_SIZE,
+                                segment.color,
+                            );
+                            cursor_x += segment.width;
+                        }
+                        text_y += line_height;
                     }
                 }
             }
