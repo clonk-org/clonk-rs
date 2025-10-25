@@ -759,6 +759,52 @@ fn get_plr_value_gain(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn get_crew(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 2 {
+        return Err(RuntimeError::new(
+            "GetCrew expects exactly 2 arguments: player and index",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetCrew", "player")?;
+    let index = value_to_i32(&args[1], "GetCrew", "index")?;
+    if index < 0 {
+        return Ok(Value::Nil);
+    }
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        let idx = index as usize;
+        let Some(crew_id) = player.crew.get(idx) else {
+            return Ok(Value::Nil);
+        };
+        Ok(object_reference_value(ObjectId::new(crew_id.as_u64())))
+    })
+}
+
+fn get_crew_count(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new(
+            "GetCrewCount expects exactly 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetCrewCount", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        Ok(Value::Int(truncate_to_i32(player.crew.len() as u64)))
+    })
+}
+
 fn get_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() {
         return Err(RuntimeError::new(
@@ -1546,6 +1592,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetScore", get_score);
     script.register_host_function("GetPlrValue", get_plr_value);
     script.register_host_function("GetPlrValueGain", get_plr_value_gain);
+    script.register_host_function("GetCrew", get_crew);
+    script.register_host_function("GetCrewCount", get_crew_count);
     script.register_host_function("SetAction", set_action);
     script.register_host_function("SetBridgeActionData", set_bridge_action_data);
     script.register_host_function("SetActionData", set_action_data);
@@ -9846,6 +9894,157 @@ mod tests {
         let args = [Value::Int(9)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_plr_value_gain(&args));
         assert_eq!(result.expect("GetPlrValueGain succeeds"), Value::Int(45));
+    }
+
+    #[test]
+    fn get_crew_returns_nth_crew_member() {
+        let crew_ids = [101_u64, 202_u64];
+        let objects = vec![
+            HostWorldObject::new(
+                ObjectId::new(crew_ids[0]),
+                "Clonk",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                1,
+                100,
+                crate::FULL_CON,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+            HostWorldObject::new(
+                ObjectId::new(crew_ids[1]),
+                "Clonk",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                1,
+                100,
+                crate::FULL_CON,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
+        ];
+        let mut player = PlayerState::default();
+        player.id = 1;
+        player.crew = vec![ObjectId::new(crew_ids[0]), ObjectId::new(crew_ids[1])];
+
+        let world = HostWorldContext::with_landscape(
+            objects,
+            None,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::from([(1, player)]),
+            1,
+            false,
+        );
+        let args = [Value::Int(1), Value::Int(1)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_crew(&args));
+
+        assert_eq!(
+            result.expect("GetCrew succeeds"),
+            object_reference_value(ObjectId::new(crew_ids[1]))
+        );
+    }
+
+    #[test]
+    fn get_crew_returns_nil_for_out_of_range_index() {
+        let crew_ids = [700_u64];
+        let objects = vec![HostWorldObject::new(
+            ObjectId::new(crew_ids[0]),
+            "Clonk",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            3,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )];
+        let mut player = PlayerState::default();
+        player.id = 3;
+        player.crew = vec![ObjectId::new(crew_ids[0])];
+
+        let world = HostWorldContext::with_landscape(
+            objects,
+            None,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::from([(3, player)]),
+            1,
+            false,
+        );
+        let args = [Value::Int(3), Value::Int(5)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_crew(&args));
+
+        assert_eq!(result.expect("GetCrew succeeds"), Value::Nil);
+    }
+
+    #[test]
+    fn get_crew_count_reports_total_crew() {
+        let crew_ids = [303_u64, 404_u64, 505_u64];
+        let objects = crew_ids
+            .iter()
+            .map(|id| {
+                HostWorldObject::new(
+                    ObjectId::new(*id),
+                    "Clonk",
+                    ObjectStatus::Normal,
+                    "Idle",
+                    None,
+                    None,
+                    None,
+                    2,
+                    100,
+                    crate::FULL_CON,
+                    Vector2::ZERO,
+                    Vector2::ZERO,
+                    Vec::new(),
+                    0,
+                    0,
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut player = PlayerState::default();
+        player.id = 2;
+        player.crew = crew_ids
+            .iter()
+            .map(|id| ObjectId::new(*id))
+            .collect::<Vec<_>>();
+
+        let world = HostWorldContext::with_landscape(
+            objects,
+            None,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::from([(2, player)]),
+            1,
+            false,
+        );
+        let args = [Value::Int(2)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_crew_count(&args));
+
+        assert_eq!(result.expect("GetCrewCount succeeds"), Value::Int(3));
     }
 
     #[test]

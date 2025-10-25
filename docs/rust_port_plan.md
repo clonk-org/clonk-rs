@@ -417,7 +417,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [ ] Verify ALL C4Aul host functions are implemented:
   - Object queries (FindObject, ObjectCount, etc.)
   - Object manipulation (CreateObject, RemoveObject, etc.)
-  - Player functions (GetCrew, GetMaterial, etc.)
+  - Player functions (GetCrew, GetMaterial, etc.) — GetCrew/GetCrewCount ported; inventory/knowledge queries pending
   - Landscape functions (Dig, Blast, etc.)
   - [x] Message functions (Message, PlayerMessage, etc.)
   - Math/utility functions
@@ -427,6 +427,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [ ] Script debugging output
 
 **Progress (2025-10-25):** Implemented `Message`, `PlayerMessage`, `AddMessage`, and `PlrMessage` host functions with legacy `%` formatter parity, speech playback, and regression coverage so scripted HUD output matches the C++ engine.
+**Progress (2028-02-19):** Ported `GetCrew`/`GetCrewCount` host functions against the Rust player state, returning legacy object references and `nil` for out-of-range slots with regression coverage to guard crew-order parity.
 
 **Files:** lc-script, host function registration in lc-engine
 
