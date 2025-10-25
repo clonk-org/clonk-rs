@@ -40,6 +40,8 @@ pub enum ScenarioDiscoveryError {
         #[source]
         source: ImageError,
     },
+    #[error("legacy scenario core at {path} is not valid UTF-8")]
+    LegacyCoreEncoding { path: PathBuf },
     #[error("path is not valid UTF-8: {path}")]
     NonUtf8Path { path: PathBuf },
 }
@@ -99,6 +101,12 @@ pub struct ScenarioEntry {
     pub is_playable: bool,
     pub preview: Option<ScenarioPreview>,
     pub children: Vec<ScenarioEntry>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LegacyCoreInfo {
+    title: Option<String>,
+    description: Option<String>,
 }
 
 pub fn discover(root: impl AsRef<Path>) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
@@ -306,26 +314,103 @@ fn collect_from_group_file(
     Ok(vec![entry])
 }
 
+fn legacy_core_info(group: &Group) -> Result<Option<LegacyCoreInfo>, ScenarioDiscoveryError> {
+    let bytes = match group.read_file("Scenario.txt") {
+        Ok(bytes) => bytes,
+        Err(GroupError::EntryNotFound(_)) => return Ok(None),
+        Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            let path = group.root().join("Scenario.txt");
+            return Err(group_error(&path, err));
+        }
+    };
+
+    let text =
+        String::from_utf8(bytes).map_err(|_| ScenarioDiscoveryError::LegacyCoreEncoding {
+            path: group.root().join("Scenario.txt"),
+        })?;
+
+    let info = parse_legacy_core_info(&text);
+    if info.title.is_none() && info.description.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some(info))
+    }
+}
+
+fn parse_legacy_core_info(text: &str) -> LegacyCoreInfo {
+    let mut info = LegacyCoreInfo::default();
+    let mut current_section = String::from("head");
+
+    for raw_line in text.lines() {
+        let without_bom = raw_line.trim_start_matches('\u{feff}');
+        let mut line = without_bom.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with(';') || line.starts_with('#') || line.starts_with("//") {
+            continue;
+        }
+        if let Some(idx) = line.find("//") {
+            line = line[..idx].trim_end();
+            if line.is_empty() {
+                continue;
+            }
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            current_section = line[1..line.len() - 1].trim().to_ascii_lowercase();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !current_section.eq_ignore_ascii_case("head") {
+            continue;
+        }
+        let key = key.trim();
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if info.title.is_none() && key.eq_ignore_ascii_case("title") {
+            info.title = Some(value.to_string());
+        } else if info.description.is_none()
+            && (key.eq_ignore_ascii_case("description") || key.eq_ignore_ascii_case("desc"))
+        {
+            info.description = Some(value.to_string());
+        }
+        if info.title.is_some() && info.description.is_some() {
+            break;
+        }
+    }
+
+    info
+}
+
 fn build_scenario_entry(
     group: &Group,
     identifier: String,
 ) -> Result<ScenarioEntry, ScenarioDiscoveryError> {
     let fallback = fallback_title_for_path(group.root());
     let manifest = scenario_manifest_info(group)?;
+    let legacy = legacy_core_info(group)?;
     let mut title = manifest
         .as_ref()
         .and_then(|info| info.name.as_ref())
         .map(|name| name.trim())
         .filter(|name| !name.is_empty())
         .map(|name| name.to_string());
-    let description = manifest.and_then(|info| info.description).and_then(|desc| {
-        let trimmed = desc.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
+
+    if title.is_none() {
+        if let Some(core) = legacy
+            .as_ref()
+            .and_then(|info| info.title.as_ref())
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            title = Some(core.to_string());
         }
-    });
+    }
 
     if title.is_none() {
         title = title_from_title_files(group)?;
@@ -333,6 +418,20 @@ fn build_scenario_entry(
 
     let title = title.unwrap_or(fallback);
     let preview = load_preview_image(group)?;
+    let description = manifest
+        .as_ref()
+        .and_then(|info| info.description.as_ref())
+        .map(|desc| desc.trim())
+        .filter(|desc| !desc.is_empty())
+        .map(|desc| desc.to_string())
+        .or_else(|| {
+            legacy
+                .as_ref()
+                .and_then(|info| info.description.as_ref())
+                .map(|desc| desc.trim())
+                .filter(|desc| !desc.is_empty())
+                .map(|desc| desc.to_string())
+        });
 
     Ok(ScenarioEntry {
         identifier,
@@ -737,6 +836,24 @@ mod tests {
         assert_eq!(folder_entry.kind, ScenarioEntryKind::Folder);
         assert_eq!(folder_entry.children.len(), 1);
         assert_eq!(folder_entry.children[0].title, "Packed Child");
+    }
+
+    #[test]
+    fn falls_back_to_legacy_core_for_metadata() {
+        let dir = tempdir().unwrap();
+        let scenario_dir = dir.path().join("Legacy.c4s");
+        fs::create_dir(&scenario_dir).unwrap();
+        fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Legacy Mission\nDescription=Restore Clonk parity\n",
+        )
+        .unwrap();
+
+        let entries = discover(dir.path()).expect("discover legacy scenario");
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.title, "Legacy Mission");
+        assert_eq!(entry.description.as_deref(), Some("Restore Clonk parity"));
     }
 
     #[test]
