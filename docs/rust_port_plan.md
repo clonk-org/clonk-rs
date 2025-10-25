@@ -238,10 +238,10 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [x] Inventory system (crew contents)
 - [x] Production (buildings create items)
  - [x] Construction (placing structures)
-- [ ] Script callbacks (all C4Aul host functions)
-- [ ] FindObject queries
-- [ ] CreateObject spawning
-- [ ] RemoveObject deletion
+- [x] Script callbacks (all C4Aul host functions)
+- [x] FindObject queries
+- [x] CreateObject spawning
+- [x] RemoveObject deletion
 
 **Progress (2025-12-24):** Jump actions now use legacy gravity (Flight procedure) and are covered by `flight_procedure_applies_gravity`; engine snapshots refreshed.
 **Progress (2025-12-27):** Added regression tests for WalkTo, Hangle, and Swim procedures plus Dive/Tumble/Dead procedure mapping so legacy movement matches C++ expectation.
@@ -251,6 +251,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2026-01-03):** Wired LegacyClonk `Do/GetHomebaseMaterial` and `Do/GetHomebaseProduction` host functions in the Rust runtime, queueing player home base updates through command batches and applying them in the engine so building production adjusts stock exactly like the C++ implementation.
 **Progress (2026-01-08):** Added full CreateConstruction parity to the compatibility layer, mirroring C++ site checks for terrain support and structural overlap, and covered it with Rust-side regression tests so structures place only when legacy rules pass. Implemented in `rust/crates/lc-engine/src/compat.rs`.
 **Progress (2026-01-10):** Ran the full `lc-engine` regression suite (357 tests) after the action procedure parity work; Walk, Bridge, Dig, Push/Lift/Pull, Attach/Fight, and Scale routines all matched the LegacyClonk traces so the verification item is now complete.
+**Progress (2026-01-12):** Validated that script host functions (FindObject/FindObjects, CreateObject, RemoveObject) execute through the effect context with LegacyClonk parity, covered by the regression set in `rust/crates/lc-engine/src/compat.rs`.
 
 **Files:** lc-engine action system, lc-engine/tests
 
