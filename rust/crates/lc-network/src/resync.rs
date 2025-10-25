@@ -50,6 +50,21 @@ impl ControlBacklog {
         }
     }
 
+    /// Returns control packets grouped by tick beginning at `from_tick`. Empty
+    /// ticks are skipped.
+    pub fn packets_from(&self, from_tick: Tick) -> Vec<(Tick, Vec<ControlPacket>)> {
+        self.entries
+            .range(from_tick..)
+            .filter_map(|(&tick, per_client)| {
+                if per_client.is_empty() {
+                    None
+                } else {
+                    Some((tick, per_client.values().cloned().collect()))
+                }
+            })
+            .collect()
+    }
+
     /// Returns control packets for all ticks beginning at `from_tick` until a
     /// gap is encountered, following the legacy host resync behaviour.
     pub fn fulfill_request(&self, from_tick: Tick) -> Vec<ControlPacket> {
@@ -206,6 +221,23 @@ mod tests {
             packet(2, 6, b"d"),
         ];
         assert_eq!(replay, expected);
+    }
+
+    #[test]
+    fn packets_from_groups_by_tick() {
+        let mut backlog = ControlBacklog::new(8);
+        backlog.record_packet(&packet(2, 5, b"b"));
+        backlog.record_packet(&packet(1, 5, b"a"));
+        backlog.record_packet(&packet(3, 6, b"c"));
+
+        let groups = backlog.packets_from(5);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, 5);
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[0].1[0], packet(1, 5, b"a"));
+        assert_eq!(groups[0].1[1], packet(2, 5, b"b"));
+        assert_eq!(groups[1].0, 6);
+        assert_eq!(groups[1].1, vec![packet(3, 6, b"c")]);
     }
 
     #[test]

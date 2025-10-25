@@ -516,6 +516,10 @@ async fn handle_accept(
         .coordination_register(client_id)
         .map_err(|error| error.to_string())?;
 
+    replay_backlog_to_client(&state.backlog, state.config.start_tick, &outbound_tx)
+        .await
+        .map_err(|error| format!("failed to replay backlog: {error}"))?;
+
     state.clients.insert(
         client_id,
         ClientConnection {
@@ -731,16 +735,36 @@ async fn broadcast_exec_sync(control_tick: Tick, state: &mut HostState) {
         .await;
 }
 
-fn aggregate_batch(batch: &ReadyBatch) -> ControlPacket {
+fn aggregate_packets_for_tick(packets: &[ControlPacket], tick: Tick) -> ControlPacket {
     let mut payload = Vec::new();
     let mut timestamp = 0;
-    for packet in batch.packets() {
+    for packet in packets {
         payload.extend_from_slice(packet.payload());
         timestamp = timestamp.max(packet.timestamp_ms());
     }
-    ControlPacket::builder(BROADCAST_CLIENT_ID, batch.tick())
+    ControlPacket::builder(BROADCAST_CLIENT_ID, tick)
         .timestamp_ms(timestamp)
         .payload(payload)
+}
+
+fn aggregate_batch(batch: &ReadyBatch) -> ControlPacket {
+    aggregate_packets_for_tick(batch.packets(), batch.tick())
+}
+
+async fn replay_backlog_to_client(
+    backlog: &ControlBacklog,
+    from_tick: Tick,
+    outbound: &mpsc::Sender<ControlMessage>,
+) -> Result<(), String> {
+    let replay = backlog.packets_from(from_tick);
+    for (tick, packets) in replay {
+        let aggregated = aggregate_packets_for_tick(&packets, tick);
+        outbound
+            .send(ControlMessage::Control(aggregated))
+            .await
+            .map_err(|error| format!("client disconnected during backlog replay: {error}"))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -990,6 +1014,80 @@ mod tests {
             .shutdown()
             .await
             .expect("second client shutdown");
+        wait_for_client_departure(&mut host_events, Duration::from_secs(1)).await;
+
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_client_replays_backlog_on_join() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(
+            listener,
+            HostConfig {
+                max_players: 4,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("start host");
+
+        let mut host_events = host.take_event_receiver();
+        let mut client_alpha =
+            connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+                .await
+                .expect("connect alpha client");
+        let mut alpha_events = client_alpha.take_event_receiver();
+        drain_initial_exec_sync(&mut alpha_events).await;
+
+        submit_control_pair(&mut host, &client_alpha, 0, vec![0xA1], vec![0xB2]).await;
+        let ready_packet = wait_for_host_ready(&mut host_events, Duration::from_secs(1)).await;
+        assert_eq!(ready_packet.tick(), 0);
+        let expected_payload = ready_packet.payload().to_vec();
+
+        let mut client_beta =
+            connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
+                .await
+                .expect("connect beta client");
+        let mut beta_events = client_beta.take_event_receiver();
+
+        let mut backlog_packets = Vec::new();
+        let mut saw_exec_sync = false;
+        for _ in 0..4 {
+            match timeout(Duration::from_secs(1), beta_events.recv())
+                .await
+                .expect("beta event wait")
+            {
+                Some(ClientEvent::Ready { packet }) => backlog_packets.push(packet),
+                Some(ClientEvent::ExecSync { control_tick }) => {
+                    assert_eq!(control_tick, 1);
+                    saw_exec_sync = true;
+                    break;
+                }
+                Some(ClientEvent::Direct { .. }) => continue,
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("beta disconnected unexpectedly: {reason:?}");
+                }
+                None => panic!("beta event stream ended unexpectedly"),
+            }
+        }
+
+        assert!(saw_exec_sync, "beta client never received exec sync");
+        assert_eq!(
+            backlog_packets.len(),
+            1,
+            "beta client did not receive backlog packet"
+        );
+        assert_eq!(backlog_packets[0].tick(), ready_packet.tick());
+        assert_eq!(backlog_packets[0].payload(), expected_payload);
+
+        client_beta.shutdown().await.expect("beta shutdown");
+        wait_for_client_departure(&mut host_events, Duration::from_secs(1)).await;
+
+        client_alpha.shutdown().await.expect("alpha shutdown");
         wait_for_client_departure(&mut host_events, Duration::from_secs(1)).await;
 
         host.shutdown().await.expect("host shutdown");
