@@ -195,7 +195,7 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
   - [x] Cursor cycling
 - [x] Mouse controls (select, drag, throw)
 - [x] Gamepad support
-- [ ] Control responsiveness (no lag)
+- [x] Control responsiveness (no lag)
 - [ ] Control customization
 
 **Progress (2025-11-30):** Engine now routes Dig/Throw/Special/Special2 commands through the legacy `Control*` scripts via `Engine::handle_control_command`, with both the frontend dispatcher and playback runtime invoking it so scripted behaviors (e.g. `ControlDig`) trigger identical to C++.
@@ -204,6 +204,7 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 **Progress (2025-12-19):** Direction buttons now drive the entire crew selection instead of just the cursor, and cursor toggles respect legacy single/double semantics, so multi-crew walks and cycling behave identically to C++ (covered by new `direction_updates_entire_selection` regression tests).
 **Progress (2025-12-20):** Gamepad buttons now mirror the default keyboard bindings: face buttons trigger Throw/Dig/Special/Special2, shoulders/trigger manage cursor selection and clear commands, Start opens the player menu, and Back toggles the pause menu via `rust/crates/lc-app/src/gamepad.rs` and `rust/crates/lc-app/src/main.rs:3564`.
 **Progress (2025-12-21):** Double-tapping Down now routes through `InputDispatcher` to call the engine’s grab/drop helpers, while pressing Up at a structure requests `Engine::try_enter_nearby`, matching legacy grab/drop/enter behavior; covered by regression tests in `rust/crates/lc-frontend/src/input.rs` and `rust/crates/lc-engine/src/lib.rs`.
+**Progress (2025-12-22):** Opening inventory or pause menus now submits a `ClearPressed` control event (and network broadcast) before suppressing gameplay commands, so direction states reset immediately and no longer stick when menus absorb the matching key releases.
 
 **Files:** InputDispatcher, handle_key() in main.rs, lc-engine/src/input.rs
 

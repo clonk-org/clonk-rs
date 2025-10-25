@@ -3130,7 +3130,7 @@ impl GameApp {
                     } else if self.ingame_menu.is_some() {
                         self.close_ingame_menu();
                     } else {
-                        self.open_ingame_menu();
+                        self.open_ingame_menu()?;
                     }
                     return Ok(());
                 }
@@ -3204,11 +3204,26 @@ impl GameApp {
             && (self.object_menu.is_some() || self.ingame_menu.is_some())
     }
 
-    fn open_ingame_menu(&mut self) {
+    fn clear_local_controls(&mut self) -> Result<(), EngineError> {
+        if let Some(network) = self.network.as_ref() {
+            let frame = self.engine.frame();
+            let tick = u32::try_from(frame).unwrap_or(u32::MAX);
+            network.submit_local_control(self.local_owner, ControlEvent::ClearPressed, tick);
+        }
+        let _ = self.input.handle_event(
+            &mut self.engine,
+            self.local_owner,
+            ControlEvent::ClearPressed,
+        )?;
+        Ok(())
+    }
+
+    fn open_ingame_menu(&mut self) -> Result<(), EngineError> {
         if !matches!(self.mode, AppMode::Running) || self.ingame_menu.is_some() {
-            return;
+            return Ok(());
         }
         self.close_object_menu();
+        self.clear_local_controls()?;
         let has_quick_save = self
             .last_save_path
             .as_ref()
@@ -3218,6 +3233,7 @@ impl GameApp {
         if self.status_text.is_empty() {
             self.status_text = "Paused".to_string();
         }
+        Ok(())
     }
 
     fn close_ingame_menu(&mut self) {
@@ -3227,24 +3243,25 @@ impl GameApp {
         }
     }
 
-    fn open_object_menu(&mut self) -> bool {
+    fn open_object_menu(&mut self) -> Result<bool, EngineError> {
         if !matches!(self.mode, AppMode::Running) || self.object_menu.is_some() {
-            return false;
+            return Ok(false);
         }
         match ObjectMenuState::for_player(self.local_owner, &mut self.engine, &self.snapshot) {
             Some(menu) => {
+                self.clear_local_controls()?;
                 self.object_menu = Some(menu);
                 self.ingame_menu = None;
                 if self.status_text.is_empty() {
                     self.status_text = "Inventory open".to_string();
                 }
-                true
+                Ok(true)
             }
             None => {
                 if self.status_text.is_empty() {
                     self.status_text = "No crew inventory available".to_string();
                 }
-                false
+                Ok(false)
             }
         }
     }
@@ -3291,8 +3308,8 @@ impl GameApp {
             ) {
                 if self.object_menu.is_some() {
                     self.close_object_menu();
-                } else if !self.open_object_menu() {
-                    self.open_ingame_menu();
+                } else if !self.open_object_menu()? {
+                    self.open_ingame_menu()?;
                 }
             }
             return Ok(true);
@@ -3739,7 +3756,7 @@ impl GameApp {
                         if self.ingame_menu.is_some() {
                             self.close_ingame_menu();
                         } else {
-                            self.open_ingame_menu();
+                            self.open_ingame_menu()?;
                         }
                     }
                 }
