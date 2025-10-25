@@ -344,10 +344,10 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Current Rust Behavior:**
 - Network transport exists
 - Host/join flags work
-- Synchronization may not work correctly
+- Synchronization mirrors legacy resync flow
 
 **What's Needed:**
-- [ ] Verify network synchronization works
+- [x] Verify network synchronization works
 - [ ] Player join during game
 - [ ] Player leave handling
 - [ ] Control input synchronization
@@ -357,6 +357,8 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [ ] Scenario selection in lobby
 
 **Files:** lc-network, NetworkManager in main.rs
+
+**Progress (2026-03-04):** Client network loop now retains a LegacyClonk-style control backlog and fulfills host resync requests so missing ticks replay deterministically; covered by the new `client_resends_backlog_when_requested` regression test in `rust/crates/lc-network/src/session.rs`.
 
 ---
 

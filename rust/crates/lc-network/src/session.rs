@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
@@ -17,6 +17,7 @@ use crate::{
 
 const PROTOCOL_VERSION: u32 = 1;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const CLIENT_BACKLOG_LIMIT: usize = 256;
 
 /// Broadcast identifier that mirrors the legacy `C4ClientIDAll` constant.
 pub const BROADCAST_CLIENT_ID: ClientId = u32::MAX;
@@ -866,6 +867,7 @@ mod tests {
     use super::*;
     use crate::ParticipantKind;
     use std::time::Duration;
+    use tokio::io::duplex;
     use tokio::time::timeout;
 
     #[tokio::test(flavor = "multi_thread")]
@@ -993,6 +995,74 @@ mod tests {
         host.shutdown().await.expect("host shutdown");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_resends_backlog_when_requested() {
+        let (client_stream, host_stream) = duplex(512);
+        let transport = crate::ControlTransport::new(client_stream);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let client_handle = tokio::spawn(super::run_client_loop(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+
+        let packet = ControlPacket::builder(7, 42)
+            .timestamp_ms(1234)
+            .payload(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        command_tx
+            .send(ClientCommand::SubmitControl(packet.clone()))
+            .await
+            .expect("submit control");
+
+        match host_transport
+            .read_message()
+            .await
+            .expect("receive control")
+        {
+            ControlMessage::Control(received) => {
+                assert_eq!(received.client_id(), packet.client_id());
+                assert_eq!(received.tick(), packet.tick());
+                assert_eq!(received.payload(), packet.payload());
+            }
+            other => panic!("expected control packet, got {other:?}"),
+        }
+
+        // Ensure the client loop processed the send before issuing the request.
+        while let Ok(Some(event)) = timeout(Duration::from_millis(20), event_rx.recv()).await {
+            match event {
+                ClientEvent::Ready { .. }
+                | ClientEvent::Direct { .. }
+                | ClientEvent::ExecSync { .. } => continue,
+                ClientEvent::Disconnected { reason } => {
+                    panic!("client disconnected unexpectedly: {reason:?}");
+                }
+            }
+        }
+
+        host_transport
+            .send_message(ControlMessage::Request { from_tick: 42 })
+            .await
+            .expect("send request");
+
+        match host_transport.read_message().await.expect("receive resend") {
+            ControlMessage::Control(resend) => {
+                assert_eq!(resend.client_id(), packet.client_id());
+                assert_eq!(resend.tick(), packet.tick());
+                assert_eq!(resend.payload(), packet.payload());
+            }
+            other => panic!("expected resend control packet, got {other:?}"),
+        }
+
+        shutdown_tx.send(()).ok();
+        client_handle.await.expect("client loop exited");
+    }
+
     async fn submit_control_pair(
         host: &mut HostHandle,
         client: &ClientHandle,
@@ -1078,27 +1148,43 @@ mod tests {
 
 async fn run_client(
     mut stream: TcpStream,
+    commands: mpsc::Receiver<ClientCommand>,
+    event_tx: mpsc::Sender<ClientEvent>,
+    shutdown_rx: oneshot::Receiver<()>,
+) {
+    stream.set_nodelay(true).ok();
+    let transport = crate::ControlTransport::new(stream);
+    run_client_loop(transport, commands, event_tx, shutdown_rx).await;
+}
+
+async fn run_client_loop<S>(
+    mut transport: crate::ControlTransport<S>,
     mut commands: mpsc::Receiver<ClientCommand>,
     event_tx: mpsc::Sender<ClientEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,
-) {
-    stream.set_nodelay(true).ok();
-    let mut transport = crate::ControlTransport::new(stream);
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut backlog = ControlBacklog::new(CLIENT_BACKLOG_LIMIT);
 
-    loop {
+    'outer: loop {
         tokio::select! {
             biased;
             _ = &mut shutdown_rx => break,
             Some(command) = commands.recv() => {
                 match command {
                     ClientCommand::SubmitControl(packet) => {
-                        if let Err(error) = transport.send_message(ControlMessage::Control(packet)).await {
-                            let _ = event_tx
-                                .send(ClientEvent::Disconnected {
-                                    reason: Some(format!("send failed: {error}")),
-                                })
-                                .await;
-                            break;
+                        let clone = packet.clone();
+                        match transport.send_message(ControlMessage::Control(packet)).await {
+                            Ok(()) => backlog.record_packet(&clone),
+                            Err(error) => {
+                                let _ = event_tx
+                                    .send(ClientEvent::Disconnected {
+                                        reason: Some(format!("send failed: {error}")),
+                                    })
+                                    .await;
+                                break;
+                            }
                         }
                     }
                     ClientCommand::SubmitPacket { delivery, data } => {
@@ -1141,7 +1227,22 @@ async fn run_client(
                     Ok(ControlMessage::ExecSync { control_tick }) => {
                         let _ = event_tx.send(ClientEvent::ExecSync { control_tick }).await;
                     }
-                    Ok(ControlMessage::Request { .. }) => {}
+                    Ok(ControlMessage::Request { from_tick }) => {
+                        let resend = backlog.fulfill_request(from_tick);
+                        for packet in resend {
+                            if let Err(error) = transport
+                                .send_message(ControlMessage::Control(packet))
+                                .await
+                            {
+                                let _ = event_tx
+                                    .send(ClientEvent::Disconnected {
+                                        reason: Some(format!("send failed: {error}")),
+                                    })
+                                    .await;
+                                break 'outer;
+                            }
+                        }
+                    }
                     Err(error) => {
                         let _ = event_tx
                             .send(ClientEvent::Disconnected {
