@@ -30,6 +30,7 @@ pub enum NetworkMode {
 #[derive(Debug, Clone)]
 pub struct HostSettings {
     pub bind_addr: SocketAddr,
+    pub player_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +60,8 @@ pub enum NetworkEvent {
     },
     PeerConnected {
         client_id: ClientId,
+        name: String,
+        kind: ParticipantKind,
     },
     PeerDisconnected {
         client_id: ClientId,
@@ -322,6 +325,11 @@ async fn run_host_worker(
         }
     };
     let _ = local_id_tx.send(Ok(HOST_CLIENT_ID));
+    let _ = event_tx.send(NetworkEvent::PeerConnected {
+        client_id: HOST_CLIENT_ID,
+        name: settings.player_name.clone(),
+        kind: ParticipantKind::Player,
+    });
     let mut host_events = host.take_event_receiver();
     let mut frame_builder = ControlFrameAccumulator::new(HOST_CLIENT_ID);
 
@@ -374,8 +382,16 @@ async fn handle_host_event(
         HostEvent::Ready { packet } => {
             handle_ready_packet(packet, local_owner, event_tx)?;
         }
-        HostEvent::ClientJoined { client_id, .. } => {
-            let _ = event_tx.send(NetworkEvent::PeerConnected { client_id });
+        HostEvent::ClientJoined {
+            client_id,
+            name,
+            kind,
+        } => {
+            let _ = event_tx.send(NetworkEvent::PeerConnected {
+                client_id,
+                name,
+                kind,
+            });
         }
         HostEvent::ClientLeft { client_id } => {
             let _ = event_tx.send(NetworkEvent::PeerDisconnected {
@@ -403,9 +419,10 @@ async fn run_client_worker(
     event_tx: Sender<NetworkEvent>,
     local_id_tx: mpsc::Sender<Result<ClientId, String>>,
 ) -> Result<()> {
+    let player_name = settings.player_name.clone();
     let mut client = match connect_client(
         settings.server_addr,
-        ClientConfig::new(settings.player_name, ParticipantKind::Player),
+        ClientConfig::new(player_name.clone(), ParticipantKind::Player),
     )
     .await
     {
@@ -418,6 +435,11 @@ async fn run_client_worker(
     };
     let client_id = client.client_id();
     let _ = local_id_tx.send(Ok(client_id));
+    let _ = event_tx.send(NetworkEvent::PeerConnected {
+        client_id,
+        name: player_name,
+        kind: ParticipantKind::Player,
+    });
     let mut client_events = client.take_event_receiver();
     let mut frame_builder = ControlFrameAccumulator::new(client_id);
 

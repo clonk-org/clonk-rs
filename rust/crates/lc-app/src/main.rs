@@ -7,7 +7,7 @@ mod network;
 mod object_menu;
 mod settings;
 
-use std::collections::{hash_map::DefaultHasher, hash_map::Entry, HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, hash_map::Entry, BTreeMap, HashMap, HashSet};
 use std::convert::TryFrom;
 use std::f32::consts::PI;
 use std::fmt;
@@ -52,7 +52,8 @@ use lc_frontend::{
     StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput, ViewportPointer,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
-use lc_gui::ButtonTextures;
+use lc_gui::{ButtonTextures, Rect as GuiRect, Size as GuiSize};
+use lc_network::{ClientId, ParticipantKind};
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
     load_endeavour_font, scenario as resource_scenario, DefCore as ResourceDefCore,
@@ -110,6 +111,7 @@ struct Cli {
 
 struct RuntimeConfig {
     player_owner: i32,
+    player_name: String,
     network: Option<NetworkMode>,
 }
 
@@ -457,7 +459,10 @@ fn darken_channel(value: u8, amount: f32) -> u8 {
 fn resolve_network_mode(cli: &Cli) -> Result<Option<NetworkMode>> {
     if let Some(ref host_addr) = cli.host {
         let bind_addr = parse_socket_addr(host_addr, "host")?;
-        return Ok(Some(NetworkMode::Host(HostSettings { bind_addr })));
+        return Ok(Some(NetworkMode::Host(HostSettings {
+            bind_addr,
+            player_name: cli.player_name.clone(),
+        })));
     }
     if let Some(ref join_addr) = cli.join {
         let server_addr = parse_socket_addr(join_addr, "join")?;
@@ -481,6 +486,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let runtime = RuntimeConfig {
         player_owner: cli.player_owner,
+        player_name: cli.player_name.clone(),
         network: resolve_network_mode(&cli)?,
     };
 
@@ -1808,6 +1814,7 @@ struct GameApp {
     material_library: Option<Arc<MaterialSet>>,
     network: Option<NetworkManager>,
     network_mode: Option<NetworkMode>,
+    network_lobby: Option<NetworkLobbyState>,
     sync_checks: SyncCheckState,
     local_owner: i32,
     last_save_path: Option<PathBuf>,
@@ -1847,6 +1854,7 @@ struct MainMenuState {
 enum StartupView {
     MainMenu,
     ScenarioBrowser,
+    NetworkLobby,
     Options,
 }
 
@@ -1855,6 +1863,516 @@ struct IngameMouseState {
     start: ViewportPointer,
     last: ViewportPointer,
     moved: bool,
+}
+
+#[derive(Clone, Debug)]
+struct LobbyParticipantState {
+    name: String,
+    ready: bool,
+    kind: ParticipantKind,
+}
+
+impl LobbyParticipantState {
+    fn new(name: impl Into<String>, kind: ParticipantKind) -> Self {
+        let ready = matches!(kind, ParticipantKind::Observer);
+        Self {
+            name: name.into(),
+            ready,
+            kind,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LobbyPointerRegion {
+    Menu,
+    Panel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LobbyButton {
+    Ready,
+    Start,
+}
+
+#[derive(Clone, Debug)]
+struct NetworkLobbyLayout {
+    panel: GuiRect,
+    ready_button: GuiRect,
+    start_button: Option<GuiRect>,
+    menu_region_max_x: f32,
+    scenario_rect: GuiRect,
+    participants_rect: GuiRect,
+}
+
+#[derive(Clone, Debug)]
+struct NetworkLobbyState {
+    participants: BTreeMap<ClientId, LobbyParticipantState>,
+    local_client_id: ClientId,
+    is_host: bool,
+    selected_identifier: Option<String>,
+    selected_title: Option<String>,
+    hover_button: Option<LobbyButton>,
+    pressed_button: Option<LobbyButton>,
+    layout: Option<NetworkLobbyLayout>,
+    pointer: Option<GuiPoint>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LobbyAction {
+    ToggleReady,
+    StartGame,
+}
+
+impl NetworkLobbyState {
+    fn new(local_client_id: ClientId, local_name: String, is_host: bool) -> Self {
+        let mut participants = BTreeMap::new();
+        participants.insert(
+            local_client_id,
+            LobbyParticipantState::new(local_name, ParticipantKind::Player),
+        );
+        if !is_host && local_client_id != 0 {
+            participants
+                .entry(0)
+                .or_insert_with(|| LobbyParticipantState::new("Host", ParticipantKind::Player));
+        }
+        Self {
+            participants,
+            local_client_id,
+            is_host,
+            selected_identifier: None,
+            selected_title: None,
+            hover_button: None,
+            pressed_button: None,
+            layout: None,
+            pointer: None,
+        }
+    }
+
+    fn scenario_label(&self) -> String {
+        self.selected_title
+            .clone()
+            .unwrap_or_else(|| "Select a scenario from the list".to_string())
+    }
+
+    fn selected_identifier(&self) -> Option<&str> {
+        self.selected_identifier.as_deref()
+    }
+
+    fn select_scenario(&mut self, identifier: &str, title: &str) {
+        self.selected_identifier = Some(identifier.to_string());
+        self.selected_title = Some(title.to_string());
+    }
+
+    fn update_layout(&mut self, width: f32, height: f32) -> &NetworkLobbyLayout {
+        let panel_margin = 24.0;
+        let min_menu_width = 240.0;
+        let mut panel_width = (width * 0.4).clamp(240.0, 420.0);
+        if width - panel_width - panel_margin < min_menu_width {
+            panel_width = (width - min_menu_width - panel_margin).max(220.0);
+        }
+        panel_width = panel_width.clamp(220.0, width - panel_margin * 2.0);
+        let mut panel_left = width - panel_width - panel_margin;
+        if panel_left < panel_margin {
+            panel_left = panel_margin;
+        }
+        let panel_height = (height - panel_margin * 2.0).max(220.0);
+        let panel_rect = GuiRect::new(panel_left, panel_margin, panel_width, panel_height);
+        let menu_region_max_x = (panel_left - 12.0).max(0.0);
+
+        let scenario_rect = GuiRect::new(
+            panel_left + 18.0,
+            panel_rect.origin.y + 60.0,
+            panel_width - 36.0,
+            46.0,
+        );
+
+        let button_height = 46.0;
+        let button_y = panel_rect.origin.y + panel_rect.size.height - button_height - 24.0;
+        let ready_button;
+        let start_button;
+        if self.is_host {
+            let total_width = panel_width - 48.0;
+            let button_width = (total_width - 12.0) * 0.5;
+            ready_button = GuiRect::new(panel_left + 24.0, button_y, button_width, button_height);
+            start_button = Some(GuiRect::new(
+                ready_button.origin.x + button_width + 12.0,
+                button_y,
+                button_width,
+                button_height,
+            ));
+        } else {
+            ready_button = GuiRect::new(
+                panel_left + 24.0,
+                button_y,
+                panel_width - 48.0,
+                button_height,
+            );
+            start_button = None;
+        }
+
+        let participants_top = scenario_rect.origin.y + scenario_rect.size.height + 18.0;
+        let participants_height = (button_y - participants_top - 16.0).max(80.0);
+        let participants_rect = GuiRect::new(
+            panel_left + 18.0,
+            participants_top,
+            panel_width - 36.0,
+            participants_height,
+        );
+
+        self.layout = Some(NetworkLobbyLayout {
+            panel: panel_rect,
+            ready_button,
+            start_button,
+            menu_region_max_x,
+            scenario_rect,
+            participants_rect,
+        });
+        self.layout.as_ref().expect("layout just initialised")
+    }
+
+    fn layout(&mut self, width: f32, height: f32) -> &NetworkLobbyLayout {
+        if self.layout.is_none() {
+            self.update_layout(width, height);
+        }
+        self.layout
+            .as_ref()
+            .expect("network lobby layout should exist")
+    }
+
+    fn pointer_region(&self, point: GuiPoint) -> LobbyPointerRegion {
+        if let Some(layout) = self.layout.as_ref() {
+            if point.x <= layout.menu_region_max_x {
+                LobbyPointerRegion::Menu
+            } else {
+                LobbyPointerRegion::Panel
+            }
+        } else {
+            LobbyPointerRegion::Menu
+        }
+    }
+
+    fn handle_panel_pointer_move(&mut self, point: GuiPoint) {
+        self.pointer = Some(point);
+        self.hover_button = self.hit_test_button(point);
+    }
+
+    fn handle_panel_pointer_down(&mut self, point: GuiPoint) {
+        self.pressed_button = self.hit_test_button(point);
+    }
+
+    fn handle_panel_pointer_up(&mut self, point: GuiPoint) -> Option<LobbyAction> {
+        let pressed = self.pressed_button.take();
+        let hit = self.hit_test_button(point);
+        if pressed.is_some() && hit == pressed {
+            match hit {
+                Some(LobbyButton::Ready) => Some(LobbyAction::ToggleReady),
+                Some(LobbyButton::Start) => Some(LobbyAction::StartGame),
+                None => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    fn pointer_left(&mut self) {
+        self.hover_button = None;
+        self.pressed_button = None;
+        self.pointer = None;
+    }
+
+    fn register_peer(&mut self, client_id: ClientId, name: String, kind: ParticipantKind) {
+        let mut ready = self
+            .participants
+            .get(&client_id)
+            .map(|participant| participant.ready)
+            .unwrap_or(matches!(kind, ParticipantKind::Observer));
+        if matches!(kind, ParticipantKind::Observer) {
+            ready = true;
+        }
+        self.participants
+            .insert(client_id, LobbyParticipantState { name, ready, kind });
+    }
+
+    fn unregister_peer(&mut self, client_id: ClientId) {
+        if client_id == self.local_client_id {
+            return;
+        }
+        self.participants.remove(&client_id);
+        if !self.is_host && client_id == 0 {
+            self.participants
+                .entry(0)
+                .or_insert_with(|| LobbyParticipantState::new("Host", ParticipantKind::Player));
+        }
+    }
+
+    fn toggle_local_ready(&mut self) -> bool {
+        if let Some(participant) = self.participants.get_mut(&self.local_client_id) {
+            participant.ready = !participant.ready;
+            participant.ready
+        } else {
+            false
+        }
+    }
+
+    fn local_ready(&self) -> bool {
+        self.participants
+            .get(&self.local_client_id)
+            .map(|participant| participant.ready)
+            .unwrap_or(false)
+    }
+
+    fn render_overlay(&mut self, surface: &mut Surface, assets: &FrontendAssets) {
+        let width = surface.width() as f32;
+        let height = surface.height() as f32;
+        let layout = self.layout(width, height).clone();
+
+        fill_gui_rect(surface, &layout.panel, Color::new(16, 28, 52, 232));
+        draw_panel_outline(surface, &layout.panel, Color::new(28, 44, 72, 255));
+
+        let font = assets.font_arc();
+        let font_ref = font.as_ref();
+
+        font_ref.draw_text(
+            surface,
+            layout.panel.origin.x + 20.0,
+            layout.panel.origin.y + 32.0,
+            "Network Lobby",
+            28.0,
+            Color::opaque(224, 232, 248),
+        );
+
+        let scenario_text = self
+            .selected_title
+            .as_deref()
+            .unwrap_or("Select a scenario from the list");
+        font_ref.draw_text(
+            surface,
+            layout.scenario_rect.origin.x,
+            layout.scenario_rect.origin.y,
+            scenario_text,
+            20.0,
+            Color::opaque(196, 208, 228),
+        );
+
+        let participants_title = "Participants";
+        font_ref.draw_text(
+            surface,
+            layout.participants_rect.origin.x,
+            layout.participants_rect.origin.y - 6.0,
+            participants_title,
+            22.0,
+            Color::opaque(204, 214, 230),
+        );
+
+        let mut row_y = layout.participants_rect.origin.y + 20.0;
+        let row_spacing = 8.0;
+        let row_height = 26.0;
+        let name_color = Color::opaque(220, 230, 248);
+        let local_name_color = Color::opaque(236, 224, 180);
+        let ready_color = Color::opaque(136, 220, 156);
+        let waiting_color = Color::opaque(236, 148, 132);
+
+        for (client_id, participant) in &self.participants {
+            if row_y + row_height
+                > layout.participants_rect.origin.y + layout.participants_rect.size.height
+            {
+                break;
+            }
+
+            let background = GuiRect::new(
+                layout.participants_rect.origin.x,
+                row_y - 18.0,
+                layout.participants_rect.size.width,
+                row_height + 8.0,
+            );
+            fill_gui_rect(surface, &background, Color::new(22, 36, 60, 180));
+
+            let label_color = if *client_id == self.local_client_id {
+                local_name_color
+            } else {
+                name_color
+            };
+            font_ref.draw_text(
+                surface,
+                layout.participants_rect.origin.x + 8.0,
+                row_y,
+                &participant.name,
+                20.0,
+                label_color,
+            );
+
+            let status_text = if participant.ready {
+                "Ready"
+            } else {
+                "Waiting"
+            };
+            let status_color = if participant.ready {
+                ready_color
+            } else {
+                waiting_color
+            };
+
+            let status_width = font_ref.measure_text(status_text, 18.0).width;
+            let status_x = layout.participants_rect.origin.x + layout.participants_rect.size.width
+                - status_width
+                - 8.0;
+
+            font_ref.draw_text(surface, status_x, row_y, status_text, 18.0, status_color);
+
+            row_y += row_height + row_spacing;
+        }
+
+        self.draw_ready_button(surface, font_ref, &layout);
+        if let Some(start) = layout.start_button {
+            self.draw_start_button(surface, font_ref, start);
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyCode, state: ElementState) -> Option<LobbyAction> {
+        if state != ElementState::Pressed {
+            return None;
+        }
+        match key {
+            KeyCode::Enter if self.is_host => Some(LobbyAction::StartGame),
+            KeyCode::Space | KeyCode::Enter => Some(LobbyAction::ToggleReady),
+            _ => None,
+        }
+    }
+
+    fn pointer_position(&self) -> Option<GuiPoint> {
+        self.pointer
+    }
+
+    fn draw_ready_button(
+        &self,
+        surface: &mut Surface,
+        font: &dyn TextFont,
+        layout: &NetworkLobbyLayout,
+    ) {
+        let base = if self.local_ready() {
+            Color::new(28, 76, 58, 236)
+        } else {
+            Color::new(52, 72, 108, 226)
+        };
+        let mut color = base;
+        if self.hover_button == Some(LobbyButton::Ready) {
+            color = offset_color(color, 18);
+        }
+        if self.pressed_button == Some(LobbyButton::Ready) {
+            color = offset_color(color, 32);
+        }
+        fill_gui_rect(surface, &layout.ready_button, color);
+        draw_panel_outline(surface, &layout.ready_button, Color::new(16, 24, 40, 255));
+
+        let label = if self.local_ready() {
+            "Unready"
+        } else {
+            "Ready"
+        };
+        let size = 20.0;
+        let metrics = font.measure_text(label, size);
+        let text_x =
+            layout.ready_button.origin.x + (layout.ready_button.size.width - metrics.width) * 0.5;
+        let text_y = layout.ready_button.origin.y + 12.0;
+        let text_color = Color::opaque(236, 240, 248);
+        font.draw_text(surface, text_x, text_y, label, size, text_color);
+    }
+
+    fn draw_start_button(&self, surface: &mut Surface, font: &dyn TextFont, rect: GuiRect) {
+        let enabled = self.selected_identifier.is_some();
+        let mut color = if enabled {
+            Color::new(32, 96, 72, 236)
+        } else {
+            Color::new(40, 48, 68, 200)
+        };
+        if enabled && self.hover_button == Some(LobbyButton::Start) {
+            color = offset_color(color, 22);
+        }
+        if enabled && self.pressed_button == Some(LobbyButton::Start) {
+            color = offset_color(color, 36);
+        }
+        fill_gui_rect(surface, &rect, color);
+        draw_panel_outline(surface, &rect, Color::new(16, 24, 40, 255));
+
+        let label = if enabled { "Start" } else { "Select Scenario" };
+        let size = 20.0;
+        let metrics = font.measure_text(label, size);
+        let text_x = rect.origin.x + (rect.size.width - metrics.width) * 0.5;
+        let text_y = rect.origin.y + 12.0;
+        let text_color = if enabled {
+            Color::opaque(230, 244, 236)
+        } else {
+            Color::opaque(200, 204, 214)
+        };
+        font.draw_text(surface, text_x, text_y, label, size, text_color);
+    }
+
+    fn hit_test_button(&self, point: GuiPoint) -> Option<LobbyButton> {
+        let layout = match self.layout.as_ref() {
+            Some(layout) => layout,
+            None => return None,
+        };
+        if point_in_rect(point, &layout.ready_button) {
+            return Some(LobbyButton::Ready);
+        }
+        if let Some(rect) = layout.start_button.as_ref() {
+            if point_in_rect(point, rect) {
+                return Some(LobbyButton::Start);
+            }
+        }
+        None
+    }
+}
+
+fn point_in_rect(point: GuiPoint, rect: &GuiRect) -> bool {
+    point.x >= rect.origin.x
+        && point.x <= rect.origin.x + rect.size.width
+        && point.y >= rect.origin.y
+        && point.y <= rect.origin.y + rect.size.height
+}
+
+fn fill_gui_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
+    let x0 = rect.origin.x.floor().clamp(0.0, surface.width() as f32) as i32;
+    let y0 = rect.origin.y.floor().clamp(0.0, surface.height() as f32) as i32;
+    let x1 = (rect.origin.x + rect.size.width)
+        .ceil()
+        .clamp(0.0, surface.width() as f32) as i32;
+    let y1 = (rect.origin.y + rect.size.height)
+        .ceil()
+        .clamp(0.0, surface.height() as f32) as i32;
+
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let _ = surface.set_pixel(x as u32, y as u32, color);
+        }
+    }
+}
+
+fn draw_panel_outline(surface: &mut Surface, rect: &GuiRect, color: Color) {
+    let top = GuiRect::new(rect.origin.x, rect.origin.y, rect.size.width, 2.0);
+    let bottom = GuiRect::new(
+        rect.origin.x,
+        rect.origin.y + rect.size.height - 2.0,
+        rect.size.width,
+        2.0,
+    );
+    let left = GuiRect::new(rect.origin.x, rect.origin.y, 2.0, rect.size.height);
+    let right = GuiRect::new(
+        rect.origin.x + rect.size.width - 2.0,
+        rect.origin.y,
+        2.0,
+        rect.size.height,
+    );
+    fill_gui_rect(surface, &top, color);
+    fill_gui_rect(surface, &bottom, color);
+    fill_gui_rect(surface, &left, color);
+    fill_gui_rect(surface, &right, color);
+}
+
+fn offset_color(color: Color, delta: i16) -> Color {
+    let adjust = |channel: u8| -> u8 { (channel as i16 + delta).clamp(0, 255) as u8 };
+    Color::new(adjust(color.r), adjust(color.g), adjust(color.b), color.a)
 }
 
 impl IngameMouseState {
@@ -2898,6 +3416,15 @@ impl GameApp {
             Some(mode) => Some(NetworkManager::for_mode(mode, runtime.player_owner)?),
             None => None,
         };
+        let player_name = runtime.player_name.clone();
+        let network_lobby = match (&network_mode, &network) {
+            (Some(mode), Some(manager)) => Some(NetworkLobbyState::new(
+                manager.local_client_id(),
+                player_name.clone(),
+                matches!(mode, NetworkMode::Host(_)),
+            )),
+            _ => None,
+        };
         let assets = Arc::new(FrontendAssets::load(paths));
         let material_library = load_install_material_library(paths);
         let base_sprites = assets.base_sprite_map().clone();
@@ -2971,6 +3498,7 @@ impl GameApp {
             material_library: material_library.clone(),
             network,
             network_mode,
+            network_lobby,
             sync_checks: SyncCheckState::new(),
             local_owner: runtime.player_owner,
             last_save_path: None,
@@ -3014,6 +3542,10 @@ impl GameApp {
             if let Some(options) = self.control_options.as_mut() {
                 options.resize(width_f, height_f);
                 options.set_pointer_position(None);
+            }
+            if let Some(lobby) = self.network_lobby.as_mut() {
+                lobby.update_layout(width_f, height_f);
+                lobby.pointer_left();
             }
         }
         Ok(())
@@ -3206,6 +3738,23 @@ impl GameApp {
                                 }
                             };
                             self.process_main_menu_actions(actions)?;
+                        }
+                        StartupView::NetworkLobby => {
+                            if let Some(action) = self
+                                .network_lobby
+                                .as_mut()
+                                .and_then(|lobby| lobby.handle_key(gui_key, state))
+                            {
+                                self.process_lobby_action(action)?;
+                                return Ok(());
+                            }
+                            match state {
+                                ElementState::Pressed => self.handle_menu_input(|menu| {
+                                    menu.menu().handle_key_down(gui_key)
+                                })?,
+                                ElementState::Released => self
+                                    .handle_menu_input(|menu| menu.menu().handle_key_up(gui_key))?,
+                            }
                         }
                         StartupView::Options => {}
                     }
@@ -3679,19 +4228,36 @@ impl GameApp {
                     NetworkEvent::SyncCheck { packet } => {
                         self.handle_sync_check(packet);
                     }
-                    NetworkEvent::PeerConnected { client_id } => {
-                        tracing::info!(%client_id, "network client connected");
-                    }
-                    NetworkEvent::PeerDisconnected { client_id, reason } => match reason {
-                        Some(reason) => {
-                            tracing::info!(
-                                %client_id,
-                                reason = %reason,
-                                "network client disconnected"
-                            );
+                    NetworkEvent::PeerConnected {
+                        client_id,
+                        name,
+                        kind,
+                    } => {
+                        tracing::info!(%client_id, %name, ?kind, "network client connected");
+                        if let Some(lobby) = self.network_lobby.as_mut() {
+                            lobby.register_peer(client_id, name.clone(), kind);
                         }
-                        None => tracing::info!(%client_id, "network client disconnected"),
-                    },
+                        self.status_text = format!("{name} joined the lobby");
+                    }
+                    NetworkEvent::PeerDisconnected { client_id, reason } => {
+                        if let Some(lobby) = self.network_lobby.as_mut() {
+                            lobby.unregister_peer(client_id);
+                        }
+                        match reason {
+                            Some(reason) => {
+                                tracing::info!(
+                                    %client_id,
+                                    reason = %reason,
+                                    "network client disconnected"
+                                );
+                                self.status_text = format!("Client {client_id} left: {reason}");
+                            }
+                            None => {
+                                tracing::info!(%client_id, "network client disconnected");
+                                self.status_text = format!("Client {client_id} left the lobby");
+                            }
+                        }
+                    }
                     NetworkEvent::Error(message) => {
                         tracing::error!(message = %message, "network error");
                     }
@@ -3801,6 +4367,14 @@ impl GameApp {
                             };
                             self.process_main_menu_actions(actions)?;
                         }
+                        StartupView::NetworkLobby => match state {
+                            ElementState::Pressed => {
+                                self.handle_menu_input(|menu| menu.menu().handle_key_down(key))?
+                            }
+                            ElementState::Released => {
+                                self.handle_menu_input(|menu| menu.menu().handle_key_up(key))?
+                            }
+                        },
                         StartupView::Options => {
                             if let Some(commands) =
                                 self.control_options.as_mut().map(|options| match state {
@@ -3843,6 +4417,11 @@ impl GameApp {
                 };
                 self.process_main_menu_actions(actions)?;
             }
+            StartupView::NetworkLobby => {
+                if state == ElementState::Pressed {
+                    self.show_main_menu();
+                }
+            }
             StartupView::Options => {
                 if state == ElementState::Pressed {
                     self.process_control_options_command(ControlOptionsCommand::Close)?;
@@ -3878,6 +4457,13 @@ impl GameApp {
                         };
                         self.process_main_menu_actions(actions)?;
                     }
+                    StartupView::NetworkLobby => match state {
+                        ElementState::Pressed => self.handle_menu_input(|menu| {
+                            menu.menu().handle_key_down(KeyCode::Enter)
+                        })?,
+                        ElementState::Released => self
+                            .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?,
+                    },
                     StartupView::Options => {
                         if let Some(commands) =
                             self.control_options.as_mut().map(|options| match state {
@@ -3928,6 +4514,26 @@ impl GameApp {
                     self.main_menu_state.set_pointer_position(Some(point));
                     let actions = self.main_menu_state.handle_pointer_move(point);
                     self.process_main_menu_actions(actions)
+                }
+                StartupView::NetworkLobby => {
+                    if let Some(lobby) = self.network_lobby.as_mut() {
+                        let width = self.graphics.surface().width() as f32;
+                        let height = self.graphics.surface().height() as f32;
+                        lobby.update_layout(width, height);
+                        match lobby.pointer_region(point) {
+                            LobbyPointerRegion::Menu => self.handle_menu_input(|state| {
+                                state.set_pointer_position(Some(point));
+                                state.menu().handle_pointer_move(point)
+                            }),
+                            LobbyPointerRegion::Panel => {
+                                lobby.handle_panel_pointer_move(point);
+                                self.menu_state.set_pointer_position(None);
+                                Ok(())
+                            }
+                        }
+                    } else {
+                        Ok(())
+                    }
                 }
                 StartupView::Options => {
                     let commands = if let Some(options) = self.control_options.as_mut() {
@@ -4091,6 +4697,54 @@ impl GameApp {
                     }
                     Ok(())
                 }
+                StartupView::NetworkLobby => {
+                    if let Some(lobby) = self.network_lobby.as_mut() {
+                        let width = self.graphics.surface().width() as f32;
+                        let height = self.graphics.surface().height() as f32;
+                        lobby.update_layout(width, height);
+
+                        match button_state {
+                            ElementState::Pressed => {
+                                if let Some(point) = lobby.pointer_position() {
+                                    if matches!(
+                                        lobby.pointer_region(point),
+                                        LobbyPointerRegion::Panel
+                                    ) {
+                                        lobby.handle_panel_pointer_down(point);
+                                        return Ok(());
+                                    }
+                                }
+                                if let Some(point) = self.menu_state.pointer_position() {
+                                    self.handle_menu_input(|state| {
+                                        state.menu().handle_pointer_down(point)
+                                    })?;
+                                }
+                                Ok(())
+                            }
+                            ElementState::Released => {
+                                if let Some(point) = lobby.pointer_position() {
+                                    if matches!(
+                                        lobby.pointer_region(point),
+                                        LobbyPointerRegion::Panel
+                                    ) {
+                                        if let Some(action) = lobby.handle_panel_pointer_up(point) {
+                                            self.process_lobby_action(action)?;
+                                        }
+                                        return Ok(());
+                                    }
+                                }
+                                if let Some(point) = self.menu_state.pointer_position() {
+                                    self.handle_menu_input(|state| {
+                                        state.menu().handle_pointer_up(point)
+                                    })?;
+                                }
+                                Ok(())
+                            }
+                        }
+                    } else {
+                        Ok(())
+                    }
+                }
                 StartupView::Options => {
                     let commands = if let Some(options) = self.control_options.as_mut() {
                         options.pointer_position().map(|point| match button_state {
@@ -4155,6 +4809,62 @@ impl GameApp {
                 };
                 self.process_main_menu_actions(actions)
             }
+            StartupView::NetworkLobby => {
+                if let Some(lobby) = self.network_lobby.as_mut() {
+                    let width = self.graphics.surface().width() as f32;
+                    let height = self.graphics.surface().height() as f32;
+                    lobby.update_layout(width, height);
+                    match phase {
+                        TouchPhase::Started => match lobby.pointer_region(position) {
+                            LobbyPointerRegion::Menu => self.handle_menu_input(|state| {
+                                state.set_pointer_position(Some(position));
+                                state.menu().handle_pointer_down(position)
+                            }),
+                            LobbyPointerRegion::Panel => {
+                                lobby.handle_panel_pointer_move(position);
+                                lobby.handle_panel_pointer_down(position);
+                                self.menu_state.set_pointer_position(None);
+                                Ok(())
+                            }
+                        },
+                        TouchPhase::Moved => match lobby.pointer_region(position) {
+                            LobbyPointerRegion::Menu => self.handle_menu_input(|state| {
+                                state.set_pointer_position(Some(position));
+                                state.menu().handle_pointer_move(position)
+                            }),
+                            LobbyPointerRegion::Panel => {
+                                lobby.handle_panel_pointer_move(position);
+                                self.menu_state.set_pointer_position(None);
+                                Ok(())
+                            }
+                        },
+                        TouchPhase::Ended => match lobby.pointer_region(position) {
+                            LobbyPointerRegion::Menu => {
+                                let result = self.handle_menu_input(|state| {
+                                    state.set_pointer_position(Some(position));
+                                    state.menu().handle_pointer_up(position)
+                                });
+                                self.pointer_left();
+                                result
+                            }
+                            LobbyPointerRegion::Panel => {
+                                lobby.handle_panel_pointer_move(position);
+                                if let Some(action) = lobby.handle_panel_pointer_up(position) {
+                                    self.process_lobby_action(action)?;
+                                }
+                                self.pointer_left();
+                                Ok(())
+                            }
+                        },
+                        TouchPhase::Cancelled => {
+                            self.pointer_left();
+                            Ok(())
+                        }
+                    }
+                } else {
+                    Ok(())
+                }
+            }
             StartupView::Options => {
                 let (commands, clear_pointer) = if let Some(options) = self.control_options.as_mut()
                 {
@@ -4188,6 +4898,12 @@ impl GameApp {
                 StartupView::MainMenu => {
                     self.main_menu_state.pointer_left();
                 }
+                StartupView::NetworkLobby => {
+                    self.menu_state.set_pointer_position(None);
+                    if let Some(lobby) = self.network_lobby.as_mut() {
+                        lobby.pointer_left();
+                    }
+                }
                 StartupView::Options => {
                     if let Some(options) = self.control_options.as_mut() {
                         options.set_pointer_position(None);
@@ -4208,7 +4924,12 @@ impl GameApp {
     where
         F: FnOnce(&mut MenuState) -> Vec<StartupMenuAction>,
     {
-        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+        if self.mode != AppMode::Menu
+            || !matches!(
+                self.startup_view,
+                StartupView::ScenarioBrowser | StartupView::NetworkLobby
+            )
+        {
             return Ok(());
         }
 
@@ -4246,7 +4967,15 @@ impl GameApp {
                 }
                 StartupMenuAction::StartScenario(summary) => {
                     self.play_ui_sound("Click");
-                    start_identifier = Some(summary.identifier);
+                    if matches!(self.startup_view, StartupView::NetworkLobby) {
+                        if let Some(lobby) = self.network_lobby.as_mut() {
+                            lobby.select_scenario(&summary.identifier, &summary.title);
+                            self.scenario_label = lobby.scenario_label();
+                            self.status_text = format!("Selected {}", summary.title);
+                        }
+                    } else {
+                        start_identifier = Some(summary.identifier);
+                    }
                 }
                 StartupMenuAction::OpenEntry(summary) => {
                     if summary.identifier == BACK_ENTRY_IDENTIFIER {
@@ -4275,7 +5004,15 @@ impl GameApp {
                         }
                         Some(ScenarioKind::Scenario) => {
                             self.play_ui_sound("Click");
-                            start_identifier = Some(summary.identifier);
+                            if matches!(self.startup_view, StartupView::NetworkLobby) {
+                                if let Some(lobby) = self.network_lobby.as_mut() {
+                                    lobby.select_scenario(&summary.identifier, &summary.title);
+                                    self.scenario_label = lobby.scenario_label();
+                                    self.status_text = format!("Selected {}", summary.title);
+                                }
+                            } else {
+                                start_identifier = Some(summary.identifier);
+                            }
                         }
                         Some(ScenarioKind::Editor) => {
                             self.play_ui_sound("Click");
@@ -4384,6 +5121,45 @@ impl GameApp {
         Ok(())
     }
 
+    fn process_lobby_action(&mut self, action: LobbyAction) -> Result<(), EngineError> {
+        match action {
+            LobbyAction::ToggleReady => {
+                if let Some(lobby) = self.network_lobby.as_mut() {
+                    let ready = lobby.toggle_local_ready();
+                    self.status_text = if ready {
+                        "You are ready".to_string()
+                    } else {
+                        "You are not ready".to_string()
+                    };
+                }
+            }
+            LobbyAction::StartGame => {
+                if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+                    self.status_text = "Only the host can start the game".to_string();
+                    return Ok(());
+                }
+                let Some(lobby) = self.network_lobby.as_ref() else {
+                    return Ok(());
+                };
+                let Some(identifier) = lobby.selected_identifier() else {
+                    self.status_text = "Select a scenario before starting".to_string();
+                    return Ok(());
+                };
+                let scenario = match self.scenario_catalog.get(identifier).cloned() {
+                    Some(scenario) => scenario,
+                    None => {
+                        self.status_text =
+                            format!("Scenario `{}` is not available in the catalog", identifier);
+                        return Ok(());
+                    }
+                };
+                self.play_ui_sound("Click");
+                self.start_scenario(scenario)?;
+            }
+        }
+        Ok(())
+    }
+
     fn persist_control_bindings(&self) {
         if let Ok(paths) = cached_app_paths() {
             self.bindings.save(paths.as_ref());
@@ -4396,7 +5172,13 @@ impl GameApp {
                 self.open_scenario_browser();
             }
             MainMenuItem::NetworkGame => {
-                self.status_text = "Network game UI not yet implemented".to_string();
+                if self.network_mode.is_none() || self.network_lobby.is_none() {
+                    self.status_text =
+                        "Start the application with --host or --join to use the network lobby"
+                            .to_string();
+                } else {
+                    self.open_network_lobby();
+                }
             }
             MainMenuItem::PlayerSelection => {
                 self.status_text = "Player selection UI not yet implemented".to_string();
@@ -4425,6 +5207,22 @@ impl GameApp {
         self.status_text.clear();
     }
 
+    fn open_network_lobby(&mut self) {
+        self.startup_view = StartupView::NetworkLobby;
+        self.menu_state.set_pointer_position(None);
+        self.menu_state.refresh_menu_entries();
+        let width = self.graphics.surface().width() as f32;
+        let height = self.graphics.surface().height() as f32;
+        self.menu_state.menu().resize(width, height);
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.update_layout(width, height);
+            self.scenario_label = lobby.scenario_label();
+        } else {
+            self.scenario_label = "Network lobby unavailable".to_string();
+        }
+        self.status_text.clear();
+    }
+
     fn open_options_menu(&mut self) {
         let width = self.graphics.surface().width() as f32;
         let height = self.graphics.surface().height() as f32;
@@ -4446,6 +5244,9 @@ impl GameApp {
     fn show_main_menu(&mut self) {
         self.startup_view = StartupView::MainMenu;
         self.main_menu_state.pointer_left();
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.pointer_left();
+        }
         self.refresh_participants_label();
         self.scenario_label = DEFAULT_SCENARIO_LABEL.to_string();
         self.status_text.clear();
@@ -4695,6 +5496,7 @@ impl GameApp {
                     &mut self.menu_state,
                     self.control_options.as_mut(),
                     self.startup_view,
+                    self.network_lobby.as_mut(),
                     frame,
                 );
                 Ok(())
@@ -5714,6 +6516,7 @@ fn render_startup_frame(
     scenario_menu: &mut MenuState,
     control_options: Option<&mut ControlOptionsState>,
     view: StartupView,
+    network_lobby: Option<&mut NetworkLobbyState>,
     frame: &mut [u8],
 ) {
     {
@@ -5730,10 +6533,16 @@ fn render_startup_frame(
         match view {
             StartupView::MainMenu => main_menu.render(surface),
             StartupView::ScenarioBrowser => scenario_menu.menu().render(surface),
+            StartupView::NetworkLobby => scenario_menu.menu().render(surface),
             StartupView::Options => {
                 if let Some(options) = control_options {
                     options.render(surface);
                 }
+            }
+        }
+        if matches!(view, StartupView::NetworkLobby) {
+            if let Some(lobby) = network_lobby {
+                lobby.render_overlay(surface, assets);
             }
         }
     }
@@ -7195,6 +8004,7 @@ mod tests {
             None,
             RuntimeConfig {
                 player_owner: 1,
+                player_name: "Player".to_string(),
                 network: None,
             },
         )
@@ -7244,6 +8054,7 @@ mod tests {
                 None,
                 RuntimeConfig {
                     player_owner: 1,
+                    player_name: "Player".to_string(),
                     network: None,
                 },
             )
@@ -7348,6 +8159,7 @@ mod tests {
                     None,
                     RuntimeConfig {
                         player_owner: 1,
+                        player_name: "Player".to_string(),
                         network: None,
                     },
                 )
@@ -7383,6 +8195,7 @@ mod tests {
                     None,
                     RuntimeConfig {
                         player_owner: 1,
+                        player_name: "Player".to_string(),
                         network: None,
                     },
                 )
@@ -7574,6 +8387,7 @@ mod tests {
             None,
             RuntimeConfig {
                 player_owner: 1,
+                player_name: "Player".to_string(),
                 network: None,
             },
         )
