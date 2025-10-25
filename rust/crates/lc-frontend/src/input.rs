@@ -123,13 +123,22 @@ fn apply_direction(
 ) -> Result<(), EngineError> {
     engine.ensure_cursor(owner)?;
     let update = ObjectUpdate::new().with_command_direction(direction);
-    match engine.apply_command(owner, CrewCommandTarget::cursor(), update.clone()) {
-        Ok(()) => Ok(()),
-        Err(EngineError::CrewSelection { .. }) => {
-            engine.apply_command(owner, CrewCommandTarget::selection(), update)
+    let mut applied = false;
+
+    let selected = engine.selected_crew(owner);
+    if !selected.is_empty() {
+        match engine.apply_command(owner, CrewCommandTarget::selection(), update.clone()) {
+            Ok(()) => applied = true,
+            Err(EngineError::CrewSelection { .. }) => {}
+            Err(error) => return Err(error),
         }
-        Err(error) => Err(error),
     }
+
+    if !applied {
+        engine.apply_command(owner, CrewCommandTarget::cursor(), update)?;
+    }
+
+    Ok(())
 }
 
 fn cycle_cursor(
@@ -137,6 +146,7 @@ fn cycle_cursor(
     owner: i32,
     direction: CycleDirection,
 ) -> Result<(), EngineError> {
+    engine.ensure_cursor(owner)?;
     let mut crew = engine.crew_members(owner);
     if crew.is_empty() {
         return Ok(());
@@ -166,14 +176,14 @@ fn cycle_cursor(
 }
 
 fn toggle_cursor_selection(engine: &mut Engine, owner: i32) -> Result<(), EngineError> {
+    let previously_selected = engine.selected_crew(owner);
     engine.ensure_cursor(owner)?;
     let Some(cursor) = engine.crew_cursor(owner) else {
         return Ok(());
     };
-    let selected = engine.selected_crew(owner);
-    if selected.contains(&cursor) {
+    if previously_selected.contains(&cursor) {
         engine.deselect_crew(owner, [cursor]);
-    } else {
+    } else if !previously_selected.is_empty() {
         engine.select_crew(owner, [cursor])?;
     }
     Ok(())
@@ -301,6 +311,27 @@ global func Step(state, frame, random) { return nil; }
             .command_direction;
         assert_eq!(crew, CommandDirection::Right);
         assert_eq!(engine.crew_cursor(1), Some(crew_id));
+        Ok(())
+    }
+
+    #[test]
+    fn direction_updates_entire_selection() -> Result<(), EngineError> {
+        let mut engine = setup_engine();
+        let first = spawn_crew_member(&mut engine, 1, 0)?;
+        let second = spawn_crew_member(&mut engine, 1, 10)?;
+        engine.select_crew(1, vec![first, second])?;
+        engine.set_crew_cursor(1, Some(first))?;
+        let mut dispatcher = InputDispatcher::new();
+
+        dispatcher.handle_event(&mut engine, 1, ControlEvent::Press(ControlButton::Right))?;
+
+        let snapshot = engine.snapshot();
+        for &crew_id in &[first, second] {
+            let crew = snapshot
+                .object(crew_id)
+                .expect("crew should exist after direction update");
+            assert_eq!(crew.command_direction, CommandDirection::Right);
+        }
         Ok(())
     }
 
