@@ -38,6 +38,8 @@ pub struct ClientSettings {
     pub player_name: String,
 }
 
+const HOST_CLIENT_ID: ClientId = 0;
+
 #[derive(Debug)]
 pub struct NetworkManager {
     command_tx: tokio_mpsc::Sender<NetworkCommand>,
@@ -68,6 +70,9 @@ enum NetworkCommand {
         event: ControlEvent,
         tick: Tick,
     },
+    FinalizeTick {
+        tick: Tick,
+    },
     Shutdown,
 }
 
@@ -80,6 +85,60 @@ enum WorkerMode {
         settings: ClientSettings,
         local_owner: i32,
     },
+}
+
+#[derive(Debug, Default)]
+struct ControlFrameAccumulator {
+    client_id: ClientId,
+    current_tick: Option<Tick>,
+    controls: Vec<lc_engine::ControlPacket>,
+    last_timestamp: Option<u64>,
+    last_sent_tick: Option<Tick>,
+}
+
+impl ControlFrameAccumulator {
+    fn new(client_id: ClientId) -> Self {
+        Self {
+            client_id,
+            ..Default::default()
+        }
+    }
+
+    fn record_control(&mut self, tick: Tick, control: lc_engine::ControlPacket, timestamp: u64) {
+        if self.last_sent_tick.map_or(false, |last| tick <= last) {
+            return;
+        }
+        if self.current_tick != Some(tick) {
+            self.controls.clear();
+            self.current_tick = Some(tick);
+        }
+        self.controls.push(control);
+        self.last_timestamp = Some(timestamp);
+    }
+
+    fn finalize_tick(&mut self, tick: Tick) -> Option<LegacyControlFrame> {
+        if self.last_sent_tick.map_or(false, |last| tick <= last) {
+            return None;
+        }
+
+        let (controls, timestamp) = if self.current_tick == Some(tick) {
+            let timestamp = self.last_timestamp.take().unwrap_or_else(current_millis);
+            let controls = std::mem::take(&mut self.controls);
+            self.current_tick = None;
+            (controls, timestamp)
+        } else {
+            (Vec::new(), current_millis())
+        };
+
+        self.last_sent_tick = Some(tick);
+
+        Some(LegacyControlFrame {
+            client_id: self.client_id,
+            tick,
+            timestamp_ms: timestamp,
+            controls,
+        })
+    }
 }
 
 impl NetworkManager {
@@ -126,6 +185,11 @@ impl NetworkManager {
 
     pub fn submit_local_control(&self, owner: i32, event: ControlEvent, tick: Tick) {
         let command = NetworkCommand::SubmitLocal { owner, event, tick };
+        let _ = self.command_tx.blocking_send(command);
+    }
+
+    pub fn finalize_tick(&self, tick: Tick) {
+        let command = NetworkCommand::FinalizeTick { tick };
         let _ = self.command_tx.blocking_send(command);
     }
 
@@ -188,6 +252,7 @@ async fn run_host_worker(
         .await
         .context("failed to start host session")?;
     let mut host_events = host.take_event_receiver();
+    let mut frame_builder = ControlFrameAccumulator::new(HOST_CLIENT_ID);
 
     loop {
         tokio::select! {
@@ -202,7 +267,14 @@ async fn run_host_worker(
             Some(command) = command_rx.recv() => {
                 match command {
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
-                        submit_local_control(&mut host, owner, event, tick, 0, &event_tx).await?;
+                        if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
+                            frame_builder.record_control(tick, control, current_millis());
+                        }
+                    }
+                    NetworkCommand::FinalizeTick { tick } => {
+                        if let Some(frame) = frame_builder.finalize_tick(tick) {
+                            send_frame_to_host(&host, frame, &event_tx).await?;
+                        }
                     }
                     NetworkCommand::Shutdown => break,
                 }
@@ -260,6 +332,7 @@ async fn run_client_worker(
     .context("failed to connect to host")?;
     let client_id = client.client_id();
     let mut client_events = client.take_event_receiver();
+    let mut frame_builder = ControlFrameAccumulator::new(client_id);
 
     loop {
         tokio::select! {
@@ -274,7 +347,14 @@ async fn run_client_worker(
             Some(command) = command_rx.recv() => {
                 match command {
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
-                        submit_client_control(&client, owner, event, tick, client_id, &event_tx).await?;
+                        if let Some(control) = control_packet_for_event(owner, event, client_id) {
+                            frame_builder.record_control(tick, control, current_millis());
+                        }
+                    }
+                    NetworkCommand::FinalizeTick { tick } => {
+                        if let Some(frame) = frame_builder.finalize_tick(tick) {
+                            send_frame_to_client(&client, frame, &event_tx).await?;
+                        }
                     }
                     NetworkCommand::Shutdown => break,
                 }
@@ -307,52 +387,42 @@ async fn handle_client_event(
     Ok(())
 }
 
-async fn submit_local_control(
-    host: &mut HostHandle,
-    owner: i32,
-    event: ControlEvent,
-    tick: Tick,
-    client_id: ClientId,
+async fn send_frame_to_host(
+    host: &HostHandle,
+    frame: LegacyControlFrame,
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
-    if let Some(frame) = control_frame(owner, event, tick, client_id) {
-        match encode_control_packet(&frame) {
-            Ok(packet) => {
-                host.submit_local_control(packet)
-                    .await
-                    .map_err(|err| anyhow!("host submit failed: {err}"))?;
-            }
-            Err(err) => {
-                let _ = event_tx.send(NetworkEvent::Error(format!(
-                    "failed to encode control packet: {err:?}"
-                )));
-            }
+    match encode_control_packet(&frame) {
+        Ok(packet) => {
+            host.submit_local_control(packet)
+                .await
+                .map_err(|err| anyhow!("host submit failed: {err}"))?;
+        }
+        Err(err) => {
+            let _ = event_tx.send(NetworkEvent::Error(format!(
+                "failed to encode control packet: {err:?}"
+            )));
         }
     }
     Ok(())
 }
 
-async fn submit_client_control(
+async fn send_frame_to_client(
     client: &ClientHandle,
-    owner: i32,
-    event: ControlEvent,
-    tick: Tick,
-    client_id: ClientId,
+    frame: LegacyControlFrame,
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
-    if let Some(frame) = control_frame(owner, event, tick, client_id) {
-        match encode_control_packet(&frame) {
-            Ok(packet) => {
-                client
-                    .submit_control(packet)
-                    .await
-                    .map_err(|err| anyhow!("client submit failed: {err}"))?;
-            }
-            Err(err) => {
-                let _ = event_tx.send(NetworkEvent::Error(format!(
-                    "failed to encode control packet: {err:?}"
-                )));
-            }
+    match encode_control_packet(&frame) {
+        Ok(packet) => {
+            client
+                .submit_control(packet)
+                .await
+                .map_err(|err| anyhow!("client submit failed: {err}"))?;
+        }
+        Err(err) => {
+            let _ = event_tx.send(NetworkEvent::Error(format!(
+                "failed to encode control packet: {err:?}"
+            )));
         }
     }
     Ok(())
@@ -408,26 +478,19 @@ fn control_owner(packet: &lc_engine::ControlPacket) -> Option<i32> {
     }
 }
 
-fn control_frame(
+fn control_packet_for_event(
     owner: i32,
     event: ControlEvent,
-    tick: Tick,
     client_id: ClientId,
-) -> Option<LegacyControlFrame> {
+) -> Option<lc_engine::ControlPacket> {
     let command = control_command_for_event(event)?;
     let by_client = i32::try_from(client_id).ok()?;
-    let data = lc_engine::ControlPacket::PlayerControl(PlayerControlData {
+    Some(lc_engine::ControlPacket::PlayerControl(PlayerControlData {
         player: owner,
         command,
         data: 0,
         by_client,
-    });
-    Some(LegacyControlFrame {
-        client_id,
-        tick,
-        timestamp_ms: current_millis(),
-        controls: vec![data],
-    })
+    }))
 }
 
 fn control_command_for_event(event: ControlEvent) -> Option<i32> {
@@ -490,4 +553,75 @@ fn current_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|_| Duration::from_secs(0))
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accumulator_batches_controls_for_tick() {
+        let mut acc = ControlFrameAccumulator::new(5);
+        let first = control_packet_for_event(1, ControlEvent::Press(ControlButton::Left), 5)
+            .expect("build first control packet");
+        acc.record_control(3, first.clone(), 10);
+
+        let second = control_packet_for_event(
+            1,
+            ControlEvent::Command {
+                command: ControlCommand::Throw,
+                kind: CommandKind::Press,
+            },
+            5,
+        )
+        .expect("build second control packet");
+        acc.record_control(3, second.clone(), 20);
+
+        let frame = acc
+            .finalize_tick(3)
+            .expect("finalizing tick with controls produces frame");
+        assert_eq!(frame.client_id, 5);
+        assert_eq!(frame.tick, 3);
+        assert_eq!(frame.controls, vec![first, second]);
+        assert!(
+            acc.finalize_tick(3).is_none(),
+            "second finalize for same tick yields no frame"
+        );
+    }
+
+    #[test]
+    fn accumulator_emits_empty_frame_without_controls() {
+        let mut acc = ControlFrameAccumulator::new(2);
+        let frame = acc
+            .finalize_tick(10)
+            .expect("empty finalize still yields frame");
+        assert_eq!(frame.client_id, 2);
+        assert_eq!(frame.tick, 10);
+        assert!(frame.controls.is_empty());
+    }
+
+    #[test]
+    fn accumulator_ignores_outdated_ticks() {
+        let mut acc = ControlFrameAccumulator::new(1);
+        let control = control_packet_for_event(1, ControlEvent::Press(ControlButton::Right), 1)
+            .expect("build control packet");
+        acc.record_control(2, control.clone(), 30);
+
+        let frame = acc.finalize_tick(2).expect("first finalize produces frame");
+        assert_eq!(frame.controls, vec![control.clone()]);
+
+        // Attempt to record another control for an already-finalized tick.
+        acc.record_control(2, control.clone(), 40);
+        assert!(
+            acc.finalize_tick(2).is_none(),
+            "duplicate finalize does not emit new frame"
+        );
+
+        // Controls for older ticks are ignored.
+        acc.record_control(1, control, 50);
+        let frame = acc
+            .finalize_tick(3)
+            .expect("finalize advances to next tick");
+        assert!(frame.controls.is_empty());
+    }
 }

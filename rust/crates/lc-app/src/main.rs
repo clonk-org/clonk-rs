@@ -4432,6 +4432,11 @@ impl GameApp {
         self.process_network_events()?;
         match self.mode {
             AppMode::Running => {
+                if let Some(network) = self.network.as_ref() {
+                    let frame = self.engine.frame();
+                    let tick = u32::try_from(frame).unwrap_or(u32::MAX);
+                    network.finalize_tick(tick);
+                }
                 self.snapshot = self.engine.tick()?;
                 self.refresh_object_menu();
                 self.refresh_focus();
