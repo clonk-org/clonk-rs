@@ -76,6 +76,78 @@ pub enum LandscapeCommand {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemperatureConversionAction {
+    ChangeMaterial { target: MaterialId, strength: i32 },
+    RemoveToSky { strength: i32 },
+}
+
+impl TemperatureConversionAction {
+    fn strength(self) -> i32 {
+        match self {
+            TemperatureConversionAction::ChangeMaterial { strength, .. } => strength,
+            TemperatureConversionAction::RemoveToSky { strength } => strength,
+        }
+    }
+}
+
+fn find_temperature_conversion_action(
+    materials: &MaterialSet,
+    material_id: MaterialId,
+    direction: TemperatureDirection,
+    ambient_temperature: i32,
+) -> Option<TemperatureConversionAction> {
+    let outcome =
+        materials.evaluate_temperature_conversion(material_id, direction, ambient_temperature)?;
+    if outcome.strength <= 0 {
+        return None;
+    }
+    if let Some(target) = outcome.target.as_material_id() {
+        if target == material_id {
+            return None;
+        }
+        return Some(TemperatureConversionAction::ChangeMaterial {
+            target,
+            strength: outcome.strength,
+        });
+    }
+    if outcome.target.is_sky() {
+        return Some(TemperatureConversionAction::RemoveToSky {
+            strength: outcome.strength,
+        });
+    }
+    None
+}
+
+fn find_column_conversion(
+    materials: &MaterialSet,
+    material_id: MaterialId,
+    ambient_temperature: i32,
+) -> Option<TemperatureConversionAction> {
+    for direction in [
+        TemperatureDirection::Downwards,
+        TemperatureDirection::Upwards,
+    ] {
+        if let Some(action) =
+            find_temperature_conversion_action(materials, material_id, direction, ambient_temperature)
+        {
+            return Some(action);
+        }
+    }
+    None
+}
+
+fn segment_material_override(
+    target: MaterialId,
+    default: Option<MaterialId>,
+) -> Option<MaterialId> {
+    if Some(target) == default {
+        None
+    } else {
+        Some(target)
+    }
+}
+
 impl Landscape {
     pub fn new(width: u32, surface: Vec<i32>) -> Result<Self, LandscapeError> {
         Self::with_default_material(width, surface, None)
@@ -240,50 +312,86 @@ impl Landscape {
             return;
         }
         self.ensure_material_capacity();
+        self.ensure_liquid_capacity();
         let original_default = self.default_solid_material;
+        let default_conversion =
+            original_default.and_then(|id| find_column_conversion(materials, id, ambient_temperature));
 
-        let evaluate_conversion = |material_id: MaterialId| -> Option<MaterialId> {
-            for direction in [
-                TemperatureDirection::Downwards,
-                TemperatureDirection::Upwards,
-            ] {
-                if let Some(outcome) = materials.evaluate_temperature_conversion(
-                    material_id,
-                    direction,
-                    ambient_temperature,
-                ) {
-                    if let crate::material::TemperatureTarget::Material(target_id) = outcome.target
-                    {
-                        if target_id != material_id {
-                            return Some(target_id);
-                        }
+        let mut changed = false;
+        let mut new_default = original_default;
+
+        for (index, slot) in self.solid_materials.iter_mut().enumerate() {
+            let (material_id, uses_default) = match slot {
+                Some(id) => (Some(*id), false),
+                None => (original_default, true),
+            };
+            let Some(material_id) = material_id else {
+                continue;
+            };
+            let conversion = if uses_default {
+                default_conversion
+            } else {
+                find_column_conversion(materials, material_id, ambient_temperature)
+            };
+            let Some(conversion) = conversion else {
+                continue;
+            };
+
+            match conversion {
+                TemperatureConversionAction::ChangeMaterial { target, .. } => {
+                    if target == material_id {
+                        continue;
+                    }
+                    if uses_default {
+                        new_default = Some(target);
+                    } else {
+                        *slot = Some(target);
+                    }
+                    changed = true;
+                }
+                TemperatureConversionAction::RemoveToSky { strength } => {
+                    if strength <= 0 {
+                        continue;
+                    }
+                    let new_height = self.surface[index].saturating_add(strength);
+                    if new_height != self.surface[index] {
+                        self.surface[index] = new_height;
+                        changed = true;
                     }
                 }
             }
-            None
-        };
+        }
 
-        let mut new_default = original_default;
-        if let Some(default_id) = original_default {
-            if let Some(converted) = evaluate_conversion(default_id) {
-                new_default = Some(converted);
+        if let Some(TemperatureConversionAction::ChangeMaterial { target, .. }) = default_conversion
+        {
+            if new_default != Some(target) {
+                new_default = Some(target);
             }
         }
 
-        for slot in &mut self.solid_materials {
-            let current = match (*slot, original_default) {
-                (Some(id), _) => Some(id),
-                (None, Some(default_id)) => Some(default_id),
-                (None, None) => None,
-            };
-            if let Some(material_id) = current {
-                if let Some(converted) = evaluate_conversion(material_id) {
-                    *slot = Some(converted);
-                }
-            }
+        if new_default != original_default {
+            changed = true;
         }
-
         self.default_solid_material = new_default;
+
+        let mut liquids_changed = false;
+        for column in &mut self.liquids {
+            if column.apply_temperature_conversions(
+                materials,
+                self.default_liquid_material,
+                ambient_temperature,
+            ) {
+                liquids_changed = true;
+            }
+        }
+
+        if liquids_changed {
+            changed = true;
+        }
+
+        if changed {
+            self.mark_mass_mover_dirty();
+        }
     }
 
     fn column_material(&self, index: usize) -> Option<MaterialId> {
@@ -904,6 +1012,121 @@ impl LiquidColumn {
         true
     }
 
+    fn apply_temperature_conversions(
+        &mut self,
+        materials: &MaterialSet,
+        default_material: Option<MaterialId>,
+        ambient_temperature: i32,
+    ) -> bool {
+        if self.segments.is_empty() {
+            return false;
+        }
+        let original_segments = self.segments.clone();
+        let mut updated_segments: Vec<LiquidSegment> =
+            Vec::with_capacity(original_segments.len());
+
+        for segment in original_segments.iter() {
+            let Some(material_id) = segment.material.or(default_material) else {
+                updated_segments.push(*segment);
+                continue;
+            };
+
+            let mut top_segments: Vec<LiquidSegment> = Vec::new();
+            let mut bottom_segments: Vec<LiquidSegment> = Vec::new();
+            let mut remaining_top = segment.top;
+            let mut remaining_bottom = segment.bottom;
+
+            if let Some(action) = find_temperature_conversion_action(
+                materials,
+                material_id,
+                TemperatureDirection::Downwards,
+                ambient_temperature,
+            ) {
+                let available = (remaining_bottom - remaining_top).saturating_add(1);
+                let strength = action.strength().max(0);
+                if available > 0 && strength > 0 {
+                    let convert_height = available.min(strength);
+                    if convert_height > 0 {
+                        match action {
+                            TemperatureConversionAction::ChangeMaterial { target, .. } => {
+                                let bottom =
+                                    remaining_top.saturating_add(convert_height - 1);
+                                top_segments.push(LiquidSegment {
+                                    top: remaining_top,
+                                    bottom,
+                                    material: segment_material_override(
+                                        target,
+                                        default_material,
+                                    ),
+                                });
+                                remaining_top =
+                                    remaining_top.saturating_add(convert_height);
+                            }
+                            TemperatureConversionAction::RemoveToSky { .. } => {
+                                remaining_top =
+                                    remaining_top.saturating_add(convert_height);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if remaining_top > remaining_bottom {
+                updated_segments.extend(top_segments);
+                continue;
+            }
+
+            if let Some(action) = find_temperature_conversion_action(
+                materials,
+                material_id,
+                TemperatureDirection::Upwards,
+                ambient_temperature,
+            ) {
+                let available = (remaining_bottom - remaining_top).saturating_add(1);
+                let strength = action.strength().max(0);
+                if available > 0 && strength > 0 {
+                    let convert_height = available.min(strength);
+                    if convert_height > 0 {
+                        match action {
+                            TemperatureConversionAction::ChangeMaterial { target, .. } => {
+                                let top =
+                                    remaining_bottom.saturating_sub(convert_height - 1);
+                                bottom_segments.push(LiquidSegment {
+                                    top,
+                                    bottom: remaining_bottom,
+                                    material: segment_material_override(
+                                        target,
+                                        default_material,
+                                    ),
+                                });
+                                remaining_bottom =
+                                    remaining_bottom.saturating_sub(convert_height);
+                            }
+                            TemperatureConversionAction::RemoveToSky { .. } => {
+                                remaining_bottom =
+                                    remaining_bottom.saturating_sub(convert_height);
+                            }
+                        }
+                    }
+                }
+            }
+
+            updated_segments.extend(top_segments);
+            if remaining_top <= remaining_bottom {
+                updated_segments.push(LiquidSegment {
+                    top: remaining_top,
+                    bottom: remaining_bottom,
+                    material: segment.material,
+                });
+            }
+            updated_segments.extend(bottom_segments);
+        }
+
+        self.segments = updated_segments;
+        self.normalize();
+        self.segments != original_segments
+    }
+
     fn normalize(&mut self) {
         if self.segments.is_empty() {
             return;
@@ -1258,6 +1481,99 @@ mod tests {
         assert_eq!(landscape.solid_material_at(0), Some(water));
         assert_eq!(landscape.solid_material_at(1), Some(water));
         assert_eq!(landscape.default_solid_material(), Some(water));
+    }
+
+    #[test]
+    fn temperature_conversion_to_sky_removes_surface_pixels() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Frost]
+            Name=Frost
+            Density=80
+            Friction=10
+            AboveTempConvert=0
+            AboveTempConvertDir=0
+            AboveTempConvertTo=Sky
+            TempConvStrength=3
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let frost = materials.id_of("Frost").expect("frost exists");
+
+        let mut landscape = Landscape::flat_with_material(2, 8, Some(frost));
+        landscape.apply_temperature_conversions(&materials, 5);
+
+        assert_eq!(landscape.surface(), &[11, 11]);
+        assert_eq!(landscape.solid_material_at(0), Some(frost));
+    }
+
+    #[test]
+    fn temperature_conversion_converts_liquid_segments() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=30
+            Friction=0
+            AboveTempConvert=0
+            AboveTempConvertDir=0
+            AboveTempConvertTo=Steam
+            TempConvStrength=2
+
+            [Material Steam]
+            Name=Steam
+            Density=5
+            Friction=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let steam = materials.id_of("Steam").expect("steam exists");
+
+        let mut landscape = Landscape::flat(1, 20);
+        landscape.set_default_liquid_material(Some(water));
+        landscape.set_liquid_column(0, vec![LiquidSegment::new(4, 7)]);
+
+        landscape.apply_temperature_conversions(&materials, 5);
+
+        let column = &landscape.liquids()[0];
+        assert_eq!(
+            column.segments(),
+            &[
+                LiquidSegment::with_material(4, 5, Some(steam)),
+                LiquidSegment::new(6, 7)
+            ]
+        );
+    }
+
+    #[test]
+    fn temperature_conversion_evaporates_liquid_segments() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Steam]
+            Name=Steam
+            Density=5
+            Friction=1
+            BelowTempConvert=10
+            BelowTempConvertDir=1
+            BelowTempConvertTo=Sky
+            TempConvStrength=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let steam = materials.id_of("Steam").expect("steam exists");
+
+        let mut landscape = Landscape::flat(1, 20);
+        landscape.set_default_liquid_material(Some(steam));
+        landscape.set_liquid_column(0, vec![LiquidSegment::new(3, 5)]);
+
+        landscape.apply_temperature_conversions(&materials, 0);
+
+        let column = &landscape.liquids()[0];
+        assert_eq!(column.segments(), &[LiquidSegment::new(3, 4)]);
     }
 
     #[test]

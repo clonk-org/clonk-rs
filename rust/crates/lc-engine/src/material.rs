@@ -57,6 +57,17 @@ impl TemperatureTarget {
                 .unwrap_or_else(|| TemperatureTarget::MaterialName(name.clone())),
         }
     }
+
+    pub fn as_material_id(&self) -> Option<MaterialId> {
+        match self {
+            TemperatureTarget::Material(id) => Some(*id),
+            TemperatureTarget::MaterialName(_) => None,
+        }
+    }
+
+    pub fn is_sky(&self) -> bool {
+        matches!(self, TemperatureTarget::MaterialName(name) if name == SKY_KEY)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
