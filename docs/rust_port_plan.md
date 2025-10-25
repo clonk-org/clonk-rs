@@ -276,7 +276,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 
 **What's Needed:**
 - [x] Verify digging actually works in-game
-- [ ] Verify blasting creates proper craters
+- [x] Verify blasting creates proper craters
 - [ ] Material reactions (all combinations in Material.txt)
 - [ ] Fire spreading (Incindiary material behavior)
 - [ ] Liquid flow physics
@@ -287,6 +287,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 
 **Progress (2025-10-25):** Dig procedure now mirrors the legacy `DigFree` cleanup so even tangential hits clear the top surface pixel; added regression coverage (`dig_procedure_removes_surface_pixel_when_circle_touches_ground`) to guard the behavior.
 **Progress (2025-12-24):** Material particle settling prevents craters from deepening further and updated the landscape regression to reflect the behaviour.
+**Progress (2026-01-18):** Engine blast rasterization now mirrors LegacyClonk's scanline circle, raises column heights by the extra cleared pixel, and adds regression coverage so Blast2 reactions see the same removed material counts.
 
 **Files:** lc-engine/src/landscape.rs, lc-engine/src/material.rs
 

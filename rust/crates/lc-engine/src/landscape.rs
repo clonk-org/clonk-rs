@@ -324,36 +324,62 @@ impl Landscape {
 
         let width = self.width as i32;
         let radius_sq = i64::from(radius) * i64::from(radius);
+        let mut column_targets: Vec<Option<i32>> = vec![None; self.surface.len()];
 
-        for dx in -radius..=radius {
-            let column = center.x.saturating_add(dx);
-            if column < 0 || column >= width {
-                continue;
-            }
-
-            let dx_sq = i64::from(dx) * i64::from(dx);
-            if dx_sq > radius_sq {
-                continue;
-            }
-
-            let remaining = radius_sq - dx_sq;
+        for y_offset in -radius..=radius {
+            let y_offset_i64 = i64::from(y_offset);
+            let remaining = radius_sq - y_offset_i64 * y_offset_i64;
             if remaining < 0 {
                 continue;
             }
-
-            let vertical = (remaining as f64).sqrt().floor() as i32;
-            let target_height = center.y.saturating_add(vertical).max(0);
-            let index = column as usize;
-
-            let current_height = match self.surface.get(index) {
-                Some(&height) => height,
+            let horizontal = (remaining as f64).sqrt().floor() as i32;
+            let start = -horizontal;
+            let end = if horizontal == 0 { 1 } else { horizontal };
+            let y = match i64::from(center.y).checked_add(y_offset_i64) {
+                Some(value) => value,
                 None => continue,
             };
+            if y > i64::from(i32::MAX) {
+                continue;
+            }
+            let y_i32 = y as i32;
 
+            for x_offset in start..end {
+                let Some(column) = center.x.checked_add(x_offset) else {
+                    continue;
+                };
+                if column < 0 || column >= width {
+                    continue;
+                }
+                let index = column as usize;
+                let current_height = match self.surface.get(index) {
+                    Some(&height) => height,
+                    None => continue,
+                };
+                if y_i32 < current_height {
+                    continue;
+                }
+                let candidate = y_i32.saturating_add(1).max(0);
+                let slot = &mut column_targets[index];
+                match slot {
+                    Some(existing) => {
+                        if candidate > *existing {
+                            *existing = candidate;
+                        }
+                    }
+                    None => *slot = Some(candidate),
+                }
+            }
+        }
+
+        for (index, maybe_target) in column_targets.into_iter().enumerate() {
+            let Some(target_height) = maybe_target else {
+                continue;
+            };
+            let current_height = self.surface[index];
             if target_height <= current_height {
                 continue;
             }
-
             let Some(material_id) = self.column_material(index) else {
                 continue;
             };
@@ -366,6 +392,7 @@ impl Landscape {
                 continue;
             }
 
+            let column = index as i32;
             if !material.blast_free() {
                 if let Some(target) = material.blast_shift_to_target() {
                     if target != material_id {
@@ -746,6 +773,43 @@ mod tests {
     use super::*;
     use lc_resources::MaterialLibrary;
 
+    fn legacy_expected_surface(initial: &[i32], center: Vector2, radius: i32) -> Vec<i32> {
+        let mut surface = initial.to_vec();
+        if radius <= 0 || surface.is_empty() {
+            return surface;
+        }
+        let width = surface.len() as i32;
+        let radius_sq = i64::from(radius) * i64::from(radius);
+
+        for y_offset in -radius..=radius {
+            let y_offset_i64 = i64::from(y_offset);
+            let remaining = radius_sq - y_offset_i64 * y_offset_i64;
+            if remaining < 0 {
+                continue;
+            }
+            let horizontal = (remaining as f64).sqrt().floor() as i32;
+            let start = -horizontal;
+            let end = if horizontal == 0 { 1 } else { horizontal };
+            let y = center.y + y_offset;
+            for x_offset in start..end {
+                let column = center.x + x_offset;
+                if column < 0 || column >= width {
+                    continue;
+                }
+                let index = column as usize;
+                if y < surface[index] {
+                    continue;
+                }
+                let candidate = y.saturating_add(1);
+                if candidate > surface[index] {
+                    surface[index] = candidate;
+                }
+            }
+        }
+
+        surface
+    }
+
     #[test]
     fn resolves_vertical_collision() {
         let landscape = Landscape::flat(10, 5);
@@ -962,26 +1026,15 @@ mod tests {
         let mut landscape = Landscape::flat_with_material(11, 40, Some(earth));
         let center = Vector2::new(5, 40);
         let radius = 3;
+        let before = landscape.surface().to_vec();
 
         let result = landscape.blast_circle(center, radius, &materials);
 
+        let expected_surface = legacy_expected_surface(&before, center, radius);
+        assert_eq!(landscape.surface(), expected_surface.as_slice());
         let mut expected_removed = 0;
-        let radius_sq = (radius * radius) as i64;
-        for dx in -radius..=radius {
-            let column = center.x + dx;
-            if column < 0 || column >= landscape.width() as i32 {
-                continue;
-            }
-            let dx_sq = (dx * dx) as i64;
-            if dx_sq > radius_sq {
-                continue;
-            }
-            let remaining = radius_sq - dx_sq;
-            let vertical = (remaining as f64).sqrt().floor() as i32;
-            let expected_height = (center.y + vertical).max(40);
-            let index = column as usize;
-            assert_eq!(landscape.surface()[index], expected_height);
-            expected_removed += (expected_height - 40).max(0);
+        for (after, prior) in expected_surface.iter().zip(&before) {
+            expected_removed += (*after - *prior).max(0);
         }
 
         assert_eq!(
