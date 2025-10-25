@@ -8588,6 +8588,18 @@ impl Engine {
                 } => {
                     self.adjust_player_home_base_production(player_id, definition_id, delta)?;
                 }
+                PlayerCommand::GrantKnowledge {
+                    player_id,
+                    definition_id,
+                } => {
+                    self.grant_player_knowledge(player_id, definition_id)?;
+                }
+                PlayerCommand::RevokeKnowledge {
+                    player_id,
+                    definition_id,
+                } => {
+                    self.revoke_player_knowledge(player_id, &definition_id)?;
+                }
             }
         }
         Ok(())
@@ -13455,6 +13467,50 @@ global func MenuCommand(state, kind, selection)
         let follower = engine.player(2).expect("follower present");
         assert_eq!(leader.home_base_material().get("Brick"), Some(&2));
         assert_eq!(follower.home_base_material().get("Brick"), Some(&2));
+    }
+
+    #[test]
+    fn apply_player_commands_grants_player_knowledge() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(PlayerConfig::new(1, "Scholar"))
+            .expect("player registered");
+
+        engine
+            .apply_player_commands(vec![PlayerCommand::GrantKnowledge {
+                player_id: 1,
+                definition_id: "BRIK".to_string(),
+            }])
+            .expect("commands applied");
+
+        let player = engine.player(1).expect("player present");
+        assert!(
+            player.knowledge().any(|id| id == "BRIK"),
+            "player gains requested knowledge"
+        );
+    }
+
+    #[test]
+    fn apply_player_commands_revokes_player_knowledge() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(
+                PlayerConfig::new(1, "Scholar").with_knowledge(vec!["BRIK".to_string()]),
+            )
+            .expect("player registered");
+
+        engine
+            .apply_player_commands(vec![PlayerCommand::RevokeKnowledge {
+                player_id: 1,
+                definition_id: "BRIK".to_string(),
+            }])
+            .expect("commands applied");
+
+        let player = engine.player(1).expect("player present");
+        assert!(
+            player.knowledge().all(|id| id != "BRIK"),
+            "player no longer knows revoked definition"
+        );
     }
 
     #[test]

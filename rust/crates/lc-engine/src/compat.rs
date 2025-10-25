@@ -98,6 +98,14 @@ pub(crate) enum PlayerCommand {
         definition_id: DefinitionId,
         delta: i32,
     },
+    GrantKnowledge {
+        player_id: i32,
+        definition_id: DefinitionId,
+    },
+    RevokeKnowledge {
+        player_id: i32,
+        definition_id: DefinitionId,
+    },
 }
 
 impl HostWorldObject {
@@ -936,6 +944,143 @@ fn get_homebase_production(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn get_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "GetPlrKnowledge expects at least 1 argument: player",
+        ));
+    }
+
+    let player_id = value_to_i32(&args[0], "GetPlrKnowledge", "player")?;
+    let definition = parse_definition_argument(args.get(1), "GetPlrKnowledge")?;
+    let index = match args.get(2) {
+        Some(Value::Nil) | None => 0,
+        Some(value) => value_to_i32(value, "GetPlrKnowledge", "index")?,
+    };
+    let category = match args.get(3) {
+        Some(Value::Nil) | None => None,
+        Some(value) => {
+            let mask = value_to_i32(value, "GetPlrKnowledge", "category")?;
+            if mask == 0 {
+                None
+            } else {
+                Some(mask)
+            }
+        }
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+
+        if let Some(definition) = definition {
+            let known = player.knowledge.iter().any(|entry| entry == &definition);
+            return Ok(Value::Bool(known));
+        }
+
+        if index < 0 {
+            return Ok(Value::Nil);
+        }
+
+        let filtered: Vec<DefinitionId> = player
+            .knowledge
+            .iter()
+            .filter_map(|entry| {
+                let metadata = context.definition_metadata(entry)?;
+                if let Some(mask) = category {
+                    if metadata.category & mask == 0 {
+                        return None;
+                    }
+                }
+                Some(entry.clone())
+            })
+            .collect();
+
+        let idx = index as usize;
+        if idx >= filtered.len() {
+            return Ok(Value::Nil);
+        }
+
+        Ok(Value::String(filtered[idx].clone()))
+    })
+}
+
+fn set_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 3 {
+        return Err(RuntimeError::new(
+            "SetPlrKnowledge expects 3 arguments: player, definition, remove flag",
+        ));
+    }
+
+    let player_id = value_to_i32(&args[0], "SetPlrKnowledge", "player")?;
+    let definition = match parse_definition_argument(args.get(1), "SetPlrKnowledge")? {
+        Some(id) => id,
+        None => return Ok(Value::Bool(false)),
+    };
+    let remove = match args.get(2) {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Nil) | None => false,
+        Some(other) => {
+            return Err(RuntimeError::new(format!(
+                "SetPlrKnowledge: expected bool for remove flag, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+
+        if remove {
+            let Some(player) = context.player_state_mut(player_id) else {
+                return Ok(Value::Bool(false));
+            };
+            if let Some(index) = player
+                .knowledge
+                .iter()
+                .position(|entry| entry == &definition)
+            {
+                let removed = player.knowledge.remove(index);
+                context.record_player_command(PlayerCommand::RevokeKnowledge {
+                    player_id,
+                    definition_id: removed,
+                });
+                Ok(Value::Bool(true))
+            } else {
+                Ok(Value::Bool(false))
+            }
+        } else {
+            if context.definition_metadata(&definition).is_none() {
+                return Ok(Value::Bool(false));
+            }
+            let player = match context.player_state_mut(player_id) {
+                Some(player) => player,
+                None => return Ok(Value::Bool(false)),
+            };
+            let mut added = false;
+            if !player.knowledge.iter().any(|entry| entry == &definition) {
+                player.knowledge.push(definition.clone());
+                added = true;
+            }
+            if added {
+                context.record_player_command(PlayerCommand::GrantKnowledge {
+                    player_id,
+                    definition_id: definition.clone(),
+                });
+            }
+            Ok(Value::Bool(true))
+        }
+    })
+}
+
 fn do_homebase_material(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() < 3 {
         return Err(RuntimeError::new(
@@ -1593,8 +1738,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetScore", get_score);
     script.register_host_function("GetPlrValue", get_plr_value);
     script.register_host_function("GetPlrValueGain", get_plr_value_gain);
+    script.register_host_function("GetPlrKnowledge", get_plr_knowledge);
     script.register_host_function("GetCrew", get_crew);
     script.register_host_function("GetCrewCount", get_crew_count);
+    script.register_host_function("SetPlrKnowledge", set_plr_knowledge);
     script.register_host_function("SetAction", set_action);
     script.register_host_function("SetBridgeActionData", set_bridge_action_data);
     script.register_host_function("SetActionData", set_action_data);
@@ -10008,6 +10155,192 @@ mod tests {
         let args = [Value::Int(9)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_plr_value_gain(&args));
         assert_eq!(result.expect("GetPlrValueGain succeeds"), Value::Int(45));
+    }
+
+    #[test]
+    fn get_plr_knowledge_reports_known_definition() {
+        let mut player = PlayerState::default();
+        player.id = 5;
+        player.knowledge = vec!["BRIK".to_string()];
+        let definitions = HashMap::from([(
+            "BRIK".to_string(),
+            DefinitionMetadata {
+                category: 0x1,
+                ocf_base: 0,
+                crew_member: false,
+                value: 0,
+                mass: 0,
+                constructable: false,
+                shape: None,
+                construction_offset: 0,
+                basement: 0,
+            },
+        )]);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::from([(5, player)]),
+            1,
+            false,
+        );
+        let args = [Value::Int(5), Value::String("BRIK".into())];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_plr_knowledge(&args));
+
+        assert_eq!(result.expect("GetPlrKnowledge succeeds"), Value::Bool(true));
+    }
+
+    #[test]
+    fn get_plr_knowledge_returns_definition_by_index() {
+        let mut player = PlayerState::default();
+        player.id = 6;
+        player.knowledge = vec!["BRIK".to_string(), "STON".to_string()];
+        let definitions = HashMap::from([
+            (
+                "BRIK".to_string(),
+                DefinitionMetadata {
+                    category: 0x1,
+                    ocf_base: 0,
+                    crew_member: false,
+                    value: 0,
+                    mass: 0,
+                    constructable: false,
+                    shape: None,
+                    construction_offset: 0,
+                    basement: 0,
+                },
+            ),
+            (
+                "STON".to_string(),
+                DefinitionMetadata {
+                    category: 0x2,
+                    ocf_base: 0,
+                    crew_member: false,
+                    value: 0,
+                    mass: 0,
+                    constructable: false,
+                    shape: None,
+                    construction_offset: 0,
+                    basement: 0,
+                },
+            ),
+        ]);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::from([(6, player)]),
+            1,
+            false,
+        );
+        let args = [Value::Int(6), Value::Nil, Value::Int(0), Value::Int(0x2)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_plr_knowledge(&args));
+
+        assert_eq!(
+            result.expect("GetPlrKnowledge succeeds"),
+            Value::String("STON".into())
+        );
+    }
+
+    #[test]
+    fn set_plr_knowledge_grants_definition_and_records_command() {
+        let mut player = PlayerState::default();
+        player.id = 7;
+        let definitions = HashMap::from([(
+            "BRIK".to_string(),
+            DefinitionMetadata {
+                category: 0x1,
+                ocf_base: 0,
+                crew_member: false,
+                value: 0,
+                mass: 0,
+                constructable: false,
+                shape: None,
+                construction_offset: 0,
+                basement: 0,
+            },
+        )]);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::from([(7, player)]),
+            1,
+            false,
+        );
+        let args = [
+            Value::Int(7),
+            Value::String("BRIK".into()),
+            Value::Bool(false),
+        ];
+        let (result, outcome) =
+            with_effect_context(None, &[], world, 1, || set_plr_knowledge(&args));
+
+        assert_eq!(result.expect("SetPlrKnowledge succeeds"), Value::Bool(true));
+        assert_eq!(outcome.player_commands.len(), 1);
+        match &outcome.player_commands[0] {
+            PlayerCommand::GrantKnowledge {
+                player_id,
+                definition_id,
+            } => {
+                assert_eq!(*player_id, 7);
+                assert_eq!(definition_id, "BRIK");
+            }
+            other => panic!("unexpected player command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_plr_knowledge_revokes_definition_and_records_command() {
+        let mut player = PlayerState::default();
+        player.id = 8;
+        player.knowledge = vec!["BRIK".to_string()];
+        let definitions = HashMap::from([(
+            "BRIK".to_string(),
+            DefinitionMetadata {
+                category: 0x1,
+                ocf_base: 0,
+                crew_member: false,
+                value: 0,
+                mass: 0,
+                constructable: false,
+                shape: None,
+                construction_offset: 0,
+                basement: 0,
+            },
+        )]);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::from([(8, player)]),
+            1,
+            false,
+        );
+        let args = [
+            Value::Int(8),
+            Value::String("BRIK".into()),
+            Value::Bool(true),
+        ];
+        let (result, outcome) =
+            with_effect_context(None, &[], world, 1, || set_plr_knowledge(&args));
+
+        assert_eq!(result.expect("SetPlrKnowledge succeeds"), Value::Bool(true));
+        assert_eq!(outcome.player_commands.len(), 1);
+        match &outcome.player_commands[0] {
+            PlayerCommand::RevokeKnowledge {
+                player_id,
+                definition_id,
+            } => {
+                assert_eq!(*player_id, 8);
+                assert_eq!(definition_id, "BRIK");
+            }
+            other => panic!("unexpected player command: {other:?}"),
+        }
     }
 
     #[test]
