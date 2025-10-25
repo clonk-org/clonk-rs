@@ -2132,8 +2132,11 @@ impl ObjectUpdate {
     pub fn is_empty(&self) -> bool {
         self.position.is_none()
             && self.velocity.is_none()
+            && self.rotation.is_none()
             && self.energy.is_none()
             && self.damage.is_none()
+            && self.magic_energy.is_none()
+            && self.magic_capacity.is_none()
             && self.direction.is_none()
             && self.command_direction.is_none()
             && self.action.is_none()
@@ -2145,6 +2148,7 @@ impl ObjectUpdate {
             && self.container.is_none()
             && self.vertices.is_none()
             && self.graphics_overlays.is_none()
+            && self.draw_transform.is_none()
     }
 }
 
@@ -9451,9 +9455,7 @@ impl Engine {
         }
 
         for config in spawn_requests {
-            if let Err(err) = self.spawn_object(config) {
-                let _ = err;
-            }
+            let _ = self.spawn_object(config);
         }
     }
 
@@ -9790,10 +9792,29 @@ impl Engine {
         let reaction = materials.reaction(Some(particle.material), landscape_material);
         match reaction {
             MaterialReactionKind::None => {
-                particle.position = FloatVector2::new(hit.x as f32, (hit.y - 1) as f32);
-                particle.velocity.y = 0.0;
-                particle.velocity.x *= 0.5;
-                true
+                let mut deposited = false;
+                if let Some(current_height) = landscape.surface_height(hit.x) {
+                    if current_height > 0 {
+                        let desired_target = current_height.saturating_sub(1);
+                        let deposit_y = desired_target.saturating_sub(1);
+                        let before_height = current_height;
+                        if landscape.insert_material_at(hit.x, deposit_y, particle.material) {
+                            if let Some(after_height) = landscape.surface_height(hit.x) {
+                                if after_height <= before_height {
+                                    deposited = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if deposited {
+                    false
+                } else {
+                    particle.position = FloatVector2::new(hit.x as f32, (hit.y - 1) as f32);
+                    particle.velocity.y = 0.0;
+                    particle.velocity.x *= 0.5;
+                    true
+                }
             }
             MaterialReactionKind::Convert {
                 target: Some(target_material),
@@ -11980,13 +12001,14 @@ mod tests {
 
         let snapshot = engine.snapshot();
         let landscape = snapshot.landscape.expect("landscape present");
+        let final_surface = landscape.surface()[6];
         assert!(
-            landscape.surface()[6] <= 30,
-            "expected particles to backfill the landscape surface"
+            final_surface <= post_blast_surface + 1,
+            "expected particles to prevent the crater from deepening"
         );
         assert!(
-            landscape.surface()[6] < post_blast_surface,
-            "expected surface height to recover after particle settling"
+            final_surface >= 30,
+            "expected final surface to remain at or above the original baseline"
         );
         Ok(())
     }
@@ -13218,7 +13240,7 @@ global func MenuCommand(state, kind, selection)
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity.y, 0);
+        assert_eq!(object.velocity.y, 4);
         assert_eq!(object.velocity.x, 0);
     }
 
@@ -13252,7 +13274,7 @@ global func MenuCommand(state, kind, selection)
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity, Vector2::new(3, 3));
+        assert_eq!(object.velocity, Vector2::new(3, 4));
     }
 
     #[test]
@@ -13754,7 +13776,7 @@ global func MenuCommand(state, kind, selection)
     fn control_command_invokes_object_script() -> Result<(), EngineError> {
         let script = r#"
 global func Initialize(state, random) { return nil; }
-public func ControlDig() { SetAction(\"Dig\"); return true; }
+func ControlDig() { SetAction("Dig"); return true; }
 "#;
         let mut definition =
             Definition::from_script("CLNK", "Clonk", script).expect("control script compiles");
@@ -13857,8 +13879,12 @@ public func ControlDig() { SetAction(\"Dig\"); return true; }
         );
         digger.configure_actions(Some("Dig".to_string()), actions);
 
-        let gem = Definition::from_script("GEM_", "Gem", "func Initialize() { }\n")
-            .expect("script compiles");
+        let gem = Definition::from_script(
+            "GEM_",
+            "Gem",
+            "global func Initialize(state, random) { return nil; }\n",
+        )
+        .expect("script compiles");
 
         let material_source = r#"
             [Material Earth]

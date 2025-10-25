@@ -189,12 +189,10 @@ impl ActionProcedure {
                     magnitude
                 }
             }
-            ActionProcedure::Flight
-            | ActionProcedure::Hang
-            | ActionProcedure::Attach
-            | ActionProcedure::Scale => 0,
+            ActionProcedure::Hang | ActionProcedure::Attach | ActionProcedure::Scale => 0,
             ActionProcedure::Dig => 0,
             ActionProcedure::Undefined
+            | ActionProcedure::Flight
             | ActionProcedure::Walk
             | ActionProcedure::Kneel
             | ActionProcedure::Throw

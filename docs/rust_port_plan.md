@@ -229,7 +229,8 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 
 **What's Needed:**
 - [ ] Verify ALL action procedures work:
-  - Walk, Jump, WalkTo, Hangle, Swim, Dive
+  - [x] Jump / Flight parity (gravity + regression test)
+  - Walk, WalkTo, Hangle, Swim, Dive
   - Dig, Push, Lift, Throw, Build
   - Attach, Scale, Tumble, Dead
 - [ ] Object-to-object interaction (enter buildings, collect items)
@@ -240,6 +241,8 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - [ ] FindObject queries
 - [ ] CreateObject spawning
 - [ ] RemoveObject deletion
+
+**Progress (2025-12-24):** Jump actions now use legacy gravity (Flight procedure) and are covered by `flight_procedure_applies_gravity`; engine snapshots refreshed.
 
 **Files:** lc-engine action system, lc-script host functions
 
@@ -272,6 +275,8 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - [ ] Material conversion (temperature-based)
 - [ ] Dig2Object (materials spawn objects when dug)
 - [ ] Blast2Object (blast spawns objects/particles)
+
+**Progress (2025-12-24):** Material particle settling prevents craters from deepening further and updated the landscape regression to reflect the behaviour.
 
 **Files:** lc-engine/src/landscape.rs, lc-engine/src/material.rs
 

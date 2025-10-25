@@ -19,8 +19,11 @@
           "x": 1,
           "y": -1
         },
+        "rotation": 0,
         "energy": 64,
         "damage": 0,
+        "magic_energy": 0,
+        "magic_capacity": 0,
         "action": {
           "name": "Idle",
           "phase": 1,
@@ -40,7 +43,8 @@
         "owner": -1,
         "category": 1,
         "crew_member": false,
-        "alive": true
+        "alive": true,
+        "graphics_overlays": []
       }
     ],
     "environment": {
@@ -52,7 +56,7 @@
         "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
-        "temperature": -1,
+        "temperature": 0,
         "climate": 0,
         "temperature_variation": 0,
         "temperature_period": 0,
@@ -73,7 +77,7 @@
         "no_gamma": true
       },
       "wind_force": 0,
-      "ambient_temperature": -1,
+      "ambient_temperature": 0,
       "precipitation": 0,
       "sky_color": {
         "r": 12,
@@ -412,8 +416,11 @@
           "x": 3,
           "y": -2
         },
+        "rotation": 0,
         "energy": 58,
         "damage": 0,
+        "magic_energy": 0,
+        "magic_capacity": 0,
         "action": {
           "name": "Idle",
           "phase": 2,
@@ -433,7 +440,8 @@
         "owner": -1,
         "category": 1,
         "crew_member": false,
-        "alive": true
+        "alive": true,
+        "graphics_overlays": []
       },
       {
         "id": 2,
@@ -446,8 +454,11 @@
           "x": 0,
           "y": -1
         },
+        "rotation": 0,
         "energy": 24,
         "damage": 0,
+        "magic_energy": 0,
+        "magic_capacity": 0,
         "action": {
           "name": "Idle",
           "phase": 0,
@@ -467,7 +478,8 @@
         "owner": 1,
         "category": 1,
         "crew_member": false,
-        "alive": true
+        "alive": true,
+        "graphics_overlays": []
       }
     ],
     "environment": {
@@ -479,7 +491,7 @@
         "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
-        "temperature": -2,
+        "temperature": 0,
         "climate": 0,
         "temperature_variation": 0,
         "temperature_period": 0,
@@ -500,7 +512,7 @@
         "no_gamma": true
       },
       "wind_force": 0,
-      "ambient_temperature": -2,
+      "ambient_temperature": 0,
       "precipitation": 0,
       "sky_color": {
         "r": 12,
@@ -813,8 +825,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
     "transfer_zones": [],
     "audio": []
@@ -839,8 +851,11 @@
           "x": 3,
           "y": -1
         },
+        "rotation": 0,
         "energy": 58,
         "damage": 0,
+        "magic_energy": 0,
+        "magic_capacity": 0,
         "action": {
           "name": "Idle",
           "phase": 3,
@@ -860,7 +875,8 @@
         "owner": -1,
         "category": 1,
         "crew_member": false,
-        "alive": true
+        "alive": true,
+        "graphics_overlays": []
       },
       {
         "id": 2,
@@ -873,8 +889,11 @@
           "x": 0,
           "y": 0
         },
+        "rotation": 0,
         "energy": 24,
         "damage": 0,
+        "magic_energy": 0,
+        "magic_capacity": 0,
         "action": {
           "name": "Idle",
           "phase": 1,
@@ -894,7 +913,8 @@
         "owner": 1,
         "category": 1,
         "crew_member": false,
-        "alive": true
+        "alive": true,
+        "graphics_overlays": []
       }
     ],
     "environment": {
@@ -906,7 +926,7 @@
         "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
-        "temperature": -3,
+        "temperature": 0,
         "climate": 0,
         "temperature_variation": 0,
         "temperature_period": 0,
@@ -927,7 +947,7 @@
         "no_gamma": true
       },
       "wind_force": 0,
-      "ambient_temperature": -3,
+      "ambient_temperature": 0,
       "precipitation": 0,
       "sky_color": {
         "r": 12,
@@ -1266,8 +1286,11 @@
           "x": 3,
           "y": 0
         },
+        "rotation": 0,
         "energy": 58,
         "damage": 0,
+        "magic_energy": 0,
+        "magic_capacity": 0,
         "action": {
           "name": "Idle",
           "phase": 4,
@@ -1287,7 +1310,8 @@
         "owner": -1,
         "category": 1,
         "crew_member": false,
-        "alive": true
+        "alive": true,
+        "graphics_overlays": []
       },
       {
         "id": 2,
@@ -1300,8 +1324,11 @@
           "x": 0,
           "y": 1
         },
+        "rotation": 0,
         "energy": 24,
         "damage": 0,
+        "magic_energy": 0,
+        "magic_capacity": 0,
         "action": {
           "name": "Idle",
           "phase": 2,
@@ -1321,7 +1348,8 @@
         "owner": 1,
         "category": 1,
         "crew_member": false,
-        "alive": true
+        "alive": true,
+        "graphics_overlays": []
       }
     ],
     "environment": {
@@ -1333,7 +1361,7 @@
         "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
-        "temperature": -4,
+        "temperature": 0,
         "climate": 0,
         "temperature_variation": 0,
         "temperature_period": 0,
@@ -1354,7 +1382,7 @@
         "no_gamma": true
       },
       "wind_force": 0,
-      "ambient_temperature": -4,
+      "ambient_temperature": 0,
       "precipitation": 0,
       "sky_color": {
         "r": 12,
@@ -1667,8 +1695,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
     "transfer_zones": [],
     "audio": []
@@ -1693,8 +1721,11 @@
           "x": 0,
           "y": 2
         },
+        "rotation": 0,
         "energy": 24,
         "damage": 0,
+        "magic_energy": 0,
+        "magic_capacity": 0,
         "action": {
           "name": "Idle",
           "phase": 3,
@@ -1714,7 +1745,8 @@
         "owner": 1,
         "category": 1,
         "crew_member": false,
-        "alive": true
+        "alive": true,
+        "graphics_overlays": []
       }
     ],
     "environment": {
@@ -1726,7 +1758,7 @@
         "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
-        "temperature": -5,
+        "temperature": 0,
         "climate": 0,
         "temperature_variation": 0,
         "temperature_period": 0,
@@ -1747,7 +1779,7 @@
         "no_gamma": true
       },
       "wind_force": 0,
-      "ambient_temperature": -5,
+      "ambient_temperature": 0,
       "precipitation": 0,
       "sky_color": {
         "r": 12,
@@ -2060,8 +2092,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Helper": 1,
-      "Commander": 1
+      "Commander": 1,
+      "Helper": 1
     },
     "transfer_zones": [],
     "audio": []
@@ -2086,8 +2118,11 @@
           "x": 0,
           "y": 3
         },
+        "rotation": 0,
         "energy": 24,
         "damage": 0,
+        "magic_energy": 0,
+        "magic_capacity": 0,
         "action": {
           "name": "Idle",
           "phase": 4,
@@ -2107,7 +2142,8 @@
         "owner": 1,
         "category": 1,
         "crew_member": false,
-        "alive": true
+        "alive": true,
+        "graphics_overlays": []
       }
     ],
     "environment": {
@@ -2119,7 +2155,7 @@
         "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
-        "temperature": -6,
+        "temperature": 0,
         "climate": 0,
         "temperature_variation": 0,
         "temperature_period": 0,
@@ -2140,7 +2176,7 @@
         "no_gamma": true
       },
       "wind_force": 0,
-      "ambient_temperature": -6,
+      "ambient_temperature": 0,
       "precipitation": 0,
       "sky_color": {
         "r": 12,
@@ -2453,8 +2489,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Helper": 1,
-      "Commander": 1
+      "Commander": 1,
+      "Helper": 1
     },
     "transfer_zones": [],
     "audio": []

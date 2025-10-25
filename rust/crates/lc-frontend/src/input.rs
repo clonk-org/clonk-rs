@@ -319,12 +319,12 @@ fn handle_down_interaction(engine: &mut Engine, owner: i32) -> Result<(), Engine
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use lc_engine::ocf;
     use lc_engine::{
         ActionSpec, ActionState, ControlButton, Definition, MovementProfile, ObjectId,
         PlayerConfig, SpawnConfig, Vector2, OWNER_NONE,
     };
+    use std::collections::HashMap;
 
     const WALKER_SCRIPT: &str = r#"
 global func Initialize(state, random) { return nil; }
