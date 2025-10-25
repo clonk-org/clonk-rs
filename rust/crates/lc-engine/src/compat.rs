@@ -39,6 +39,7 @@ thread_local! {
 }
 
 const OWNER_ANY: i32 = -2;
+const MATERIAL_NONE: i32 = -1;
 const ANY_CONTAINER_SENTINEL: i32 = 123;
 const NO_CONTAINER_SENTINEL: i32 = 124;
 const MAX_VERTEX_COUNT: i32 = 30;
@@ -1614,6 +1615,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GBackSemiSolid", g_back_semi_solid);
     script.register_host_function("GBackLiquid", g_back_liquid);
     script.register_host_function("GBackSky", g_back_sky);
+    script.register_host_function("GetMaterial", get_material);
     script.register_host_function("SetDir", set_dir);
     script.register_host_function("GetDir", get_dir);
     script.register_host_function("SetComDir", set_com_dir);
@@ -1996,10 +1998,12 @@ fn format_script_string(
                 let raw = match param {
                     Value::String(text) => text.clone(),
                     Value::Nil => "(null)".to_string(),
-                    other => return Err(RuntimeError::new(format!(
+                    other => {
+                        return Err(RuntimeError::new(format!(
                         "{function}: string format placeholder requires string argument, got {}",
                         other.type_name()
-                    ))),
+                    )))
+                    }
                 };
                 let truncated = truncate_to_precision(&raw, precision);
                 output.push_str(&pad_left(&truncated, width_value));
@@ -5409,6 +5413,39 @@ fn fallback_without_context(query: LandscapeQuery) -> bool {
         LandscapeQuery::Sky => true,
         LandscapeQuery::Solid | LandscapeQuery::SemiSolid | LandscapeQuery::Liquid => false,
     }
+}
+
+fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 2 {
+        return Err(RuntimeError::new("GetMaterial expects 2 arguments: x, y"));
+    }
+
+    let local_x = value_to_i32(&args[0], "GetMaterial", "x")?;
+    let local_y = value_to_i32(&args[1], "GetMaterial", "y")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Int(MATERIAL_NONE)),
+        };
+
+        let mut global_x = local_x;
+        let mut global_y = local_y;
+        if let Some(object) = context.object_context() {
+            let position = object.effective_position();
+            global_x = global_x.saturating_add(position.x);
+            global_y = global_y.saturating_add(position.y);
+        }
+
+        let material = context
+            .landscape_ref()
+            .and_then(|landscape| landscape.material_at(global_x, global_y));
+        let result = material
+            .map(|material_id| material_id.index() as i32)
+            .unwrap_or(MATERIAL_NONE);
+        Ok(Value::Int(result))
+    })
 }
 
 fn find_object(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -9725,6 +9762,83 @@ mod tests {
             (Value::Bool(solid), Value::Bool(sky)) => assert_eq!(sky, !solid),
             other => panic!("expected bool results, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn get_material_returns_mnone_without_context() {
+        let (result, _) = with_effect_context(None, &[], HostWorldContext::default(), 1, || {
+            get_material(&[Value::Int(0), Value::Int(0)])
+        });
+        assert_eq!(
+            result.expect("GetMaterial without context succeeds"),
+            Value::Int(MATERIAL_NONE)
+        );
+    }
+
+    #[test]
+    fn get_material_reports_solid_material_from_landscape() {
+        let material = crate::MaterialId::new(3).expect("material id");
+        let landscape = Landscape::flat_with_material(32, 10, Some(material));
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            get_material(&[Value::Int(5), Value::Int(12)])
+        });
+        let expected = Value::Int(material.index() as i32);
+        assert_eq!(
+            result.expect("GetMaterial with landscape succeeds"),
+            expected
+        );
+    }
+
+    #[test]
+    fn get_material_applies_object_relative_coordinates() {
+        let material = crate::MaterialId::new(2).expect("material id");
+        let landscape = Landscape::flat_with_material(24, 12, Some(material));
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            5,
+            false,
+        );
+        let object_id = ObjectId::new(11);
+        let object_context = HostObjectContext::new(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            100,
+            OWNER_NONE,
+            Vector2::new(3, 4),
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+        let (result, _) = with_effect_context(Some(object_context), &[], world, 6, || {
+            get_material(&[Value::Int(0), Value::Int(8)])
+        });
+        assert_eq!(
+            result.expect("GetMaterial with object succeeds"),
+            Value::Int(material.index() as i32)
+        );
     }
 
     #[test]
