@@ -322,11 +322,12 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [x] Day/night lighting changes
 - [x] Sky parallax scrolling
 - [x] Weather transitions
-- [ ] Climate zones (temperature varies by height)
+ - [x] Climate zones (temperature varies by height)
 
 **Files:** lc-engine/src/sky.rs, rust/crates/lc-frontend/src/lib.rs, rust/crates/lc-engine/src/lib.rs
 
 **Progress (2025-10-25):** Precipitation overlay now renders after world composition so rain and snow appear onscreen; added `precipitation_renders_over_world` regression test in `rust/crates/lc-frontend/src/lib.rs` to guard the behavior.
+**Progress (2025-10-25):** Engine now derives per-height ambient temperatures using the legacy climate/temperature range, applies them to solid and liquid conversions, and exposes regression coverage so lower strata warm up while high-altitude columns stay cold (`rust/crates/lc-engine/src/lib.rs`, `rust/crates/lc-engine/src/landscape.rs`).
 **Progress (2026-02-23):** Weather updates now advance wind-driven physics, day/night tinting, and parallax rendering per the existing regression suite, and lightning strikes launch the legacy `FXL1` effect by calling its `Activate` callback from `tick_weather_events`, verified by the new `lightning_event_spawns_effect_and_calls_activate` engine test.
 
 ---

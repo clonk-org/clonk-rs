@@ -1522,6 +1522,19 @@ impl EnvironmentSettings {
         base.saturating_sub(delta)
     }
 
+    pub fn temperature_at_height(&self, frame: u64, y: i32, world_height: i32) -> i32 {
+        let ambient = self.ambient_temperature(frame);
+        if world_height <= 0 {
+            return ambient.clamp(-100, 100);
+        }
+        let clamped_height = y.clamp(0, world_height);
+        let fraction = clamped_height as f32 / world_height as f32;
+        let gradient = (fraction * 2.0) - 1.0;
+        let max_offset = (self.temperature_range / 2).clamp(0, 50);
+        let offset = (gradient * max_offset as f32).round() as i32;
+        ambient.saturating_add(offset).clamp(-100, 100)
+    }
+
     pub fn advance_frame(&mut self, rng: &mut ChaCha8Rng) {
         self.refresh_runtime_fields();
         self.update_season();
@@ -6889,8 +6902,7 @@ impl Engine {
         if let Some(sky) = &mut self.sky {
             sky.advance(&self.environment);
         }
-        let ambient_temperature = self.environment.ambient_temperature(self.frame);
-        self.apply_landscape_temperature_conversions(ambient_temperature);
+        self.apply_landscape_temperature_conversions();
         self.tick_player_systems();
         if self.scenario_script.is_some() {
             let snapshot = self.snapshot();
@@ -9895,12 +9907,14 @@ impl Engine {
         Ok(())
     }
 
-    fn apply_landscape_temperature_conversions(&mut self, ambient_temperature: i32) {
+    fn apply_landscape_temperature_conversions(&mut self) {
         if self.materials.is_empty() {
             return;
         }
         if let Some(landscape) = self.landscape.as_mut() {
-            landscape.apply_temperature_conversions(&self.materials, ambient_temperature);
+            let environment = self.environment;
+            let frame = self.frame;
+            landscape.apply_temperature_conversions(&self.materials, &environment, frame);
         }
     }
 
@@ -15954,6 +15968,28 @@ func ControlDig() { SetAction("Dig"); return true; }
         assert_eq!(settings.ambient_temperature(0), 15);
         assert_eq!(settings.ambient_temperature(3), 23);
         assert_eq!(settings.ambient_temperature(9), 7);
+    }
+
+    #[test]
+    fn temperature_at_height_respects_gradient() {
+        let settings = EnvironmentSettings::new(0)
+            .with_temperature(0)
+            .with_climate(0)
+            .with_temperature_range(40);
+        let world_height = 200;
+        let top = settings.temperature_at_height(0, 0, world_height);
+        let middle = settings.temperature_at_height(0, world_height / 2, world_height);
+        let bottom = settings.temperature_at_height(0, world_height, world_height);
+
+        assert_eq!(middle, settings.ambient_temperature(0));
+        assert!(
+            top < middle,
+            "expected top of map to be colder than mid level"
+        );
+        assert!(
+            bottom > middle,
+            "expected bottom of map to be warmer than mid level"
+        );
     }
 
     #[test]
