@@ -418,12 +418,14 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
   - Object manipulation (CreateObject, RemoveObject, etc.)
   - Player functions (GetCrew, GetMaterial, etc.)
   - Landscape functions (Dig, Blast, etc.)
-  - Message functions (Message, PlayerMessage, etc.)
+  - [x] Message functions (Message, PlayerMessage, etc.)
   - Math/utility functions
 - [ ] Effect system (AddEffect, RemoveEffect, callbacks)
 - [ ] Global script execution
 - [ ] Scenario script control
 - [ ] Script debugging output
+
+**Progress (2025-10-25):** Implemented `Message`, `PlayerMessage`, `AddMessage`, and `PlrMessage` host functions with legacy `%` formatter parity, speech playback, and regression coverage so scripted HUD output matches the C++ engine.
 
 **Files:** lc-script, host function registration in lc-engine
 

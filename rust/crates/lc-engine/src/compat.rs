@@ -6,8 +6,8 @@ use std::rc::Rc;
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::math::integer_distance;
 use crate::message::{
-    MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, HORIZONTAL_POSITION_FLAGS,
-    VERTICAL_POSITION_FLAGS,
+    MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_MULTIPLE,
+    HORIZONTAL_POSITION_FLAGS, VERTICAL_POSITION_FLAGS,
 };
 use crate::ocf;
 #[cfg(test)]
@@ -1588,6 +1588,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CreateParticle", create_particle);
     script.register_host_function("ClearParticles", clear_particles);
     script.register_host_function("CustomMessage", custom_message);
+    script.register_host_function("Message", message);
+    script.register_host_function("PlayerMessage", player_message);
+    script.register_host_function("AddMessage", add_message);
+    script.register_host_function("PlrMessage", plr_message);
     script.register_host_function("Contents", contents);
     script.register_host_function("ContentsCount", contents_count);
     script.register_host_function("FindContents", find_contents);
@@ -1642,6 +1646,350 @@ pub(crate) fn enter_random_context(rng: ChaCha8Rng) -> RandomContextGuard {
             context: Some(context),
         }
     })
+}
+
+const LEGACY_DEFAULT_MESSAGE_COLOR: u32 = 0x00ff_ffff;
+
+fn value_to_data_string(value: &Value) -> String {
+    match value {
+        Value::Nil => "nil".to_string(),
+        Value::Int(i) => i.to_string(),
+        Value::Bool(true) => "true".to_string(),
+        Value::Bool(false) => "false".to_string(),
+        Value::String(text) => format!("\"{text}\""),
+        Value::Array(values) => {
+            let inner = values
+                .iter()
+                .map(value_to_data_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{inner}]")
+        }
+        Value::Proplist(entries) => {
+            if entries.is_empty() {
+                "{}".to_string()
+            } else {
+                let mut items: Vec<_> = entries.iter().collect();
+                items.sort_by(|a, b| a.0.cmp(b.0));
+                let inner = items
+                    .into_iter()
+                    .map(|(key, value)| format!("{key} = {}", value_to_data_string(value)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{ {inner} }}")
+            }
+        }
+    }
+}
+
+fn format_int_value(value: &Value, function: &str) -> Result<i32, RuntimeError> {
+    match value {
+        Value::Int(i) => Ok(*i),
+        Value::Bool(flag) => Ok(if *flag { 1 } else { 0 }),
+        Value::Nil => Ok(0),
+        other => Err(RuntimeError::new(format!(
+            "{function}: expected integer-compatible value for format placeholder, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn render_c4id(raw: i32) -> String {
+    if raw == 0 {
+        return "NONE".to_string();
+    }
+    if (0..=9999).contains(&raw) {
+        return format!("{raw:04}");
+    }
+    let bytes = (raw as u32).to_le_bytes();
+    let mut text = String::new();
+    for byte in bytes {
+        if byte == 0 {
+            break;
+        }
+        text.push(byte as char);
+    }
+    if text.is_empty() {
+        "NONE".to_string()
+    } else {
+        text
+    }
+}
+
+fn format_c4id_string(value: &Value, function: &str) -> Result<String, RuntimeError> {
+    match value {
+        Value::Int(raw) => Ok(render_c4id(*raw)),
+        Value::String(text) if !text.is_empty() => Ok(text.clone()),
+        Value::String(_) | Value::Nil => Ok("NONE".to_string()),
+        other => Err(RuntimeError::new(format!(
+            "{function}: expected C4ID-compatible value for format placeholder, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn format_decimal(
+    value: i32,
+    width: Option<usize>,
+    precision: Option<usize>,
+    zero_pad: bool,
+) -> String {
+    let sign = if value < 0 { "-" } else { "" };
+    let magnitude = if value < 0 {
+        -(i64::from(value))
+    } else {
+        i64::from(value)
+    };
+    let mut digits = if precision == Some(0) && magnitude == 0 {
+        String::new()
+    } else {
+        magnitude.abs().to_string()
+    };
+    if let Some(prec) = precision {
+        if digits.len() < prec {
+            let pad = "0".repeat(prec - digits.len());
+            digits = format!("{pad}{digits}");
+        }
+    }
+    let mut result = if sign.is_empty() {
+        digits.clone()
+    } else {
+        format!("{sign}{digits}")
+    };
+    if let Some(width) = width {
+        if result.len() < width {
+            let pad_len = width - result.len();
+            if zero_pad && precision.is_none() {
+                let pad = "0".repeat(pad_len);
+                if sign.is_empty() {
+                    result = format!("{pad}{digits}");
+                } else {
+                    result = format!("-{pad}{digits}");
+                }
+            } else {
+                let pad = " ".repeat(pad_len);
+                result = format!("{pad}{result}");
+            }
+        }
+    }
+    result
+}
+
+fn format_hex(
+    value: i32,
+    width: Option<usize>,
+    precision: Option<usize>,
+    zero_pad: bool,
+    uppercase: bool,
+) -> String {
+    let raw = value as u32;
+    let mut digits = if precision == Some(0) && raw == 0 {
+        String::new()
+    } else if uppercase {
+        format!("{raw:X}")
+    } else {
+        format!("{raw:x}")
+    };
+    if let Some(prec) = precision {
+        if digits.len() < prec {
+            let pad = "0".repeat(prec - digits.len());
+            digits = format!("{pad}{digits}");
+        }
+    }
+    let mut result = digits.clone();
+    if let Some(width) = width {
+        if result.len() < width {
+            let pad_len = width - result.len();
+            if zero_pad && precision.is_none() {
+                let pad = "0".repeat(pad_len);
+                result = format!("{pad}{digits}");
+            } else {
+                let pad = " ".repeat(pad_len);
+                result = format!("{pad}{result}");
+            }
+        }
+    }
+    result
+}
+
+fn truncate_to_precision(text: &str, precision: Option<usize>) -> String {
+    match precision {
+        Some(limit) => text.chars().take(limit).collect(),
+        None => text.to_string(),
+    }
+}
+
+fn pad_left(text: &str, width: Option<usize>) -> String {
+    match width {
+        Some(width) => {
+            let len = text.chars().count();
+            if len >= width {
+                text.to_string()
+            } else {
+                let pad = " ".repeat(width - len);
+                format!("{pad}{text}")
+            }
+        }
+        None => text.to_string(),
+    }
+}
+
+fn format_script_string(
+    function: &str,
+    format_str: &str,
+    params: &[Value],
+) -> Result<String, RuntimeError> {
+    let mut output = String::new();
+    let mut chars = format_str.chars().peekable();
+    let mut arg_index = 0usize;
+
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            output.push(ch);
+            continue;
+        }
+
+        if matches!(chars.peek(), Some('%')) {
+            chars.next();
+            output.push('%');
+            continue;
+        }
+
+        let mut zero_pad = false;
+        let mut width_value: Option<usize> = None;
+        let mut first_width_digit: Option<char> = None;
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_digit() {
+                if first_width_digit.is_none() {
+                    first_width_digit = Some(c);
+                }
+                width_value =
+                    Some(width_value.unwrap_or(0) * 10 + c.to_digit(10).unwrap() as usize);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        if matches!(first_width_digit, Some('0')) && width_value.unwrap_or(0) > 0 {
+            zero_pad = true;
+        }
+
+        let mut precision: Option<usize> = None;
+        if matches!(chars.peek(), Some('.')) {
+            chars.next();
+            let mut digits = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_ascii_digit() {
+                    digits.push(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            precision = Some(digits.parse::<usize>().unwrap_or(0));
+        }
+
+        let spec = match chars.next() {
+            Some(c) => c,
+            None => {
+                output.push('%');
+                break;
+            }
+        };
+
+        match spec {
+            'd' => {
+                let param = params.get(arg_index).ok_or_else(|| {
+                    RuntimeError::new(format!("{function}: format placeholder without parameter"))
+                })?;
+                arg_index += 1;
+                let value = format_int_value(param, function)?;
+                output.push_str(&format_decimal(value, width_value, precision, zero_pad));
+            }
+            'x' => {
+                let param = params.get(arg_index).ok_or_else(|| {
+                    RuntimeError::new(format!("{function}: format placeholder without parameter"))
+                })?;
+                arg_index += 1;
+                let value = format_int_value(param, function)?;
+                output.push_str(&format_hex(value, width_value, precision, zero_pad, false));
+            }
+            'X' => {
+                let param = params.get(arg_index).ok_or_else(|| {
+                    RuntimeError::new(format!("{function}: format placeholder without parameter"))
+                })?;
+                arg_index += 1;
+                let value = format_int_value(param, function)?;
+                output.push_str(&format_hex(value, width_value, precision, zero_pad, true));
+            }
+            'c' => {
+                let param = params.get(arg_index).ok_or_else(|| {
+                    RuntimeError::new(format!("{function}: format placeholder without parameter"))
+                })?;
+                arg_index += 1;
+                let code = format_int_value(param, function)? as u32;
+                let ch = char::from_u32(code).unwrap_or('?');
+                output.push_str(&pad_left(&ch.to_string(), width_value));
+            }
+            'i' => {
+                let param = params.get(arg_index).ok_or_else(|| {
+                    RuntimeError::new(format!("{function}: format placeholder without parameter"))
+                })?;
+                arg_index += 1;
+                let text = format_c4id_string(param, function)?;
+                let truncated = truncate_to_precision(&text, precision);
+                output.push_str(&pad_left(&truncated, width_value));
+            }
+            's' => {
+                let param = params.get(arg_index).ok_or_else(|| {
+                    RuntimeError::new(format!("{function}: format placeholder without parameter"))
+                })?;
+                arg_index += 1;
+                let raw = match param {
+                    Value::String(text) => text.clone(),
+                    Value::Nil => "(null)".to_string(),
+                    other => return Err(RuntimeError::new(format!(
+                        "{function}: string format placeholder requires string argument, got {}",
+                        other.type_name()
+                    ))),
+                };
+                let truncated = truncate_to_precision(&raw, precision);
+                output.push_str(&pad_left(&truncated, width_value));
+            }
+            'v' => {
+                let param = params.get(arg_index).ok_or_else(|| {
+                    RuntimeError::new(format!("{function}: format placeholder without parameter"))
+                })?;
+                arg_index += 1;
+                let text = if matches!(param, Value::Nil) {
+                    "0".to_string()
+                } else {
+                    value_to_data_string(param)
+                };
+                output.push_str(&pad_left(&text, width_value));
+            }
+            '%' => output.push('%'),
+            other => {
+                output.push('%');
+                output.push(other);
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+fn extract_speech_segment(raw: &str) -> Option<String> {
+    let mut segments = raw.splitn(3, '$');
+    segments.next()?;
+    segments
+        .next()
+        .map(|segment| segment.to_string())
+        .filter(|segment| !segment.is_empty())
+}
+
+fn extract_message_text(formatted: &str) -> String {
+    formatted.split('$').next().unwrap_or("").to_string()
 }
 
 fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -1772,6 +2120,295 @@ fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_mut()
             .ok_or_else(|| RuntimeError::new("CustomMessage requires an active engine context"))?;
         context.register_message(MessageCommand::Add(spec));
+        Ok(Value::Bool(true))
+    })
+}
+
+fn message(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "Message expects at least 1 argument: message",
+        ));
+    }
+
+    let raw_message = match &args[0] {
+        Value::String(text) => text.clone(),
+        Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Message: expected string for message, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let target_raw = if let Some(arg) = args.get(1) {
+        parse_object_reference_argument(arg, "Message", "target")?.map(|id| id.as_u64())
+    } else {
+        None
+    };
+
+    let format_args = if args.len() > 2 { &args[2..] } else { &[] };
+    let formatted = format_script_string("Message", &raw_message, format_args)?;
+    let display_text = extract_message_text(&formatted);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("Message requires an active engine context"))?;
+
+        let mut played_speech = false;
+        if let Some(sound) = extract_speech_segment(&raw_message) {
+            if !sound.is_empty() {
+                let speech_target = target_raw
+                    .map(ObjectId::new)
+                    .or_else(|| context.object_context().map(|object| object.id()));
+                context
+                    .audio_mut()
+                    .play_sound(&sound, speech_target, 100, false, false, None);
+                played_speech = true;
+            }
+        }
+
+        if !played_speech {
+            let text = display_text.clone();
+            if !text.trim().is_empty() {
+                let spec = MessageSpec {
+                    kind: if target_raw.is_some() {
+                        MessageKind::Target
+                    } else {
+                        MessageKind::Global
+                    },
+                    text,
+                    target: target_raw.map(ObjectId::new),
+                    player: None,
+                    offset: Vector2::ZERO,
+                    color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+                    flags: 0,
+                    width: None,
+                    decoration: None,
+                    portrait: None,
+                };
+                context.register_message(MessageCommand::Add(spec));
+            }
+        }
+
+        Ok(Value::Bool(true))
+    })
+}
+
+fn resolve_target_player(context: &EffectHostContext, player_id: i32) -> Option<i32> {
+    if player_id >= 0 && context.player_state(player_id).is_some() {
+        Some(player_id)
+    } else {
+        None
+    }
+}
+
+fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 2 {
+        return Err(RuntimeError::new(
+            "PlayerMessage expects at least 2 arguments: player and message",
+        ));
+    }
+
+    let player_id = value_to_i32(&args[0], "PlayerMessage", "player")?;
+    let raw_message = match &args[1] {
+        Value::String(text) => text.clone(),
+        Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "PlayerMessage: expected string for message, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let target_raw = if let Some(arg) = args.get(2) {
+        parse_object_reference_argument(arg, "PlayerMessage", "target")?.map(|id| id.as_u64())
+    } else {
+        None
+    };
+
+    let format_args = if args.len() > 3 { &args[3..] } else { &[] };
+    let formatted = format_script_string("PlayerMessage", &raw_message, format_args)?;
+    let display_text = extract_message_text(&formatted);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("PlayerMessage requires an active engine context"))?;
+
+        let resolved_player = resolve_target_player(context, player_id);
+
+        let mut played_speech = false;
+        if let Some(sound) = extract_speech_segment(&raw_message) {
+            if !sound.is_empty() {
+                let speech_target = target_raw
+                    .map(ObjectId::new)
+                    .or_else(|| context.object_context().map(|object| object.id()));
+                context
+                    .audio_mut()
+                    .play_sound(&sound, speech_target, 100, false, false, None);
+                played_speech = true;
+            }
+        }
+
+        if !played_speech {
+            let text = display_text.clone();
+            if !text.trim().is_empty() {
+                let kind = match (target_raw.is_some(), resolved_player.is_some()) {
+                    (true, true) => MessageKind::TargetPlayer,
+                    (true, false) => MessageKind::Target,
+                    (false, true) => MessageKind::GlobalPlayer,
+                    (false, false) => MessageKind::Global,
+                };
+                let spec = MessageSpec {
+                    kind,
+                    text,
+                    target: target_raw.map(ObjectId::new),
+                    player: resolved_player,
+                    offset: Vector2::ZERO,
+                    color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+                    flags: 0,
+                    width: None,
+                    decoration: None,
+                    portrait: None,
+                };
+                context.register_message(MessageCommand::Add(spec));
+            }
+        }
+
+        Ok(Value::Bool(true))
+    })
+}
+
+fn add_message(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "AddMessage expects at least 1 argument: message",
+        ));
+    }
+
+    let raw_message = match &args[0] {
+        Value::String(text) => text.clone(),
+        Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "AddMessage: expected string for message, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let target_raw = if let Some(arg) = args.get(1) {
+        parse_object_reference_argument(arg, "AddMessage", "target")?.map(|id| id.as_u64())
+    } else {
+        None
+    };
+
+    let format_args = if args.len() > 2 { &args[2..] } else { &[] };
+    let formatted = format_script_string("AddMessage", &raw_message, format_args)?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("AddMessage requires an active engine context"))?;
+
+        let text = formatted.clone();
+        if !text.trim().is_empty() {
+            let spec = MessageSpec {
+                kind: if target_raw.is_some() {
+                    MessageKind::Target
+                } else {
+                    MessageKind::Global
+                },
+                text,
+                target: target_raw.map(ObjectId::new),
+                player: None,
+                offset: Vector2::ZERO,
+                color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+                flags: FLAG_MULTIPLE,
+                width: None,
+                decoration: None,
+                portrait: None,
+            };
+            context.register_message(MessageCommand::Add(spec));
+        }
+
+        Ok(Value::Bool(true))
+    })
+}
+
+fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 2 {
+        return Err(RuntimeError::new(
+            "PlrMessage expects at least 2 arguments: message and player",
+        ));
+    }
+
+    let raw_message = match &args[0] {
+        Value::String(text) => text.clone(),
+        Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "PlrMessage: expected string for message, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let player_id = value_to_i32(&args[1], "PlrMessage", "player")?;
+    let format_args = if args.len() > 2 { &args[2..] } else { &[] };
+    let formatted = format_script_string("PlrMessage", &raw_message, format_args)?;
+    let display_text = extract_message_text(&formatted);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("PlrMessage requires an active engine context"))?;
+
+        let resolved_player = resolve_target_player(context, player_id);
+
+        let mut played_speech = false;
+        if let Some(sound) = extract_speech_segment(&raw_message) {
+            if !sound.is_empty() {
+                let speech_target = context.object_context().map(|object| object.id());
+                context
+                    .audio_mut()
+                    .play_sound(&sound, speech_target, 100, false, false, None);
+                played_speech = true;
+            }
+        }
+
+        if !played_speech {
+            let text = display_text.clone();
+            if !text.trim().is_empty() {
+                let kind = if resolved_player.is_some() {
+                    MessageKind::GlobalPlayer
+                } else {
+                    MessageKind::Global
+                };
+                let spec = MessageSpec {
+                    kind,
+                    text,
+                    target: None,
+                    player: resolved_player,
+                    offset: Vector2::ZERO,
+                    color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+                    flags: 0,
+                    width: None,
+                    decoration: None,
+                    portrait: None,
+                };
+                context.register_message(MessageCommand::Add(spec));
+            }
+        }
+
         Ok(Value::Bool(true))
     })
 }
@@ -8756,6 +9393,7 @@ mod tests {
     use super::*;
     use crate::ocf;
     use crate::ActionSpec;
+    use crate::AudioCommand;
     use proptest::prelude::*;
     use rand::{Rng, SeedableRng};
     use std::collections::HashMap;
@@ -8833,6 +9471,99 @@ mod tests {
         let result = func();
         let delta = guard.finish();
         (result, delta)
+    }
+
+    #[test]
+    fn message_formats_and_registers_global_message() {
+        let args = [
+            Value::String("Score %03d".into()),
+            Value::Nil,
+            Value::Int(7),
+        ];
+        let (result, outcome) = with_object_host_context(|| message(&args));
+        assert_eq!(result.expect("Message succeeds"), Value::Bool(true));
+        assert_eq!(outcome.messages.len(), 1);
+        match &outcome.messages[0] {
+            MessageCommand::Add(spec) => {
+                assert_eq!(spec.kind, MessageKind::Global);
+                assert_eq!(spec.text, "Score 007");
+                assert!(spec.target.is_none());
+                assert!(spec.player.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn message_with_speech_only_emits_audio() {
+        let args = [Value::String("Hello$Horn".into())];
+        let (result, outcome) = with_object_host_context(|| message(&args));
+        assert_eq!(result.expect("Message succeeds"), Value::Bool(true));
+        assert!(outcome.messages.is_empty());
+        assert_eq!(outcome.audio.events.len(), 1);
+        match &outcome.audio.events[0] {
+            AudioCommand::PlaySound {
+                name,
+                volume,
+                looped,
+                ..
+            } => {
+                assert_eq!(name, "Horn");
+                assert_eq!(*volume, 100);
+                assert!(!looped);
+            }
+            other => panic!("expected PlaySound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn player_message_targets_valid_player() {
+        let mut player = PlayerState::default();
+        player.id = 1;
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let args = [Value::Int(1), Value::String("Hi there".into())];
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || player_message(&args));
+        assert_eq!(result.expect("PlayerMessage succeeds"), Value::Bool(true));
+        assert_eq!(outcome.messages.len(), 1);
+        match &outcome.messages[0] {
+            MessageCommand::Add(spec) => {
+                assert_eq!(spec.kind, MessageKind::GlobalPlayer);
+                assert_eq!(spec.player, Some(1));
+                assert_eq!(spec.text, "Hi there");
+            }
+        }
+    }
+
+    #[test]
+    fn add_message_sets_multiple_flag() {
+        let args = [Value::String("Queued".into())];
+        let (result, outcome) = with_object_host_context(|| add_message(&args));
+        assert_eq!(result.expect("AddMessage succeeds"), Value::Bool(true));
+        assert_eq!(outcome.messages.len(), 1);
+        match &outcome.messages[0] {
+            MessageCommand::Add(spec) => {
+                assert_eq!(spec.flags & FLAG_MULTIPLE, FLAG_MULTIPLE);
+                assert_eq!(spec.text, "Queued");
+            }
+        }
+    }
+
+    #[test]
+    fn plr_message_degrades_to_global_when_player_missing() {
+        let args = [Value::String("Warning".into()), Value::Int(42)];
+        let (result, outcome) = with_object_host_context(|| plr_message(&args));
+        assert_eq!(result.expect("PlrMessage succeeds"), Value::Bool(true));
+        assert_eq!(outcome.messages.len(), 1);
+        match &outcome.messages[0] {
+            MessageCommand::Add(spec) => {
+                assert_eq!(spec.kind, MessageKind::Global);
+                assert!(spec.player.is_none());
+                assert_eq!(spec.text, "Warning");
+            }
+        }
     }
 
     #[test]
