@@ -2,7 +2,7 @@
 
 ## Current Problem
 
-Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios from installation are not discovered/loaded properly. The game is not playable with real content.
+Core scenarios boot, but complex object procedures (push/build/inventory) still diverge from C++ once gameplay interactions begin.
 
 ## Required for Exact C++ Parity
 
@@ -230,9 +230,9 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 **What's Needed:**
 - [ ] Verify ALL action procedures work:
   - [x] Jump / Flight parity (gravity + regression test)
-  - Walk, WalkTo, Hangle, Swim, Dive
-  - Dig, Push, Lift, Throw, Build
-  - Attach, Scale, Tumble, Dead
+  - [x] Walk / WalkTo / Hangle / Swim / Dive
+  - [ ] Dig / Push / Lift / Throw / Build
+  - [ ] Attach / Scale / Tumble / Dead
 - [ ] Object-to-object interaction (enter buildings, collect items)
 - [ ] Inventory system (crew contents)
 - [ ] Production (buildings create items)
@@ -243,8 +243,9 @@ Running `cargo run` shows ONLY a "Sandbox Scenario" fallback. Real scenarios fro
 - [ ] RemoveObject deletion
 
 **Progress (2025-12-24):** Jump actions now use legacy gravity (Flight procedure) and are covered by `flight_procedure_applies_gravity`; engine snapshots refreshed.
+**Progress (2025-12-27):** Added regression tests for WalkTo, Hangle, and Swim procedures plus Dive/Tumble/Dead procedure mapping so legacy movement matches C++ expectation.
 
-**Files:** lc-engine action system, lc-script host functions
+**Files:** lc-engine action system, lc-engine/tests
 
 ---
 

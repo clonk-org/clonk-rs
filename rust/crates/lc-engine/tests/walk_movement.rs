@@ -92,3 +92,36 @@ fn walk_procedure_accelerates_and_brakes() -> Result<(), Box<dyn std::error::Err
 
     Ok(())
 }
+
+#[test]
+fn walkto_action_uses_walk_procedure() -> Result<(), Box<dyn std::error::Error>> {
+    let mut engine = Engine::new();
+    let mut definition = Definition::from_script("Walker", "Walker", WALKER_SCRIPT)?;
+    let mut actions = HashMap::new();
+    actions.insert(
+        "WalkTo".to_string(),
+        ActionSpec::default().with_procedure("Walk"),
+    );
+    definition.configure_actions(Some("WalkTo".to_string()), actions);
+    definition.set_movement_profile(
+        MovementProfile::default()
+            .with_walk_speed(6)
+            .with_walk_acceleration(2),
+    );
+    engine.register_definition(definition)?;
+
+    let object_id = engine.spawn_object(
+        SpawnConfig::new("Walker")
+            .with_action(ActionState::new("WalkTo"))
+            .with_command_direction(CommandDirection::Right),
+    )?;
+
+    let snapshot = engine.tick()?;
+    let object = snapshot
+        .object(object_id)
+        .expect("object must exist after first WalkTo tick");
+    assert_eq!(object.velocity.x, 2);
+    assert_eq!(object.direction, Direction::Right);
+
+    Ok(())
+}

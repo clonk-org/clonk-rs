@@ -169,6 +169,10 @@ impl ActionProcedure {
             "fight" => ActionProcedure::Fight,
             "connect" => ActionProcedure::Connect,
             "pull" => ActionProcedure::Pull,
+            "walkto" => ActionProcedure::Walk,
+            "dive" => ActionProcedure::Swim,
+            "tumble" => ActionProcedure::Flight,
+            "dead" | "dead2" => ActionProcedure::Flight,
             _ => ActionProcedure::Other,
         }
     }
