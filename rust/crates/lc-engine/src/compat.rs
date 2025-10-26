@@ -25,6 +25,7 @@ use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use std::mem;
+use tracing::{debug, info};
 
 thread_local! {
     static HOST_CONTEXT: RefCell<Option<EffectHostContext>> = const { RefCell::new(None) };
@@ -1789,6 +1790,9 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("PlayerMessage", player_message);
     script.register_host_function("AddMessage", add_message);
     script.register_host_function("PlrMessage", plr_message);
+    script.register_host_function("Log", log_message);
+    script.register_host_function("DebugLog", debug_log_message);
+    script.register_host_function("Format", format_string);
     script.register_host_function("Contents", contents);
     script.register_host_function("ContentsCount", contents_count);
     script.register_host_function("FindContents", find_contents);
@@ -2321,6 +2325,71 @@ fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
         context.register_message(MessageCommand::Add(spec));
         Ok(Value::Bool(true))
     })
+}
+
+enum LogLevel {
+    Info,
+    Debug,
+}
+
+fn log_internal(function: &str, args: &[Value], level: LogLevel) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(format!(
+            "{function} expects at least 1 argument: message",
+        )));
+    }
+
+    let format_str = match &args[0] {
+        Value::String(text) => text.clone(),
+        Value::Nil => String::new(),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "{function}: expected string for message, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let format_args = if args.len() > 1 { &args[1..] } else { &[] };
+    let formatted = format_script_string(function, &format_str, format_args)?;
+
+    match level {
+        LogLevel::Info => info!(target: "lc-script", "{}", formatted),
+        LogLevel::Debug => debug!(target: "lc-script", "{}", formatted),
+    }
+
+    Ok(Value::Bool(true))
+}
+
+fn log_message(args: &[Value]) -> Result<Value, RuntimeError> {
+    log_internal("Log", args, LogLevel::Info)
+}
+
+fn debug_log_message(args: &[Value]) -> Result<Value, RuntimeError> {
+    log_internal("DebugLog", args, LogLevel::Debug)
+}
+
+fn format_string(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "Format expects at least 1 argument: format",
+        ));
+    }
+
+    let format_str = match &args[0] {
+        Value::String(text) => text.clone(),
+        Value::Nil => String::new(),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Format: expected string for format, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let format_args = if args.len() > 1 { &args[1..] } else { &[] };
+    let formatted = format_script_string("Format", &format_str, format_args)?;
+    Ok(Value::String(formatted))
 }
 
 fn message(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -9629,6 +9698,12 @@ mod tests {
     use proptest::prelude::*;
     use rand::{Rng, SeedableRng};
     use std::collections::HashMap;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::{subscriber, Level};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+    use tracing_subscriber::registry::Registry;
 
     fn empty_state() -> Value {
         let mut map = HashMap::new();
@@ -9703,6 +9778,67 @@ mod tests {
         let result = func();
         let delta = guard.finish();
         (result, delta)
+    }
+
+    #[derive(Debug)]
+    struct RecordedEvent {
+        level: Level,
+        target: String,
+        message: String,
+    }
+
+    #[derive(Clone)]
+    struct RecordingLayer {
+        records: Arc<Mutex<Vec<RecordedEvent>>>,
+    }
+
+    impl RecordingLayer {
+        fn new(records: Arc<Mutex<Vec<RecordedEvent>>>) -> Self {
+            Self { records }
+        }
+    }
+
+    impl<S> Layer<S> for RecordingLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = MessageVisitor::default();
+            event.record(&mut visitor);
+            let message = visitor.message.unwrap_or_default();
+            let record = RecordedEvent {
+                level: *event.metadata().level(),
+                target: event.metadata().target().to_string(),
+                message,
+            };
+            self.records.lock().unwrap().push(record);
+        }
+    }
+
+    #[derive(Default)]
+    struct MessageVisitor {
+        message: Option<String>,
+    }
+
+    impl Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            if field.name() == "message" {
+                let mut text = format!("{value:?}");
+                if let Some(stripped) = text
+                    .strip_prefix('"')
+                    .and_then(|inner| inner.strip_suffix('"'))
+                {
+                    text = stripped.to_string();
+                }
+                self.message = Some(text);
+            }
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "message" {
+                self.message = Some(value.to_string());
+            }
+        }
     }
 
     #[test]
@@ -9796,6 +9932,55 @@ mod tests {
                 assert_eq!(spec.text, "Warning");
             }
         }
+    }
+
+    #[test]
+    fn format_applies_legacy_placeholders() {
+        let args = [
+            Value::String("Crew %03d %i %s %v %%".into()),
+            Value::Int(7),
+            Value::String("CLNK".into()),
+            Value::String("Ready".into()),
+            Value::Int(5),
+        ];
+        let result = format_string(&args).expect("Format succeeds");
+        assert_eq!(result, Value::String("Crew 007 CLNK Ready 5 %".into()));
+    }
+
+    #[test]
+    fn log_message_emits_info_event_with_script_target() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let layer = RecordingLayer::new(Arc::clone(&records));
+        let subscriber = Registry::default().with(layer);
+        subscriber::with_default(subscriber, || {
+            let args = [Value::String("Log %02d".into()), Value::Int(3)];
+            let result = log_message(&args).expect("Log succeeds");
+            assert_eq!(result, Value::Bool(true));
+        });
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.level, Level::INFO);
+        assert_eq!(record.target, "lc-script");
+        assert_eq!(record.message, "Log 03");
+    }
+
+    #[test]
+    fn debug_log_message_emits_debug_event_with_script_target() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let layer = RecordingLayer::new(Arc::clone(&records));
+        let subscriber = Registry::default().with(layer);
+        subscriber::with_default(subscriber, || {
+            let args = [Value::String("Debug %d".into()), Value::Int(42)];
+            let result = debug_log_message(&args).expect("DebugLog succeeds");
+            assert_eq!(result, Value::Bool(true));
+        });
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.level, Level::DEBUG);
+        assert_eq!(record.target, "lc-script");
+        assert_eq!(record.message, "Debug 42");
     }
 
     #[test]

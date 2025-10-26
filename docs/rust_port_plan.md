@@ -420,16 +420,17 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
   - Player functions (GetCrew, GetMaterial, etc.) — GetCrew/GetCrewCount/GetMaterial/GetPlrKnowledge/SetPlrKnowledge ported; inventory queries pending
   - Landscape functions (Dig, Blast, etc.)
   - [x] Message functions (Message, PlayerMessage, etc.)
-  - Math/utility functions
+  - [x] Math/utility functions (Format, Log, DebugLog)
 - [ ] Effect system (AddEffect, RemoveEffect, callbacks)
 - [ ] Global script execution
 - [ ] Scenario script control
-- [ ] Script debugging output
+- [x] Script debugging output
 
 **Progress (2025-10-25):** Implemented `Message`, `PlayerMessage`, `AddMessage`, and `PlrMessage` host functions with legacy `%` formatter parity, speech playback, and regression coverage so scripted HUD output matches the C++ engine.
 **Progress (2028-02-19):** Ported `GetCrew`/`GetCrewCount` host functions against the Rust player state, returning legacy object references and `nil` for out-of-range slots with regression coverage to guard crew-order parity.
 **Progress (2028-04-27):** Ported `GetMaterial` into the Rust compatibility layer, mirroring C++ object-relative coordinates, returning `MNone` when the landscape lacks material, and covering it with regression tests in `rust/crates/lc-engine/src/compat.rs`.
 **Progress (2025-10-25):** Added `GetPlrKnowledge`/`SetPlrKnowledge` to the Rust host layer, mirroring LegacyClonk’s knowledge checks, recording engine synchronization commands, and covering both grants and revokes with regression tests in `lc-engine::compat` and engine-level command handling.
+**Progress (2028-05-20):** Added parity `Format`, `Log`, and `DebugLog` host functions so scripts can format data and emit debug output through the Rust tracing pipeline, backed by unit tests in `rust/crates/lc-engine/src/compat.rs`.
 
 **Files:** lc-script, host function registration in lc-engine
 
