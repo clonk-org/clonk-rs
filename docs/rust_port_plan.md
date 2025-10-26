@@ -1,6 +1,6 @@
 # LegacyClonk C++ → Rust Port Plan
 
-**Updated:** 2025-10-26 | **Goal:** Run ALL real scenarios with exact C++ parity | **Status:** ⛔ BLOCKED
+**Updated:** 2025-10-27 | **Goal:** Run ALL real scenarios with exact C++ parity | **Status:** ⛔ BLOCKED
 
 ---
 
@@ -8,7 +8,7 @@
 
 - **P0 BLOCKERS:** AI command system still partial (Acquire/Buy persist across saves; long-tail commands still missing)
 - **Scenario Discovery:** ✅ Official content repo wired; menu now lists full scenario catalog
-- **Current State:** Build compiles; workspace tests green; Build + Exit commands implemented in command stack
+- **Current State:** Build compiles; workspace tests green; Build/Exit/Grab/UnGrab commands implemented in command stack
 - **Next 48h:** Keep engine tests green; sketch AI command trait; triage panics
 - **Exit Criteria:** P0 cleared + CI green + smoke tests pass
 
@@ -24,14 +24,14 @@
 ---
 
 ### 1. AI Command System — PARTIAL ⚠️
-**Problem:** Command stack covers MoveTo/Follow/Enter/Exit/Build/Attack/Acquire/Buy/Energy; Grab/Throw/Chop/Dig/etc. remain unported so many C++ behaviours still unavailable
-**Evidence:** `command::tests::exit_moves_into_parent_container_when_nested` + `command::tests::exit_leaves_container_when_no_parent` ensure Exit parity; `command::tests::acquire_requests_move_for_nearby_item` verifies ground pickup pathing; `compat::tests::set_command_clears_stack_and_pushes_command` still green
+**Problem:** Command stack covers MoveTo/Follow/Enter/Exit/Build/Attack/Acquire/Buy/Energy + Grab/UnGrab; Throw/Chop/Dig/etc. remain unported so many C++ behaviours still unavailable
+**Evidence:** `command::tests::exit_moves_into_parent_container_when_nested` + `command::tests::exit_leaves_container_when_no_parent` ensure Exit parity; `command::tests::acquire_requests_move_for_nearby_item` verifies ground pickup pathing; `command::tests::grab_starts_push_when_in_range` + `command::tests::ungrab_sets_idle_and_completes` cover push/release flow; `compat::tests::set_command_clears_stack_and_pushes_command` still green
 **C++ Has:** 30 commands (Follow, MoveTo, Build, Attack, etc.) via `C4Command.cpp`
-**Rust Has:** Command trait infrastructure + MoveTo/Follow/Enter/Exit/Build/Attack + Acquire for loose items, shared-container withdrawal, cross-container exit heuristics, Buy commands that deduct home base stock/wealth, spawn purchased items in bases, and hand off targeted shop purchases, plus Energy line-kit handshake; command stack snapshots persist across engine saves and scenario exports
-**Impact:** Build automation works (crew picks up components, honours material requirements); Exit mirrors C++ nested-container behaviour and stops builders before ejecting; Energize follows loose line-kit pickups; merchant/shop buys succeed and survive save/load; broader command coverage still missing
+**Rust Has:** Command trait infrastructure + MoveTo/Follow/Enter/Exit/Build/Attack + Acquire for loose items, shared-container withdrawal, cross-container exit heuristics; Buy commands that deduct home base stock/wealth, spawn purchased items in bases, and hand off targeted shop purchases; Energy line-kit handshake; Grab/UnGrab mirror C++ push start/stop (auto queues UnGrab when switching targets); command stack snapshots persist across engine saves and scenario exports
+**Impact:** Build automation works (crew picks up components, honours material requirements); Exit mirrors C++ nested-container behaviour and stops builders before ejecting; Grab reproduces push engagement and respects hang/build dig-outs; Energize follows loose line-kit pickups; merchant/shop buys succeed and survive save/load; broader command coverage still missing
 **Next:**
 1. Expand tests to cover queue chaining, failure recovery, and scenario parity
-2. Implement remaining command types (Grab/UnGrab/Throw/Chop/Jump/Wait/Get/Put/Drop/Dig/Activate/PushTo/Construct/Transfer/Context/Sell/Retry/Home/Call/Take/Take2) and associated movement heuristics
+2. Implement remaining command types (Throw/Chop/Jump/Wait/Get/Put/Drop/Dig/Activate/PushTo/Construct/Transfer/Context/Sell/Retry/Home/Call/Take/Take2) and associated movement heuristics
 
 **Accept:** `AddCommand("MoveTo", ...)` and `SetCommand("Build", ...)` reproduce C++ behaviour across parity scenarios
 **Owner:** TBD | **ETA:** Weeks 2-4 | **Risk:** HIGH (large system, hidden deps)
@@ -75,7 +75,7 @@
 | **Tests** | ✅ Working | `cargo test --workspace` passes | TBD |
 | **Scenario Discovery** | ✅ Working | content/ assets discovered; sandbox no longer sole entry | TBD |
 | **Scenario Loading** | ⚠️ Unknown | Needs real scenarios to test | TBD |
-| **AI Commands** | ⚠️ Partial | MoveTo/Follow/Enter/Exit/Build/Attack + Acquire handles loose/container/cross-container pickups; Buy spawns base purchases and targeted hand-offs; command persistence landed; remaining commands (Grab/Throw/etc.) still pending | TBD |
+| **AI Commands** | ⚠️ Partial | MoveTo/Follow/Enter/Exit/Build/Attack + Acquire + Grab/UnGrab handle loose/container/cross-container pickups; Buy spawns base purchases and targeted hand-offs; command persistence landed; remaining commands (Throw/Chop/etc.) still pending | TBD |
 | **Graphics Rendering** | ✅ Implemented | Code exists; needs verification | TBD |
 | **Player Input** | ✅ Implemented | Keyboard/mouse/gamepad code exists | TBD |
 | **Landscape** | ✅ Implemented | Dig/blast/materials code exists | TBD |
@@ -101,6 +101,7 @@
 ✅ **AI Build Command:** Rust `SetCommand("Build")` starts construction, respects component requirements
 ✅ **AI Follow/Attack:** Command stack issues MoveTo + direction updates mirroring baseline C4 behaviour (unit tested)
 ✅ **AI Acquire/Buy:** Shared/container/cross-container pulls mirrored via command events; base + targeted shop purchases adjust wealth/spawn objects (`command::tests::buy_spawns_item_and_updates_player_state`, `command::tests::buy_collects_item_from_explicit_target`)
+✅ **AI Grab/UnGrab:** Push engagement + release parity covered by unit tests (`command::tests::grab_starts_push_when_in_range`, `command::tests::ungrab_sets_idle_and_completes`)
 ✅ **AI Enter Command:** Crew enter structures when in range; MoveTo fallback covers distance (`command::tests::enter_enters_target_when_in_range`, `command::tests::enter_requests_move_when_far`)
 ✅ **Command Persistence:** Command stack state captured and restored across saves (`command::tests::command_stack_snapshot_preserves_acquire_state`)
 

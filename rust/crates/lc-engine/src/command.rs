@@ -403,6 +403,267 @@ mod tests {
     }
 
     #[test]
+    fn grab_requests_move_when_far() {
+        let actor_id = ObjectId::new(200);
+        let target_id = ObjectId::new(300);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(0, 0);
+        actor.command_direction = CommandDirection::Left;
+        actor.action_procedure = ActionProcedure::Walk;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(60, 0);
+        target.ocf = ocf::GRAB | ocf::AVAILABLE;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(target.id, target.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = GrabState::from_request(
+            &CommandRequest::new(CommandId::Grab).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        let update = result
+            .update
+            .expect("grab should stop actor before requesting movement");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert!(result.events.is_empty());
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.tx, Some(target.position.x));
+                assert_eq!(request.ty, Some(target.position.y));
+                assert_eq!(request.update_interval, 50);
+            }
+            other => panic!("unexpected operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn grab_starts_push_when_in_range() {
+        let actor_id = ObjectId::new(310);
+        let target_id = ObjectId::new(320);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(10, 10);
+        actor.command_direction = CommandDirection::Right;
+        actor.action_procedure = ActionProcedure::Walk;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(14, 12);
+        target.ocf = ocf::GRAB | ocf::AVAILABLE;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(target.id, target);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 1,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = GrabState::from_request(
+            &CommandRequest::new(CommandId::Grab).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.operations.is_empty());
+        let update = result.update.expect("grab should update action");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        let action = update.action.expect("grab should set push action");
+        assert_eq!(action.name.as_deref(), Some("Push"));
+        assert_eq!(action.target, Some(Some(target_id)));
+    }
+
+    #[test]
+    fn grab_completes_when_already_pushing_target() {
+        let actor_id = ObjectId::new(330);
+        let target_id = ObjectId::new(340);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Push;
+        actor.action_target = Some(target_id);
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.ocf = ocf::GRAB | ocf::AVAILABLE;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(target.id, target);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 2,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = GrabState::from_request(
+            &CommandRequest::new(CommandId::Grab).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.update.is_none());
+        assert!(result.operations.is_empty());
+    }
+
+    #[test]
+    fn grab_requests_ungrab_when_pushing_other_target() {
+        let actor_id = ObjectId::new(350);
+        let target_id = ObjectId::new(360);
+        let other_id = ObjectId::new(361);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Push;
+        actor.action_target = Some(other_id);
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(15, 0);
+        target.ocf = ocf::GRAB | ocf::AVAILABLE;
+
+        let mut other = snapshot_with_id(other_id.as_u64());
+        other.ocf = ocf::GRAB | ocf::AVAILABLE;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(target.id, target);
+        objects.insert(other.id, other);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 3,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = GrabState::from_request(
+            &CommandRequest::new(CommandId::Grab).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none());
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::UnGrab);
+                assert_eq!(request.update_interval, 50);
+            }
+            other => panic!("unexpected operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ungrab_sets_idle_and_completes() {
+        let actor_id = ObjectId::new(370);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Push;
+        actor.command_direction = CommandDirection::Left;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 4,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = UnGrabState::from_request(&CommandRequest::new(CommandId::UnGrab));
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result.update.expect("ungrab should update actor");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        let action = update.action.expect("ungrab should reset action");
+        assert_eq!(action.name.as_deref(), Some("Idle"));
+        assert_eq!(action.target, Some(None));
+    }
+
+    #[test]
+    fn ungrab_completes_without_update_when_not_pushing() {
+        let actor_id = ObjectId::new(380);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Walk;
+        actor.command_direction = CommandDirection::Stop;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 5,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = UnGrabState::from_request(&CommandRequest::new(CommandId::UnGrab));
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.update.is_none());
+        assert!(result.operations.is_empty());
+    }
+
+    #[test]
     fn exit_completes_when_not_contained() {
         let actor_id = ObjectId::new(51);
         let actor = snapshot_with_id(actor_id.as_u64());
@@ -2345,6 +2606,195 @@ impl BuildState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct GrabState {
+    target: ObjectId,
+    offset_x: i32,
+    offset_y: i32,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    last_move_order: Option<u64>,
+    ungrab_requested: bool,
+}
+
+impl GrabState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let target = request.target.ok_or(CommandError::Unsupported)?;
+        Ok(Self {
+            target,
+            offset_x: request.tx.unwrap_or(0),
+            offset_y: request.ty.unwrap_or(0),
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            last_move_order: None,
+            ungrab_requested: false,
+        })
+    }
+
+    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn should_issue_move(&mut self, frame: u64) -> bool {
+        const MOVE_COOLDOWN: u64 = 12;
+        match self.last_move_order {
+            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
+            _ => {
+                self.last_move_order = Some(frame);
+                true
+            }
+        }
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        if ctx.object.action_procedure == ActionProcedure::Push
+            && ctx.object.action_target == Some(self.target)
+        {
+            return CommandStepResult::completed(self.update_to_stop(ctx));
+        }
+
+        let target_snapshot = match ctx.resolve(self.target) {
+            Some(snapshot) => snapshot,
+            None => {
+                let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
+                return CommandStepResult::failed(Some(update));
+            }
+        };
+
+        if !target_snapshot.is_active() {
+            let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
+            return CommandStepResult::failed(Some(update));
+        }
+
+        let mut pending_update = self.update_to_stop(ctx);
+
+        if matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Build
+                | ActionProcedure::Chop
+                | ActionProcedure::Dig
+                | ActionProcedure::Hang
+                | ActionProcedure::Scale
+        ) {
+            let idle_action = ActionUpdate::default().with_name("Idle").with_force(true);
+            let update = pending_update.take().unwrap_or_else(ObjectUpdate::new);
+            pending_update = Some(update.with_action_update(idle_action));
+        }
+
+        if ctx.object.action_procedure == ActionProcedure::Push
+            && ctx.object.action_target != Some(self.target)
+        {
+            if !self.ungrab_requested {
+                self.ungrab_requested = true;
+                let request = CommandRequest::new(CommandId::UnGrab)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::Sub);
+                let mut result = CommandStepResult::running(pending_update);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
+            return CommandStepResult::running(pending_update);
+        }
+
+        let approach_position = Vector2::new(
+            target_snapshot.position.x + self.offset_x,
+            target_snapshot.position.y + self.offset_y,
+        );
+
+        let dx = target_snapshot.position.x - ctx.position.x;
+        let dy = target_snapshot.position.y - ctx.position.y;
+        const GRAB_RANGE: i32 = 8;
+        let can_grab_here = ctx.object.container.is_none()
+            && dx.abs() <= GRAB_RANGE
+            && dy.abs() <= GRAB_RANGE
+            && (target_snapshot.ocf & ocf::GRAB) != 0;
+
+        if can_grab_here {
+            let mut update = pending_update.unwrap_or_else(ObjectUpdate::new);
+            let action_update = ActionUpdate::default()
+                .with_name("Push")
+                .with_target(Some(self.target))
+                .with_force(true)
+                .with_phase(0)
+                .with_ticks(0);
+            update = update.with_action_update(action_update);
+            return CommandStepResult::running(Some(update));
+        }
+
+        if self.should_issue_move(ctx.frame) {
+            let request = CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(approach_position.x))
+                .with_ty(Some(approach_position.y))
+                .with_update_interval(50);
+            let mut result = CommandStepResult::running(pending_update);
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
+        }
+
+        CommandStepResult::running(pending_update)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct UnGrabState {
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+}
+
+impl UnGrabState {
+    fn from_request(request: &CommandRequest) -> Self {
+        Self {
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+        }
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        let mut needs_update = false;
+        let mut update = ObjectUpdate::new();
+
+        if ctx.object.command_direction != CommandDirection::Stop {
+            update = update.with_command_direction(CommandDirection::Stop);
+            needs_update = true;
+        }
+
+        if ctx.object.action_procedure == ActionProcedure::Push {
+            let action_update = ActionUpdate::default()
+                .with_name("Idle")
+                .with_target(None)
+                .with_force(true);
+            update = update.with_action_update(action_update);
+            needs_update = true;
+        }
+
+        if needs_update {
+            CommandStepResult::completed(Some(update))
+        } else {
+            CommandStepResult::completed(None)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FollowState {
     target: ObjectId,
     update_interval: u32,
@@ -3211,6 +3661,8 @@ enum CommandState {
     Enter(EnterState),
     Exit(ExitState),
     Build(BuildState),
+    Grab(GrabState),
+    UnGrab(UnGrabState),
     Attack(AttackState),
     Buy(BuyState),
     Acquire(AcquireState),
@@ -3231,6 +3683,8 @@ impl ActiveCommand {
             CommandId::Enter => CommandState::Enter(EnterState::from_request(&request)?),
             CommandId::Exit => CommandState::Exit(ExitState::from_request(&request)?),
             CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
+            CommandId::Grab => CommandState::Grab(GrabState::from_request(&request)?),
+            CommandId::UnGrab => CommandState::UnGrab(UnGrabState::from_request(&request)),
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
             CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
             CommandId::Acquire => CommandState::Acquire(AcquireState::from_request(&request)?),
@@ -3256,6 +3710,8 @@ impl ActiveCommand {
             CommandState::Enter(state) => state.step(ctx),
             CommandState::Exit(state) => state.step(ctx),
             CommandState::Build(state) => state.step(ctx),
+            CommandState::Grab(state) => state.step(ctx),
+            CommandState::UnGrab(state) => state.step(ctx),
             CommandState::Attack(state) => state.step(ctx),
             CommandState::Buy(state) => state.step(ctx),
             CommandState::Acquire(state) => state.step(ctx),
