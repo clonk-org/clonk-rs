@@ -69,6 +69,12 @@ impl Engine {
         self.host_functions.insert(name.into(), Arc::new(func));
     }
 
+    pub fn host_function_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.host_functions.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     pub fn clear_host_functions(&mut self) {
         self.host_functions.clear();
     }

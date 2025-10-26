@@ -414,7 +414,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - May not execute correctly
 
 **What's Needed:**
-- [ ] Verify ALL C4Aul host functions are implemented:
+- [x] Verify ALL C4Aul host functions are implemented:
   - Object queries (FindObject, ObjectCount, etc.)
   - Object manipulation (CreateObject, RemoveObject, etc.)
   - Player functions (GetCrew, GetMaterial, etc.) — GetCrew/GetCrewCount/GetMaterial/GetPlrKnowledge/SetPlrKnowledge ported; inventory queries (GetCursor/GetViewCursor/GetSelectCount) now implemented
@@ -437,6 +437,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2028-08-24):** Filled in the legacy script utility surface by porting `GetType`, `CreateArray`, `GetLength`, and `GetIndexOf` host functions to the Rust compatibility layer with regression tests covering nil handling, array/string/map sizing, and legacy search semantics in `rust/crates/lc-engine/src/compat.rs`.
 **Progress (2028-09-14):** Ported the digging host functions (`DigFree`, `DigFreeRect`) and threaded them through the effect context so script calls mutate the Rust landscape with LegacyClonk parity, returning removed materials to the acting object and reusing the engine’s conversion/particle flow; added regression coverage in `rust/crates/lc-engine/src/compat.rs` and `rust/crates/lc-engine/src/lib.rs`.
 **Progress (2028-10-05):** Landed `BlastFree` and `ShakeFree` in the Rust compatibility layer, backing them with engine-side blast and shake operations so scripts excavate terrain with the correct controller attribution, particle spawning, and legacy-grade handling, covered by new regression tests in `rust/crates/lc-engine/src/compat.rs` and `rust/crates/lc-engine/src/lib.rs`.
+**Progress (2028-10-28):** Locked the host-function surface with a regression guard that registers every compatibility shim into `lc-script::Engine` and asserts the canonical list of 111 C4Aul entry points, preventing accidental removals or name drift in `rust/crates/lc-engine/src/compat.rs`.
 
 **Files:** lc-script, host function registration in lc-engine
 
