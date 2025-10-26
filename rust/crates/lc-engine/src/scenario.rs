@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use image::{load_from_memory, ImageError};
-use lc_resources::definition::ActionFacet as ResourceActionFacet;
+use lc_resources::definition::{
+    ActionFacet as ResourceActionFacet, DefinitionGraphicsVariant as ResourceGraphicsVariant,
+};
 use lc_resources::{
     ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap, ColorByOwnerMask,
     DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
@@ -104,6 +106,7 @@ struct ScenarioDefinition {
     picture_image: Option<GraphicsImage>,
     graphics_image: Option<GraphicsImage>,
     color_by_owner_mask: Option<ColorByOwnerMask>,
+    additional_graphics: HashMap<String, ResourceGraphicsVariant>,
     resource_group: Option<Group>,
 }
 
@@ -339,6 +342,17 @@ impl Scenario {
                 DefinitionSpriteImage::from_resource(image, definition.color_by_owner_mask.as_ref())
             });
             compiled.set_sprite_image(sprite_image);
+            if !definition.additional_graphics.is_empty() {
+                let mut variants = HashMap::with_capacity(definition.additional_graphics.len());
+                for (key, variant) in &definition.additional_graphics {
+                    let mask = variant.color_by_owner_mask.as_ref();
+                    variants.insert(
+                        key.clone(),
+                        DefinitionSpriteImage::from_resource(&variant.image, mask),
+                    );
+                }
+                compiled.set_sprite_variants(variants);
+            }
             engine.register_definition(compiled)?;
         }
 
@@ -487,6 +501,7 @@ impl Scenario {
                     picture_image: None,
                     graphics_image: None,
                     color_by_owner_mask: None,
+                    additional_graphics: HashMap::new(),
                     resource_group: None,
                 }
             };
@@ -3053,6 +3068,7 @@ fn scenario_definition_from_resource(
         picture_image,
         graphics_image,
         color_by_owner_mask,
+        additional_graphics,
     } = resource;
     let actions = action_map.map(|map| convert_action_map(&map));
 
@@ -3070,6 +3086,7 @@ fn scenario_definition_from_resource(
         picture_image,
         graphics_image,
         color_by_owner_mask,
+        additional_graphics,
         resource_group: source_group,
     }
 }
@@ -4927,6 +4944,7 @@ global func Step(state, frame, random)
                 picture_image: None,
                 graphics_image: None,
                 color_by_owner_mask: None,
+                additional_graphics: HashMap::new(),
                 resource_group: None,
             }],
             initial_spawns: vec![ScenarioSpawn {
@@ -4999,6 +5017,7 @@ global func Step(state, frame, random)
                 picture_image: None,
                 graphics_image: None,
                 color_by_owner_mask: None,
+                additional_graphics: HashMap::new(),
                 resource_group: None,
             }],
             initial_spawns: vec![ScenarioSpawn {

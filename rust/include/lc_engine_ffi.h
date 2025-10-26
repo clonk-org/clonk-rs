@@ -70,6 +70,10 @@ typedef struct LcEngineObjectSnapshot {
     uint64_t container_id;
     const uint64_t *contents;
     size_t contents_count;
+    bool has_base_graphics;
+    const char *base_definition_id;
+    const char *base_graphics_name;
+    uint32_t base_blit_mode;
     bool has_draw_transform;
     float draw_scale_x;
     float draw_scale_y;

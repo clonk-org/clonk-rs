@@ -101,6 +101,15 @@ const MIN_THROW_DRAG_DISTANCE: f32 = 12.0;
 static APP_PATH_CACHE: Mutex<Option<std::result::Result<Arc<AppPaths>, PathsError>>> =
     Mutex::new(None);
 
+fn sprite_map_key(definition_id: &str, graphics_name: Option<&str>) -> String {
+    match graphics_name {
+        Some(name) if !name.is_empty() => {
+            format!("{}::{}", definition_id, name.to_ascii_lowercase())
+        }
+        _ => definition_id.to_string(),
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "lc-app", about = "LegacyClonk Rust runtime", version)]
 struct Cli {
@@ -4034,37 +4043,58 @@ impl GameApp {
                 .definition_action_graphics(definition_id)
                 .unwrap_or_default();
 
-            let (sprite_image, color_mask) =
-                if let Some(image) = self.engine.definition_sprite_image(definition_id) {
+            let default_key = sprite_map_key(definition_id, None);
+            if let Some(image) = self.engine.definition_sprite_image(definition_id, None) {
+                let width = image.width();
+                let height = image.height();
+                let mask = image
+                    .color_mask()
+                    .map(|mask| ColorByOwnerMask::new(width, height, mask));
+                let pixels = image.into_pixels();
+                sprites.insert(
+                    default_key.clone(),
+                    DefinitionSprite {
+                        image: ImageData::from_arc(width, height, pixels),
+                        actions: actions.clone(),
+                        color_mask: mask,
+                    },
+                );
+            } else if let Some(image) = self.engine.definition_picture_image(definition_id) {
+                let width = image.width();
+                let height = image.height();
+                sprites.insert(
+                    default_key.clone(),
+                    DefinitionSprite {
+                        image: ImageData::from_arc(width, height, image.into_pixels()),
+                        actions: actions.clone(),
+                        color_mask: None,
+                    },
+                );
+            } else if let Some(existing) = sprites.get_mut(&default_key) {
+                existing.actions = actions.clone();
+            }
+
+            for variant in self.engine.definition_sprite_variant_names(definition_id) {
+                if let Some(image) = self
+                    .engine
+                    .definition_sprite_image(definition_id, Some(&variant))
+                {
                     let width = image.width();
                     let height = image.height();
                     let mask = image
                         .color_mask()
                         .map(|mask| ColorByOwnerMask::new(width, height, mask));
                     let pixels = image.into_pixels();
-                    (Some(ImageData::from_arc(width, height, pixels)), mask)
-                } else if let Some(image) = self.engine.definition_picture_image(definition_id) {
-                    let width = image.width();
-                    let height = image.height();
-                    (
-                        Some(ImageData::from_arc(width, height, image.into_pixels())),
-                        None,
-                    )
-                } else {
-                    (None, None)
-                };
-
-            if let Some(image) = sprite_image {
-                sprites.insert(
-                    definition_id.to_string(),
-                    DefinitionSprite {
-                        image,
-                        actions,
-                        color_mask,
-                    },
-                );
-            } else if let Some(existing) = sprites.get_mut(definition_id) {
-                existing.actions = actions;
+                    let key = sprite_map_key(definition_id, Some(&variant));
+                    sprites.insert(
+                        key,
+                        DefinitionSprite {
+                            image: ImageData::from_arc(width, height, pixels),
+                            actions: actions.clone(),
+                            color_mask: mask,
+                        },
+                    );
+                }
             }
         }
         if sprites != self.object_sprites {
@@ -8242,7 +8272,7 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     use std::path::Path;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Mutex, OnceLock};
     use std::thread;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -8284,6 +8314,7 @@ mod tests {
             category: DEFAULT_CATEGORY,
             crew_member: true,
             alive: true,
+            base_graphics: None,
             graphics_overlays: Vec::new(),
             draw_transform: None,
         }
@@ -8588,6 +8619,7 @@ mod tests {
                 category: DEFAULT_CATEGORY,
                 crew_member: true,
                 alive: true,
+                base_graphics: None,
                 graphics_overlays: Vec::new(),
                 draw_transform: None,
             },
@@ -8615,6 +8647,7 @@ mod tests {
                 category: DEFAULT_CATEGORY,
                 crew_member: true,
                 alive: true,
+                base_graphics: None,
                 graphics_overlays: Vec::new(),
                 draw_transform: None,
             },

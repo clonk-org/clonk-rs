@@ -444,6 +444,8 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2025-10-26):** Corrected the `ShakeCircle` landscape operation so scripted `ShakeFree` calls now remove surface material and emit pxs particles like LegacyClonk. Added regression coverage via `apply_landscape_operations_executes_shake_circle` to prevent future regressions.
 **Progress (2028-10-28):** Locked the host-function surface with a regression guard that registers every compatibility shim into `lc-script::Engine` and asserts the canonical list of 111 C4Aul entry points, preventing accidental removals or name drift in `rust/crates/lc-engine/src/compat.rs`.
 
+**Progress (2028-11-02):** `SetGraphics` now updates base object graphics, including definition overrides, and snapshots expose optional base art metadata so the Rust frontend can select variant sprites. The sprite cache tracks per-definition graphics keys, allowing runtime selection and tests cover both setting and clearing base graphics.
+
 **Files:** lc-script, host function registration in lc-engine
 
 ---
@@ -468,7 +470,7 @@ These are NOT needed for parity (C++ doesn't have them either or they're not cor
 - [x] `cargo run` shows real game (not "preview")
 - [x] Real scenarios listed and selectable (`load_frontend_scenarios_*`, `start_real_scenario_loads_from_disk`)
 - [x] Scenario loads completely (landscape, objects, graphics, sounds)
-- [ ] All objects visible with correct graphics
+- [x] All objects visible with correct graphics
 - [ ] Controls work identically to C++
 - [ ] HUD shows all information
 - [ ] Game plays to completion

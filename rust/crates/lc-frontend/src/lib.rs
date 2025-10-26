@@ -51,6 +51,15 @@ const DEFAULT_PLAYER_COLORS: [Color; 12] = [
     Color::opaque(0xC0, 0x00, 0xBC),
 ];
 
+fn sprite_map_key(definition_id: &str, graphics_name: Option<&str>) -> String {
+    match graphics_name {
+        Some(name) if !name.is_empty() => {
+            format!("{}::{}", definition_id, name.to_ascii_lowercase())
+        }
+        _ => definition_id.to_string(),
+    }
+}
+
 pub fn default_owner_color(owner: i32) -> Color {
     if owner <= 0 {
         return Color::opaque(255, 255, 255);
@@ -899,11 +908,7 @@ impl GraphicsSystem {
                 for x in 0..viewport_surface.width() as i32 {
                     let rel_x = x - offset_x_i32;
                     let rel_y = y - offset_y_i32;
-                    if rel_x >= 0
-                        && rel_x < content_width
-                        && rel_y >= 0
-                        && rel_y < content_height
-                    {
+                    if rel_x >= 0 && rel_x < content_width && rel_y >= 0 && rel_y < content_height {
                         continue;
                     }
                     let sample_x = rel_x.clamp(0, content_width - 1) as u32;
@@ -1748,7 +1753,34 @@ impl GraphicsSystem {
         }
 
         let base_transform = object.draw_transform;
-        if let Some(sprite) = self.object_sprites.get(&object.definition_id).cloned() {
+        let (base_definition_id, base_graphics_name) =
+            if let Some(base) = object.base_graphics.as_ref() {
+                (base.definition.clone(), base.graphics_name.clone())
+            } else {
+                (object.definition_id.clone(), None)
+            };
+        let mut sprite = self
+            .object_sprites
+            .get(&sprite_map_key(
+                &base_definition_id,
+                base_graphics_name.as_deref(),
+            ))
+            .cloned();
+        if sprite.is_none() {
+            if base_graphics_name.is_some() {
+                sprite = self
+                    .object_sprites
+                    .get(&sprite_map_key(&base_definition_id, None))
+                    .cloned();
+            }
+        }
+        if sprite.is_none() && base_definition_id != object.definition_id {
+            sprite = self
+                .object_sprites
+                .get(&sprite_map_key(&object.definition_id, None))
+                .cloned();
+        }
+        if let Some(sprite) = sprite {
             if self.draw_action_sprite(
                 object,
                 &sprite,
@@ -2096,7 +2128,24 @@ impl GraphicsSystem {
             .definition
             .as_deref()
             .unwrap_or(&object.definition_id);
-        let Some(sprite) = self.object_sprites.get(definition_id).cloned() else {
+        let graphics_name = overlay.graphics_name.as_deref();
+        let mut sprite = self
+            .object_sprites
+            .get(&sprite_map_key(definition_id, graphics_name))
+            .cloned();
+        if sprite.is_none() && graphics_name.is_some() {
+            sprite = self
+                .object_sprites
+                .get(&sprite_map_key(definition_id, None))
+                .cloned();
+        }
+        if sprite.is_none() && definition_id != &object.definition_id {
+            sprite = self
+                .object_sprites
+                .get(&sprite_map_key(&object.definition_id, None))
+                .cloned();
+        }
+        let Some(sprite) = sprite else {
             return;
         };
         let action_name = overlay
@@ -2137,7 +2186,24 @@ impl GraphicsSystem {
             .definition
             .as_deref()
             .unwrap_or(&object.definition_id);
-        let Some(sprite) = self.object_sprites.get(definition_id).cloned() else {
+        let graphics_name = overlay.graphics_name.as_deref();
+        let mut sprite = self
+            .object_sprites
+            .get(&sprite_map_key(definition_id, graphics_name))
+            .cloned();
+        if sprite.is_none() && graphics_name.is_some() {
+            sprite = self
+                .object_sprites
+                .get(&sprite_map_key(definition_id, None))
+                .cloned();
+        }
+        if sprite.is_none() && definition_id != &object.definition_id {
+            sprite = self
+                .object_sprites
+                .get(&sprite_map_key(&object.definition_id, None))
+                .cloned();
+        }
+        let Some(sprite) = sprite else {
             return;
         };
         let sprite_width = (sprite.image.width() as f32 * zoom).max(1.0);
@@ -2289,11 +2355,31 @@ impl GraphicsSystem {
             return;
         }
 
-        let sprite_height = self
-            .object_sprites
-            .get(&object.definition_id)
-            .map(|sprite| (sprite.image.height() as f32 * zoom).max(1.0))
-            .unwrap_or(12.0 * zoom);
+        let (cursor_definition_id, cursor_graphics_name) =
+            if let Some(base) = object.base_graphics.as_ref() {
+                (base.definition.clone(), base.graphics_name.clone())
+            } else {
+                (object.definition_id.clone(), None)
+            };
+        let sprite_height = {
+            let mut sprite = self.object_sprites.get(&sprite_map_key(
+                &cursor_definition_id,
+                cursor_graphics_name.as_deref(),
+            ));
+            if sprite.is_none() && cursor_graphics_name.is_some() {
+                sprite = self
+                    .object_sprites
+                    .get(&sprite_map_key(&cursor_definition_id, None));
+            }
+            if sprite.is_none() && cursor_definition_id != object.definition_id {
+                sprite = self
+                    .object_sprites
+                    .get(&sprite_map_key(&object.definition_id, None));
+            }
+            sprite
+                .map(|sprite| (sprite.image.height() as f32 * zoom).max(1.0))
+                .unwrap_or(12.0 * zoom)
+        };
         let cursor_width = image.width() as f32;
         let cursor_height = image.height() as f32;
 
@@ -2426,10 +2512,7 @@ impl GraphicsSystem {
                 let offset_y = viewport.content_rect.y as f32 / zoom;
                 let adjusted_x = (viewport.viewport_x - offset_x).max(0.0);
                 let adjusted_y = (viewport.viewport_y - offset_y).max(0.0);
-                (
-                    adjusted_x.round() as i32,
-                    adjusted_y.round() as i32,
-                )
+                (adjusted_x.round() as i32, adjusted_y.round() as i32)
             })
             .unwrap_or((
                 self.viewport_x.round() as i32,
@@ -3330,6 +3413,7 @@ mod tests {
                 category: lc_engine::DEFAULT_CATEGORY,
                 crew_member: true,
                 alive: true,
+                base_graphics: None,
                 graphics_overlays: Vec::new(),
                 draw_transform: None,
             }],

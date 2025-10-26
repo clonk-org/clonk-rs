@@ -270,6 +270,15 @@ impl ObjectGraphicsOverlay {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectBaseGraphics {
+    pub definition: DefinitionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphics_name: Option<String>,
+    #[serde(default)]
+    pub blit_mode: u32,
+}
+
 pub const CNAT_NONE: u32 = 0;
 pub const CNAT_LEFT: u32 = 1;
 pub const CNAT_RIGHT: u32 = 2;
@@ -1765,6 +1774,8 @@ pub struct ObjectState {
     pub crew_member: bool,
     #[serde(default = "default_alive")]
     pub alive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_graphics: Option<ObjectBaseGraphics>,
     #[serde(default)]
     pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1846,6 +1857,9 @@ impl ObjectState {
         if let Some(transform) = &delta.draw_transform {
             self.draw_transform = transform.clone();
         }
+        if let Some(base_graphics) = &delta.base_graphics {
+            self.base_graphics = base_graphics.clone();
+        }
         if let Some(owner) = delta.owner {
             self.owner = owner;
         }
@@ -1904,6 +1918,7 @@ struct ObjectDelta {
     vertices: Option<Vec<ObjectVertex>>,
     graphics_overlays: Option<Vec<ObjectGraphicsOverlay>>,
     draw_transform: Option<Option<DrawTransform>>,
+    base_graphics: Option<Option<ObjectBaseGraphics>>,
 }
 
 impl ObjectDelta {
@@ -1962,6 +1977,9 @@ impl ObjectDelta {
         if let Some(transform) = update.draw_transform {
             self.draw_transform = Some(transform);
         }
+        if let Some(base_graphics) = update.base_graphics {
+            self.base_graphics = Some(base_graphics);
+        }
         if let Some(action) = update.action {
             match &mut self.action {
                 Some(existing) => existing.merge(action),
@@ -1994,6 +2012,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             vertices: update.vertices,
             graphics_overlays: update.graphics_overlays,
             draw_transform: update.draw_transform,
+            base_graphics: update.base_graphics,
         }
     }
 }
@@ -2036,6 +2055,8 @@ pub struct ObjectUpdate {
     pub graphics_overlays: Option<Vec<ObjectGraphicsOverlay>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw_transform: Option<Option<DrawTransform>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_graphics: Option<Option<ObjectBaseGraphics>>,
 }
 
 impl ObjectUpdate {
@@ -2186,6 +2207,7 @@ impl ObjectUpdate {
             && self.vertices.is_none()
             && self.graphics_overlays.is_none()
             && self.draw_transform.is_none()
+            && self.base_graphics.is_none()
     }
 }
 
@@ -2457,6 +2479,7 @@ impl Object {
             category: self.state.category,
             crew_member: self.state.crew_member,
             alive: self.state.alive,
+            base_graphics: self.state.base_graphics.clone(),
             graphics_overlays: self.state.graphics_overlays.clone(),
             draw_transform: self.state.draw_transform,
         }
@@ -2942,6 +2965,8 @@ pub struct ObjectSnapshot {
     pub crew_member: bool,
     #[serde(default = "default_alive")]
     pub alive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_graphics: Option<ObjectBaseGraphics>,
     #[serde(default)]
     pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3304,6 +3329,7 @@ pub struct Definition {
     picture: Option<DefinitionPicture>,
     picture_image: Option<DefinitionPictureImage>,
     sprite_image: Option<DefinitionSpriteImage>,
+    sprite_variants: HashMap<String, DefinitionSpriteImage>,
     shape: Option<DefinitionRect>,
     collection_rect: Option<DefinitionRect>,
     collection_limit: Option<u32>,
@@ -3368,6 +3394,7 @@ impl Definition {
             picture: None,
             picture_image: None,
             sprite_image: None,
+            sprite_variants: HashMap::new(),
             shape: None,
             collection_rect: None,
             collection_limit: None,
@@ -3426,6 +3453,17 @@ impl Definition {
         if let Some(image) = resource.graphics_image.as_ref() {
             let mask = resource.color_by_owner_mask.as_ref();
             definition.set_sprite_image(Some(DefinitionSpriteImage::from_resource(image, mask)));
+        }
+        if !resource.additional_graphics.is_empty() {
+            let mut variants = HashMap::with_capacity(resource.additional_graphics.len());
+            for (key, variant) in &resource.additional_graphics {
+                let mask = variant.color_by_owner_mask.as_ref();
+                variants.insert(
+                    key.clone(),
+                    DefinitionSpriteImage::from_resource(&variant.image, mask),
+                );
+            }
+            definition.set_sprite_variants(variants);
         }
         definition.set_shape_rect(resource.core.shape.map(DefinitionRect::from));
         definition.set_collection_rect(resource.core.collection.map(DefinitionRect::from));
@@ -3630,6 +3668,27 @@ impl Definition {
         self.sprite_image = image;
     }
 
+    pub fn sprite_image_variant(
+        &self,
+        graphics_name: Option<&str>,
+    ) -> Option<&DefinitionSpriteImage> {
+        match graphics_name {
+            None | Some("") => self.sprite_image.as_ref(),
+            Some(name) => {
+                let key = name.to_ascii_lowercase();
+                self.sprite_variants.get(&key)
+            }
+        }
+    }
+
+    pub fn set_sprite_variants(&mut self, variants: HashMap<String, DefinitionSpriteImage>) {
+        self.sprite_variants = variants;
+    }
+
+    pub fn sprite_variant_keys(&self) -> Vec<String> {
+        self.sprite_variants.keys().cloned().collect()
+    }
+
     pub fn shape_rect(&self) -> Option<DefinitionRect> {
         self.shape
     }
@@ -3738,8 +3797,10 @@ impl Definition {
                     self.ocf_base,
                     self.crew_member,
                     state.draw_transform,
+                    state.base_graphics.clone(),
                 )
                 .with_graphics_overlays(state.graphics_overlays.clone())
+                .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
                 .with_ocf(self.compute_ocf(state)),
             ),
@@ -3884,8 +3945,10 @@ impl Definition {
                     self.ocf_base,
                     self.crew_member,
                     state.draw_transform,
+                    state.base_graphics.clone(),
                 )
                 .with_graphics_overlays(state.graphics_overlays.clone())
+                .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
                 .with_ocf(self.compute_ocf(state)),
             ),
@@ -4031,8 +4094,10 @@ impl Definition {
                     self.ocf_base,
                     self.crew_member,
                     state.draw_transform,
+                    state.base_graphics.clone(),
                 )
                 .with_graphics_overlays(state.graphics_overlays.clone())
+                .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
                 .with_ocf(self.compute_ocf(state)),
             ),
@@ -4126,8 +4191,10 @@ impl Definition {
             self.ocf_base,
             self.crew_member,
             state.draw_transform,
+            state.base_graphics.clone(),
         )
         .with_alive(state.alive)
+        .with_base_graphics(state.base_graphics.clone())
         .with_ocf(self.compute_ocf(state));
         let (result, outcome) = compat::with_effect_context(
             Some(object_context),
@@ -4244,8 +4311,10 @@ impl Definition {
             self.ocf_base,
             self.crew_member,
             state.draw_transform,
+            state.base_graphics.clone(),
         )
         .with_alive(state.alive)
+        .with_base_graphics(state.base_graphics.clone())
         .with_ocf(self.compute_ocf(state));
         let (result, mut host_effects) = compat::with_effect_context(
             Some(object_context),
@@ -4347,8 +4416,10 @@ impl Definition {
             self.ocf_base,
             self.crew_member,
             state.draw_transform,
+            state.base_graphics.clone(),
         )
         .with_graphics_overlays(state.graphics_overlays.clone())
+        .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
         .with_ocf(self.compute_ocf(state));
         let (result, mut host_effects) = compat::with_effect_context(
@@ -4455,8 +4526,10 @@ impl Definition {
             self.ocf_base,
             self.crew_member,
             state.draw_transform,
+            state.base_graphics.clone(),
         )
         .with_graphics_overlays(state.graphics_overlays.clone())
+        .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
         .with_ocf(self.compute_ocf(state));
         let (result, mut host_effects) = compat::with_effect_context(
@@ -4559,8 +4632,10 @@ impl Definition {
             self.ocf_base,
             self.crew_member,
             state.draw_transform,
+            state.base_graphics.clone(),
         )
         .with_alive(state.alive)
+        .with_base_graphics(state.base_graphics.clone())
         .with_ocf(self.compute_ocf(state));
         let (result, mut host_effects) = compat::with_effect_context(
             Some(object_context),
@@ -4854,8 +4929,10 @@ impl Definition {
                     self.ocf_base,
                     self.crew_member,
                     state.draw_transform,
+                    state.base_graphics.clone(),
                 )
                 .with_alive(state.alive)
+                .with_base_graphics(state.base_graphics.clone())
                 .with_ocf(self.compute_ocf(state)),
             ),
             global_effects,
@@ -6859,10 +6936,21 @@ impl Engine {
             .and_then(|definition| definition.picture_image().cloned())
     }
 
-    pub fn definition_sprite_image(&self, definition_id: &str) -> Option<DefinitionSpriteImage> {
+    pub fn definition_sprite_image(
+        &self,
+        definition_id: &str,
+        graphics_name: Option<&str>,
+    ) -> Option<DefinitionSpriteImage> {
         self.definitions
             .get(definition_id)
-            .and_then(|definition| definition.sprite_image().cloned())
+            .and_then(|definition| definition.sprite_image_variant(graphics_name).cloned())
+    }
+
+    pub fn definition_sprite_variant_names(&self, definition_id: &str) -> Vec<String> {
+        self.definitions
+            .get(definition_id)
+            .map(|definition| definition.sprite_variant_keys())
+            .unwrap_or_default()
     }
 
     pub fn definition_action_graphics(
@@ -8397,6 +8485,7 @@ impl Engine {
                     category: snapshot.category,
                     crew_member: snapshot.crew_member,
                     alive: snapshot.alive,
+                    base_graphics: snapshot.base_graphics.clone(),
                     graphics_overlays: snapshot.graphics_overlays.clone(),
                     draw_transform: snapshot.draw_transform,
                 },
@@ -11303,6 +11392,7 @@ impl Engine {
                 category: initial_category,
                 crew_member: initial_crew_member,
                 alive: alive.unwrap_or(true),
+                base_graphics: None,
                 graphics_overlays: Vec::new(),
                 draw_transform: None,
             },

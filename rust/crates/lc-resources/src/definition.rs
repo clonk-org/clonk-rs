@@ -14,6 +14,7 @@ pub struct Definition {
     pub picture_image: Option<GraphicsImage>,
     pub graphics_image: Option<GraphicsImage>,
     pub color_by_owner_mask: Option<ColorByOwnerMask>,
+    pub additional_graphics: HashMap<String, DefinitionGraphicsVariant>,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +22,13 @@ pub struct ColorByOwnerMask {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DefinitionGraphicsVariant {
+    pub name: String,
+    pub image: GraphicsImage,
+    pub color_by_owner_mask: Option<ColorByOwnerMask>,
 }
 
 impl Definition {
@@ -37,7 +45,7 @@ impl Definition {
         };
 
         let picture_image = load_definition_picture(group, &core);
-        let (graphics_image, color_by_owner_mask) =
+        let (graphics_image, color_by_owner_mask, additional_graphics) =
             load_definition_graphics(group, core.color_by_owner);
 
         Ok(Self {
@@ -47,6 +55,7 @@ impl Definition {
             picture_image,
             graphics_image,
             color_by_owner_mask,
+            additional_graphics,
         })
     }
 }
@@ -583,32 +592,193 @@ fn find_picture_entry_recursive(
 fn load_definition_graphics(
     group: &Group,
     color_by_owner: bool,
-) -> (Option<GraphicsImage>, Option<ColorByOwnerMask>) {
-    let path = match find_graphics_entry(group).ok().flatten() {
-        Some(path) => path,
-        None => return (None, None),
+) -> (
+    Option<GraphicsImage>,
+    Option<ColorByOwnerMask>,
+    HashMap<String, DefinitionGraphicsVariant>,
+) {
+    let mut candidates = match collect_graphics_entries(group) {
+        Ok(entries) => entries,
+        Err(_) => Vec::new(),
     };
-    let data = match group.read_file(&path) {
-        Ok(data) => data,
-        Err(_) => return (None, None),
-    };
-    let mut image = match image::load_from_memory(&data) {
-        Ok(image) => image.into_rgba8(),
-        Err(_) => return (None, None),
-    };
+    if candidates.is_empty() {
+        return (None, None, HashMap::new());
+    }
+
+    let base_path = select_base_graphics(&candidates);
+    let mut base_image = None;
+    let mut base_mask = None;
+    let mut additional = HashMap::new();
+
+    if let Some(base_path) = base_path.clone() {
+        if let Some((image, mask)) = load_graphics_entry(group, &base_path, color_by_owner) {
+            base_image = Some(image);
+            base_mask = mask;
+        }
+    }
+
+    // Remove the base candidate so it does not get processed as additional graphics.
+    if let Some(base_path) = &base_path {
+        candidates.retain(|path| path != base_path);
+    }
+
+    for path in candidates {
+        if let Some((image, mask)) = load_graphics_entry(group, &path, color_by_owner) {
+            if let Some(name) = derive_variant_name(&path) {
+                if !name.is_empty() {
+                    let key = normalize_variant_key(&name);
+                    additional
+                        .entry(key)
+                        .or_insert_with(|| DefinitionGraphicsVariant {
+                            name,
+                            image,
+                            color_by_owner_mask: mask,
+                        });
+                }
+            }
+        }
+    }
+
+    (base_image, base_mask, additional)
+}
+
+fn collect_graphics_entries(group: &Group) -> Result<Vec<PathBuf>, GroupError> {
+    let mut entries = Vec::new();
+    collect_graphics_entries_recursive(group, PathBuf::new(), false, &mut entries)?;
+    Ok(entries)
+}
+
+fn collect_graphics_entries_recursive(
+    group: &Group,
+    base: PathBuf,
+    in_graphics_dir: bool,
+    entries: &mut Vec<PathBuf>,
+) -> Result<(), GroupError> {
+    for entry in group.entries()? {
+        let mut combined = base.clone();
+        combined.push(&entry.relative_path);
+        let name_lower = entry
+            .relative_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let next_in_graphics_dir =
+            in_graphics_dir || name_lower.contains("graphics") || name_lower.starts_with("gfx");
+        if entry.is_directory {
+            let child = group.open_child(&entry.relative_path)?;
+            collect_graphics_entries_recursive(
+                &child,
+                combined.clone(),
+                next_in_graphics_dir,
+                entries,
+            )?;
+        } else if (next_in_graphics_dir && is_image_path(&entry.relative_path))
+            && (name_lower.starts_with("graphics") || name_lower.starts_with("gfx"))
+        {
+            entries.push(combined);
+        }
+    }
+    Ok(())
+}
+
+fn select_base_graphics(paths: &[PathBuf]) -> Option<PathBuf> {
+    const PRIORITY: [&str; 4] = [
+        "graphics32.png",
+        "graphics64.png",
+        "graphics.png",
+        "graphics.bmp",
+    ];
+
+    for name in PRIORITY {
+        let mut best: Option<&PathBuf> = None;
+        for path in paths {
+            if path
+                .file_name()
+                .and_then(|file| file.to_str())
+                .map(|file| file.eq_ignore_ascii_case(name))
+                .unwrap_or(false)
+            {
+                best = match best {
+                    Some(existing) => {
+                        let existing_depth = existing.components().count();
+                        let path_depth = path.components().count();
+                        if path_depth < existing_depth {
+                            Some(path)
+                        } else {
+                            Some(existing)
+                        }
+                    }
+                    None => Some(path),
+                };
+            }
+        }
+        if let Some(best) = best {
+            return Some(best.clone());
+        }
+    }
+
+    paths.first().cloned()
+}
+
+fn load_graphics_entry(
+    group: &Group,
+    path: &Path,
+    color_by_owner: bool,
+) -> Option<(GraphicsImage, Option<ColorByOwnerMask>)> {
+    let data = group.read_file(path).ok()?;
+    let mut image = image::load_from_memory(&data).ok()?.into_rgba8();
     let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
-        return (None, None);
+        return None;
     }
 
     let mask = if color_by_owner {
-        load_or_generate_color_by_owner_mask(group, &path, &mut image)
+        load_or_generate_color_by_owner_mask(group, path, &mut image)
     } else {
         None
     };
 
-    let graphics_image = GraphicsImage::new(width, height, image.into_raw());
-    (Some(graphics_image), mask)
+    Some((GraphicsImage::new(width, height, image.into_raw()), mask))
+}
+
+fn strip_graphics_prefix<'a>(name: &'a str) -> Option<&'a str> {
+    let lower = name.to_ascii_lowercase();
+    if let Some(stripped) = lower.strip_prefix("graphics") {
+        let prefix_len = name.len() - stripped.len();
+        return Some(&name[prefix_len..]);
+    }
+    if let Some(stripped) = lower.strip_prefix("gfx") {
+        let prefix_len = name.len() - stripped.len();
+        return Some(&name[prefix_len..]);
+    }
+    None
+}
+
+fn derive_variant_name(path: &Path) -> Option<String> {
+    let file_stem = path.file_stem()?.to_string_lossy();
+    if let Some(stripped) = strip_graphics_prefix(&file_stem) {
+        if !stripped.is_empty() {
+            return Some(stripped.to_string());
+        }
+    }
+
+    let mut current = path.parent();
+    while let Some(parent) = current {
+        if let Some(stem) = parent.file_stem().and_then(|s| s.to_str()) {
+            if !stem.is_empty()
+                && !stem.eq_ignore_ascii_case("graphics")
+                && !stem.eq_ignore_ascii_case("gfx")
+            {
+                return Some(stem.to_string());
+            }
+        }
+        current = parent.parent();
+    }
+    None
+}
+
+fn normalize_variant_key(name: &str) -> String {
+    name.to_ascii_lowercase()
 }
 
 fn load_or_generate_color_by_owner_mask(
@@ -776,62 +946,6 @@ fn detect_color_by_owner(dw_clr: u32) -> Option<u8> {
     }
 
     Some((dw_clr & 0xff) as u8)
-}
-
-fn find_graphics_entry(group: &Group) -> Result<Option<PathBuf>, GroupError> {
-    const PRIORITY_FILES: [&str; 4] = [
-        "Graphics32.png",
-        "Graphics64.png",
-        "Graphics.png",
-        "Graphics.bmp",
-    ];
-    for candidate in PRIORITY_FILES {
-        if group.exists(candidate) {
-            return Ok(Some(PathBuf::from(candidate)));
-        }
-    }
-
-    const PRIORITY_GROUPS: [&str; 3] = ["Graphics.ocg", "Graphics.c4d", "Graphics.c4g"];
-    for candidate in PRIORITY_GROUPS {
-        if let Ok(child) = group.open_child(candidate) {
-            if let Some(found) =
-                find_graphics_entry_recursive(&child, PathBuf::from(candidate), true)?
-            {
-                return Ok(Some(found));
-            }
-        }
-    }
-
-    find_graphics_entry_recursive(group, PathBuf::new(), false)
-}
-
-fn find_graphics_entry_recursive(
-    group: &Group,
-    base: PathBuf,
-    in_graphics_dir: bool,
-) -> Result<Option<PathBuf>, GroupError> {
-    for entry in group.entries()? {
-        let mut combined = base.clone();
-        combined.push(&entry.relative_path);
-        let name_lower = entry
-            .relative_path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_default();
-        let next_in_graphics_dir =
-            in_graphics_dir || name_lower.contains("graphics") || name_lower.starts_with("gfx");
-        if entry.is_directory {
-            let child = group.open_child(&entry.relative_path)?;
-            if let Some(found) =
-                find_graphics_entry_recursive(&child, combined.clone(), next_in_graphics_dir)?
-            {
-                return Ok(Some(found));
-            }
-        } else if next_in_graphics_dir && is_image_path(&entry.relative_path) {
-            return Ok(Some(combined));
-        }
-    }
-    Ok(None)
 }
 
 fn is_image_path(path: &Path) -> bool {

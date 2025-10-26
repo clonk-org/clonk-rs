@@ -84,6 +84,10 @@ pub struct LcEngineObjectSnapshot {
     pub container_id: u64,
     pub contents: *const u64,
     pub contents_len: usize,
+    pub has_base_graphics: bool,
+    pub base_definition_id: *const c_char,
+    pub base_graphics_name: *const c_char,
+    pub base_blit_mode: u32,
     pub has_draw_transform: bool,
     pub draw_scale_x: f32,
     pub draw_scale_y: f32,
@@ -248,6 +252,10 @@ pub struct LcEngineRuntimeObjectState {
     pub container_id: u64,
     pub contents: *const u64,
     pub contents_len: usize,
+    pub has_base_graphics: bool,
+    pub base_definition_id: *const c_char,
+    pub base_graphics_name: *const c_char,
+    pub base_blit_mode: u32,
     pub has_draw_transform: bool,
     pub draw_scale_x: f32,
     pub draw_scale_y: f32,
@@ -490,6 +498,8 @@ pub struct LcEngineRuntimeObjectStateArray {
     definition_ids: Vec<CString>,
     action_names: Vec<CString>,
     contents: Vec<Box<[u64]>>,
+    base_definition_ids: Vec<Option<CString>>,
+    base_graphics_names: Vec<Option<CString>>,
 }
 
 impl LcEngineRuntimeObjectStateArray {
@@ -504,6 +514,8 @@ impl LcEngineRuntimeObjectStateArray {
             definition_ids: Vec::with_capacity(snapshot.objects.len()),
             action_names: Vec::with_capacity(snapshot.objects.len()),
             contents: Vec::with_capacity(snapshot.objects.len()),
+            base_definition_ids: Vec::with_capacity(snapshot.objects.len()),
+            base_graphics_names: Vec::with_capacity(snapshot.objects.len()),
         };
 
         for object in &snapshot.objects {
@@ -535,6 +547,45 @@ impl LcEngineRuntimeObjectStateArray {
             let has_container = object.container.is_some();
             let container_id = object.container.map(|id| id.as_u64()).unwrap_or_default();
 
+            let (has_base_graphics, base_definition_ptr, base_graphics_ptr, base_blit_mode) =
+                if let Some(base) = object.base_graphics.as_ref() {
+                    let definition = CString::new(base.definition.clone()).map_err(|_| {
+                        format!(
+                            "base definition id for object {} contains null byte",
+                            object.id
+                        )
+                    })?;
+                    let name_cstring = if let Some(name) = base.graphics_name.as_ref() {
+                        Some(CString::new(name.clone()).map_err(|_| {
+                            format!(
+                                "base graphics name for object {} contains null byte",
+                                object.id
+                            )
+                        })?)
+                    } else {
+                        None
+                    };
+                    buffer.base_definition_ids.push(Some(definition));
+                    buffer.base_graphics_names.push(name_cstring);
+                    let def_ptr = buffer
+                        .base_definition_ids
+                        .last()
+                        .and_then(|value| value.as_ref())
+                        .map(|cstr| cstr.as_ptr())
+                        .unwrap_or(ptr::null());
+                    let name_ptr = buffer
+                        .base_graphics_names
+                        .last()
+                        .and_then(|value| value.as_ref())
+                        .map(|cstr| cstr.as_ptr())
+                        .unwrap_or(ptr::null());
+                    (true, def_ptr, name_ptr, base.blit_mode)
+                } else {
+                    buffer.base_definition_ids.push(None);
+                    buffer.base_graphics_names.push(None);
+                    (false, ptr::null(), ptr::null(), 0)
+                };
+
             buffer.objects.push(LcEngineRuntimeObjectState {
                 id: object.id.as_u64(),
                 definition_id: buffer.definition_ids.last().unwrap().as_ptr(),
@@ -560,6 +611,10 @@ impl LcEngineRuntimeObjectStateArray {
                 container_id,
                 contents: contents_ptr,
                 contents_len,
+                has_base_graphics,
+                base_definition_id: base_definition_ptr,
+                base_graphics_name: base_graphics_ptr,
+                base_blit_mode,
                 has_draw_transform: object.draw_transform.is_some(),
                 draw_scale_x: object
                     .draw_transform
@@ -715,6 +770,35 @@ unsafe fn make_snapshot(
         };
         let contents = contents_slice.iter().copied().map(ObjectId::new).collect();
 
+        let base_graphics = if entry.has_base_graphics {
+            let definition_ptr = entry.base_definition_id;
+            if definition_ptr.is_null() {
+                return None;
+            }
+            let definition = match CStr::from_ptr(definition_ptr).to_str() {
+                Ok(value) => value.to_string(),
+                Err(_) => CStr::from_ptr(definition_ptr)
+                    .to_string_lossy()
+                    .into_owned(),
+            };
+            let graphics_name = if entry.base_graphics_name.is_null() {
+                None
+            } else {
+                Some(
+                    CStr::from_ptr(entry.base_graphics_name)
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            };
+            Some(ObjectBaseGraphics {
+                definition,
+                graphics_name,
+                blit_mode: entry.base_blit_mode,
+            })
+        } else {
+            None
+        };
+
         snapshots.push(ObjectSnapshot {
             id: ObjectId::new(entry.id),
             definition_id,
@@ -739,6 +823,7 @@ unsafe fn make_snapshot(
             category: entry.category,
             crew_member: entry.crew_member,
             alive: entry.alive,
+            base_graphics,
             graphics_overlays: Vec::new(),
             draw_transform: if entry.has_draw_transform {
                 Some(DrawTransform::from_components(
@@ -2369,6 +2454,10 @@ global func Step(state, frame, random)
             container_id: 0,
             contents: ptr::null(),
             contents_len: 0,
+            has_base_graphics: false,
+            base_definition_id: ptr::null(),
+            base_graphics_name: ptr::null(),
+            base_blit_mode: 0,
             has_draw_transform: false,
             draw_scale_x: 1.0,
             draw_scale_y: 1.0,
@@ -2463,6 +2552,10 @@ global func Step(state, frame, random)
             container_id: 0,
             contents: ptr::null(),
             contents_len: 0,
+            has_base_graphics: false,
+            base_definition_id: ptr::null(),
+            base_graphics_name: ptr::null(),
+            base_blit_mode: 0,
             has_draw_transform: false,
             draw_scale_x: 1.0,
             draw_scale_y: 1.0,
@@ -2651,6 +2744,10 @@ global func Step(state, frame, random)
             container_id: 0,
             contents: container_contents.as_ptr(),
             contents_len: container_contents.len(),
+            has_base_graphics: false,
+            base_definition_id: ptr::null(),
+            base_graphics_name: ptr::null(),
+            base_blit_mode: 0,
             has_draw_transform: false,
             draw_scale_x: 1.0,
             draw_scale_y: 1.0,
@@ -2688,6 +2785,10 @@ global func Step(state, frame, random)
             container_id: 1,
             contents: ptr::null(),
             contents_len: 0,
+            has_base_graphics: false,
+            base_definition_id: ptr::null(),
+            base_graphics_name: ptr::null(),
+            base_blit_mode: 0,
             has_draw_transform: false,
             draw_scale_x: 1.0,
             draw_scale_y: 1.0,

@@ -17,10 +17,10 @@ use crate::PlayerViewport;
 use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, AudioCommand,
     CommandDirection, CrewSelectionState, DefinitionId, DefinitionRect, Direction, DrawTransform,
-    EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay,
-    ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig,
-    ParticleLayer, ParticleScope, PathFinder, PhysicsSettings, PlayerState, QueuedCommand,
-    SpawnConfig, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
+    EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectBaseGraphics,
+    ObjectGraphicsOverlay, ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand,
+    ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicsSettings, PlayerState,
+    QueuedCommand, SpawnConfig, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
     CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT,
     CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
 };
@@ -2976,6 +2976,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub construction: i32,
     pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
     pub draw_transform: Option<DrawTransform>,
+    pub base_graphics: Option<ObjectBaseGraphics>,
 }
 
 impl<'a> HostObjectContext<'a> {
@@ -3025,6 +3026,7 @@ impl<'a> HostObjectContext<'a> {
             ocf::NORMAL,
             false,
             None,
+            None,
         )
     }
 
@@ -3053,6 +3055,7 @@ impl<'a> HostObjectContext<'a> {
         ocf_base: u32,
         crew_member: bool,
         draw_transform: Option<DrawTransform>,
+        base_graphics: Option<ObjectBaseGraphics>,
     ) -> Self {
         Self {
             id,
@@ -3082,6 +3085,7 @@ impl<'a> HostObjectContext<'a> {
             vertices,
             graphics_overlays: Vec::new(),
             draw_transform,
+            base_graphics,
         }
     }
 
@@ -3097,6 +3101,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_draw_transform(mut self, transform: Option<DrawTransform>) -> Self {
         self.draw_transform = transform;
+        self
+    }
+
+    pub fn with_base_graphics(mut self, base: Option<ObjectBaseGraphics>) -> Self {
+        self.base_graphics = base;
         self
     }
 
@@ -8145,38 +8154,84 @@ fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    if overlay_id <= 0 {
-        return Ok(Value::Bool(false));
-    }
-
-    let mode = if mode_value == 0 {
-        GraphicsOverlayMode::Base
-    } else {
-        match GraphicsOverlayMode::from_script_value(mode_value) {
-            Some(mode) => mode,
-            None => return Ok(Value::Bool(false)),
-        }
-    };
-
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetGraphics requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+
+        let object_id = if let Some(target) = target_id {
+            target
+        } else {
+            match context.object_context() {
+                Some(object) => object.id(),
+                None => return Ok(Value::Bool(false)),
+            }
         };
 
-        if let Some(target) = target_id {
-            if target != object.id() {
+        let mut resolved_definition = definition.clone();
+        if overlay_id <= 0 && resolved_definition.is_none() {
+            resolved_definition = context
+                .get_world_object(object_id)
+                .map(|world_object| world_object.definition_id().to_string());
+            if resolved_definition.is_none() {
                 return Ok(Value::Bool(false));
             }
         }
 
+        if overlay_id <= 0 {
+            let definition_id = resolved_definition.expect("resolved definition present");
+
+            if context.definition_metadata(&definition_id).is_none() {
+                return Ok(Value::Bool(false));
+            }
+
+            let object = match context.object_context_mut() {
+                Some(object) => {
+                    if object.id != object_id {
+                        return Ok(Value::Bool(false));
+                    }
+                    object
+                }
+                None => return Ok(Value::Bool(false)),
+            };
+
+            let base_graphics = if definition.is_none() && graphics_name.is_none() {
+                None
+            } else {
+                Some(ObjectBaseGraphics {
+                    definition: definition_id,
+                    graphics_name: graphics_name.clone(),
+                    blit_mode,
+                })
+            };
+
+            let changed = object.set_base_graphics(base_graphics);
+            return Ok(Value::Bool(changed));
+        }
+
+        let object = match context.object_context_mut() {
+            Some(object) => {
+                if object.id != object_id {
+                    return Ok(Value::Bool(false));
+                }
+                object
+            }
+            None => return Ok(Value::Bool(false)),
+        };
+
         if overlay_id < 0 {
             return Ok(Value::Bool(false));
         }
+
+        let mode = if mode_value == 0 {
+            GraphicsOverlayMode::Base
+        } else {
+            match GraphicsOverlayMode::from_script_value(mode_value) {
+                Some(mode) => mode,
+                None => return Ok(Value::Bool(false)),
+            }
+        };
 
         if mode == GraphicsOverlayMode::Object && overlay_object.is_none() {
             let removed = object.remove_graphics_overlay(overlay_id);
@@ -9266,6 +9321,7 @@ impl EffectHostContext {
                 action_target2,
                 vertices,
                 graphics_overlays,
+                base_graphics,
                 category,
                 ocf: _,
                 ocf_base,
@@ -9298,6 +9354,7 @@ impl EffectHostContext {
                 ocf_base,
                 crew_member,
                 graphics_overlays,
+                base_graphics,
                 draw_transform,
             )
         });
@@ -9648,6 +9705,7 @@ struct ObjectScopeContext {
     current_rotation: i32,
     vertices: Vec<ObjectVertex>,
     graphics_overlays: Vec<ObjectGraphicsOverlay>,
+    base_graphics: Option<ObjectBaseGraphics>,
     current_draw_transform: Option<DrawTransform>,
 }
 
@@ -9678,6 +9736,7 @@ impl ObjectScopeContext {
         ocf_base: u32,
         crew_member: bool,
         graphics_overlays: Vec<ObjectGraphicsOverlay>,
+        base_graphics: Option<ObjectBaseGraphics>,
         draw_transform: Option<DrawTransform>,
     ) -> Self {
         let blocks_other_actions = action_library.blocks_other_actions(&action_name);
@@ -9715,6 +9774,7 @@ impl ObjectScopeContext {
             current_rotation: rotation.rem_euclid(360),
             vertices,
             graphics_overlays,
+            base_graphics,
             current_draw_transform: draw_transform,
         }
     }
@@ -10088,6 +10148,15 @@ impl ObjectScopeContext {
         } else {
             false
         }
+    }
+
+    fn set_base_graphics(&mut self, base: Option<ObjectBaseGraphics>) -> bool {
+        if self.base_graphics == base {
+            return false;
+        }
+        self.base_graphics = base.clone();
+        self.pending_update.base_graphics = Some(base);
+        true
     }
 
     fn draw_transform(&self) -> Option<DrawTransform> {
@@ -15781,8 +15850,10 @@ mod tests {
             ocf::NORMAL,
             false,
             None,
+            None,
         )
         .with_alive(true)
+        .with_base_graphics(None)
         .with_ocf(ocf_mask);
 
         let (result, _) = with_effect_context(Some(object_context), &[], world, 2, || get_ocf(&[]));
@@ -15824,8 +15895,10 @@ mod tests {
             ocf::NORMAL,
             false,
             None,
+            None,
         )
-        .with_graphics_overlays(Vec::new());
+        .with_graphics_overlays(Vec::new())
+        .with_base_graphics(None);
 
         let (result, outcome) = with_effect_context(
             Some(object_context),
@@ -15887,8 +15960,10 @@ mod tests {
             ocf::NORMAL,
             false,
             None,
+            None,
         )
-        .with_graphics_overlays(vec![overlay]);
+        .with_graphics_overlays(vec![overlay])
+        .with_base_graphics(None);
 
         let (result, outcome) = with_effect_context(
             Some(object_context),
@@ -15912,6 +15987,178 @@ mod tests {
             .graphics_overlays
             .expect("graphics overlay update expected");
         assert!(overlays.is_empty());
+    }
+
+    #[test]
+    fn set_graphics_updates_base_graphics() {
+        let object_id = ObjectId::new(11);
+        let definitions = {
+            let mut map = HashMap::new();
+            map.insert("CLON".to_string(), DefinitionMetadata::default());
+            map.insert("BRIK".to_string(), DefinitionMetadata::default());
+            map
+        };
+        let world = HostWorldContext::with_landscape(
+            vec![HostWorldObject::new(
+                object_id,
+                "CLON",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                crate::FULL_CON,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            )],
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            100,
+            false,
+        );
+
+        let object_context = HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            0,
+            0,
+            crate::FULL_CON,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            0,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+            None,
+            None,
+        );
+
+        let (result, outcome) = with_effect_context(
+            Some(object_context.with_base_graphics(None)),
+            &[],
+            world,
+            100,
+            || {
+                set_graphics(&[
+                    Value::String("Alt".into()),
+                    Value::Nil,
+                    Value::String("BRIK".into()),
+                    Value::Int(0),
+                ])
+            },
+        );
+
+        assert_eq!(result.expect("SetGraphics succeeds"), Value::Bool(true));
+        let update = outcome.object_update.expect("object update expected");
+        let base = update
+            .base_graphics
+            .expect("base graphics update expected")
+            .expect("base graphics set");
+        assert_eq!(base.definition, "BRIK");
+        assert_eq!(base.graphics_name.as_deref(), Some("Alt"));
+        assert_eq!(base.blit_mode, 0);
+    }
+
+    #[test]
+    fn set_graphics_clears_base_graphics_when_nil() {
+        let object_id = ObjectId::new(12);
+        let definitions = {
+            let mut map = HashMap::new();
+            map.insert("CLON".to_string(), DefinitionMetadata::default());
+            map
+        };
+        let world = HostWorldContext::with_landscape(
+            vec![HostWorldObject::new(
+                object_id,
+                "CLON",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                crate::FULL_CON,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            )],
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            100,
+            false,
+        );
+
+        let base = ObjectBaseGraphics {
+            definition: "CLON".to_string(),
+            graphics_name: Some("Alt".into()),
+            blit_mode: 0,
+        };
+
+        let object_context = HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            0,
+            0,
+            crate::FULL_CON,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            0,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+            None,
+            None,
+        )
+        .with_base_graphics(Some(base));
+
+        let (result, outcome) = with_effect_context(Some(object_context), &[], world, 100, || {
+            set_graphics(&[Value::Nil, Value::Nil, Value::Nil, Value::Int(0)])
+        });
+
+        assert_eq!(result.expect("SetGraphics succeeds"), Value::Bool(true));
+        let update = outcome.object_update.expect("object update expected");
+        let base = update.base_graphics.expect("base graphics update expected");
+        assert!(base.is_none());
     }
 
     #[test]
@@ -15942,7 +16189,10 @@ mod tests {
             ocf::NORMAL,
             false,
             None,
+            None,
         );
+
+        let object_context = object_context.with_base_graphics(None);
 
         let (result, outcome) = with_effect_context(
             Some(object_context),
@@ -16005,8 +16255,10 @@ mod tests {
             ocf::NORMAL,
             false,
             None,
+            None,
         )
-        .with_graphics_overlays(vec![overlay]);
+        .with_graphics_overlays(vec![overlay])
+        .with_base_graphics(None);
 
         let (result, outcome) = with_effect_context(
             Some(object_context),

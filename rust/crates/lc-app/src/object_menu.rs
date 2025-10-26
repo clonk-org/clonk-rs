@@ -959,6 +959,7 @@ mod tests {
             category: 0,
             crew_member: false,
             alive: true,
+            base_graphics: None,
             graphics_overlays: Vec::new(),
             draw_transform: None,
         }

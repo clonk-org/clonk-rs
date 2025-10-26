@@ -65,7 +65,7 @@ Category=C4D_Object
     scenario.apply(&mut engine)?;
 
     assert!(
-        engine.definition_sprite_image("TEST").is_some(),
+        engine.definition_sprite_image("TEST", None).is_some(),
         "expected manifest definition sprites to load"
     );
 
