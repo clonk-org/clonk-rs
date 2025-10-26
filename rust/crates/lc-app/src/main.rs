@@ -53,10 +53,11 @@ use lc_engine::{
     FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
-    default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
-    GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher, KeyCode,
-    MainMenuAction, MainMenuItem, PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState,
-    StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput, ViewportPointer,
+    default_owner_color, draw_image, AboutAction, ColorByOwnerMask, CrewOverlay, CursorAtlas,
+    DefinitionSprite, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData,
+    InputDispatcher, KeyCode, MainMenuAction, MainMenuItem, PlayerOverlay, ScenarioEntry,
+    ScenarioKind, SkyRenderState, StartupAboutDialog, StartupMainMenu, StartupMenu,
+    StartupMenuAction, ViewportInput, ViewportPointer,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
 use lc_gui::{ButtonTextures, Rect as GuiRect};
@@ -1829,6 +1830,7 @@ struct GameApp {
     menu_state: MenuState,
     main_menu_state: MainMenuState,
     control_options: Option<ControlOptionsState>,
+    about_dialog: Option<AboutDialogState>,
     startup_view: StartupView,
     object_menu: Option<ObjectMenuState>,
     ingame_menu: Option<IngameMenuState>,
@@ -1929,12 +1931,17 @@ struct MainMenuState {
     participants_label: String,
 }
 
+struct AboutDialogState {
+    dialog: lc_frontend::StartupAboutDialog,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StartupView {
     MainMenu,
     ScenarioBrowser,
     NetworkLobby,
     Options,
+    About,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4085,6 +4092,7 @@ impl GameApp {
             menu_state,
             main_menu_state,
             control_options: None,
+            about_dialog: None,
             startup_view: StartupView::MainMenu,
             object_menu: None,
             ingame_menu: None,
@@ -4148,6 +4156,10 @@ impl GameApp {
             if let Some(options) = self.control_options.as_mut() {
                 options.resize(width_f, height_f);
                 options.set_pointer_position(None);
+            }
+            if let Some(about) = self.about_dialog.as_mut() {
+                about.dialog.resize(width_f, height_f);
+                about.dialog.set_pointer_position(None);
             }
             if let Some(lobby) = self.network_lobby.as_mut() {
                 lobby.update_layout(width_f, height_f);
@@ -4407,6 +4419,15 @@ impl GameApp {
                             }
                         }
                         StartupView::Options => {}
+                        StartupView::About => {
+                            if let Some(about) = self.about_dialog.as_mut() {
+                                let actions = match state {
+                                    ElementState::Pressed => about.dialog.handle_key_down(gui_key),
+                                    ElementState::Released => about.dialog.handle_key_up(gui_key),
+                                };
+                                self.process_about_actions(actions)?;
+                            }
+                        }
                     }
                 }
                 Ok(())
@@ -5266,6 +5287,15 @@ impl GameApp {
                                 self.process_control_options_commands(commands)?;
                             }
                         }
+                        StartupView::About => {
+                            if let Some(about) = self.about_dialog.as_mut() {
+                                let actions = match state {
+                                    ElementState::Pressed => about.dialog.handle_key_down(key),
+                                    ElementState::Released => about.dialog.handle_key_up(key),
+                                };
+                                self.process_about_actions(actions)?;
+                            }
+                        }
                     }
                 }
             }
@@ -5312,6 +5342,15 @@ impl GameApp {
             StartupView::Options => {
                 if state == ElementState::Pressed {
                     self.process_control_options_command(ControlOptionsCommand::Close)?;
+                }
+            }
+            StartupView::About => {
+                if let Some(about) = self.about_dialog.as_mut() {
+                    let actions = match state {
+                        ElementState::Pressed => about.dialog.handle_key_down(KeyCode::Escape),
+                        ElementState::Released => about.dialog.handle_key_up(KeyCode::Escape),
+                    };
+                    self.process_about_actions(actions)?;
                 }
             }
         }
@@ -5372,6 +5411,15 @@ impl GameApp {
                             })
                         {
                             self.process_control_options_commands(commands)?;
+                        }
+                    }
+                    StartupView::About => {
+                        if let Some(about) = self.about_dialog.as_mut() {
+                            let actions = match state {
+                                ElementState::Pressed => about.dialog.handle_key_down(KeyCode::Enter),
+                                ElementState::Released => about.dialog.handle_key_up(KeyCode::Enter),
+                            };
+                            self.process_about_actions(actions)?;
                         }
                     }
                 },
@@ -5449,6 +5497,15 @@ impl GameApp {
                         };
                         if let Some(commands) = commands {
                             self.process_control_options_commands(commands)
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    StartupView::About => {
+                        if let Some(about) = self.about_dialog.as_mut() {
+                            about.dialog.set_pointer_position(Some(point));
+                            let actions = about.dialog.handle_pointer_move(point);
+                            self.process_about_actions(actions)
                         } else {
                             Ok(())
                         }
@@ -5677,6 +5734,18 @@ impl GameApp {
                         }
                         Ok(())
                     }
+                    StartupView::About => {
+                        if let Some(about) = self.about_dialog.as_mut() {
+                            if let Some(point) = about.dialog.pointer_position() {
+                                let actions = match button_state {
+                                    ElementState::Pressed => about.dialog.handle_pointer_down(point),
+                                    ElementState::Released => about.dialog.handle_pointer_up(point),
+                                };
+                                self.process_about_actions(actions)?;
+                            }
+                        }
+                        Ok(())
+                    }
                 }
             }
             AppMode::Running => self.handle_ingame_mouse_button(button_state),
@@ -5811,6 +5880,27 @@ impl GameApp {
                 }
                 self.process_control_options_commands(commands)
             }
+            StartupView::About => {
+                if let Some(about) = self.about_dialog.as_mut() {
+                    about.dialog.set_pointer_position(Some(position));
+                    let actions = match phase {
+                        TouchPhase::Started => about.dialog.handle_pointer_down(position),
+                        TouchPhase::Moved => about.dialog.handle_pointer_move(position),
+                        TouchPhase::Ended => {
+                            let actions = about.dialog.handle_pointer_up(position);
+                            self.pointer_left();
+                            actions
+                        }
+                        TouchPhase::Cancelled => {
+                            self.pointer_left();
+                            Vec::new()
+                        }
+                    };
+                    self.process_about_actions(actions)
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -5832,6 +5922,11 @@ impl GameApp {
                 StartupView::Options => {
                     if let Some(options) = self.control_options.as_mut() {
                         options.set_pointer_position(None);
+                    }
+                }
+                StartupView::About => {
+                    if let Some(about) = self.about_dialog.as_mut() {
+                        about.dialog.set_pointer_position(None);
                     }
                 }
             },
@@ -6055,6 +6150,35 @@ impl GameApp {
         Ok(())
     }
 
+    fn process_about_actions(&mut self, actions: Vec<AboutAction>) -> Result<(), EngineError> {
+        for action in actions {
+            self.process_about_action(action)?;
+        }
+        Ok(())
+    }
+
+    fn process_about_action(&mut self, action: AboutAction) -> Result<(), EngineError> {
+        match action {
+            AboutAction::Back => {
+                if let Some(dialog) = self.about_dialog.as_mut() {
+                    if dialog.dialog.current_page() > 0 {
+                        // Let the dialog handle it (already done in handle_key_down/button_click)
+                    } else {
+                        dialog.dialog.set_pointer_position(None);
+                        self.show_main_menu();
+                    }
+                }
+            }
+            AboutAction::CheckForUpdates => {
+                self.status_text = "Update checking not yet implemented in Rust port".to_string();
+            }
+            AboutAction::NextPage => {
+                // Handled internally by the dialog
+            }
+        }
+        Ok(())
+    }
+
     fn process_lobby_action(&mut self, action: LobbyAction) -> Result<(), EngineError> {
         match action {
             LobbyAction::ToggleReady => {
@@ -6121,7 +6245,7 @@ impl GameApp {
                 self.open_options_menu();
             }
             MainMenuItem::About => {
-                self.status_text = "LegacyClonk Rust Preview".to_string();
+                self.open_about_dialog();
             }
             MainMenuItem::Quit => {
                 self.request_exit();
@@ -6178,6 +6302,17 @@ impl GameApp {
         state.set_pointer_position(None);
         self.control_options = Some(state);
         self.startup_view = StartupView::Options;
+        self.status_text.clear();
+    }
+
+    fn open_about_dialog(&mut self) {
+        let width = self.graphics.surface().width() as f32;
+        let height = self.graphics.surface().height() as f32;
+        let mut dialog = StartupAboutDialog::new(self.assets.font_arc());
+        dialog.resize(width, height);
+        dialog.set_pointer_position(None);
+        self.about_dialog = Some(AboutDialogState { dialog });
+        self.startup_view = StartupView::About;
         self.status_text.clear();
     }
 
@@ -6520,6 +6655,7 @@ impl GameApp {
                 let control_options = self.control_options.as_mut();
                 let network_lobby = self.network_lobby.as_mut();
                 let game_over_dialog = self.game_over_dialog.as_ref();
+                let about_dialog = self.about_dialog.as_mut();
                 render_startup_frame(
                     &mut self.graphics,
                     self.assets.as_ref(),
@@ -6529,6 +6665,7 @@ impl GameApp {
                     self.startup_view,
                     network_lobby,
                     game_over_dialog,
+                    about_dialog,
                     frame,
                 );
                 Ok(())
@@ -7648,6 +7785,7 @@ fn render_startup_frame(
     view: StartupView,
     network_lobby: Option<&mut NetworkLobbyState>,
     game_over: Option<&GameOverState>,
+    about_dialog: Option<&mut AboutDialogState>,
     frame: &mut [u8],
 ) {
     {
@@ -7668,6 +7806,11 @@ fn render_startup_frame(
             StartupView::Options => {
                 if let Some(options) = control_options {
                     options.render(surface);
+                }
+            }
+            StartupView::About => {
+                if let Some(about) = about_dialog {
+                    about.dialog.render(surface);
                 }
             }
         }
