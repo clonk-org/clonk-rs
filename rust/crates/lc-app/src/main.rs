@@ -3929,6 +3929,10 @@ fn load_participants_label(paths: Option<&AppPaths>) -> String {
     label
 }
 
+fn overlay_text_needs_update(current: &str, default_prefix: &str) -> bool {
+    current.is_empty() || current.starts_with(default_prefix)
+}
+
 impl GameApp {
     fn new(
         width: u32,
@@ -6266,8 +6270,11 @@ impl GameApp {
             .focus_id
             .and_then(|id| self.snapshot.object(id).cloned());
 
+        const FRAME_PREFIX: &str = "FRAME ";
+        const STATUS_PREFIX: &str = "ENERGY ";
+
         if let Some(object) = &self.focus_snapshot {
-            self.frame_text = format!(
+            let default_frame = format!(
                 "FRAME {:05} POS {:04}/{:04} VEL {:03}/{:03}",
                 self.snapshot.frame,
                 object.position.x,
@@ -6275,16 +6282,28 @@ impl GameApp {
                 object.velocity.x,
                 object.velocity.y
             );
-            self.status_text = format!(
+            if overlay_text_needs_update(&self.frame_text, FRAME_PREFIX) {
+                self.frame_text = default_frame;
+            }
+
+            let default_status = format!(
                 "ENERGY {:03} DAMAGE {:03} OWNER {}",
                 object.energy.max(0),
                 object.damage.max(0),
                 object.owner
             );
+            if overlay_text_needs_update(&self.status_text, STATUS_PREFIX) {
+                self.status_text = default_status;
+            }
             self.energy_fraction = (object.energy.max(0).min(100) as f32) / 100.0;
         } else {
-            self.frame_text = format!("FRAME {:05}", self.snapshot.frame);
-            self.status_text.clear();
+            let default_frame = format!("FRAME {:05}", self.snapshot.frame);
+            if overlay_text_needs_update(&self.frame_text, FRAME_PREFIX) {
+                self.frame_text = default_frame;
+            }
+            if overlay_text_needs_update(&self.status_text, STATUS_PREFIX) {
+                self.status_text.clear();
+            }
             self.energy_fraction = 0.0;
         }
     }
@@ -8370,6 +8389,20 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn overlay_text_helper_respects_custom_text() {
+        assert!(overlay_text_needs_update("", "FRAME "));
+        assert!(overlay_text_needs_update("FRAME 00005", "FRAME "));
+        assert!(!overlay_text_needs_update("Inventory open", "FRAME "));
+
+        assert!(overlay_text_needs_update("", "ENERGY "));
+        assert!(overlay_text_needs_update(
+            "ENERGY 100 DAMAGE 000 OWNER 1",
+            "ENERGY "
+        ));
+        assert!(!overlay_text_needs_update("Paused", "ENERGY "));
+    }
 
     fn wait_for_running(app: &mut GameApp) {
         for _ in 0..480 {

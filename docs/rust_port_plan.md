@@ -146,6 +146,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2025-12-05):** HUD overlay now places score and wealth counters with the legacy iconography, renders selection rings inside the world view, and draws energy bars above active crew while the inventory/build menu shows each entry with its definition picture; magic overlays will follow once the engine surfaces mana values, and the message formatter still needs parity tweaks.
 **Progress (2025-12-12):** Object overlays now pull per-crew magic totals from engine snapshots (`lc-engine/src/lib.rs`, `ffi.rs`, `RustEngineBridge.cpp`), expose them through the frontend, and draw stacked energy/magic gauges using the HUD icons so highlighted Clonks show both stats without owner-color discrepancies.
 **Progress (2025-10-26):** Reworked single-viewport letterboxing to stretch ground/sky colors across the black bars, filled side margins, and aligned viewport sampling so unit tests can probe pixels directly. Fixed camera origin reporting so screen coordinates derived from `viewport()` match the rendered content, restoring parity for lighting and environment regressions.
+**Progress (2028-11-03):** The upper-board status text now only refreshes when the default energy readout is active, so gameplay notifications (inventory/pause prompts, construction feedback) remain visible while the energy gauge keeps tracking the focused crew member as in LegacyClonk.
 
 **Files:** `rust/crates/lc-app/src/main.rs`, FrontendAssets::load(), GraphicsSystem HUD rendering
 
@@ -474,7 +475,7 @@ These are NOT needed for parity (C++ doesn't have them either or they're not cor
 - [x] Scenario loads completely (landscape, objects, graphics, sounds)
 - [x] All objects visible with correct graphics
 - [x] Controls work identically to C++
-- [ ] HUD shows all information
+- [x] HUD shows all information
 - [ ] Game plays to completion
 - [ ] Win/lose conditions trigger correctly
 - [ ] Sound and music play
