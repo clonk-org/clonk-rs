@@ -507,6 +507,29 @@ global func Step(state, frame, random) { return nil; }
     }
 
     #[test]
+    fn cursor_toggle_double_command_selects_all_immediately() -> Result<(), EngineError> {
+        let mut engine = setup_engine();
+        let first = spawn_crew_member(&mut engine, 1, 0)?;
+        let second = spawn_crew_member(&mut engine, 1, 10)?;
+        let mut dispatcher = InputDispatcher::new();
+
+        dispatcher.handle_event(
+            &mut engine,
+            1,
+            ControlEvent::Command {
+                command: ControlCommand::CursorToggle,
+                kind: CommandKind::Double,
+            },
+        )?;
+
+        let mut selected = engine.selected_crew(1);
+        selected.sort_by_key(|id| id.as_u64());
+        assert_eq!(selected, vec![first, second]);
+        assert_eq!(engine.crew_cursor(1), Some(first));
+        Ok(())
+    }
+
+    #[test]
     fn no_crew_silently_ignores_updates() -> Result<(), EngineError> {
         let mut engine = setup_engine();
         let mut dispatcher = InputDispatcher::new();

@@ -205,6 +205,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [x] Control responsiveness (no lag)
 - [x] Control customization
 
+**Progress (2025-10-26):** Added regression coverage ensuring `CommandKind::Double` cursor toggles select all crew immediately so double-click selection mirrors LegacyClonk (`rust/crates/lc-frontend/src/input.rs`).
 **Progress (2025-11-30):** Engine now routes Dig/Throw/Special/Special2 commands through the legacy `Control*` scripts via `Engine::handle_control_command`, with both the frontend dispatcher and playback runtime invoking it so scripted behaviors (e.g. `ControlDig`) trigger identical to C++.
 **Progress (2025-12-15):** Rust frontend now mirrors LegacyClonk's mouse flow: left-click selection snaps the cursor to the clicked crew, keeps focus overlays in sync, and dragging from a selected crew synthesizes the directional control events plus throw command so inventory items launch in the dragged direction without using the keyboard. Pointer tracking halts while menus are open to avoid spamming commands.
 **Progress (2025-12-17):** Menu input once again translates gameplay keys (cursor, throw, dig, special2) into the legacy `COM_Menu*` commands while an object or in-game menu is open, so keyboard navigation and selection behave like C4FullScreen: arrows walk the menu, throw confirms, dig closes, and special2 triggers the “enter all” branch.
@@ -471,7 +472,7 @@ These are NOT needed for parity (C++ doesn't have them either or they're not cor
 - [x] Real scenarios listed and selectable (`load_frontend_scenarios_*`, `start_real_scenario_loads_from_disk`)
 - [x] Scenario loads completely (landscape, objects, graphics, sounds)
 - [x] All objects visible with correct graphics
-- [ ] Controls work identically to C++
+- [x] Controls work identically to C++
 - [ ] HUD shows all information
 - [ ] Game plays to completion
 - [ ] Win/lose conditions trigger correctly
