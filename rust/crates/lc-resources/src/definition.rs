@@ -85,6 +85,7 @@ pub struct DefCore {
     pub con_size_off: i32,
     pub basement: i32,
     pub components: Vec<DefComponent>,
+    pub line_connect: u32,
 }
 
 impl DefCore {
@@ -178,6 +179,8 @@ pub enum DefinitionError {
     MissingDefCoreField(&'static str),
     #[error("definition core references unknown category flag `{0}`")]
     UnknownCategoryFlag(String),
+    #[error("definition core references unknown line connect flag `{0}`")]
+    UnknownLineConnectFlag(String),
     #[error("definition core category value `{0}` is not valid")]
     InvalidCategoryValue(String),
     #[error("definition core could not be parsed: {0}")]
@@ -217,6 +220,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut con_size_off: i32 = 0;
     let mut basement: i32 = 0;
     let mut components: Vec<DefComponent> = Vec::new();
+    let mut line_connect: u32 = 0;
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -304,6 +308,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "components" => {
                 components = parse_components(value);
             }
+            "lineconnect" => {
+                line_connect = parse_line_connect(value)?;
+            }
             _ => {}
         }
     }
@@ -331,6 +338,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         con_size_off,
         basement,
         components,
+        line_connect,
     })
 }
 
@@ -361,6 +369,40 @@ fn parse_components(value: &str) -> Vec<DefComponent> {
             Some(DefComponent { id, count })
         })
         .collect()
+}
+
+fn normalize_line_connect_token(token: &str) -> String {
+    token
+        .trim()
+        .replace(' ', "")
+        .replace('_', "")
+        .to_ascii_lowercase()
+}
+
+fn parse_line_connect(value: &str) -> Result<u32, DefinitionError> {
+    let mut flags = 0u32;
+    for token in value.split(|ch| ch == '|' || ch == ',' || ch == ';') {
+        let normalized = normalize_line_connect_token(token);
+        if normalized.is_empty() {
+            continue;
+        }
+        let bit = match normalized.as_str() {
+            "c4dpowerinput" => 1,
+            "c4dpoweroutput" => 1 << 1,
+            "c4dliquidinput" => 1 << 2,
+            "c4dliquidoutput" => 1 << 3,
+            "c4dpowergenerator" => 1 << 4,
+            "c4dpowerconsumer" => 1 << 5,
+            "c4dliquidpump" => 1 << 6,
+            "c4dconnectrope" => 1 << 7,
+            "c4denergyholder" => 1 << 8,
+            other => {
+                return Err(DefinitionError::UnknownLineConnectFlag(other.to_string()));
+            }
+        };
+        flags |= bit;
+    }
+    Ok(flags)
 }
 
 fn load_scripts(group: &Group) -> Result<DefinitionScript, DefinitionError> {

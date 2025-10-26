@@ -1,16 +1,20 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::{
-    ActionProcedure, ActionUpdate, CommandDirection, ObjectId, ObjectStatus, ObjectUpdate, Vector2,
-    CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, FULL_CON, OWNER_NONE,
+    ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, ObjectId, ObjectStatus,
+    ObjectUpdate, Vector2, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, CATEGORY_VEHICLE, FULL_CON,
+    LINE_CONNECT_POWER_INPUT, OWNER_NONE,
 };
 
 /// Maximum number of commands that may be queued for an object.
 pub const MAX_COMMAND_STACK: usize = 35;
+const LINEKIT_DEFINITION: &str = "LNKT";
+const ACQUIRE_REQUEST_INTERVAL: u32 = 50;
 
 #[derive(Debug, Clone)]
 pub struct CommandObjectSnapshot {
     pub id: ObjectId,
+    pub definition_id: DefinitionId,
     pub position: Vector2,
     pub status: ObjectStatus,
     pub destroyed: bool,
@@ -24,6 +28,8 @@ pub struct CommandObjectSnapshot {
     pub crew_member: bool,
     pub selected: bool,
     pub alive: bool,
+    pub contents: Vec<ObjectId>,
+    pub line_connect: u32,
 }
 
 impl CommandObjectSnapshot {
@@ -150,6 +156,7 @@ mod tests {
     fn snapshot_with_id(id: u64) -> CommandObjectSnapshot {
         CommandObjectSnapshot {
             id: ObjectId::new(id),
+            definition_id: format!("DEF{id}"),
             position: Vector2::ZERO,
             status: ObjectStatus::Normal,
             destroyed: false,
@@ -163,6 +170,8 @@ mod tests {
             crew_member: false,
             selected: false,
             alive: true,
+            contents: Vec::new(),
+            line_connect: 0,
         }
     }
 
@@ -189,6 +198,7 @@ mod tests {
             position: follower.position,
             object: objects.get(&follower_id).expect("follower present"),
             objects: &objects,
+            structures_need_energy: false,
         };
 
         let mut state = FollowState::from_request(
@@ -224,6 +234,7 @@ mod tests {
             position: follower.position,
             object: objects.get(&follower_id).expect("follower present"),
             objects: &objects,
+            structures_need_energy: false,
         };
 
         let mut state = FollowState::from_request(
@@ -266,6 +277,7 @@ mod tests {
             position: attacker.position,
             object: objects.get(&attacker_id).expect("attacker present"),
             objects: &objects,
+            structures_need_energy: false,
         };
 
         let mut state = AttackState::from_request(
@@ -298,6 +310,7 @@ mod tests {
             position: attacker.position,
             object: objects.get(&attacker_id).expect("attacker present"),
             objects: &objects,
+            structures_need_energy: false,
         };
 
         let mut state = AttackState::from_request(
@@ -318,6 +331,88 @@ mod tests {
                 assert_eq!(request.target, Some(target_id));
             }
             other => panic!("expected move request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_queues_activate_for_internal_vehicle() {
+        let builder_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.command_direction = CommandDirection::Right;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.construction = FULL_CON;
+        target.category = CATEGORY_VEHICLE;
+        target.container = Some(builder_id);
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+        objects.insert(target.id, target);
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            structures_need_energy: false,
+        };
+
+        let mut state = BuildState::from_request(
+            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
+        )
+        .expect("build state");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Activate);
+                assert_eq!(request.target, Some(target_id));
+            }
+            other => panic!("expected activate request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_queues_energy_for_structures_needing_power() {
+        let builder_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+
+        let builder = snapshot_with_id(builder_id.as_u64());
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.construction = FULL_CON;
+        target.line_connect = LINE_CONNECT_POWER_INPUT;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+        objects.insert(target.id, target);
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            structures_need_energy: true,
+        };
+
+        let mut state = BuildState::from_request(
+            &CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
+        )
+        .expect("build state");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Energy);
+                assert_eq!(request.target, Some(target_id));
+            }
+            other => panic!("expected energy request, got {:?}", other),
         }
     }
 }
@@ -470,12 +565,53 @@ impl CommandStepResult {
     }
 }
 
+fn c4id_to_definition_string(id: i32) -> Option<DefinitionId> {
+    if id == 0 {
+        return None;
+    }
+    if (0..=9999).contains(&id) {
+        return Some(format!("{id:04}"));
+    }
+    let bytes = id.to_le_bytes();
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1] == 0 {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
+}
+
+fn definition_id_to_c4id(definition: &str) -> Option<i32> {
+    if definition.is_empty() {
+        return None;
+    }
+    if definition.chars().all(|ch| ch.is_ascii_digit()) && definition.len() <= 4 {
+        return definition.parse::<i32>().ok();
+    }
+    let mut bytes = [0u8; 4];
+    for (idx, ch) in definition.chars().take(4).enumerate() {
+        bytes[idx] = ch as u8;
+    }
+    Some(i32::from_le_bytes(bytes))
+}
+
+fn command_data_to_definition_id(data: &CommandData) -> Option<DefinitionId> {
+    match data {
+        CommandData::Integer(value) => c4id_to_definition_string(*value),
+        CommandData::Text(text) if !text.is_empty() => Some(text.clone()),
+        _ => None,
+    }
+}
+
 #[derive(Clone)]
 pub struct CommandRuntimeContext<'a> {
     pub frame: u64,
     pub position: Vector2,
     pub object: &'a CommandObjectSnapshot,
     pub objects: &'a HashMap<ObjectId, CommandObjectSnapshot>,
+    pub structures_need_energy: bool,
 }
 
 impl<'a> CommandRuntimeContext<'a> {
@@ -711,8 +847,25 @@ impl BuildState {
         }
 
         if target_snapshot.construction >= FULL_CON {
+            let mut operations = Vec::new();
+            if target_snapshot.container.is_some()
+                && (target_snapshot.category & CATEGORY_VEHICLE) != 0
+            {
+                operations.push(CommandOperation::PushFront(
+                    CommandRequest::new(CommandId::Activate).with_target(Some(self.target)),
+                ));
+            }
+
+            if ctx.structures_need_energy
+                && (target_snapshot.line_connect & LINE_CONNECT_POWER_INPUT) != 0
+            {
+                operations.push(CommandOperation::PushFront(
+                    CommandRequest::new(CommandId::Energy).with_target(Some(self.target)),
+                ));
+            }
+
             let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
-            return CommandStepResult::completed(Some(update));
+            return CommandStepResult::completed(Some(update)).with_operations(operations);
         }
 
         let builder_actively_building = builder.action_procedure == ActionProcedure::Build
@@ -984,11 +1137,113 @@ impl AttackState {
 }
 
 #[derive(Debug, Clone)]
+struct AcquireState {
+    definition_id: DefinitionId,
+}
+
+impl AcquireState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let definition_id =
+            command_data_to_definition_id(&request.data).ok_or(CommandError::Unsupported)?;
+        Ok(Self { definition_id })
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let has_item = ctx
+            .object
+            .contents
+            .iter()
+            .filter_map(|id| ctx.resolve(*id))
+            .any(|snapshot| snapshot.definition_id == self.definition_id);
+
+        if has_item {
+            return CommandStepResult::completed(None);
+        }
+
+        let update = if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        };
+        CommandStepResult::failed(update)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EnergyState {
+    target: ObjectId,
+    acquire_requested: bool,
+}
+
+impl EnergyState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let target = request.target.ok_or(CommandError::Unsupported)?;
+        Ok(Self {
+            target,
+            acquire_requested: false,
+        })
+    }
+
+    fn builder_has_linekit(&self, ctx: &CommandRuntimeContext<'_>) -> bool {
+        ctx.object
+            .contents
+            .iter()
+            .filter_map(|id| ctx.resolve(*id))
+            .any(|snapshot| snapshot.definition_id == LINEKIT_DEFINITION)
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let update_to_stop = || {
+            if ctx.object.command_direction != CommandDirection::Stop {
+                Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+            } else {
+                None
+            }
+        };
+
+        let Some(target_snapshot) = ctx.resolve(self.target) else {
+            return CommandStepResult::failed(update_to_stop());
+        };
+
+        if !target_snapshot.is_active() {
+            return CommandStepResult::failed(update_to_stop());
+        }
+
+        if !ctx.structures_need_energy
+            || (target_snapshot.line_connect & LINE_CONNECT_POWER_INPUT) == 0
+        {
+            return CommandStepResult::completed(None);
+        }
+
+        if self.builder_has_linekit(ctx) {
+            return CommandStepResult::completed(None);
+        }
+
+        if self.acquire_requested {
+            return CommandStepResult::running(update_to_stop());
+        }
+
+        let mut operations = Vec::new();
+        if let Some(c4id) = definition_id_to_c4id(LINEKIT_DEFINITION) {
+            let request = CommandRequest::new(CommandId::Acquire)
+                .with_data(CommandData::Integer(c4id))
+                .with_update_interval(ACQUIRE_REQUEST_INTERVAL);
+            operations.push(CommandOperation::PushFront(request));
+            self.acquire_requested = true;
+        }
+
+        CommandStepResult::running(update_to_stop()).with_operations(operations)
+    }
+}
+
+#[derive(Debug, Clone)]
 enum CommandState {
     Follow(FollowState),
     MoveTo(MoveToState),
     Build(BuildState),
     Attack(AttackState),
+    Acquire(AcquireState),
+    Energy(EnergyState),
     Unsupported,
 }
 
@@ -1004,6 +1259,8 @@ impl ActiveCommand {
             CommandId::MoveTo => CommandState::MoveTo(MoveToState::from_request(&request)),
             CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
+            CommandId::Acquire => CommandState::Acquire(AcquireState::from_request(&request)?),
+            CommandId::Energy => CommandState::Energy(EnergyState::from_request(&request)?),
             _ => CommandState::Unsupported,
         };
 
@@ -1020,6 +1277,8 @@ impl ActiveCommand {
             CommandState::MoveTo(state) => state.step(ctx),
             CommandState::Build(state) => state.step(ctx),
             CommandState::Attack(state) => state.step(ctx),
+            CommandState::Acquire(state) => state.step(ctx),
+            CommandState::Energy(state) => state.step(ctx),
             CommandState::Unsupported => {
                 let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
                 CommandStepResult::failed(Some(update))

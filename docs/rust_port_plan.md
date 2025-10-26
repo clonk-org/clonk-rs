@@ -27,10 +27,10 @@
 **Problem:** Command stack now supports MoveTo + Build; Follow/Attack/etc. still missing
 **Evidence:** `SetCommand("Build", ...)` starts Build procedure with material gating; `compat::tests::set_command_clears_stack_and_pushes_command` still green
 **C++ Has:** 30 commands (Follow, MoveTo, Build, Attack, etc.) via `C4Command.cpp`
-**Rust Has:** Command trait infrastructure + MoveTo/Build/Follow/Attack; Acquire/Energy queueing still absent
+**Rust Has:** Command trait infrastructure + MoveTo/Build/Follow/Attack; Build now queues Acquire/Energy stubs (inventory transfer pending)
 **Impact:** Build automation works (crew picks up components, honours material requirements); hauling/combat automation still incomplete without Acquire/Energy
 **Next:**
-1. Teach Build to chain Acquire/Energy commands (line kits, activation)
+1. ✅ Teach Build to chain Acquire/Energy commands (line kits, activation)
 2. Add command persistence to save-state snapshots + scenario world objects
 3. Expand tests to cover queue chaining, failure recovery, and scen parity
 

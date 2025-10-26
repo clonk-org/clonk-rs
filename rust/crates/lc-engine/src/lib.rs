@@ -303,6 +303,16 @@ pub const CATEGORY_SORT_LIMIT: i32 = CATEGORY_STATIC_BACK
     | CATEGORY_OBJECT;
 pub const DEFAULT_CATEGORY: i32 = CATEGORY_STATIC_BACK;
 
+pub const LINE_CONNECT_POWER_INPUT: u32 = 1;
+pub const LINE_CONNECT_POWER_OUTPUT: u32 = 1 << 1;
+pub const LINE_CONNECT_LIQUID_INPUT: u32 = 1 << 2;
+pub const LINE_CONNECT_LIQUID_OUTPUT: u32 = 1 << 3;
+pub const LINE_CONNECT_POWER_GENERATOR: u32 = 1 << 4;
+pub const LINE_CONNECT_POWER_CONSUMER: u32 = 1 << 5;
+pub const LINE_CONNECT_LIQUID_PUMP: u32 = 1 << 6;
+pub const LINE_CONNECT_CONNECT_ROPE: u32 = 1 << 7;
+pub const LINE_CONNECT_ENERGY_HOLDER: u32 = 1 << 8;
+
 fn default_rng() -> ChaCha8Rng {
     ChaCha8Rng::seed_from_u64(0)
 }
@@ -3396,6 +3406,7 @@ pub struct Definition {
     construction_offset: i32,
     basement: i32,
     components: Vec<DefinitionComponent>,
+    line_connect: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3462,6 +3473,7 @@ impl Definition {
             construction_offset: 0,
             basement: 0,
             components: Vec::new(),
+            line_connect: 0,
         })
     }
 
@@ -3544,6 +3556,7 @@ impl Definition {
                 .collect();
             definition.set_components(components);
         }
+        definition.set_line_connect(resource.core.line_connect);
         Ok(definition)
     }
 
@@ -3823,6 +3836,14 @@ impl Definition {
 
     pub fn set_components(&mut self, components: Vec<DefinitionComponent>) {
         self.components = components;
+    }
+
+    pub fn line_connect(&self) -> u32 {
+        self.line_connect
+    }
+
+    pub fn set_line_connect(&mut self, line_connect: u32) {
+        self.line_connect = line_connect;
     }
 
     fn call_initialize(
@@ -5391,6 +5412,7 @@ pub struct Engine {
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
     team_home_base_rule: bool,
     construction_needs_material: bool,
+    structures_need_energy: bool,
     known_crew_owners: HashSet<i32>,
     eliminated_crew_owners: HashSet<i32>,
     transfer_zones: TransferZoneTable,
@@ -5798,6 +5820,7 @@ impl Engine {
             crew_roles: HashMap::new(),
             team_home_base_rule: false,
             construction_needs_material: false,
+            structures_need_energy: false,
             known_crew_owners: HashSet::new(),
             eliminated_crew_owners: HashSet::new(),
             transfer_zones: TransferZoneTable::default(),
@@ -5837,6 +5860,14 @@ impl Engine {
 
     pub fn set_construction_needs_material(&mut self, enabled: bool) {
         self.construction_needs_material = enabled;
+    }
+
+    pub fn structures_need_energy(&self) -> bool {
+        self.structures_need_energy
+    }
+
+    pub fn set_structures_need_energy(&mut self, enabled: bool) {
+        self.structures_need_energy = enabled;
     }
 
     pub fn register_player(&mut self, config: PlayerConfig) -> Result<(), EngineError> {
@@ -7530,19 +7561,21 @@ impl Engine {
         let mut command_snapshots: HashMap<ObjectId, CommandObjectSnapshot> =
             HashMap::with_capacity(self.objects.len());
         for object in &self.objects {
-            let procedure = self
+            let (procedure, line_connect) = self
                 .definitions
                 .get(&object.definition_id)
                 .map(|definition| {
-                    definition
+                    let procedure = definition
                         .action_library()
-                        .procedure_for_action(&object.state.action.name)
+                        .procedure_for_action(&object.state.action.name);
+                    (procedure, definition.line_connect())
                 })
-                .unwrap_or_default();
+                .unwrap_or((ActionProcedure::default(), 0));
             command_snapshots.insert(
                 object.id,
                 CommandObjectSnapshot {
                     id: object.id,
+                    definition_id: object.definition_id.clone(),
                     position: object.state.position,
                     status: object.state.status,
                     destroyed: object.destroyed,
@@ -7556,6 +7589,8 @@ impl Engine {
                     crew_member: object.state.crew_member,
                     selected: selected_objects.contains(&object.id),
                     alive: object.state.alive,
+                    contents: object.state.contents.clone(),
+                    line_connect,
                 },
             );
         }
@@ -7590,6 +7625,7 @@ impl Engine {
                     position: current_position,
                     object: builder_snapshot,
                     objects: &command_snapshots,
+                    structures_need_energy: self.structures_need_energy,
                 };
                 if let Some(update) = object.step_command_stack(command_context) {
                     object
@@ -8011,10 +8047,16 @@ impl Engine {
 
             self.apply_landscape_at_index(idx);
             self.auto_collect_at_index(idx)?;
+            let line_connect = self
+                .definitions
+                .get(&self.objects[idx].definition_id)
+                .map(|definition| definition.line_connect())
+                .unwrap_or(0);
             command_snapshots.insert(
                 object_id,
                 CommandObjectSnapshot {
                     id: object_id,
+                    definition_id: self.objects[idx].definition_id.clone(),
                     position: self.objects[idx].state.position,
                     status: self.objects[idx].state.status,
                     destroyed: self.objects[idx].destroyed,
@@ -8029,6 +8071,8 @@ impl Engine {
                     crew_member: self.objects[idx].state.crew_member,
                     selected: selected_objects.contains(&object_id),
                     alive: self.objects[idx].state.alive,
+                    contents: self.objects[idx].state.contents.clone(),
+                    line_connect,
                 },
             );
             spawn_requests.extend(spawns.into_iter());

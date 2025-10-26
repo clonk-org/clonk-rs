@@ -109,6 +109,7 @@ struct ScenarioDefinition {
     additional_graphics: HashMap<String, ResourceGraphicsVariant>,
     resource_group: Option<Group>,
     components: Vec<DefinitionComponent>,
+    line_connect: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +153,7 @@ pub struct Scenario {
     script: Option<ScenarioScriptSource>,
     objectives: ScenarioObjectives,
     construction_needs_material: bool,
+    structures_need_energy: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -326,6 +328,7 @@ impl Scenario {
             script,
             objectives: ScenarioObjectives::from_legacy_game(&manifest.core.game),
             construction_needs_material: manifest.core.game.realism.construction_needs_material,
+            structures_need_energy: manifest.core.game.realism.structures_need_energy,
         })
     }
 
@@ -397,6 +400,7 @@ impl Scenario {
         }
 
         engine.set_construction_needs_material(self.construction_needs_material);
+        engine.set_structures_need_energy(self.structures_need_energy);
 
         for definition in &self.definitions {
             let name = definition.name.as_deref().unwrap_or(&definition.id);
@@ -432,6 +436,7 @@ impl Scenario {
                 compiled.set_sprite_variants(variants);
             }
             compiled.set_components(definition.components.clone());
+            compiled.set_line_connect(definition.line_connect);
             engine.register_definition(compiled)?;
         }
 
@@ -583,6 +588,7 @@ impl Scenario {
                     additional_graphics: HashMap::new(),
                     resource_group: None,
                     components: Vec::new(),
+                    line_connect: 0,
                 }
             };
 
@@ -765,6 +771,7 @@ impl Scenario {
             script,
             objectives: ScenarioObjectives::default(),
             construction_needs_material: false,
+            structures_need_energy: false,
         })
     }
 }
@@ -3178,6 +3185,7 @@ fn scenario_definition_from_resource(
                 count: component.count,
             })
             .collect(),
+        line_connect: core.line_connect,
     }
 }
 
@@ -5037,6 +5045,7 @@ global func Step(state, frame, random)
                 additional_graphics: HashMap::new(),
                 resource_group: None,
                 components: Vec::new(),
+                line_connect: 0,
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
@@ -5053,6 +5062,7 @@ global func Step(state, frame, random)
             }),
             objectives: ScenarioObjectives::default(),
             construction_needs_material: false,
+            structures_need_energy: false,
         };
 
         let mut engine = Engine::with_seed(11);
@@ -5113,6 +5123,7 @@ global func Step(state, frame, random)
                 additional_graphics: HashMap::new(),
                 resource_group: None,
                 components: Vec::new(),
+                line_connect: 0,
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
@@ -5129,6 +5140,7 @@ global func Step(state, frame, random)
             }),
             objectives: ScenarioObjectives::default(),
             construction_needs_material: false,
+            structures_need_energy: false,
         };
 
         let mut engine = Engine::with_seed(7);
