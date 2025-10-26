@@ -27,7 +27,7 @@
 **Problem:** Command stack now supports MoveTo + Build; Follow/Attack/etc. still missing
 **Evidence:** `SetCommand("Build", ...)` starts Build procedure with material gating; `command::tests::acquire_requests_move_for_nearby_item` verifies ground pickup pathing; `compat::tests::set_command_clears_stack_and_pushes_command` still green
 **C++ Has:** 30 commands (Follow, MoveTo, Build, Attack, etc.) via `C4Command.cpp`
-**Rust Has:** Command trait infrastructure + MoveTo/Build/Follow/Attack + Acquire for loose items, shared-container withdrawal, cross-container exit/grab heuristics, Buy commands that deduct home base stock/wealth, spawn purchased items in bases, and hand off targeted shop purchases, plus Energy line-kit handshake; command stack snapshots persist across engine saves and scenario exports
+**Rust Has:** Command trait infrastructure + MoveTo/Build/Follow/Attack/Enter + Acquire for loose items, shared-container withdrawal, cross-container exit/grab heuristics, Buy commands that deduct home base stock/wealth, spawn purchased items in bases, and hand off targeted shop purchases, plus Energy line-kit handshake; command stack snapshots persist across engine saves and scenario exports
 **Impact:** Build automation works (crew picks up components, honours material requirements); Energize follows loose line-kit pickups; merchant/shop buys succeed and survive save/load; broader command coverage still missing
 **Next:**
 1. Expand tests to cover queue chaining, failure recovery, and scenario parity
@@ -75,7 +75,7 @@
 | **Tests** | ✅ Working | `cargo test --workspace` passes | TBD |
 | **Scenario Discovery** | ✅ Working | content/ assets discovered; sandbox no longer sole entry | TBD |
 | **Scenario Loading** | ⚠️ Unknown | Needs real scenarios to test | TBD |
-| **AI Commands** | ⚠️ Partial | MoveTo/Build/Follow/Attack + Acquire handles loose/container/cross-container pickups; Buy spawns base purchases and targeted hand-offs; command persistence landed; remaining command types still pending | TBD |
+| **AI Commands** | ⚠️ Partial | MoveTo/Build/Follow/Attack/Enter + Acquire handles loose/container/cross-container pickups; Buy spawns base purchases and targeted hand-offs; command persistence landed; remaining command types still pending | TBD |
 | **Graphics Rendering** | ✅ Implemented | Code exists; needs verification | TBD |
 | **Player Input** | ✅ Implemented | Keyboard/mouse/gamepad code exists | TBD |
 | **Landscape** | ✅ Implemented | Dig/blast/materials code exists | TBD |
@@ -101,6 +101,7 @@
 ✅ **AI Build Command:** Rust `SetCommand("Build")` starts construction, respects component requirements
 ✅ **AI Follow/Attack:** Command stack issues MoveTo + direction updates mirroring baseline C4 behaviour (unit tested)
 ✅ **AI Acquire/Buy:** Shared/container/cross-container pulls mirrored via command events; base + targeted shop purchases adjust wealth/spawn objects (`command::tests::buy_spawns_item_and_updates_player_state`, `command::tests::buy_collects_item_from_explicit_target`)
+✅ **AI Enter Command:** Crew enter structures when in range; MoveTo fallback covers distance (`command::tests::enter_enters_target_when_in_range`, `command::tests::enter_requests_move_when_far`)
 ✅ **Command Persistence:** Command stack state captured and restored across saves (`command::tests::command_stack_snapshot_preserves_acquire_state`)
 
 ---

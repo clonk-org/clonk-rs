@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_COMMAND_STACK: usize = 35;
 const LINEKIT_DEFINITION: &str = "LNKT";
 const ACQUIRE_REQUEST_INTERVAL: u32 = 50;
+const COMMAND_FLAG_ENTER_PUSH_TARGET: i32 = 0b10;
 
 #[derive(Debug, Clone)]
 pub struct CommandObjectSnapshot {
@@ -298,6 +299,106 @@ mod tests {
                 assert_eq!(request.target, Some(target_id));
             }
             other => panic!("expected move request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn enter_enters_target_when_in_range() {
+        let actor_id = ObjectId::new(30);
+        let target_id = ObjectId::new(40);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(10, 10);
+        actor.command_direction = CommandDirection::Right;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(18, 16);
+        target.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
+        target.category = CATEGORY_STRUCTURE;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(target.id, target);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = EnterState::from_request(
+            &CommandRequest::new(CommandId::Enter).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result.update.expect("enter should produce an update");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert_eq!(update.container, Some(Some(target_id)));
+        assert_eq!(update.position, Some(Vector2::new(18, 16)));
+        assert_eq!(update.velocity, Some(Vector2::ZERO));
+        assert!(result.operations.is_empty());
+    }
+
+    #[test]
+    fn enter_requests_move_when_far() {
+        let actor_id = ObjectId::new(31);
+        let target_id = ObjectId::new(41);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(0, 0);
+        actor.command_direction = CommandDirection::Left;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(120, 0);
+        target.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
+        target.category = CATEGORY_STRUCTURE;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(target.id, target);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 5,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = EnterState::from_request(
+            &CommandRequest::new(CommandId::Enter).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        let update = result
+            .update
+            .expect("enter should stop actor before requesting movement");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert!(result.events.is_empty());
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.target, Some(target_id));
+                assert_eq!(request.update_interval, 50);
+            }
+            other => panic!("unexpected operation: {:?}", other),
         }
     }
 
@@ -1773,6 +1874,104 @@ impl MoveToState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct EnterState {
+    target: ObjectId,
+    #[allow(dead_code)]
+    push_target: bool,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    last_move_order: Option<u64>,
+}
+
+impl EnterState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let target = request.target.ok_or(CommandError::Unsupported)?;
+        let push_target = matches!(
+            request.data,
+            CommandData::Integer(flags) if flags & COMMAND_FLAG_ENTER_PUSH_TARGET != 0
+        );
+        Ok(Self {
+            target,
+            push_target,
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            last_move_order: None,
+        })
+    }
+
+    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn should_issue_move(&mut self, frame: u64) -> bool {
+        const MOVE_COOLDOWN: u64 = 12;
+        match self.last_move_order {
+            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
+            _ => {
+                self.last_move_order = Some(frame);
+                true
+            }
+        }
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        let Some(target_snapshot) = ctx.resolve(self.target) else {
+            return CommandStepResult::failed(self.update_to_stop(ctx));
+        };
+
+        if !target_snapshot.is_active() {
+            return CommandStepResult::completed(self.update_to_stop(ctx));
+        }
+
+        if ctx.object.container == Some(self.target) {
+            return CommandStepResult::completed(self.update_to_stop(ctx));
+        }
+
+        if target_snapshot.ocf & ocf::ENTRANCE == 0 {
+            return CommandStepResult::failed(self.update_to_stop(ctx));
+        }
+
+        if let Some(container) = ctx.object.container {
+            if container != self.target && target_snapshot.container != Some(container) {
+                return CommandStepResult::running(self.update_to_stop(ctx));
+            }
+        }
+
+        const ENTRANCE_RANGE: i32 = 12;
+        let dx = target_snapshot.position.x - ctx.position.x;
+        let dy = target_snapshot.position.y - ctx.position.y;
+        if dx.abs() <= ENTRANCE_RANGE && dy.abs() <= ENTRANCE_RANGE {
+            let mut update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
+            update.container = Some(Some(self.target));
+            update.position = Some(target_snapshot.position);
+            update.velocity = Some(Vector2::ZERO);
+            return CommandStepResult::completed(Some(update));
+        }
+
+        let mut result = CommandStepResult::running(self.update_to_stop(ctx));
+        if self.should_issue_move(ctx.frame) {
+            let request = CommandRequest::new(CommandId::MoveTo)
+                .with_target(Some(self.target))
+                .with_update_interval(50);
+            result = result.with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+        result
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct BuildState {
     target: ObjectId,
     site: Option<Vector2>,
@@ -2777,6 +2976,7 @@ impl EnergyState {
 enum CommandState {
     Follow(FollowState),
     MoveTo(MoveToState),
+    Enter(EnterState),
     Build(BuildState),
     Attack(AttackState),
     Buy(BuyState),
@@ -2795,6 +2995,7 @@ impl ActiveCommand {
         let state = match request.id {
             CommandId::Follow => CommandState::Follow(FollowState::from_request(&request)?),
             CommandId::MoveTo => CommandState::MoveTo(MoveToState::from_request(&request)),
+            CommandId::Enter => CommandState::Enter(EnterState::from_request(&request)?),
             CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
             CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
@@ -2818,6 +3019,7 @@ impl ActiveCommand {
         match &mut self.state {
             CommandState::Follow(state) => state.step(ctx),
             CommandState::MoveTo(state) => state.step(ctx),
+            CommandState::Enter(state) => state.step(ctx),
             CommandState::Build(state) => state.step(ctx),
             CommandState::Attack(state) => state.step(ctx),
             CommandState::Buy(state) => state.step(ctx),
