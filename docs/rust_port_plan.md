@@ -463,7 +463,7 @@ These are NOT needed for parity (C++ doesn't have them either or they're not cor
 
 **Checklist:**
 - [x] `cargo run` shows real game (not "preview")
-- [ ] Real scenarios listed and selectable
+- [x] Real scenarios listed and selectable (`load_frontend_scenarios_*`, `start_real_scenario_loads_from_disk`)
 - [ ] Scenario loads completely (landscape, objects, graphics, sounds)
 - [ ] All objects visible with correct graphics
 - [ ] Controls work identically to C++
