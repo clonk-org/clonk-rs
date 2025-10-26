@@ -25,6 +25,7 @@ pub struct AppPaths {
     install_root: PathBuf,
     planet_dir: PathBuf,
     system_group: PathBuf,
+    content_dir: Option<PathBuf>,
     user_data_dir: PathBuf,
     cache_dir: PathBuf,
     logs_dir: PathBuf,
@@ -47,6 +48,10 @@ impl AppPaths {
 
     pub fn planet_dir(&self) -> &Path {
         &self.planet_dir
+    }
+
+    pub fn content_dir(&self) -> Option<&Path> {
+        self.content_dir.as_deref()
     }
 
     pub fn system_group_path(&self) -> &Path {
@@ -110,10 +115,12 @@ fn build_paths(
     if !system_group.exists() {
         return Err(PathsError::SystemGroupMissing { path: system_group });
     }
+    let content_dir = discover_content_dir(&install_root);
     Ok(AppPaths {
         install_root,
         planet_dir,
         system_group,
+        content_dir,
         user_data_dir,
         cache_dir,
         logs_dir,
@@ -208,6 +215,21 @@ fn discover_temp_dir() -> PathBuf {
     env::temp_dir().join(APP_NAME)
 }
 
+fn discover_content_dir(install_root: &Path) -> Option<PathBuf> {
+    if let Some(dir) = env_path("LC_CONTENT_DIR") {
+        if dir.exists() {
+            return Some(dir);
+        }
+    }
+    for name in ["content", "Content", "lc-content", "LCContent"] {
+        let candidate = install_root.join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn env_path(key: &str) -> Option<PathBuf> {
     env::var_os(key)
         .filter(|value| !value.is_empty())
@@ -217,6 +239,7 @@ fn env_path(key: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::ffi::OsString;
     use std::io::Write;
     use std::path::Path;
@@ -332,5 +355,17 @@ mod tests {
         assert_eq!(paths.cache_dir(), cache_dir);
         assert_eq!(paths.logs_dir(), logs_dir);
         assert_eq!(paths.temp_dir(), temp_dir);
+        assert!(paths.content_dir().is_none());
+    }
+
+    #[test]
+    fn discover_detects_content_dir() {
+        let install_dir = TempDir::new().unwrap();
+        touch_system_group(&install_dir);
+        let content_dir = install_dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+        let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(install_dir.path()))]);
+        let paths = AppPaths::discover().unwrap();
+        assert_eq!(paths.content_dir(), Some(content_dir.as_path()));
     }
 }

@@ -5036,6 +5036,7 @@ global func Step(state, frame, random)
                 color_by_owner_mask: None,
                 additional_graphics: HashMap::new(),
                 resource_group: None,
+                components: Vec::new(),
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
@@ -5050,6 +5051,8 @@ global func Step(state, frame, random)
                 name: "Script.c".into(),
                 source: scenario_script.to_string(),
             }),
+            objectives: ScenarioObjectives::default(),
+            construction_needs_material: false,
         };
 
         let mut engine = Engine::with_seed(11);
@@ -5109,6 +5112,7 @@ global func Step(state, frame, random)
                 color_by_owner_mask: None,
                 additional_graphics: HashMap::new(),
                 resource_group: None,
+                components: Vec::new(),
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
@@ -5123,6 +5127,8 @@ global func Step(state, frame, random)
                 name: "Script.c".into(),
                 source: scenario_script.to_string(),
             }),
+            objectives: ScenarioObjectives::default(),
+            construction_needs_material: false,
         };
 
         let mut engine = Engine::with_seed(7);

@@ -1333,11 +1333,17 @@ fn discover_global_sound_libraries() -> Vec<SoundLibrary> {
     match AppPaths::discover() {
         Ok(paths) => {
             let mut seen = HashSet::new();
-            for root in [
+            let mut roots = vec![
                 paths.install_root().to_path_buf(),
                 paths.planet_dir().to_path_buf(),
                 paths.user_data_dir().to_path_buf(),
-            ] {
+            ];
+            if let Some(content) = paths.content_dir() {
+                roots.push(content.to_path_buf());
+            }
+            roots.sort();
+            roots.dedup();
+            for root in roots {
                 for candidate in find_sound_group_candidates(&root) {
                     let key = candidate.to_string_lossy().to_ascii_lowercase();
                     if !seen.insert(key) {
@@ -3635,6 +3641,11 @@ fn candidate_material_paths(paths: &AppPaths) -> Vec<PathBuf> {
     if install_root.exists() {
         candidates.push(install_root.to_path_buf());
     }
+    if let Some(content) = paths.content_dir() {
+        if content.exists() {
+            candidates.push(content.to_path_buf());
+        }
+    }
     let scenario_dir = paths.scenario_dir();
     if scenario_dir.exists() {
         candidates.push(scenario_dir);
@@ -3644,13 +3655,16 @@ fn candidate_material_paths(paths: &AppPaths) -> Vec<PathBuf> {
         candidates.push(system_group.to_path_buf());
     }
 
-    for base in [
-        paths.planet_dir(),
-        paths.install_root(),
-        paths.system_group_path(),
-    ]
-    .into_iter()
-    {
+    let mut group_bases = vec![
+        paths.planet_dir().to_path_buf(),
+        paths.install_root().to_path_buf(),
+        paths.system_group_path().to_path_buf(),
+    ];
+    if let Some(content) = paths.content_dir() {
+        group_bases.push(content.to_path_buf());
+    }
+
+    for base in group_bases {
         for name in GROUP_NAMES {
             let path = base.join(name);
             if path.exists() {
@@ -8058,6 +8072,9 @@ fn open_install_objects_group(paths: &AppPaths) -> Option<Group> {
     let mut bases = Vec::new();
     bases.push(paths.planet_dir().to_path_buf());
     bases.push(paths.install_root().to_path_buf());
+    if let Some(content) = paths.content_dir() {
+        bases.push(content.to_path_buf());
+    }
     bases.sort();
     bases.dedup();
 
@@ -8369,6 +8386,9 @@ fn scenario_roots(paths: &AppPaths) -> Vec<ScenarioRoot> {
     let mut roots = Vec::new();
     let mut seen = HashSet::new();
     push_root(&mut roots, &mut seen, paths.scenario_dir(), "Scenarios");
+    if let Some(content) = paths.content_dir() {
+        push_root(&mut roots, &mut seen, content.to_path_buf(), "Scenarios");
+    }
     push_root(
         &mut roots,
         &mut seen,
@@ -8656,10 +8676,12 @@ mod tests {
     use rand_chacha::ChaCha8Rng;
     use std::collections::HashMap;
     use std::env;
+    use parking_lot::ReentrantMutex;
     use std::ffi::OsString;
     use std::fs;
+    use std::io::BufWriter;
     use std::path::Path;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
     use std::thread;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -9560,6 +9582,29 @@ mod tests {
                 .and_then(|path| path.file_name())
                 .and_then(|name| name.to_str()),
             Some("Alpha.c4s")
+        );
+
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn load_frontend_scenarios_discovers_repository_content() {
+        let _env_lock = crate::tests::env_lock().lock();
+        reset_cached_app_paths();
+
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let install_root = manifest_dir
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+
+        let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(install_root))]);
+        let scenarios = load_frontend_scenarios();
+
+        assert!(
+            scenarios.iter().any(|scenario| scenario.identifier != "rust_sandbox"),
+            "expected repository content scenarios to be discoverable"
         );
 
         reset_cached_app_paths();
