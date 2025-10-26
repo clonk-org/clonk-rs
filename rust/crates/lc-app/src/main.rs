@@ -1,4 +1,5 @@
 mod control_options;
+mod game_over;
 mod gamepad;
 mod ingame_menu;
 mod input;
@@ -34,6 +35,7 @@ use clap::Parser;
 use control_options::{
     binding_display_name, format_key_label, ControlOptionsCommand, ControlOptionsState,
 };
+use game_over::{GameOverEntry, GameOverOutcome, GameOverState};
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
 use ingame_menu::{IngameMenuAction, IngameMenuState};
 use input::{ControlBindingId, KeyboardBindings};
@@ -45,10 +47,10 @@ use lc_engine::{
     ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, FloatVector2,
     Landscape, MaterialSet, MenuCommandKind, MenuCommandSelection, MessageKind, MovementProfile,
     ObjectId, ObjectSnapshot, ObjectUpdate, PlayerConfig, PlayerStatus, Recorder, Recording,
-    Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2,
-    FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT,
-    FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL,
-    OWNER_NONE,
+    RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket,
+    Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER,
+    FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL,
+    FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
     default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
@@ -1850,6 +1852,7 @@ struct GameApp {
     ingame_pointer: Option<ViewportPointer>,
     mouse_state: Option<IngameMouseState>,
     exit_requested: bool,
+    game_over_dialog: Option<GameOverState>,
     game_over_handled: bool,
 }
 
@@ -4072,6 +4075,7 @@ impl GameApp {
             ingame_pointer: None,
             mouse_state: None,
             exit_requested: false,
+            game_over_dialog: None,
             game_over_handled: false,
         };
         if let Some(existing) = existing_quick_save_path() {
@@ -4285,6 +4289,20 @@ impl GameApp {
 
         match self.mode {
             AppMode::Menu => {
+                if self.game_over_dialog.is_some() {
+                    if state == ElementState::Pressed
+                        && matches!(
+                            key,
+                            VirtualKeyCode::Return
+                                | VirtualKeyCode::NumpadEnter
+                                | VirtualKeyCode::Space
+                                | VirtualKeyCode::Escape
+                        )
+                    {
+                        self.dismiss_game_over_dialog();
+                    }
+                    return Ok(());
+                }
                 if self.startup_view == StartupView::Options {
                     if let Some(options) = self.control_options.as_mut() {
                         let mut commands = Vec::new();
@@ -5227,6 +5245,12 @@ impl GameApp {
     }
 
     fn handle_menu_cancel_action(&mut self, state: ElementState) -> Result<(), EngineError> {
+        if self.game_over_dialog.is_some() {
+            if state == ElementState::Pressed {
+                self.dismiss_game_over_dialog();
+            }
+            return Ok(());
+        }
         match self.startup_view {
             StartupView::ScenarioBrowser => match state {
                 ElementState::Pressed => {
@@ -5262,6 +5286,19 @@ impl GameApp {
         action: GamepadActionType,
         state: ElementState,
     ) -> Result<(), EngineError> {
+        if matches!(self.mode, AppMode::Menu) && self.game_over_dialog.is_some() {
+            if state == ElementState::Pressed {
+                if matches!(
+                    action,
+                    GamepadActionType::Select
+                        | GamepadActionType::Cancel
+                        | GamepadActionType::MenuToggle
+                ) {
+                    self.dismiss_game_over_dialog();
+                }
+            }
+            return Ok(());
+        }
         match action {
             GamepadActionType::Select => match self.mode {
                 AppMode::Menu => match self.startup_view {
@@ -5331,50 +5368,56 @@ impl GameApp {
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
         let point = gui_point_from_position(position);
         match self.mode {
-            AppMode::Menu => match self.startup_view {
-                StartupView::ScenarioBrowser => self.handle_menu_input(|state| {
-                    state.set_pointer_position(Some(point));
-                    state.menu().handle_pointer_move(point)
-                }),
-                StartupView::MainMenu => {
-                    self.main_menu_state.set_pointer_position(Some(point));
-                    let actions = self.main_menu_state.handle_pointer_move(point);
-                    self.process_main_menu_actions(actions)
+            AppMode::Menu => {
+                if self.game_over_dialog.is_some() {
+                    self.pointer_left();
+                    return Ok(());
                 }
-                StartupView::NetworkLobby => {
-                    if let Some(lobby) = self.network_lobby.as_mut() {
-                        let width = self.graphics.surface().width() as f32;
-                        let height = self.graphics.surface().height() as f32;
-                        lobby.update_layout(width, height);
-                        match lobby.pointer_region(point) {
-                            LobbyPointerRegion::Menu => self.handle_menu_input(|state| {
-                                state.set_pointer_position(Some(point));
-                                state.menu().handle_pointer_move(point)
-                            }),
-                            LobbyPointerRegion::Panel => {
-                                lobby.handle_panel_pointer_move(point);
-                                self.menu_state.set_pointer_position(None);
-                                Ok(())
+                match self.startup_view {
+                    StartupView::ScenarioBrowser => self.handle_menu_input(|state| {
+                        state.set_pointer_position(Some(point));
+                        state.menu().handle_pointer_move(point)
+                    }),
+                    StartupView::MainMenu => {
+                        self.main_menu_state.set_pointer_position(Some(point));
+                        let actions = self.main_menu_state.handle_pointer_move(point);
+                        self.process_main_menu_actions(actions)
+                    }
+                    StartupView::NetworkLobby => {
+                        if let Some(lobby) = self.network_lobby.as_mut() {
+                            let width = self.graphics.surface().width() as f32;
+                            let height = self.graphics.surface().height() as f32;
+                            lobby.update_layout(width, height);
+                            match lobby.pointer_region(point) {
+                                LobbyPointerRegion::Menu => self.handle_menu_input(|state| {
+                                    state.set_pointer_position(Some(point));
+                                    state.menu().handle_pointer_move(point)
+                                }),
+                                LobbyPointerRegion::Panel => {
+                                    lobby.handle_panel_pointer_move(point);
+                                    self.menu_state.set_pointer_position(None);
+                                    Ok(())
+                                }
                             }
+                        } else {
+                            Ok(())
                         }
-                    } else {
-                        Ok(())
+                    }
+                    StartupView::Options => {
+                        let commands = if let Some(options) = self.control_options.as_mut() {
+                            options.set_pointer_position(Some(point));
+                            Some(options.handle_pointer_move(point))
+                        } else {
+                            None
+                        };
+                        if let Some(commands) = commands {
+                            self.process_control_options_commands(commands)
+                        } else {
+                            Ok(())
+                        }
                     }
                 }
-                StartupView::Options => {
-                    let commands = if let Some(options) = self.control_options.as_mut() {
-                        options.set_pointer_position(Some(point));
-                        Some(options.handle_pointer_move(point))
-                    } else {
-                        None
-                    };
-                    if let Some(commands) = commands {
-                        self.process_control_options_commands(commands)
-                    } else {
-                        Ok(())
-                    }
-                }
-            },
+            }
             AppMode::Running => {
                 self.update_ingame_pointer(point);
                 Ok(())
@@ -5498,94 +5541,107 @@ impl GameApp {
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         match self.mode {
-            AppMode::Menu => match self.startup_view {
-                StartupView::ScenarioBrowser => {
-                    if let Some(point) = self.menu_state.pointer_position() {
-                        match button_state {
-                            ElementState::Pressed => self.handle_menu_input(|state| {
-                                state.menu().handle_pointer_down(point)
-                            })?,
-                            ElementState::Released => self
-                                .handle_menu_input(|state| state.menu().handle_pointer_up(point))?,
-                        }
+            AppMode::Menu => {
+                if self.game_over_dialog.is_some() {
+                    if button_state == ElementState::Released {
+                        self.dismiss_game_over_dialog();
                     }
-                    Ok(())
+                    return Ok(());
                 }
-                StartupView::MainMenu => {
-                    if let Some(point) = self.main_menu_state.pointer_position() {
-                        let actions = match button_state {
-                            ElementState::Pressed => {
-                                self.main_menu_state.handle_pointer_down(point)
+                match self.startup_view {
+                    StartupView::ScenarioBrowser => {
+                        if let Some(point) = self.menu_state.pointer_position() {
+                            match button_state {
+                                ElementState::Pressed => self.handle_menu_input(|state| {
+                                    state.menu().handle_pointer_down(point)
+                                })?,
+                                ElementState::Released => self.handle_menu_input(|state| {
+                                    state.menu().handle_pointer_up(point)
+                                })?,
                             }
-                            ElementState::Released => self.main_menu_state.handle_pointer_up(point),
-                        };
-                        self.process_main_menu_actions(actions)?;
+                        }
+                        Ok(())
                     }
-                    Ok(())
-                }
-                StartupView::NetworkLobby => {
-                    if let Some(lobby) = self.network_lobby.as_mut() {
-                        let width = self.graphics.surface().width() as f32;
-                        let height = self.graphics.surface().height() as f32;
-                        lobby.update_layout(width, height);
+                    StartupView::MainMenu => {
+                        if let Some(point) = self.main_menu_state.pointer_position() {
+                            let actions = match button_state {
+                                ElementState::Pressed => {
+                                    self.main_menu_state.handle_pointer_down(point)
+                                }
+                                ElementState::Released => {
+                                    self.main_menu_state.handle_pointer_up(point)
+                                }
+                            };
+                            self.process_main_menu_actions(actions)?;
+                        }
+                        Ok(())
+                    }
+                    StartupView::NetworkLobby => {
+                        if let Some(lobby) = self.network_lobby.as_mut() {
+                            let width = self.graphics.surface().width() as f32;
+                            let height = self.graphics.surface().height() as f32;
+                            lobby.update_layout(width, height);
 
-                        match button_state {
-                            ElementState::Pressed => {
-                                if let Some(point) = lobby.pointer_position() {
-                                    if matches!(
-                                        lobby.pointer_region(point),
-                                        LobbyPointerRegion::Panel
-                                    ) {
-                                        lobby.handle_panel_pointer_down(point);
-                                        return Ok(());
-                                    }
-                                }
-                                if let Some(point) = self.menu_state.pointer_position() {
-                                    self.handle_menu_input(|state| {
-                                        state.menu().handle_pointer_down(point)
-                                    })?;
-                                }
-                                Ok(())
-                            }
-                            ElementState::Released => {
-                                if let Some(point) = lobby.pointer_position() {
-                                    if matches!(
-                                        lobby.pointer_region(point),
-                                        LobbyPointerRegion::Panel
-                                    ) {
-                                        if let Some(action) = lobby.handle_panel_pointer_up(point) {
-                                            self.process_lobby_action(action)?;
+                            match button_state {
+                                ElementState::Pressed => {
+                                    if let Some(point) = lobby.pointer_position() {
+                                        if matches!(
+                                            lobby.pointer_region(point),
+                                            LobbyPointerRegion::Panel
+                                        ) {
+                                            lobby.handle_panel_pointer_down(point);
+                                            return Ok(());
                                         }
-                                        return Ok(());
                                     }
+                                    if let Some(point) = self.menu_state.pointer_position() {
+                                        self.handle_menu_input(|state| {
+                                            state.menu().handle_pointer_down(point)
+                                        })?;
+                                    }
+                                    Ok(())
                                 }
-                                if let Some(point) = self.menu_state.pointer_position() {
-                                    self.handle_menu_input(|state| {
-                                        state.menu().handle_pointer_up(point)
-                                    })?;
+                                ElementState::Released => {
+                                    if let Some(point) = lobby.pointer_position() {
+                                        if matches!(
+                                            lobby.pointer_region(point),
+                                            LobbyPointerRegion::Panel
+                                        ) {
+                                            if let Some(action) =
+                                                lobby.handle_panel_pointer_up(point)
+                                            {
+                                                self.process_lobby_action(action)?;
+                                            }
+                                            return Ok(());
+                                        }
+                                    }
+                                    if let Some(point) = self.menu_state.pointer_position() {
+                                        self.handle_menu_input(|state| {
+                                            state.menu().handle_pointer_up(point)
+                                        })?;
+                                    }
+                                    Ok(())
                                 }
-                                Ok(())
                             }
+                        } else {
+                            Ok(())
                         }
-                    } else {
+                    }
+                    StartupView::Options => {
+                        let commands = if let Some(options) = self.control_options.as_mut() {
+                            options.pointer_position().map(|point| match button_state {
+                                ElementState::Pressed => options.handle_pointer_down(point),
+                                ElementState::Released => options.handle_pointer_up(point),
+                            })
+                        } else {
+                            None
+                        };
+                        if let Some(commands) = commands {
+                            self.process_control_options_commands(commands)?;
+                        }
                         Ok(())
                     }
                 }
-                StartupView::Options => {
-                    let commands = if let Some(options) = self.control_options.as_mut() {
-                        options.pointer_position().map(|point| match button_state {
-                            ElementState::Pressed => options.handle_pointer_down(point),
-                            ElementState::Released => options.handle_pointer_up(point),
-                        })
-                    } else {
-                        None
-                    };
-                    if let Some(commands) = commands {
-                        self.process_control_options_commands(commands)?;
-                    }
-                    Ok(())
-                }
-            },
+            }
             AppMode::Running => self.handle_ingame_mouse_button(button_state),
             AppMode::Loading => Ok(()),
         }
@@ -5593,6 +5649,12 @@ impl GameApp {
 
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
         if self.mode != AppMode::Menu {
+            return Ok(());
+        }
+        if self.game_over_dialog.is_some() {
+            if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                self.dismiss_game_over_dialog();
+            }
             return Ok(());
         }
         match self.startup_view {
@@ -5750,6 +5812,9 @@ impl GameApp {
     where
         F: FnOnce(&mut MenuState) -> Vec<StartupMenuAction>,
     {
+        if self.game_over_dialog.is_some() {
+            return Ok(());
+        }
         if self.mode != AppMode::Menu
             || !matches!(
                 self.startup_view,
@@ -5881,6 +5946,9 @@ impl GameApp {
         &mut self,
         actions: Vec<MainMenuAction>,
     ) -> Result<(), EngineError> {
+        if self.game_over_dialog.is_some() {
+            return Ok(());
+        }
         for action in actions {
             match action {
                 MainMenuAction::SelectionChanged(_) => {
@@ -6201,19 +6269,73 @@ impl GameApp {
         }
     }
 
+    fn build_game_over_entries(&self) -> Vec<GameOverEntry> {
+        self.snapshot
+            .players
+            .iter()
+            .map(|state| {
+                let name = if state.name.trim().is_empty() {
+                    format!("Player {}", state.id)
+                } else {
+                    state.name.clone()
+                };
+                let status_outcome = match state.status {
+                    PlayerStatus::Active => GameOverOutcome::Victory,
+                    PlayerStatus::Eliminated | PlayerStatus::Surrendered => GameOverOutcome::Defeat,
+                    PlayerStatus::Inactive | PlayerStatus::TeamSelection => {
+                        GameOverOutcome::Observer
+                    }
+                };
+                let outcome = if state.surrendered {
+                    GameOverOutcome::Defeat
+                } else {
+                    status_outcome
+                };
+                let color = state
+                    .color
+                    .map(|RgbColor { r, g, b }| Color::opaque(r, g, b));
+                GameOverEntry {
+                    player_id: state.id,
+                    name,
+                    outcome,
+                    wealth: state.wealth,
+                    score: state.points,
+                    value: state.value,
+                    is_local: state.id == self.local_owner,
+                    color,
+                }
+            })
+            .collect()
+    }
+
+    fn dismiss_game_over_dialog(&mut self) {
+        if self.game_over_dialog.take().is_some() {
+            self.play_ui_sound("DoorClose");
+            self.pointer_left();
+        }
+    }
+
     fn handle_game_over(&mut self) {
-        let finished_label = self
+        let scenario_title = self
             .active_scenario
             .as_ref()
-            .map(|scenario| format!("{} complete", scenario.title))
-            .unwrap_or_else(|| "Scenario complete".to_string());
+            .map(|scenario| scenario.title.clone())
+            .unwrap_or_else(|| "Scenario".to_string());
+        let entries = self.build_game_over_entries();
+        let dialog = GameOverState::new(scenario_title.clone(), entries);
+        let status_message = if dialog.subtitle().is_empty() {
+            format!("{scenario_title} complete")
+        } else {
+            format!("{scenario_title}: {}", dialog.subtitle())
+        };
         self.finish_recording();
         self.game_over_handled = true;
         self.mode = AppMode::Menu;
         self.show_main_menu();
-        self.status_text = finished_label;
+        self.status_text = status_message;
         self.active_scenario = None;
         self.ensure_menu_music();
+        self.game_over_dialog = Some(dialog);
     }
 
     fn maybe_emit_sync_check(&mut self) {
@@ -6358,14 +6480,18 @@ impl GameApp {
     fn render(&mut self, frame: &mut [u8]) -> Result<()> {
         match self.mode {
             AppMode::Menu => {
+                let control_options = self.control_options.as_mut();
+                let network_lobby = self.network_lobby.as_mut();
+                let game_over_dialog = self.game_over_dialog.as_ref();
                 render_startup_frame(
                     &mut self.graphics,
                     self.assets.as_ref(),
                     &mut self.main_menu_state,
                     &mut self.menu_state,
-                    self.control_options.as_mut(),
+                    control_options,
                     self.startup_view,
-                    self.network_lobby.as_mut(),
+                    network_lobby,
+                    game_over_dialog,
                     frame,
                 );
                 Ok(())
@@ -6993,6 +7119,7 @@ impl GameApp {
         self.object_menu = None;
         self.save_browser = None;
         self.save_browser_return_to_menu = false;
+        self.game_over_dialog = None;
         self.engine = Engine::new();
         self.apply_material_library();
         self.input = InputDispatcher::new();
@@ -7068,6 +7195,7 @@ impl GameApp {
     }
 
     fn start_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
+        self.game_over_dialog = None;
         if scenario.path.is_none() {
             return self.start_sandbox_scenario(scenario);
         }
@@ -7482,6 +7610,7 @@ fn render_startup_frame(
     control_options: Option<&mut ControlOptionsState>,
     view: StartupView,
     network_lobby: Option<&mut NetworkLobbyState>,
+    game_over: Option<&GameOverState>,
     frame: &mut [u8],
 ) {
     {
@@ -7509,6 +7638,10 @@ fn render_startup_frame(
             if let Some(lobby) = network_lobby {
                 lobby.render_overlay(surface, assets);
             }
+        }
+        if let Some(dialog) = game_over {
+            let font = assets.font_arc();
+            dialog.render(surface, font.as_ref());
         }
     }
     let surface = graphics.surface();

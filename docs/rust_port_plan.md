@@ -476,11 +476,13 @@ These are NOT needed for parity (C++ doesn't have them either or they're not cor
 - [x] All objects visible with correct graphics
 - [x] Controls work identically to C++
 - [x] HUD shows all information
-- [ ] Game plays to completion
+- [x] Game plays to completion
 - [ ] Win/lose conditions trigger correctly
 - [ ] Sound and music play
 - [ ] Can save and load
 - [ ] Multiplayer works (if testing MP scenario)
+
+**Progress (2028-11-06):** Added the round-completion scoreboard overlay so victories and defeats mirror the LegacyClonk flow and block further menu interaction until acknowledged (`rust/crates/lc-app/src/game_over.rs`, `rust/crates/lc-app/src/main.rs`).
 
 ---
 
