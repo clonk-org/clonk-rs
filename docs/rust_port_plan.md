@@ -2,7 +2,7 @@
 
 ## Current Problem
 
-Core scenarios boot, but complex object procedures (push/build/inventory) still diverge from C++ once gameplay interactions begin.
+Build procedures now enforce component requirements; next parity gap is modeling the builder's physical `CanConstruct` speed adjustments.
 
 ## Required for Exact C++ Parity
 
@@ -263,6 +263,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2026-01-08):** Added full CreateConstruction parity to the compatibility layer, mirroring C++ site checks for terrain support and structural overlap, and covered it with Rust-side regression tests so structures place only when legacy rules pass. Implemented in `rust/crates/lc-engine/src/compat.rs`.
 **Progress (2026-01-10):** Ran the full `lc-engine` regression suite (357 tests) after the action procedure parity work; Walk, Bridge, Dig, Push/Lift/Pull, Attach/Fight, and Scale routines all matched the LegacyClonk traces so the verification item is now complete.
 **Progress (2026-01-12):** Validated that script host functions (FindObject/FindObjects, CreateObject, RemoveObject) execute through the effect context with LegacyClonk parity, covered by the regression set in `rust/crates/lc-engine/src/compat.rs`.
+**Progress (2025-10-26):** Build procedure now consults definition component lists before advancing construction, consuming materials from the builder or its container and halting progress when parts are missing. Added regression tests covering both the failure and consumption paths in `rust/crates/lc-engine/src/lib.rs`.
 
 **Files:** lc-engine action system, lc-engine/tests
 

@@ -1766,6 +1766,8 @@ pub struct ObjectState {
     #[serde(default)]
     pub contents: Vec<ObjectId>,
     #[serde(default)]
+    pub components: HashMap<DefinitionId, u32>,
+    #[serde(default)]
     pub status: ObjectStatus,
     #[serde(default = "default_owner")]
     pub owner: i32,
@@ -1881,6 +1883,9 @@ impl ObjectState {
                 self.container = container;
                 container_change = Some((previous_container, self.container));
             }
+            if let Some(components) = &delta.components {
+                self.components = components.clone();
+            }
         }
 
         self.action.reconcile_with_library(library);
@@ -1920,6 +1925,7 @@ struct ObjectDelta {
     graphics_overlays: Option<Vec<ObjectGraphicsOverlay>>,
     draw_transform: Option<Option<DrawTransform>>,
     base_graphics: Option<Option<ObjectBaseGraphics>>,
+    components: Option<HashMap<DefinitionId, u32>>,
 }
 
 impl ObjectDelta {
@@ -1981,6 +1987,9 @@ impl ObjectDelta {
         if let Some(base_graphics) = update.base_graphics {
             self.base_graphics = Some(base_graphics);
         }
+        if let Some(components) = update.components {
+            self.components = Some(components);
+        }
         if let Some(action) = update.action {
             match &mut self.action {
                 Some(existing) => existing.merge(action),
@@ -2014,6 +2023,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             graphics_overlays: update.graphics_overlays,
             draw_transform: update.draw_transform,
             base_graphics: update.base_graphics,
+            components: update.components,
         }
     }
 }
@@ -2058,6 +2068,8 @@ pub struct ObjectUpdate {
     pub draw_transform: Option<Option<DrawTransform>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_graphics: Option<Option<ObjectBaseGraphics>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub components: Option<HashMap<DefinitionId, u32>>,
 }
 
 impl ObjectUpdate {
@@ -2209,6 +2221,7 @@ impl ObjectUpdate {
             && self.graphics_overlays.is_none()
             && self.draw_transform.is_none()
             && self.base_graphics.is_none()
+            && self.components.is_none()
     }
 }
 
@@ -2475,6 +2488,7 @@ impl Object {
             vertices: self.state.vertices.clone(),
             container: self.state.container,
             contents: self.state.contents.clone(),
+            components: self.state.components.clone(),
             status: self.state.status,
             owner: self.state.owner,
             category: self.state.category,
@@ -2957,6 +2971,8 @@ pub struct ObjectSnapshot {
     #[serde(default)]
     pub contents: Vec<ObjectId>,
     #[serde(default)]
+    pub components: HashMap<DefinitionId, u32>,
+    #[serde(default)]
     pub status: ObjectStatus,
     #[serde(default = "default_owner")]
     pub owner: i32,
@@ -3318,6 +3334,12 @@ pub struct DefinitionActionGraphics {
     pub length: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefinitionComponent {
+    pub id: DefinitionId,
+    pub count: u32,
+}
+
 pub struct Definition {
     id: DefinitionId,
     name: String,
@@ -3343,6 +3365,7 @@ pub struct Definition {
     constructable: bool,
     construction_offset: i32,
     basement: i32,
+    components: Vec<DefinitionComponent>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3408,6 +3431,7 @@ impl Definition {
             constructable: false,
             construction_offset: 0,
             basement: 0,
+            components: Vec::new(),
         })
     }
 
@@ -3478,6 +3502,18 @@ impl Definition {
         definition.set_constructable(resource.core.constructable);
         definition.set_construction_offset(resource.core.con_size_off);
         definition.set_basement(resource.core.basement);
+        if !resource.core.components.is_empty() {
+            let components = resource
+                .core
+                .components
+                .iter()
+                .map(|component| DefinitionComponent {
+                    id: component.id.clone(),
+                    count: component.count,
+                })
+                .collect();
+            definition.set_components(components);
+        }
         Ok(definition)
     }
 
@@ -3749,6 +3785,14 @@ impl Definition {
 
     pub fn set_basement(&mut self, basement: i32) {
         self.basement = basement.max(0);
+    }
+
+    pub fn components(&self) -> &[DefinitionComponent] {
+        &self.components
+    }
+
+    pub fn set_components(&mut self, components: Vec<DefinitionComponent>) {
+        self.components = components;
     }
 
     fn call_initialize(
@@ -5292,6 +5336,7 @@ pub struct Engine {
     crew_selection: HashMap<i32, CrewSelection>,
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
     team_home_base_rule: bool,
+    construction_needs_material: bool,
     known_crew_owners: HashSet<i32>,
     eliminated_crew_owners: HashSet<i32>,
     transfer_zones: TransferZoneTable,
@@ -5698,6 +5743,7 @@ impl Engine {
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
             team_home_base_rule: false,
+            construction_needs_material: false,
             known_crew_owners: HashSet::new(),
             eliminated_crew_owners: HashSet::new(),
             transfer_zones: TransferZoneTable::default(),
@@ -5733,6 +5779,10 @@ impl Engine {
             portrait: None,
         };
         self.messages.add_message(spec);
+    }
+
+    pub fn set_construction_needs_material(&mut self, enabled: bool) {
+        self.construction_needs_material = enabled;
     }
 
     pub fn register_player(&mut self, config: PlayerConfig) -> Result<(), EngineError> {
@@ -8710,6 +8760,7 @@ impl Engine {
                     vertices: snapshot.vertices.clone(),
                     container: None,
                     contents: Vec::new(),
+                    components: snapshot.components.clone(),
                     status: snapshot.status,
                     owner: snapshot.owner,
                     category: snapshot.category,
@@ -9767,13 +9818,33 @@ impl Engine {
             return false;
         }
 
+        let target_definition_id = self.objects[target_idx].definition_id.clone();
+        let need_material = self.construction_needs_material
+            || (self.objects[target_idx].state.category
+                & (CATEGORY_STRUCTURE | CATEGORY_STATIC_BACK))
+                == 0;
+        let required_components = self
+            .definitions
+            .get(&target_definition_id)
+            .map(|definition| definition.components().to_vec())
+            .unwrap_or_default();
+        if need_material
+            && !required_components.is_empty()
+            && !self.ensure_build_components(
+                idx,
+                target_idx,
+                self.objects[target_idx].state.construction,
+                &required_components,
+            )
+        {
+            return false;
+        }
+
         let level = if self.objects[target_idx].state.container.is_some() {
             1
         } else {
             10
         };
-
-        let target_definition_id = self.objects[target_idx].definition_id.clone();
         let target_mass = self
             .definitions
             .get(&target_definition_id)
@@ -9798,6 +9869,110 @@ impl Engine {
         }
 
         true
+    }
+
+    fn ensure_build_components(
+        &mut self,
+        builder_idx: usize,
+        target_idx: usize,
+        construction: i32,
+        required: &[DefinitionComponent],
+    ) -> bool {
+        if required.is_empty() {
+            return true;
+        }
+
+        for component in required {
+            if component.count == 0 {
+                continue;
+            }
+
+            let mut inserted = self.objects[target_idx]
+                .state
+                .components
+                .get(&component.id)
+                .copied()
+                .unwrap_or(0);
+
+            if inserted > component.count {
+                inserted = component.count;
+                self.objects[target_idx]
+                    .state
+                    .components
+                    .insert(component.id.clone(), inserted);
+            }
+
+            while (i64::from(inserted) * i64::from(FULL_CON))
+                < (i64::from(component.count) * i64::from(construction))
+            {
+                if inserted >= component.count {
+                    break;
+                }
+                let consumed = self.consume_component_from_contents(builder_idx, &component.id)
+                    || self.consume_component_from_container_of(builder_idx, &component.id)
+                    || self.consume_component_from_container_of(target_idx, &component.id);
+                if !consumed {
+                    return false;
+                }
+                inserted += 1;
+                self.objects[target_idx]
+                    .state
+                    .components
+                    .insert(component.id.clone(), inserted);
+            }
+        }
+
+        true
+    }
+
+    fn consume_component_from_contents(
+        &mut self,
+        container_index: usize,
+        component_id: &DefinitionId,
+    ) -> bool {
+        if container_index >= self.objects.len() {
+            return false;
+        }
+        let contents = self.objects[container_index].state.contents.clone();
+        for object_id in contents {
+            let Some(child_index) = self.find_object_index(object_id) else {
+                continue;
+            };
+            let child = &self.objects[child_index];
+            if child.definition_id != *component_id
+                || child.destroyed
+                || matches!(child.state.status, ObjectStatus::Deleted)
+                || child.state.construction < FULL_CON
+            {
+                continue;
+            }
+            self.objects[container_index]
+                .state
+                .contents
+                .retain(|&id| id != object_id);
+            self.objects[child_index].state.container = None;
+            self.objects[child_index].mark_destroyed();
+            return true;
+        }
+        false
+    }
+
+    fn consume_component_from_container_of(
+        &mut self,
+        object_index: usize,
+        component_id: &DefinitionId,
+    ) -> bool {
+        if object_index >= self.objects.len() {
+            return false;
+        }
+        let container_id = match self.objects[object_index].state.container {
+            Some(id) => id,
+            None => return false,
+        };
+        let Some(container_index) = self.find_object_index(container_id) else {
+            return false;
+        };
+        self.consume_component_from_contents(container_index, component_id)
     }
 
     fn reset_action_to_default(
@@ -11630,6 +11805,7 @@ impl Engine {
                 vertices,
                 container: None,
                 contents: Vec::new(),
+                components: HashMap::new(),
                 status: status.unwrap_or_default(),
                 owner,
                 category: initial_category,
@@ -16288,6 +16464,163 @@ func ControlDig() { SetAction("Dig"); return true; }
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity, Vector2::new(-6, -3));
         assert_eq!(object.direction, Direction::Left);
+    }
+
+    #[test]
+    fn build_procedure_requires_components_before_progress() -> Result<(), EngineError> {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut builder_definition = Definition::from_script("Builder", "Builder", script)?;
+        let mut builder_actions = HashMap::new();
+        builder_actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        builder_actions.insert(
+            "Build".to_string(),
+            ActionSpec::default().with_procedure("build"),
+        );
+        builder_definition.configure_actions(Some("Idle".to_string()), builder_actions);
+        builder_definition.set_category(DEFAULT_CATEGORY);
+        builder_definition.set_mass(50);
+
+        let mut structure_definition = Definition::from_script("Structure", "Structure", script)?;
+        structure_definition.set_constructable(true);
+        structure_definition.set_category(CATEGORY_STRUCTURE);
+        structure_definition.set_mass(100);
+        structure_definition.set_components(vec![DefinitionComponent {
+            id: "Wood".to_string(),
+            count: 1,
+        }]);
+
+        let mut material_definition = Definition::from_script("Wood", "Wood", script)?;
+        material_definition.set_mass(20);
+
+        let mut engine = Engine::with_seed(7);
+        engine.register_definition(builder_definition)?;
+        engine.register_definition(structure_definition)?;
+        engine.register_definition(material_definition)?;
+        engine.set_construction_needs_material(true);
+
+        let structure_id = engine
+            .spawn_object(SpawnConfig::new("Structure").with_construction(0))
+            .expect("structure spawns");
+
+        let mut build_state = ActionState::new("Build");
+        build_state.target = Some(structure_id);
+        engine
+            .spawn_object(
+                SpawnConfig::new("Builder")
+                    .with_action(build_state)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("builder spawns");
+
+        let before = engine
+            .object_snapshot(structure_id)
+            .expect("structure present")
+            .construction;
+        let snapshot = engine.tick()?;
+        let after = snapshot
+            .object(structure_id)
+            .expect("structure present")
+            .construction;
+        assert_eq!(before, 0);
+        assert_eq!(
+            after, 0,
+            "construction should not progress without components"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_procedure_consumes_components_from_builder() -> Result<(), EngineError> {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut builder_definition = Definition::from_script("Builder", "Builder", script)?;
+        let mut builder_actions = HashMap::new();
+        builder_actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        builder_actions.insert(
+            "Build".to_string(),
+            ActionSpec::default().with_procedure("build"),
+        );
+        builder_definition.configure_actions(Some("Idle".to_string()), builder_actions);
+        builder_definition.set_category(DEFAULT_CATEGORY);
+        builder_definition.set_mass(50);
+
+        let mut structure_definition = Definition::from_script("Structure", "Structure", script)?;
+        structure_definition.set_constructable(true);
+        structure_definition.set_category(CATEGORY_STRUCTURE);
+        structure_definition.set_mass(100);
+        structure_definition.set_components(vec![DefinitionComponent {
+            id: "Wood".to_string(),
+            count: 1,
+        }]);
+
+        let mut material_definition = Definition::from_script("Wood", "Wood", script)?;
+        material_definition.set_mass(20);
+
+        let mut engine = Engine::with_seed(11);
+        engine.register_definition(builder_definition)?;
+        engine.register_definition(structure_definition)?;
+        engine.register_definition(material_definition)?;
+        engine.set_construction_needs_material(true);
+
+        let structure_id = engine
+            .spawn_object(SpawnConfig::new("Structure").with_construction(0))
+            .expect("structure spawns");
+
+        let mut build_state = ActionState::new("Build");
+        build_state.target = Some(structure_id);
+        let builder_id = engine
+            .spawn_object(
+                SpawnConfig::new("Builder")
+                    .with_action(build_state)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("builder spawns");
+
+        let wood_id = engine
+            .spawn_object(SpawnConfig::new("Wood").with_construction(FULL_CON))
+            .expect("wood spawns");
+        engine
+            .apply_object_update(wood_id, ObjectUpdate::new().with_container(builder_id))
+            .expect("assign container succeeds");
+
+        let snapshot = engine.tick()?;
+        let structure = snapshot
+            .object(structure_id)
+            .expect("structure present after tick");
+        assert!(
+            structure.construction > 0,
+            "construction should advance when components are available"
+        );
+        let components = structure.components.get("Wood");
+        assert_eq!(components, Some(&1));
+        assert!(
+            snapshot.object(wood_id).is_none(),
+            "component should be consumed during build"
+        );
+        Ok(())
     }
 
     #[test]

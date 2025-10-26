@@ -20,10 +20,10 @@ use serde::Deserialize;
 
 use crate::{
     action::ActionSpec, ActionState, CommandDirection, Definition, DefinitionActionFacet,
-    DefinitionActionGraphics, DefinitionPicture, DefinitionPictureImage, DefinitionSpriteImage,
-    Direction, EffectState, Engine, EngineError, EnvironmentSettings, Landscape, MovementProfile,
-    ObjectId, ObjectStatus, PhysicsSettings, RgbColor, SkyParallaxMode, SkySettings, SpawnConfig,
-    Vector2, FULL_CON,
+    DefinitionActionGraphics, DefinitionComponent, DefinitionPicture, DefinitionPictureImage,
+    DefinitionSpriteImage, Direction, EffectState, Engine, EngineError, EnvironmentSettings,
+    Landscape, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings, RgbColor, SkyParallaxMode,
+    SkySettings, SpawnConfig, Vector2, FULL_CON,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -108,6 +108,7 @@ struct ScenarioDefinition {
     color_by_owner_mask: Option<ColorByOwnerMask>,
     additional_graphics: HashMap<String, ResourceGraphicsVariant>,
     resource_group: Option<Group>,
+    components: Vec<DefinitionComponent>,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +151,7 @@ pub struct Scenario {
     sky: Option<SkyConfig>,
     script: Option<ScenarioScriptSource>,
     objectives: ScenarioObjectives,
+    construction_needs_material: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -323,6 +325,7 @@ impl Scenario {
             sky: None,
             script,
             objectives: ScenarioObjectives::from_legacy_game(&manifest.core.game),
+            construction_needs_material: manifest.core.game.realism.construction_needs_material,
         })
     }
 
@@ -393,6 +396,8 @@ impl Scenario {
             engine.clear_sky();
         }
 
+        engine.set_construction_needs_material(self.construction_needs_material);
+
         for definition in &self.definitions {
             let name = definition.name.as_deref().unwrap_or(&definition.id);
             let mut compiled = Definition::from_script(&definition.id, name, &definition.script)?;
@@ -426,6 +431,7 @@ impl Scenario {
                 }
                 compiled.set_sprite_variants(variants);
             }
+            compiled.set_components(definition.components.clone());
             engine.register_definition(compiled)?;
         }
 
@@ -576,6 +582,7 @@ impl Scenario {
                     color_by_owner_mask: None,
                     additional_graphics: HashMap::new(),
                     resource_group: None,
+                    components: Vec::new(),
                 }
             };
 
@@ -757,6 +764,7 @@ impl Scenario {
             sky,
             script,
             objectives: ScenarioObjectives::default(),
+            construction_needs_material: false,
         })
     }
 }
@@ -3162,6 +3170,14 @@ fn scenario_definition_from_resource(
         color_by_owner_mask,
         additional_graphics,
         resource_group: source_group,
+        components: core
+            .components
+            .into_iter()
+            .map(|component| DefinitionComponent {
+                id: component.id,
+                count: component.count,
+            })
+            .collect(),
     }
 }
 

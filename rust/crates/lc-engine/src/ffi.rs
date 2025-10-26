@@ -818,6 +818,7 @@ unsafe fn make_snapshot(
             vertices,
             container,
             contents,
+            components: HashMap::new(),
             status: ObjectStatus::Normal,
             owner: entry.owner,
             category: entry.category,

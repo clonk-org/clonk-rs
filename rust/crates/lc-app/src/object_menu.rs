@@ -933,6 +933,7 @@ mod tests {
     };
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
+    use std::collections::HashMap;
 
     fn make_object(id: u64, definition: &str) -> ObjectSnapshot {
         ObjectSnapshot {
@@ -954,6 +955,7 @@ mod tests {
             vertices: Vec::new(),
             container: None,
             contents: Vec::new(),
+            components: HashMap::new(),
             status: ObjectStatus::Normal,
             owner: 1,
             category: 0,

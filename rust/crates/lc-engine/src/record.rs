@@ -327,6 +327,7 @@ mod tests {
     };
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
+    use std::collections::HashMap;
 
     fn make_snapshot(frame: u64, energy: i32) -> SimulationSnapshot {
         SimulationSnapshot {
@@ -352,6 +353,7 @@ mod tests {
                 vertices: Vec::new(),
                 container: None,
                 contents: Vec::new(),
+                components: HashMap::new(),
                 status: ObjectStatus::Normal,
                 owner: OWNER_NONE,
                 category: crate::DEFAULT_CATEGORY,

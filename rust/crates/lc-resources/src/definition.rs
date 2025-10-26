@@ -61,6 +61,12 @@ impl Definition {
 }
 
 /// Parsed metadata from `DefCore.txt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefComponent {
+    pub id: String,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct DefCore {
     pub id: String,
@@ -78,6 +84,7 @@ pub struct DefCore {
     pub constructable: bool,
     pub con_size_off: i32,
     pub basement: i32,
+    pub components: Vec<DefComponent>,
 }
 
 impl DefCore {
@@ -209,6 +216,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut constructable = false;
     let mut con_size_off: i32 = 0;
     let mut basement: i32 = 0;
+    let mut components: Vec<DefComponent> = Vec::new();
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -293,6 +301,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "basement" => {
                 basement = parse_i32(value).unwrap_or(0).max(0);
             }
+            "components" => {
+                components = parse_components(value);
+            }
             _ => {}
         }
     }
@@ -319,7 +330,37 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         constructable,
         con_size_off,
         basement,
+        components,
     })
+}
+
+fn parse_components(value: &str) -> Vec<DefComponent> {
+    value
+        .split(|ch| ch == ';' || ch == ',' || ch == ' ')
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let (id_part, count_part) = match trimmed.find([':', '=']) {
+                Some(idx) => {
+                    let (lhs, rhs) = trimmed.split_at(idx);
+                    (lhs.trim(), Some(rhs[1..].trim()))
+                }
+                None => (trimmed, None),
+            };
+            if id_part.is_empty() {
+                return None;
+            }
+            let id = id_part.to_ascii_uppercase();
+            let count = count_part
+                .and_then(|raw| raw.parse::<i32>().ok())
+                .unwrap_or(1)
+                .max(0) as u32;
+            let count = if count == 0 { 1 } else { count };
+            Some(DefComponent { id, count })
+        })
+        .collect()
 }
 
 fn load_scripts(group: &Group) -> Result<DefinitionScript, DefinitionError> {
@@ -1293,6 +1334,38 @@ DigFree=24
         );
         assert_eq!(parsed.collection_limit, Some(3));
         assert!(parsed.collectible);
+    }
+
+    #[test]
+    fn parse_def_core_components_list() {
+        let data = br#"
+            [DefCore]
+            id=HUTS
+            Components=WOOD:2,Metal=1; rock
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert_eq!(parsed.components.len(), 3);
+        assert_eq!(
+            parsed.components[0],
+            DefComponent {
+                id: "WOOD".to_string(),
+                count: 2
+            }
+        );
+        assert_eq!(
+            parsed.components[1],
+            DefComponent {
+                id: "METAL".to_string(),
+                count: 1
+            }
+        );
+        assert_eq!(
+            parsed.components[2],
+            DefComponent {
+                id: "ROCK".to_string(),
+                count: 1
+            }
+        );
     }
 
     #[test]

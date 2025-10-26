@@ -3409,6 +3409,7 @@ mod tests {
                 vertices: Vec::new(),
                 container: None,
                 contents: Vec::new(),
+                components: HashMap::new(),
                 status: Default::default(),
                 owner: 0,
                 category: lc_engine::DEFAULT_CATEGORY,
