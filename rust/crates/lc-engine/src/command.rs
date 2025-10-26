@@ -5,6 +5,7 @@ use crate::{
     ObjectUpdate, Vector2, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, CATEGORY_VEHICLE, FULL_CON,
     LINE_CONNECT_POWER_INPUT, OWNER_NONE,
 };
+use serde::{Deserialize, Serialize};
 
 /// Maximum number of commands that may be queued for an object.
 pub const MAX_COMMAND_STACK: usize = 35;
@@ -507,6 +508,109 @@ mod tests {
             other => panic!("expected move request, got {:?}", other),
         }
     }
+
+    #[test]
+    fn acquire_transfers_item_from_shared_container() {
+        let builder_id = ObjectId::new(1);
+        let container_id = ObjectId::new(2);
+        let item_id = ObjectId::new(3);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        builder.collectible = false;
+        builder.container = Some(container_id);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.position = Vector2::new(0, 0);
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "WOOD".into();
+        item.construction = FULL_CON;
+        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+        item.collectible = true;
+        item.container = Some(container_id);
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder);
+        objects.insert(container.id, container);
+        objects.insert(item.id, item);
+
+        let builder_snapshot = objects.get(&builder_id).expect("builder present");
+        let ctx = CommandRuntimeContext {
+            frame: 42,
+            position: builder_snapshot.position,
+            object: builder_snapshot,
+            objects: &objects,
+            structures_need_energy: false,
+        };
+
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.operations.is_empty());
+        assert_eq!(result.events.len(), 1);
+
+        match &result.events[0] {
+            CommandEvent::ApplyObjectUpdate { object_id, update } => {
+                assert_eq!(*object_id, item_id);
+                assert_eq!(update.container, Some(Some(builder_id)));
+                assert_eq!(update.position, Some(builder_snapshot.position));
+            }
+        }
+    }
+
+    #[test]
+    fn acquire_enters_container_when_adjacent() {
+        let builder_id = ObjectId::new(1);
+        let container_id = ObjectId::new(2);
+        let item_id = ObjectId::new(3);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        builder.collectible = false;
+        builder.position = Vector2::new(0, 0);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.position = Vector2::new(4, 0);
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "WOOD".into();
+        item.construction = FULL_CON;
+        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+        item.collectible = true;
+        item.container = Some(container_id);
+        item.position = container.position;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder);
+        objects.insert(container.id, container);
+        objects.insert(item.id, item);
+
+        let builder_snapshot = objects.get(&builder_id).expect("builder present");
+        let ctx = CommandRuntimeContext {
+            frame: 100,
+            position: builder_snapshot.position,
+            object: builder_snapshot,
+            objects: &objects,
+            structures_need_energy: false,
+        };
+
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.events.is_empty());
+        let update = result.update.expect("builder update");
+        assert_eq!(update.container, Some(Some(container_id)));
+        assert_eq!(update.position, Some(Vector2::new(4, 0)));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -612,6 +716,14 @@ pub enum CommandOperation {
     PushBack(CommandRequest),
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CommandEvent {
+    ApplyObjectUpdate {
+        object_id: ObjectId,
+        update: ObjectUpdate,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandStatus {
     Running,
@@ -624,6 +736,7 @@ pub struct CommandStepResult {
     pub update: Option<ObjectUpdate>,
     pub status: CommandStatus,
     pub operations: Vec<CommandOperation>,
+    pub events: Vec<CommandEvent>,
 }
 
 impl CommandStepResult {
@@ -632,6 +745,7 @@ impl CommandStepResult {
             update,
             status: CommandStatus::Running,
             operations: Vec::new(),
+            events: Vec::new(),
         }
     }
 
@@ -640,6 +754,7 @@ impl CommandStepResult {
             update,
             status: CommandStatus::Completed,
             operations: Vec::new(),
+            events: Vec::new(),
         }
     }
 
@@ -648,6 +763,7 @@ impl CommandStepResult {
             update,
             status: CommandStatus::Failed,
             operations: Vec::new(),
+            events: Vec::new(),
         }
     }
 
@@ -1313,8 +1429,7 @@ impl AcquireState {
             }
         }
         if let Some(container) = candidate.container {
-            let builder_container = ctx.object.container;
-            if Some(container) != builder_container && container != ctx.object.id {
+            if container == ctx.object.id {
                 return false;
             }
         } else if !candidate.collectible {
@@ -1340,6 +1455,59 @@ impl AcquireState {
             }
         }
         best.map(|(id, _)| id)
+    }
+
+    fn handle_container_candidate(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        candidate_id: ObjectId,
+        container_id: ObjectId,
+    ) -> CommandStepResult {
+        let base_update = self.update_to_stop(ctx);
+        let builder_container = ctx.object.container;
+
+        if builder_container == Some(container_id) {
+            let mut result = CommandStepResult::running(base_update.clone());
+            let mut transfer_update = ObjectUpdate::new();
+            transfer_update.container = Some(Some(ctx.object.id));
+            transfer_update.position = Some(ctx.position);
+            transfer_update.velocity = Some(Vector2::ZERO);
+            result.events.push(CommandEvent::ApplyObjectUpdate {
+                object_id: candidate_id,
+                update: transfer_update,
+            });
+            return result;
+        }
+
+        let Some(container_snapshot) = ctx.resolve(container_id) else {
+            return CommandStepResult::running(base_update);
+        };
+
+        if builder_container.is_none() {
+            let dx = container_snapshot.position.x - ctx.position.x;
+            let dy = container_snapshot.position.y - ctx.position.y;
+            const CONTAINER_APPROACH_RANGE: i32 = 12;
+            if dx.abs() <= CONTAINER_APPROACH_RANGE && dy.abs() <= CONTAINER_APPROACH_RANGE {
+                let mut update = base_update.clone().unwrap_or_default();
+                update.container = Some(Some(container_id));
+                update.position = Some(container_snapshot.position);
+                update.velocity = Some(Vector2::ZERO);
+                if update.command_direction.is_none() {
+                    update.command_direction = Some(CommandDirection::Stop);
+                }
+                return CommandStepResult::running(Some(update));
+            }
+        }
+
+        if self.should_issue_move(ctx.frame) {
+            let request = CommandRequest::new(CommandId::MoveTo)
+                .with_target(Some(container_id))
+                .with_update_interval(10);
+            return CommandStepResult::running(base_update)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+
+        CommandStepResult::running(base_update)
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -1389,6 +1557,11 @@ impl AcquireState {
         let dy = candidate.position.y - ctx.position.y;
         const PICKUP_RANGE: i32 = 12;
         if dx.abs() <= PICKUP_RANGE && dy.abs() <= PICKUP_RANGE {
+            if let Some(container_id) = candidate.container {
+                if container_id != ctx.object.id {
+                    return self.handle_container_candidate(ctx, candidate_id, container_id);
+                }
+            }
             return CommandStepResult::running(self.update_to_stop(ctx));
         }
 

@@ -1,12 +1,12 @@
 # LegacyClonk C++ → Rust Port Plan
 
-**Updated:** 2025-10-26 | **Goal:** Run ALL real scenarios with exact C++ parity | **Status:** ⛔ BLOCKED
+**Updated:** 2025-10-27 | **Goal:** Run ALL real scenarios with exact C++ parity | **Status:** ⛔ BLOCKED
 
 ---
 
 ## TL;DR
 
-- **P0 BLOCKERS:** AI command system still partial (Acquire now gathers loose supplies; container/Get parity still work-in-progress)
+- **P0 BLOCKERS:** AI command system still partial (Acquire now gathers loose supplies + container withdraw; merchant/buy flows still pending)
 - **Scenario Discovery:** ✅ Official content repo wired; menu now lists full scenario catalog
 - **Current State:** Build compiles; workspace tests green; Build command implemented in command stack
 - **Next 48h:** Keep engine tests green; sketch AI command trait; triage panics
@@ -27,12 +27,12 @@
 **Problem:** Command stack now supports MoveTo + Build; Follow/Attack/etc. still missing
 **Evidence:** `SetCommand("Build", ...)` starts Build procedure with material gating; `command::tests::acquire_requests_move_for_nearby_item` verifies ground pickup pathing; `compat::tests::set_command_clears_stack_and_pushes_command` still green
 **C++ Has:** 30 commands (Follow, MoveTo, Build, Attack, etc.) via `C4Command.cpp`
-**Rust Has:** Command trait infrastructure + MoveTo/Build/Follow/Attack + Acquire for collectible world items + Energy line-kit handshake; container withdrawal still missing
-**Impact:** Build automation works (crew picks up components, honours material requirements) and Energize follows loose line-kit pickups; hauling/combat automation still incomplete without container-aware Acquire/Get
+**Rust Has:** Command trait infrastructure + MoveTo/Build/Follow/Attack + Acquire for loose items and shared-container withdrawal + Energy line-kit handshake; merchant `Buy` fallback still missing
+**Impact:** Build automation works (crew picks up components, honours material requirements) and Energize follows loose line-kit pickups; automation still incomplete without buy flows and non-container movement commands
 **Next:**
-1. Implement Acquire/Get parity for container withdrawal + merchant buying flows
+1. Extend Acquire to trigger `Buy` fallback + cross-container access (Grab/Enter) parity
 2. Add command persistence to save-state snapshots + scenario world objects
-3. Expand tests to cover queue chaining, container fallbacks, failure recovery, and scen parity
+3. Expand tests to cover queue chaining, failure recovery, and scenario parity
 
 **Accept:** `AddCommand("MoveTo", ...)` and `SetCommand("Build", ...)` reproduce C++ behaviour across parity scenarios
 **Owner:** TBD | **ETA:** Weeks 2-4 | **Risk:** HIGH (large system, hidden deps)
@@ -76,7 +76,7 @@
 | **Tests** | ✅ Working | `cargo test --workspace` passes | TBD |
 | **Scenario Discovery** | ✅ Working | content/ assets discovered; sandbox no longer sole entry | TBD |
 | **Scenario Loading** | ⚠️ Unknown | Needs real scenarios to test | TBD |
-| **AI Commands** | ⚠️ Partial | MoveTo/Build/Follow/Attack + Acquire handles loose supplies; container/Get parity pending | TBD |
+| **AI Commands** | ⚠️ Partial | MoveTo/Build/Follow/Attack + Acquire handles loose + shared-container transfers; buy/queue flows pending | TBD |
 | **Graphics Rendering** | ✅ Implemented | Code exists; needs verification | TBD |
 | **Player Input** | ✅ Implemented | Keyboard/mouse/gamepad code exists | TBD |
 | **Landscape** | ✅ Implemented | Dig/blast/materials code exists | TBD |
@@ -101,6 +101,7 @@
 ✅ **Fallback Design:** Sandbox appears only when discovery fails (good design)
 ✅ **AI Build Command:** Rust `SetCommand("Build")` starts construction, respects component requirements
 ✅ **AI Follow/Attack:** Command stack issues MoveTo + direction updates mirroring baseline C4 behaviour (unit tested)
+✅ **AI Acquire (partial):** Shared-container withdraws now mirrored via command events + targeted tests
 
 ---
 
@@ -154,6 +155,11 @@ rg -n "panic!\(|todo!\(|unimplemented!\(" rust/crates/lc-engine/src | wc -l  # 4
 **Host Functions:**
 ```bash
 rg "script.register_host_function" rust/crates/lc-engine/src/compat.rs | wc -l  # 121
+```
+
+**AI Commands:**
+```bash
+cargo test -p lc-engine command::tests::acquire_transfers_item_from_shared_container command::tests::acquire_enters_container_when_adjacent
 ```
 
 ---

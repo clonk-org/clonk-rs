@@ -79,7 +79,10 @@ pub struct ContextMenuEntry {
     pub description: Option<String>,
 }
 
-use command::{CommandObjectSnapshot, CommandOperation, CommandRuntimeContext, CommandStack};
+use command::{
+    CommandEvent, CommandObjectSnapshot, CommandOperation, CommandRuntimeContext, CommandStack,
+    CommandStepResult,
+};
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
     object_reference_value, AudioRegistry, DefinitionMetadata, EffectContextOutcome,
@@ -2242,6 +2245,8 @@ pub struct QueuedCommand {
     pub delay: u32,
     pub update: ObjectUpdate,
     pub effects: Vec<EffectCommand>,
+    #[serde(default)]
+    pub events: Vec<CommandEvent>,
     pub destroy: bool,
     pub spawns: Vec<SpawnConfig>,
     #[serde(default)]
@@ -2256,6 +2261,7 @@ impl QueuedCommand {
             delay,
             update,
             effects: Vec::new(),
+            events: Vec::new(),
             destroy: false,
             spawns: Vec::new(),
             landscape: Vec::new(),
@@ -2268,6 +2274,7 @@ impl QueuedCommand {
             delay: 0,
             update,
             effects: Vec::new(),
+            events: Vec::new(),
             destroy: false,
             spawns: Vec::new(),
             landscape: Vec::new(),
@@ -2282,6 +2289,11 @@ impl QueuedCommand {
 
     pub fn with_effects(mut self, effects: Vec<EffectCommand>) -> Self {
         self.effects = effects;
+        self
+    }
+
+    pub fn with_events(mut self, events: Vec<CommandEvent>) -> Self {
+        self.events = events;
         self
     }
 
@@ -2453,6 +2465,7 @@ struct CommandQueueOutcome {
     destroy: bool,
     effect_events: Vec<EffectEvent>,
     container_updates: Vec<ContainerUpdateRecord>,
+    command_events: Vec<CommandEvent>,
     particles: Vec<ParticleCommand>,
 }
 
@@ -2492,8 +2505,8 @@ impl Object {
         }
     }
 
-    fn step_command_stack(&mut self, ctx: CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
-        self.commands.step(&ctx).and_then(|result| result.update)
+    fn step_command_stack(&mut self, ctx: CommandRuntimeContext<'_>) -> Option<CommandStepResult> {
+        self.commands.step(&ctx)
     }
 
     fn mark_destroyed(&mut self) -> Vec<EffectEvent> {
@@ -2748,6 +2761,9 @@ impl Object {
             }
             if !command.spawns.is_empty() {
                 outcome.spawns.extend(command.spawns);
+            }
+            if !command.events.is_empty() {
+                outcome.command_events.extend(command.events);
             }
             if !command.particles.is_empty() {
                 outcome.particles.extend(command.particles);
@@ -7627,6 +7643,7 @@ impl Engine {
                 queue_destroy,
                 queue_events,
                 container_updates,
+                command_events,
                 (object_id, previous_owner, new_owner, new_crew),
             ) = {
                 let object = &mut self.objects[idx];
@@ -7642,10 +7659,15 @@ impl Engine {
                     objects: &command_snapshots,
                     structures_need_energy: self.structures_need_energy,
                 };
-                if let Some(update) = object.step_command_stack(command_context) {
-                    object
-                        .command_queue
-                        .push_front(QueuedCommand::immediate(update));
+                if let Some(result) = object.step_command_stack(command_context) {
+                    if result.update.is_some() || !result.events.is_empty() {
+                        let update = result.update.unwrap_or_default();
+                        let mut queued = QueuedCommand::immediate(update);
+                        if !result.events.is_empty() {
+                            queued = queued.with_events(result.events.clone());
+                        }
+                        object.command_queue.push_front(queued);
+                    }
                 }
                 let previous_owner = object.state.owner;
                 let outcome = object.execute_command_queue(
@@ -7661,6 +7683,7 @@ impl Engine {
                     outcome.destroy,
                     outcome.effect_events,
                     outcome.container_updates,
+                    outcome.command_events,
                     (object.id, previous_owner, new_owner, new_crew),
                 )
             };
@@ -7669,6 +7692,10 @@ impl Engine {
 
             for update in container_updates {
                 self.apply_container_change(update.object_id, update.previous, update.new)?;
+            }
+
+            for event in command_events {
+                self.apply_command_event(event)?;
             }
 
             if !queue_events.is_empty() {
@@ -11084,6 +11111,15 @@ impl Engine {
             }
         }
 
+        Ok(())
+    }
+
+    fn apply_command_event(&mut self, event: CommandEvent) -> Result<(), EngineError> {
+        match event {
+            CommandEvent::ApplyObjectUpdate { object_id, update } => {
+                self.apply_object_update(object_id, update)?;
+            }
+        }
         Ok(())
     }
 
