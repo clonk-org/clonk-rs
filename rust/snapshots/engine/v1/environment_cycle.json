@@ -1,6 +1,7 @@
 [
   {
     "frame": 1,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -40,12 +41,17 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": 1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {
@@ -643,6 +649,7 @@
   },
   {
     "frame": 2,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -682,12 +689,17 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": 1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {
@@ -1285,6 +1297,7 @@
   },
   {
     "frame": 3,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -1324,12 +1337,17 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": 1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {
@@ -1927,6 +1945,7 @@
   },
   {
     "frame": 4,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -1966,12 +1985,17 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": 1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {
@@ -2569,6 +2593,7 @@
   },
   {
     "frame": 5,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -2608,12 +2633,17 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": 1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {
@@ -3211,6 +3241,7 @@
   },
   {
     "frame": 6,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -3250,12 +3281,17 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": 1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {
@@ -3853,6 +3889,7 @@
   },
   {
     "frame": 7,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -3892,12 +3929,17 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": 1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {
@@ -4495,6 +4537,7 @@
   },
   {
     "frame": 8,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -4534,12 +4577,17 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": 1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {

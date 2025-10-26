@@ -3363,8 +3363,8 @@ fn rect_contains(rect: SurfaceRect, point: GuiPoint, tolerance: f32) -> bool {
 mod tests {
     use super::*;
     use lc_engine::{
-        EnvironmentFrame, Landscape, LiquidSegment, ObjectId, ObjectVertex, PlayerState, RgbColor,
-        Vector2,
+        CommandStackSnapshot, EnvironmentFrame, Landscape, LiquidSegment, ObjectId, ObjectVertex,
+        PlayerState, RgbColor, Vector2,
     };
     use lc_graphics::{BitmapFont, PixelFormat};
     use rand::SeedableRng;
@@ -3420,6 +3420,8 @@ mod tests {
                 base_graphics: None,
                 graphics_overlays: Vec::new(),
                 draw_transform: None,
+                command_queue: Vec::new(),
+                command_stack: CommandStackSnapshot::default(),
             }],
             environment: EnvironmentFrame::default(),
             sky: None,

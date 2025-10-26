@@ -928,8 +928,8 @@ fn draw_border(surface: &mut Surface, rect: Rect, color: Color) {
 mod tests {
     use super::*;
     use lc_engine::{
-        Definition, Engine, MovementProfile, ObjectSnapshot, ObjectStatus, PlayerConfig,
-        SpawnConfig, Vector2,
+        CommandStackSnapshot, Definition, Engine, MovementProfile, ObjectSnapshot, ObjectStatus,
+        PlayerConfig, SpawnConfig, Vector2,
     };
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
@@ -964,6 +964,8 @@ mod tests {
             base_graphics: None,
             graphics_overlays: Vec::new(),
             draw_transform: None,
+            command_queue: Vec::new(),
+            command_stack: CommandStackSnapshot::default(),
         }
     }
 

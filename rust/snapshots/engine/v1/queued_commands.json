@@ -1,6 +1,7 @@
 [
   {
     "frame": 1,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -40,12 +41,132 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": -1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [
+          {
+            "delay": 0,
+            "update": {
+              "position": null,
+              "velocity": {
+                "x": 3,
+                "y": -3
+              },
+              "rotation": null,
+              "energy": 58,
+              "damage": null,
+              "magic_energy": null,
+              "magic_capacity": null,
+              "construction": null,
+              "action": null,
+              "direction": null,
+              "command_direction": null,
+              "status": null,
+              "owner": null,
+              "category": null,
+              "crew_member": null,
+              "alive": null
+            },
+            "effects": [],
+            "events": [],
+            "destroy": false,
+            "spawns": [
+              {
+                "id": null,
+                "definition_id": "Helper",
+                "position": {
+                  "x": 6,
+                  "y": 0
+                },
+                "velocity": {
+                  "x": 0,
+                  "y": -1
+                },
+                "rotation": 0,
+                "energy": 24,
+                "construction": 100000,
+                "action": null,
+                "direction": 0,
+                "command_direction": 0,
+                "effects": [],
+                "vertices": [],
+                "owner": 1,
+                "crew_member": null,
+                "status": null,
+                "container": null,
+                "alive": null,
+                "category": null
+              }
+            ],
+            "landscape": [],
+            "particles": [
+              {
+                "Create": {
+                  "definition_id": "Spark",
+                  "position": {
+                    "x": 0.0,
+                    "y": -1.5
+                  },
+                  "velocity": {
+                    "x": 0.25,
+                    "y": -0.5
+                  },
+                  "life": 4,
+                  "parameter_a": 0.75,
+                  "parameter_b": 3,
+                  "layer": {
+                    "scope": "front",
+                    "object": 1
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "delay": 3,
+            "update": {
+              "position": null,
+              "velocity": null,
+              "rotation": null,
+              "energy": null,
+              "damage": null,
+              "magic_energy": null,
+              "magic_capacity": null,
+              "construction": null,
+              "action": null,
+              "direction": null,
+              "command_direction": null,
+              "status": "inactive",
+              "owner": 2,
+              "category": null,
+              "crew_member": null,
+              "alive": null
+            },
+            "effects": [],
+            "events": [],
+            "destroy": true,
+            "spawns": [],
+            "landscape": [],
+            "particles": [
+              {
+                "Clear": {
+                  "definition_id": "Spark",
+                  "scope": {
+                    "Object": 1
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {
@@ -392,14 +513,15 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
     "transfer_zones": [],
     "audio": []
   },
   {
     "frame": 2,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -439,12 +561,54 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": -1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [
+          {
+            "delay": 2,
+            "update": {
+              "position": null,
+              "velocity": null,
+              "rotation": null,
+              "energy": null,
+              "damage": null,
+              "magic_energy": null,
+              "magic_capacity": null,
+              "construction": null,
+              "action": null,
+              "direction": null,
+              "command_direction": null,
+              "status": "inactive",
+              "owner": 2,
+              "category": null,
+              "crew_member": null,
+              "alive": null
+            },
+            "effects": [],
+            "events": [],
+            "destroy": true,
+            "spawns": [],
+            "landscape": [],
+            "particles": [
+              {
+                "Clear": {
+                  "definition_id": "Spark",
+                  "scope": {
+                    "Object": 1
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "command_stack": {
+          "commands": []
+        }
       },
       {
         "id": 2,
@@ -478,12 +642,17 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": 1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {
@@ -830,14 +999,15 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Helper": 1,
-      "Commander": 1
+      "Commander": 1,
+      "Helper": 1
     },
     "transfer_zones": [],
     "audio": []
   },
   {
     "frame": 3,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -877,12 +1047,54 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": -1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [
+          {
+            "delay": 1,
+            "update": {
+              "position": null,
+              "velocity": null,
+              "rotation": null,
+              "energy": null,
+              "damage": null,
+              "magic_energy": null,
+              "magic_capacity": null,
+              "construction": null,
+              "action": null,
+              "direction": null,
+              "command_direction": null,
+              "status": "inactive",
+              "owner": 2,
+              "category": null,
+              "crew_member": null,
+              "alive": null
+            },
+            "effects": [],
+            "events": [],
+            "destroy": true,
+            "spawns": [],
+            "landscape": [],
+            "particles": [
+              {
+                "Clear": {
+                  "definition_id": "Spark",
+                  "scope": {
+                    "Object": 1
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "command_stack": {
+          "commands": []
+        }
       },
       {
         "id": 2,
@@ -916,12 +1128,17 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": 1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {
@@ -1276,6 +1493,7 @@
   },
   {
     "frame": 4,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -1315,12 +1533,54 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": -1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [
+          {
+            "delay": 0,
+            "update": {
+              "position": null,
+              "velocity": null,
+              "rotation": null,
+              "energy": null,
+              "damage": null,
+              "magic_energy": null,
+              "magic_capacity": null,
+              "construction": null,
+              "action": null,
+              "direction": null,
+              "command_direction": null,
+              "status": "inactive",
+              "owner": 2,
+              "category": null,
+              "crew_member": null,
+              "alive": null
+            },
+            "effects": [],
+            "events": [],
+            "destroy": true,
+            "spawns": [],
+            "landscape": [],
+            "particles": [
+              {
+                "Clear": {
+                  "definition_id": "Spark",
+                  "scope": {
+                    "Object": 1
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "command_stack": {
+          "commands": []
+        }
       },
       {
         "id": 2,
@@ -1354,12 +1614,17 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": 1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {
@@ -1714,6 +1979,7 @@
   },
   {
     "frame": 5,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -1753,12 +2019,17 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": 1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {
@@ -2105,14 +2376,15 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Helper": 1,
-      "Commander": 1
+      "Commander": 1,
+      "Helper": 1
     },
     "transfer_zones": [],
     "audio": []
   },
   {
     "frame": 6,
+    "game_over": false,
     "physics": {
       "gravity": 1,
       "max_fall_speed": 12,
@@ -2152,12 +2424,17 @@
         "vertices": [],
         "container": null,
         "contents": [],
+        "components": {},
         "status": "normal",
         "owner": 1,
         "category": 1,
         "crew_member": false,
         "alive": true,
-        "graphics_overlays": []
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        }
       }
     ],
     "environment": {

@@ -23,6 +23,7 @@ mod transfer;
 pub use action::{
     ActionLibrary, ActionProcedure, ActionSpec, ActionState, ActionUpdate, ActionUpdateResult,
 };
+pub use command::CommandStackSnapshot;
 pub use control::{
     interpret_player_control_command, CommandKind, ControlButton, ControlCommand, ControlEvent,
     ControlPacket, PlayerControlData, SyncCheckPacket, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT,
@@ -2550,6 +2551,8 @@ impl Object {
             base_graphics: self.state.base_graphics.clone(),
             graphics_overlays: self.state.graphics_overlays.clone(),
             draw_transform: self.state.draw_transform,
+            command_queue: self.command_queue.iter().cloned().collect(),
+            command_stack: self.commands.snapshot(),
         }
     }
 
@@ -3044,6 +3047,10 @@ pub struct ObjectSnapshot {
     pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw_transform: Option<DrawTransform>,
+    #[serde(default)]
+    pub command_queue: Vec<QueuedCommand>,
+    #[serde(default)]
+    pub command_stack: CommandStackSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3105,6 +3112,8 @@ pub struct PersistedObject {
     pub snapshot: ObjectSnapshot,
     #[serde(default)]
     pub command_queue: Vec<QueuedCommand>,
+    #[serde(default)]
+    pub command_stack: CommandStackSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3182,7 +3191,8 @@ impl EngineState {
         for object in &snapshot.objects {
             objects.push(PersistedObject {
                 snapshot: object.clone(),
-                command_queue: Vec::new(),
+                command_queue: object.command_queue.clone(),
+                command_stack: object.command_stack.clone(),
             });
         }
 
@@ -8923,6 +8933,7 @@ impl Engine {
                 PersistedObject {
                     snapshot: object.snapshot(library),
                     command_queue: object.command_queue.iter().cloned().collect(),
+                    command_stack: object.commands.snapshot(),
                 }
             })
             .collect();
@@ -9065,6 +9076,9 @@ impl Engine {
                 },
             );
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
+            object
+                .commands
+                .restore_from_snapshot(&persisted.command_stack);
             self.objects.push(object);
             if let Some(container) = snapshot.container {
                 container_assignments.push((snapshot.id, container));

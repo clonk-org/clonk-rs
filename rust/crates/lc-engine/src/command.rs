@@ -68,7 +68,7 @@ pub struct CommandDefinitionSnapshot {
 }
 
 /// Identifiers that map to the classic C4 command constants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(i32)]
 pub enum CommandId {
     Follow = 1,
@@ -909,6 +909,86 @@ mod tests {
     }
 
     #[test]
+    fn command_stack_snapshot_preserves_acquire_state() {
+        let builder_id = ObjectId::new(10);
+        let item_id = ObjectId::new(11);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        builder.collectible = false;
+        builder.position = Vector2::new(0, 0);
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "WOOD".into();
+        item.position = Vector2::new(50, 0);
+        item.collectible = true;
+        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+        item.construction = FULL_CON;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder);
+        objects.insert(item.id, item);
+
+        let builder_snapshot = objects.get(&builder_id).expect("builder present");
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+            )
+            .expect("command enqueued");
+
+        let ctx_initial = CommandRuntimeContext {
+            frame: 0,
+            position: builder_snapshot.position,
+            object: builder_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let first_step = stack.step(&ctx_initial).expect("first step evaluates");
+        assert_eq!(first_step.status, CommandStatus::Running);
+        assert_eq!(stack.len(), 2, "move command should be queued");
+
+        let snapshot = stack.snapshot();
+        let encoded = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        let acquire_state = encoded["commands"]
+            .as_array()
+            .and_then(|commands| commands.iter().find_map(|entry| entry.get("Acquire")))
+            .expect("acquire state present");
+        let candidate = acquire_state["candidate"]
+            .as_u64()
+            .expect("candidate recorded");
+        assert_eq!(candidate, item_id.as_u64());
+
+        let ctx_followup = CommandRuntimeContext {
+            frame: 25,
+            position: builder_snapshot.position,
+            object: builder_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let original_second = stack.step(&ctx_followup).expect("second step evaluates");
+
+        let mut restored = CommandStack::new();
+        restored.restore_from_snapshot(&snapshot);
+        let restored_second = restored
+            .step(&ctx_followup)
+            .expect("restored step evaluates");
+
+        assert_eq!(original_second, restored_second);
+    }
+
+    #[test]
     fn buy_spawns_item_and_updates_player_state() {
         let builder_id = ObjectId::new(1);
         let base_id = ObjectId::new(2);
@@ -1245,7 +1325,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandMode {
     SilentSub,
     Base,
@@ -1265,14 +1345,14 @@ impl CommandMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandData {
     Integer(i32),
     Text(String),
     None,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandRequest {
     pub id: CommandId,
     pub target: Option<ObjectId>,
@@ -1341,7 +1421,7 @@ impl CommandRequest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CommandOperation {
     Clear,
     PushFront(CommandRequest),
@@ -1371,14 +1451,14 @@ pub enum CommandEvent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandStatus {
     Running,
     Completed,
     Failed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandStepResult {
     pub update: Option<ObjectUpdate>,
     pub status: CommandStatus,
@@ -1504,6 +1584,17 @@ pub enum CommandError {
     Unsupported,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CommandStackSnapshot {
+    commands: Vec<CommandState>,
+}
+
+impl CommandStackSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CommandStack {
     entries: VecDeque<ActiveCommand>,
@@ -1527,6 +1618,25 @@ impl CommandStack {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    pub fn snapshot(&self) -> CommandStackSnapshot {
+        CommandStackSnapshot {
+            commands: self
+                .entries
+                .iter()
+                .map(|entry| entry.state.clone())
+                .collect(),
+        }
+    }
+
+    pub fn restore_from_snapshot(&mut self, snapshot: &CommandStackSnapshot) {
+        self.entries = snapshot
+            .commands
+            .iter()
+            .cloned()
+            .map(ActiveCommand::from_state)
+            .collect();
     }
 
     pub fn push_front(&mut self, request: CommandRequest) -> Result<(), CommandError> {
@@ -1573,7 +1683,7 @@ impl CommandStack {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct MoveToState {
     target: Option<ObjectId>,
     tx: Option<i32>,
@@ -1662,7 +1772,7 @@ impl MoveToState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct BuildState {
     target: ObjectId,
     site: Option<Vector2>,
@@ -1803,7 +1913,7 @@ impl BuildState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FollowState {
     target: ObjectId,
     update_interval: u32,
@@ -1914,7 +2024,7 @@ impl FollowState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct AttackState {
     target: ObjectId,
     update_interval: u32,
@@ -2007,7 +2117,7 @@ impl AttackState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct AcquireState {
     definition_id: DefinitionId,
     ignore_container: Option<ObjectId>,
@@ -2323,7 +2433,7 @@ impl AcquireState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct BuyState {
     definition_id: DefinitionId,
     target: Option<ObjectId>,
@@ -2596,7 +2706,7 @@ impl BuyState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct EnergyState {
     target: ObjectId,
     acquire_requested: bool,
@@ -2663,7 +2773,7 @@ impl EnergyState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 enum CommandState {
     Follow(FollowState),
     MoveTo(MoveToState),
@@ -2675,7 +2785,7 @@ enum CommandState {
     Unsupported,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ActiveCommand {
     state: CommandState,
 }
@@ -2698,6 +2808,10 @@ impl ActiveCommand {
         }
 
         Ok(Self { state })
+    }
+
+    fn from_state(state: CommandState) -> Self {
+        Self { state }
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {

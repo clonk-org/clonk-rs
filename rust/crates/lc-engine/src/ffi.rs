@@ -4,12 +4,12 @@ use crate::{
         interpret_player_control_command, parse_control_ini, CommandKind, ControlCommand,
         ControlPacket, PlayerControlData,
     },
-    ActionState, CommandDirection, CrewCommandTarget, CrewRole, CrewSelectionState, Direction,
-    DrawTransform, EffectState, Engine, EngineError, EngineState, EnvironmentFrame, FloatVector2,
-    HudPlayerSnapshot, HudSnapshot, Landscape, NetworkPacketDirection, NetworkPacketSnapshot,
-    ObjectId, ObjectSnapshot, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleLayer,
-    ParticleSnapshot, Playback, PlayerInputState, Recorder, Recording, Scenario,
-    SimulationSnapshot, SurfaceSnapshot, Vector2,
+    ActionState, CommandDirection, CommandStackSnapshot, CrewCommandTarget, CrewRole,
+    CrewSelectionState, Direction, DrawTransform, EffectState, Engine, EngineError, EngineState,
+    EnvironmentFrame, FloatVector2, HudPlayerSnapshot, HudSnapshot, Landscape,
+    NetworkPacketDirection, NetworkPacketSnapshot, ObjectId, ObjectSnapshot, ObjectStatus,
+    ObjectUpdate, ObjectVertex, ParticleLayer, ParticleSnapshot, Playback, PlayerInputState,
+    Recorder, Recording, Scenario, SimulationSnapshot, SurfaceSnapshot, Vector2,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -836,6 +836,8 @@ unsafe fn make_snapshot(
             } else {
                 None
             },
+            command_queue: Vec::new(),
+            command_stack: CommandStackSnapshot::default(),
         });
     }
     snapshots.sort_by_key(|object| object.id);

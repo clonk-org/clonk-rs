@@ -43,14 +43,14 @@ use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_core::std_config::Config;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
-    ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
-    ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, FloatVector2,
-    Landscape, MaterialSet, MenuCommandKind, MenuCommandSelection, MessageKind, MovementProfile,
-    ObjectId, ObjectSnapshot, ObjectUpdate, PlayerConfig, PlayerStatus, Recorder, Recording,
-    RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket,
-    Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER,
-    FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL,
-    FLAG_Y_REL, OWNER_NONE,
+    ActionSpec, ActionState, AudioCommand, CommandKind, CommandStackSnapshot, ControlButton,
+    ControlCommand, ControlEvent, Definition, Engine, EngineError, EngineState,
+    EnvironmentSettings, FloatVector2, Landscape, MaterialSet, MenuCommandKind,
+    MenuCommandSelection, MessageKind, MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate,
+    PlayerConfig, PlayerStatus, Recorder, Recording, RgbColor, Scenario, ScenarioError,
+    SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER,
+    FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK,
+    FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
     default_owner_color, draw_image, AboutAction, ColorByOwnerMask, CrewOverlay, CursorAtlas,
@@ -8901,6 +8901,8 @@ mod tests {
             base_graphics: None,
             graphics_overlays: Vec::new(),
             draw_transform: None,
+            command_queue: Vec::new(),
+            command_stack: CommandStackSnapshot::default(),
         }
     }
 
@@ -9217,6 +9219,8 @@ mod tests {
                 base_graphics: None,
                 graphics_overlays: Vec::new(),
                 draw_transform: None,
+                command_queue: Vec::new(),
+                command_stack: CommandStackSnapshot::default(),
             },
             ObjectSnapshot {
                 id: teammate,
@@ -9246,6 +9250,8 @@ mod tests {
                 base_graphics: None,
                 graphics_overlays: Vec::new(),
                 draw_transform: None,
+                command_queue: Vec::new(),
+                command_stack: CommandStackSnapshot::default(),
             },
         ];
 
