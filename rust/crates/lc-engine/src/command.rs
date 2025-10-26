@@ -368,6 +368,53 @@ mod tests {
     }
 
     #[test]
+    fn retry_command_waits_then_completes() {
+        let actor = snapshot_with_id(60);
+        let actor_id = actor.id;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor_id, actor.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(CommandRequest::new(CommandId::Retry).with_update_interval(3))
+            .expect("retry command accepted");
+
+        for frame in 0..2 {
+            let ctx = CommandRuntimeContext {
+                frame,
+                position: actor.position,
+                object: objects.get(&actor_id).expect("actor present"),
+                objects: &objects,
+                players: &players,
+                definitions: &definitions,
+                structures_need_energy: false,
+                base_buy_enabled: true,
+            };
+            let result = stack.step(&ctx).expect("running result");
+            assert_eq!(result.status, CommandStatus::Running);
+            assert!(result.update.is_none());
+        }
+
+        let ctx = CommandRuntimeContext {
+            frame: 2,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+        let result = stack.step(&ctx).expect("completion result");
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.update.is_none());
+    }
+
+    #[test]
     fn enter_enters_target_when_in_range() {
         let actor_id = ObjectId::new(30);
         let target_id = ObjectId::new(40);
@@ -2904,6 +2951,31 @@ impl WaitState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct RetryState {
+    remaining: u32,
+}
+
+impl RetryState {
+    fn from_request(request: &CommandRequest) -> Self {
+        Self {
+            remaining: request.update_interval.max(1),
+        }
+    }
+
+    fn step(&mut self, _ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.remaining == 0 {
+            return CommandStepResult::completed(None);
+        }
+        self.remaining -= 1;
+        if self.remaining == 0 {
+            CommandStepResult::completed(None)
+        } else {
+            CommandStepResult::running(None)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FollowState {
     target: ObjectId,
     update_interval: u32,
@@ -3773,6 +3845,7 @@ enum CommandState {
     Grab(GrabState),
     UnGrab(UnGrabState),
     Wait(WaitState),
+    Retry(RetryState),
     Attack(AttackState),
     Buy(BuyState),
     Acquire(AcquireState),
@@ -3796,6 +3869,7 @@ impl ActiveCommand {
             CommandId::Grab => CommandState::Grab(GrabState::from_request(&request)?),
             CommandId::UnGrab => CommandState::UnGrab(UnGrabState::from_request(&request)),
             CommandId::Wait => CommandState::Wait(WaitState::from_request(&request)),
+            CommandId::Retry => CommandState::Retry(RetryState::from_request(&request)),
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
             CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
             CommandId::Acquire => CommandState::Acquire(AcquireState::from_request(&request)?),
@@ -3824,6 +3898,7 @@ impl ActiveCommand {
             CommandState::Grab(state) => state.step(ctx),
             CommandState::UnGrab(state) => state.step(ctx),
             CommandState::Wait(state) => state.step(ctx),
+            CommandState::Retry(state) => state.step(ctx),
             CommandState::Attack(state) => state.step(ctx),
             CommandState::Buy(state) => state.step(ctx),
             CommandState::Acquire(state) => state.step(ctx),
