@@ -4993,13 +4993,10 @@ impl ScenarioScript {
         let world = host_world_context_from_snapshot(snapshot);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
-        let (result, host_effects) = compat::with_effect_context(
-            None,
-            global_effects,
-            world,
-            next_object_id,
-            || self.script.call(function, &args),
-        );
+        let (result, host_effects) =
+            compat::with_effect_context(None, global_effects, world, next_object_id, || {
+                self.script.call(function, &args)
+            });
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
         let mut environment_delta = env_guard.finish();
@@ -6149,9 +6146,10 @@ impl Engine {
         if self.game_over_triggered || !self.players_registered {
             return Ok(());
         }
-        let has_active = self.players.values().any(|player| {
-            matches!(player.status(), PlayerStatus::Active) && !player.surrendered()
-        });
+        let has_active = self
+            .players
+            .values()
+            .any(|player| matches!(player.status(), PlayerStatus::Active) && !player.surrendered());
         if has_active {
             return Ok(());
         }
@@ -8406,9 +8404,9 @@ impl Engine {
         self.next_object_id = state.next_object_id.max(highest_id + 1);
 
         self.prune_roles();
-       self.prune_selection();
-       self.sync_all_player_cursors();
-       self.refresh_elimination_state();
+        self.prune_selection();
+        self.sync_all_player_cursors();
+        self.refresh_elimination_state();
         self.check_game_over()?;
 
         if self.team_home_base_rule {
@@ -16426,7 +16424,6 @@ func ControlDig() { SetAction("Dig"); return true; }
             Vector2::new(120, 0),
             "lightning effect should spawn at requested x position"
         );
-
     }
 
     #[test]
@@ -18121,19 +18118,17 @@ func ControlDig() { SetAction("Dig"); return true; }
         flag_def.set_category(CATEGORY_STRUCTURE);
         engine.register_definition(flag_def)?;
 
-        let _crew_id = engine
-            .spawn_object(
-                SpawnConfig::new("Crew")
-                    .with_owner(1)
-                    .with_crew_member(true)
-                    .with_position(Vector2::new(100, 200)),
-            )?;
-        let _base_id = engine
-            .spawn_object(
-                SpawnConfig::new("Base")
-                    .with_owner(1)
-                    .with_position(Vector2::new(150, 220)),
-            )?;
+        let _crew_id = engine.spawn_object(
+            SpawnConfig::new("Crew")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_position(Vector2::new(100, 200)),
+        )?;
+        let _base_id = engine.spawn_object(
+            SpawnConfig::new("Base")
+                .with_owner(1)
+                .with_position(Vector2::new(150, 220)),
+        )?;
 
         engine.install_scenario_script("Scenario", SCRIPT)?;
 

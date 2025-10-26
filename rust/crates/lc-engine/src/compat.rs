@@ -1911,6 +1911,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Log", log_message);
     script.register_host_function("DebugLog", debug_log_message);
     script.register_host_function("Format", format_string);
+    script.register_host_function("GetKeys", get_keys);
+    script.register_host_function("GetValues", get_values);
     script.register_host_function("Contents", contents);
     script.register_host_function("ContentsCount", contents_count);
     script.register_host_function("FindContents", find_contents);
@@ -2485,6 +2487,49 @@ fn log_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn debug_log_message(args: &[Value]) -> Result<Value, RuntimeError> {
     log_internal("DebugLog", args, LogLevel::Debug)
+}
+
+fn get_keys(args: &[Value]) -> Result<Value, RuntimeError> {
+    let map = match args.get(0) {
+        Some(Value::Proplist(map)) => map,
+        Some(Value::Nil) | None => {
+            return Err(RuntimeError::new("GetKeys(): map expected, got 0"));
+        }
+        Some(other) => {
+            return Err(RuntimeError::new(format!(
+                "GetKeys(): map expected, got {}",
+                other.type_name()
+            )));
+        }
+    };
+
+    let mut keys: Vec<_> = map.keys().cloned().collect();
+    keys.sort();
+    let values = keys.into_iter().map(Value::String).collect();
+    Ok(Value::Array(values))
+}
+
+fn get_values(args: &[Value]) -> Result<Value, RuntimeError> {
+    let map = match args.get(0) {
+        Some(Value::Proplist(map)) => map,
+        Some(Value::Nil) | None => {
+            return Err(RuntimeError::new("GetValues(): map expected, got 0"));
+        }
+        Some(other) => {
+            return Err(RuntimeError::new(format!(
+                "GetValues(): map expected, got {}",
+                other.type_name()
+            )));
+        }
+    };
+
+    let mut entries: Vec<_> = map.iter().collect();
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let values = entries
+        .into_iter()
+        .map(|(_, value)| value.clone())
+        .collect();
+    Ok(Value::Array(values))
 }
 
 fn format_string(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -9957,6 +10002,49 @@ mod tests {
                 self.message = Some(value.to_string());
             }
         }
+    }
+
+    #[test]
+    fn get_keys_returns_sorted_keys() {
+        let mut map = HashMap::new();
+        map.insert("beta".into(), Value::Int(2));
+        map.insert("alpha".into(), Value::Int(1));
+        let result = get_keys(&[Value::Proplist(map)]).expect("GetKeys succeeds");
+        match result {
+            Value::Array(entries) => {
+                assert_eq!(
+                    entries,
+                    vec![Value::String("alpha".into()), Value::String("beta".into())]
+                );
+            }
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn get_keys_rejects_nil() {
+        let error = get_keys(&[Value::Nil]).expect_err("GetKeys should fail for nil");
+        assert_eq!(error.message(), "GetKeys(): map expected, got 0");
+    }
+
+    #[test]
+    fn get_values_returns_entries_sorted_by_key() {
+        let mut map = HashMap::new();
+        map.insert("beta".into(), Value::Int(2));
+        map.insert("alpha".into(), Value::Int(1));
+        let result = get_values(&[Value::Proplist(map)]).expect("GetValues succeeds");
+        match result {
+            Value::Array(entries) => {
+                assert_eq!(entries, vec![Value::Int(1), Value::Int(2)]);
+            }
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn get_values_rejects_nil() {
+        let error = get_values(&[Value::Nil]).expect_err("GetValues should fail for nil");
+        assert_eq!(error.message(), "GetValues(): map expected, got 0");
     }
 
     #[test]
