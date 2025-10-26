@@ -7517,6 +7517,16 @@ impl Engine {
         }
         let mut spawn_requests = Vec::new();
         self.tick_global_effects();
+        let mut selected_objects = HashSet::new();
+        for selection in self.crew_selection.values() {
+            for id in selection.selected() {
+                selected_objects.insert(*id);
+            }
+            if let Some(cursor) = selection.cursor() {
+                selected_objects.insert(cursor);
+            }
+        }
+
         let mut command_snapshots: HashMap<ObjectId, CommandObjectSnapshot> =
             HashMap::with_capacity(self.objects.len());
         for object in &self.objects {
@@ -7542,6 +7552,10 @@ impl Engine {
                     action_procedure: procedure,
                     command_direction: object.state.command_direction,
                     construction: object.state.construction,
+                    owner: object.state.owner,
+                    crew_member: object.state.crew_member,
+                    selected: selected_objects.contains(&object.id),
+                    alive: object.state.alive,
                 },
             );
         }
@@ -8011,6 +8025,10 @@ impl Engine {
                         .procedure_for_action(&self.objects[idx].state.action.name),
                     command_direction: self.objects[idx].state.command_direction,
                     construction: self.objects[idx].state.construction,
+                    owner: self.objects[idx].state.owner,
+                    crew_member: self.objects[idx].state.crew_member,
+                    selected: selected_objects.contains(&object_id),
+                    alive: self.objects[idx].state.alive,
                 },
             );
             spawn_requests.extend(spawns.into_iter());

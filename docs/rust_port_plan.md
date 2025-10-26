@@ -6,7 +6,7 @@
 
 ## TL;DR
 
-- **P0 BLOCKERS:** AI command system partial (MoveTo + Build only)
+- **P0 BLOCKERS:** AI command system still partial (MoveTo/Build/Follow/Attack done; rest missing)
 - **Scenario Discovery:** ✅ Official content repo wired; menu now lists full scenario catalog
 - **Current State:** Build compiles; workspace tests green; Build command implemented in command stack
 - **Next 48h:** Keep engine tests green; sketch AI command trait; triage panics
@@ -27,13 +27,12 @@
 **Problem:** Command stack now supports MoveTo + Build; Follow/Attack/etc. still missing
 **Evidence:** `SetCommand("Build", ...)` starts Build procedure with material gating; `compat::tests::set_command_clears_stack_and_pushes_command` still green
 **C++ Has:** 30 commands (Follow, MoveTo, Build, Attack, etc.) via `C4Command.cpp`
-**Rust Has:** Command trait infrastructure + MoveTo/Build implementations; no Follow/Attack/Acquire queueing yet
-**Impact:** Build automation works (crew picks up components, honours material requirements); hauling/combat automation still absent
+**Rust Has:** Command trait infrastructure + MoveTo/Build/Follow/Attack; Acquire/Energy queueing still absent
+**Impact:** Build automation works (crew picks up components, honours material requirements); hauling/combat automation still incomplete without Acquire/Energy
 **Next:**
-1. Implement Follow/Attack to unblock AI companions/hostiles
-2. Teach Build to chain Acquire/Energy commands (line kits, activation)
-3. Add command persistence to save-state snapshots + scenario world objects
-4. Expand tests to cover queue chaining, failure recovery, and scen parity
+1. Teach Build to chain Acquire/Energy commands (line kits, activation)
+2. Add command persistence to save-state snapshots + scenario world objects
+3. Expand tests to cover queue chaining, failure recovery, and scen parity
 
 **Accept:** `AddCommand("MoveTo", ...)` and `SetCommand("Build", ...)` reproduce C++ behaviour across parity scenarios
 **Owner:** TBD | **ETA:** Weeks 2-4 | **Risk:** HIGH (large system, hidden deps)
@@ -77,7 +76,7 @@
 | **Tests** | ✅ Working | `cargo test --workspace` passes | TBD |
 | **Scenario Discovery** | ✅ Working | content/ assets discovered; sandbox no longer sole entry | TBD |
 | **Scenario Loading** | ⚠️ Unknown | Needs real scenarios to test | TBD |
-| **AI Commands** | ⚠️ Partial | MoveTo + Build implemented in stack; Follow/Attack pending | TBD |
+| **AI Commands** | ⚠️ Partial | MoveTo/Build/Follow/Attack in stack; Acquire/Energy pending | TBD |
 | **Graphics Rendering** | ✅ Implemented | Code exists; needs verification | TBD |
 | **Player Input** | ✅ Implemented | Keyboard/mouse/gamepad code exists | TBD |
 | **Landscape** | ✅ Implemented | Dig/blast/materials code exists | TBD |
@@ -101,6 +100,7 @@
 ✅ **Scenario Parser:** Scenario.txt, landscape, Objects.txt loading implemented
 ✅ **Fallback Design:** Sandbox appears only when discovery fails (good design)
 ✅ **AI Build Command:** Rust `SetCommand("Build")` starts construction, respects component requirements
+✅ **AI Follow/Attack:** Command stack issues MoveTo + direction updates mirroring baseline C4 behaviour (unit tested)
 
 ---
 

@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::{
     ActionProcedure, ActionUpdate, CommandDirection, ObjectId, ObjectStatus, ObjectUpdate, Vector2,
-    CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, FULL_CON,
+    CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, FULL_CON, OWNER_NONE,
 };
 
 /// Maximum number of commands that may be queued for an object.
@@ -20,11 +20,15 @@ pub struct CommandObjectSnapshot {
     pub action_procedure: ActionProcedure,
     pub command_direction: CommandDirection,
     pub construction: i32,
+    pub owner: i32,
+    pub crew_member: bool,
+    pub selected: bool,
+    pub alive: bool,
 }
 
 impl CommandObjectSnapshot {
     pub fn is_active(&self) -> bool {
-        !self.destroyed && self.status.is_active()
+        !self.destroyed && self.status.is_active() && self.alive
     }
 }
 
@@ -134,6 +138,186 @@ impl CommandId {
             Self::Call => "Call",
             Self::Take => "Take",
             Self::Take2 => "Take2",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn snapshot_with_id(id: u64) -> CommandObjectSnapshot {
+        CommandObjectSnapshot {
+            id: ObjectId::new(id),
+            position: Vector2::ZERO,
+            status: ObjectStatus::Normal,
+            destroyed: false,
+            category: 0,
+            container: None,
+            action_target: None,
+            action_procedure: ActionProcedure::Undefined,
+            command_direction: CommandDirection::Stop,
+            construction: 0,
+            owner: OWNER_NONE,
+            crew_member: false,
+            selected: false,
+            alive: true,
+        }
+    }
+
+    #[test]
+    fn follow_completes_for_unselected_crew() {
+        let follower_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+
+        let mut follower = snapshot_with_id(follower_id.as_u64());
+        follower.crew_member = true;
+        follower.owner = 42;
+        follower.selected = false;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(20, 0);
+        target.crew_member = true;
+
+        let mut objects = HashMap::new();
+        objects.insert(follower.id, follower.clone());
+        objects.insert(target.id, target);
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: follower.position,
+            object: objects.get(&follower_id).expect("follower present"),
+            objects: &objects,
+        };
+
+        let mut state = FollowState::from_request(
+            &CommandRequest::new(CommandId::Follow).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+    }
+
+    #[test]
+    fn follow_requests_move_when_out_of_range() {
+        let follower_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+
+        let mut follower = snapshot_with_id(follower_id.as_u64());
+        follower.crew_member = true;
+        follower.owner = 1;
+        follower.selected = true;
+        follower.command_direction = CommandDirection::Left;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(100, 0);
+        target.crew_member = true;
+
+        let mut objects = HashMap::new();
+        objects.insert(follower.id, follower.clone());
+        objects.insert(target.id, target);
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: follower.position,
+            object: objects.get(&follower_id).expect("follower present"),
+            objects: &objects,
+        };
+
+        let mut state = FollowState::from_request(
+            &CommandRequest::new(CommandId::Follow).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(
+            result.update.is_some(),
+            "follower should receive a stop update before moving"
+        );
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.target, Some(target_id));
+            }
+            other => panic!("expected move request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn attack_completes_when_target_not_crew() {
+        let attacker_id = ObjectId::new(7);
+        let target_id = ObjectId::new(8);
+
+        let attacker = snapshot_with_id(attacker_id.as_u64());
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.crew_member = false;
+
+        let mut objects = HashMap::new();
+        objects.insert(attacker.id, attacker.clone());
+        objects.insert(target.id, target);
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: attacker.position,
+            object: objects.get(&attacker_id).expect("attacker present"),
+            objects: &objects,
+        };
+
+        let mut state = AttackState::from_request(
+            &CommandRequest::new(CommandId::Attack).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+    }
+
+    #[test]
+    fn attack_requests_move_when_out_of_range() {
+        let attacker_id = ObjectId::new(30);
+        let target_id = ObjectId::new(40);
+
+        let mut attacker = snapshot_with_id(attacker_id.as_u64());
+        attacker.command_direction = CommandDirection::Left;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.crew_member = true;
+        target.position = Vector2::new(200, -50);
+
+        let mut objects = HashMap::new();
+        objects.insert(attacker.id, attacker.clone());
+        objects.insert(target.id, target);
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: attacker.position,
+            object: objects.get(&attacker_id).expect("attacker present"),
+            objects: &objects,
+        };
+
+        let mut state = AttackState::from_request(
+            &CommandRequest::new(CommandId::Attack).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(
+            result.update.is_some(),
+            "attacker should stop before chasing target"
+        );
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.target, Some(target_id));
+            }
+            other => panic!("expected move request, got {:?}", other),
         }
     }
 }
@@ -596,9 +780,215 @@ impl BuildState {
 }
 
 #[derive(Debug, Clone)]
+struct FollowState {
+    target: ObjectId,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    last_move_order: Option<u64>,
+}
+
+impl FollowState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let target = request.target.ok_or(CommandError::Unsupported)?;
+        Ok(Self {
+            target,
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            last_move_order: None,
+        })
+    }
+
+    fn should_issue_move(&mut self, frame: u64) -> bool {
+        const MOVE_COOLDOWN: u64 = 12;
+        match self.last_move_order {
+            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
+            _ => {
+                self.last_move_order = Some(frame);
+                true
+            }
+        }
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        let follower = ctx.object;
+
+        if follower.crew_member && follower.owner != OWNER_NONE && !follower.selected {
+            let update = if follower.command_direction != CommandDirection::Stop {
+                Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+            } else {
+                None
+            };
+            return CommandStepResult::completed(update);
+        }
+
+        let target = match ctx.resolve(self.target) {
+            Some(snapshot) => snapshot,
+            None => {
+                let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
+                return CommandStepResult::failed(Some(update));
+            }
+        };
+
+        if !target.is_active() {
+            let update = if follower.command_direction != CommandDirection::Stop {
+                Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+            } else {
+                None
+            };
+            return CommandStepResult::completed(update);
+        }
+
+        if follower.id == target.id {
+            return CommandStepResult::completed(None);
+        }
+
+        if follower.container != target.container {
+            if follower.crew_member {
+                let update = if follower.command_direction != CommandDirection::Stop {
+                    Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+                } else {
+                    None
+                };
+                return CommandStepResult::completed(update);
+            }
+            let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
+            return CommandStepResult::failed(Some(update));
+        }
+
+        const FOLLOW_RANGE: i32 = 6;
+        let dx = target.position.x - ctx.position.x;
+        let dy = target.position.y - ctx.position.y;
+        if dx.abs() <= FOLLOW_RANGE && dy.abs() <= FOLLOW_RANGE {
+            if follower.command_direction != target.command_direction {
+                let update = ObjectUpdate::new().with_command_direction(target.command_direction);
+                return CommandStepResult::running(Some(update));
+            }
+            return CommandStepResult::running(None);
+        }
+
+        let update = if follower.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        };
+        let mut result = CommandStepResult::running(update);
+        if self.should_issue_move(ctx.frame) {
+            let request = CommandRequest::new(CommandId::MoveTo)
+                .with_target(Some(self.target))
+                .with_update_interval(10);
+            result = result.with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+        result
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AttackState {
+    target: ObjectId,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    last_move_order: Option<u64>,
+}
+
+impl AttackState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let target = request.target.ok_or(CommandError::Unsupported)?;
+        Ok(Self {
+            target,
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            last_move_order: None,
+        })
+    }
+
+    fn should_issue_move(&mut self, frame: u64) -> bool {
+        const MOVE_COOLDOWN: u64 = 8;
+        match self.last_move_order {
+            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
+            _ => {
+                self.last_move_order = Some(frame);
+                true
+            }
+        }
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        let attacker = ctx.object;
+        let target = match ctx.resolve(self.target) {
+            Some(snapshot) => snapshot,
+            None => {
+                let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
+                return CommandStepResult::failed(Some(update));
+            }
+        };
+
+        if !target.is_active() {
+            let update = if attacker.command_direction != CommandDirection::Stop {
+                Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+            } else {
+                None
+            };
+            return CommandStepResult::completed(update);
+        }
+
+        if !target.crew_member {
+            let update = if attacker.command_direction != CommandDirection::Stop {
+                Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+            } else {
+                None
+            };
+            return CommandStepResult::completed(update);
+        }
+
+        const ATTACK_RANGE: i32 = 12;
+        let dx = target.position.x - ctx.position.x;
+        let dy = target.position.y - ctx.position.y;
+        if dx.abs() <= ATTACK_RANGE && dy.abs() <= ATTACK_RANGE {
+            if attacker.command_direction != CommandDirection::Stop {
+                let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
+                return CommandStepResult::running(Some(update));
+            }
+            return CommandStepResult::running(None);
+        }
+
+        let update = if attacker.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        };
+        let mut result = CommandStepResult::running(update);
+        if self.should_issue_move(ctx.frame) {
+            let request = CommandRequest::new(CommandId::MoveTo)
+                .with_target(Some(self.target))
+                .with_update_interval(10);
+            result = result.with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+        result
+    }
+}
+
+#[derive(Debug, Clone)]
 enum CommandState {
+    Follow(FollowState),
     MoveTo(MoveToState),
     Build(BuildState),
+    Attack(AttackState),
     Unsupported,
 }
 
@@ -610,8 +1000,10 @@ struct ActiveCommand {
 impl ActiveCommand {
     fn from_request(request: CommandRequest) -> Result<Self, CommandError> {
         let state = match request.id {
+            CommandId::Follow => CommandState::Follow(FollowState::from_request(&request)?),
             CommandId::MoveTo => CommandState::MoveTo(MoveToState::from_request(&request)),
             CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
+            CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
             _ => CommandState::Unsupported,
         };
 
@@ -624,8 +1016,10 @@ impl ActiveCommand {
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         match &mut self.state {
+            CommandState::Follow(state) => state.step(ctx),
             CommandState::MoveTo(state) => state.step(ctx),
             CommandState::Build(state) => state.step(ctx),
+            CommandState::Attack(state) => state.step(ctx),
             CommandState::Unsupported => {
                 let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
                 CommandStepResult::failed(Some(update))
