@@ -10608,8 +10608,18 @@ impl Engine {
                 continue;
             }
             let vertical = (remaining as f64).sqrt().floor() as i32;
-            let target_height = center.y.saturating_add(vertical);
-            let previous_height = landscape.surface_height(column).unwrap_or(0);
+            let mut target_height = center.y.saturating_add(vertical);
+            let previous_height = match landscape.surface_height(column) {
+                Some(height) => height,
+                None => continue,
+            };
+            if target_height <= previous_height {
+                let distance = previous_height.saturating_sub(target_height);
+                if distance > radius {
+                    continue;
+                }
+                target_height = previous_height.saturating_add(1);
+            }
             let Some((material_id, removed)) =
                 Self::dig_column(&self.materials, landscape, column, target_height)
             else {

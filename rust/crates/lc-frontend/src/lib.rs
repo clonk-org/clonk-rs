@@ -890,6 +890,30 @@ impl GraphicsSystem {
         self.world_height = saved_world_height;
 
         blit_surface(&mut viewport_surface, &content_surface, offset_x, offset_y);
+        if content_surface.width() > 0 && content_surface.height() > 0 {
+            let content_width = content_surface.width() as i32;
+            let content_height = content_surface.height() as i32;
+            let offset_x_i32 = offset_x;
+            let offset_y_i32 = offset_y;
+            for y in 0..viewport_surface.height() as i32 {
+                for x in 0..viewport_surface.width() as i32 {
+                    let rel_x = x - offset_x_i32;
+                    let rel_y = y - offset_y_i32;
+                    if rel_x >= 0
+                        && rel_x < content_width
+                        && rel_y >= 0
+                        && rel_y < content_height
+                    {
+                        continue;
+                    }
+                    let sample_x = rel_x.clamp(0, content_width - 1) as u32;
+                    let sample_y = rel_y.clamp(0, content_height - 1) as u32;
+                    if let Some(color) = content_surface.get_pixel(sample_x, sample_y) {
+                        let _ = viewport_surface.set_pixel(x as u32, y as u32, color);
+                    }
+                }
+            }
+        }
         blit_surface(&mut self.surface, &viewport_surface, rect.x, rect.y);
 
         self.active_viewports.push(ActiveViewport {
@@ -1091,10 +1115,23 @@ impl GraphicsSystem {
             return Vec::new();
         }
 
-        let overlay_height = (OVERLAY_HEIGHT.round() as i32).clamp(0, self.surface_height as i32);
-        let available_height = (self.surface_height as i32).saturating_sub(overlay_height);
+        let mut overlay_height =
+            (OVERLAY_HEIGHT.round() as i32).clamp(0, self.surface_height as i32);
+        let mut available_height = (self.surface_height as i32).saturating_sub(overlay_height);
         if available_height <= 0 {
-            return vec![SurfaceRect::new(0, overlay_height, self.surface_width, 0)];
+            // Surface too small to host the overlay and a viewport. Give the
+            // entire surface to the viewport and suppress the overlay instead
+            // of producing a zero-height viewport that won't render anything.
+            overlay_height = 0;
+            available_height = self.surface_height as i32;
+        }
+        if available_height <= 0 {
+            return vec![SurfaceRect::new(
+                0,
+                overlay_height,
+                self.surface_width,
+                available_height.max(0) as u32,
+            )];
         }
 
         let columns = match count {
@@ -1125,7 +1162,7 @@ impl GraphicsSystem {
                 if col_width == 0 || row_height == 0 {
                     rects.push(SurfaceRect::new(x as i32, y as i32, col_width, row_height));
                 } else {
-                    let margin = 2i32;
+                    let margin = if rows == 1 && columns == 1 { 0 } else { 2 };
                     let mut rect_x = x as i32 + margin;
                     let mut rect_y = y as i32 + margin;
                     let mut rect_width = col_width.saturating_sub((margin * 2).max(0) as u32);
@@ -2384,9 +2421,14 @@ impl GraphicsSystem {
         self.active_viewports
             .first()
             .map(|viewport| {
+                let zoom = viewport.zoom.max(MIN_VIEWPORT_ZOOM);
+                let offset_x = viewport.content_rect.x as f32 / zoom;
+                let offset_y = viewport.content_rect.y as f32 / zoom;
+                let adjusted_x = (viewport.viewport_x - offset_x).max(0.0);
+                let adjusted_y = (viewport.viewport_y - offset_y).max(0.0);
                 (
-                    viewport.viewport_x.round() as i32,
-                    viewport.viewport_y.round() as i32,
+                    adjusted_x.round() as i32,
+                    adjusted_y.round() as i32,
                 )
             })
             .unwrap_or((
