@@ -46,7 +46,7 @@ impl StartupMainMenu {
             MenuButton::new("Player Selection", MainMenuItem::PlayerSelection),
             MenuButton::new("Options", MainMenuItem::Options),
             MenuButton::new("About", MainMenuItem::About),
-            MenuButton::new("Quit", MainMenuItem::Quit),
+            MenuButton::new("Exit", MainMenuItem::Quit),
         ];
         Self {
             font,
