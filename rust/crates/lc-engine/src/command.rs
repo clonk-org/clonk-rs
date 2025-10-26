@@ -576,6 +576,7 @@ mod tests {
 
         let mut container = snapshot_with_id(container_id.as_u64());
         container.position = Vector2::new(4, 0);
+        container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
 
         let mut item = snapshot_with_id(item_id.as_u64());
         item.definition_id = "WOOD".into();
@@ -610,6 +611,201 @@ mod tests {
         let update = result.update.expect("builder update");
         assert_eq!(update.container, Some(Some(container_id)));
         assert_eq!(update.position, Some(Vector2::new(4, 0)));
+    }
+
+    #[test]
+    fn acquire_requests_buy_when_no_candidate() {
+        let builder_id = ObjectId::new(10);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        builder.collectible = false;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            structures_need_energy: false,
+        };
+
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Buy);
+                assert_eq!(request.update_interval, 100);
+            }
+            other => panic!("expected buy request, got {:?}", other),
+        }
+
+        let later_ctx = CommandRuntimeContext {
+            frame: 10,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            structures_need_energy: false,
+        };
+
+        let second = state.step(&later_ctx);
+        assert!(second.operations.is_empty());
+    }
+
+    #[test]
+    fn acquire_exits_other_container_before_access() {
+        let builder_id = ObjectId::new(1);
+        let current_container_id = ObjectId::new(2);
+        let target_container_id = ObjectId::new(3);
+        let item_id = ObjectId::new(4);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        builder.collectible = false;
+        builder.container = Some(current_container_id);
+
+        let mut current_container = snapshot_with_id(current_container_id.as_u64());
+        current_container.position = Vector2::new(5, 5);
+        current_container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
+
+        let mut target_container = snapshot_with_id(target_container_id.as_u64());
+        target_container.position = Vector2::new(20, 0);
+        target_container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "WOOD".into();
+        item.construction = FULL_CON;
+        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+        item.collectible = true;
+        item.container = Some(target_container_id);
+        item.position = target_container.position;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+        objects.insert(current_container.id, current_container.clone());
+        objects.insert(target_container.id, target_container);
+        objects.insert(item.id, item);
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            structures_need_energy: false,
+        };
+
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        let update = result.update.expect("builder update");
+        assert_eq!(update.container, Some(None));
+        assert_eq!(update.position, Some(current_container.position));
+        assert_eq!(update.velocity, Some(Vector2::ZERO));
+    }
+
+    #[test]
+    fn acquire_leaves_container_for_loose_item() {
+        let builder_id = ObjectId::new(1);
+        let current_container_id = ObjectId::new(2);
+        let item_id = ObjectId::new(3);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        builder.collectible = false;
+        builder.container = Some(current_container_id);
+
+        let mut current_container = snapshot_with_id(current_container_id.as_u64());
+        current_container.position = Vector2::new(5, 5);
+        current_container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "WOOD".into();
+        item.construction = FULL_CON;
+        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+        item.collectible = true;
+        item.position = Vector2::new(30, 0);
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+        objects.insert(current_container.id, current_container.clone());
+        objects.insert(item.id, item);
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            structures_need_energy: false,
+        };
+
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        let update = result.update.expect("builder update");
+        assert_eq!(update.container, Some(None));
+        assert_eq!(update.position, Some(current_container.position));
+        assert_eq!(update.velocity, Some(Vector2::ZERO));
+    }
+
+    #[test]
+    fn acquire_attaches_to_grabbable_container() {
+        let builder_id = ObjectId::new(1);
+        let container_id = ObjectId::new(2);
+        let item_id = ObjectId::new(3);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        builder.collectible = false;
+        builder.position = Vector2::new(0, 0);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.position = Vector2::new(6, 0);
+        container.ocf = ocf::AVAILABLE | ocf::GRAB;
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "WOOD".into();
+        item.construction = FULL_CON;
+        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+        item.collectible = true;
+        item.container = Some(container_id);
+        item.position = container.position;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+        objects.insert(container.id, container.clone());
+        objects.insert(item.id, item);
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            structures_need_energy: false,
+        };
+
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        let update = result.update.expect("builder update");
+        assert_eq!(update.container, Some(Some(container_id)));
+        assert_eq!(update.position, Some(container.position));
     }
 }
 
@@ -1354,6 +1550,8 @@ struct AcquireState {
     last_evaluated: Option<u64>,
     last_move_order: Option<u64>,
     candidate: Option<ObjectId>,
+    buy_requested: bool,
+    last_buy_request: Option<u64>,
 }
 
 impl AcquireState {
@@ -1381,6 +1579,8 @@ impl AcquireState {
             last_evaluated: None,
             last_move_order: None,
             candidate: None,
+            buy_requested: false,
+            last_buy_request: None,
         })
     }
 
@@ -1390,6 +1590,36 @@ impl AcquireState {
         } else {
             None
         }
+    }
+
+    fn maybe_reset_buy(&mut self, frame: u64) {
+        const BUY_RETRY_INTERVAL: u64 = 100;
+        if !self.buy_requested {
+            self.last_buy_request = None;
+            return;
+        }
+        if let Some(last) = self.last_buy_request {
+            if frame.saturating_sub(last) >= BUY_RETRY_INTERVAL {
+                self.buy_requested = false;
+                self.last_buy_request = None;
+            }
+        }
+    }
+
+    fn request_buy(&mut self, frame: u64) -> Option<CommandOperation> {
+        if self.buy_requested {
+            return None;
+        }
+        let Some(c4id) = definition_id_to_c4id(&self.definition_id) else {
+            return None;
+        };
+        self.buy_requested = true;
+        self.last_buy_request = Some(frame);
+        let request = CommandRequest::new(CommandId::Buy)
+            .with_data(CommandData::Integer(c4id))
+            .with_update_interval(100)
+            .with_mode(CommandMode::Sub);
+        Some(CommandOperation::PushFront(request))
     }
 
     fn should_issue_move(&mut self, frame: u64) -> bool {
@@ -1483,13 +1713,18 @@ impl AcquireState {
             return CommandStepResult::running(base_update);
         };
 
+        let can_enter = (container_snapshot.ocf & ocf::ENTRANCE) != 0;
+        let can_grab = (container_snapshot.ocf & ocf::GRAB) != 0;
+
         if builder_container.is_none() {
             let dx = container_snapshot.position.x - ctx.position.x;
             let dy = container_snapshot.position.y - ctx.position.y;
             const CONTAINER_APPROACH_RANGE: i32 = 12;
             if dx.abs() <= CONTAINER_APPROACH_RANGE && dy.abs() <= CONTAINER_APPROACH_RANGE {
                 let mut update = base_update.clone().unwrap_or_default();
-                update.container = Some(Some(container_id));
+                if can_enter || can_grab {
+                    update.container = Some(Some(container_id));
+                }
                 update.position = Some(container_snapshot.position);
                 update.velocity = Some(Vector2::ZERO);
                 if update.command_direction.is_none() {
@@ -1497,6 +1732,10 @@ impl AcquireState {
                 }
                 return CommandStepResult::running(Some(update));
             }
+        }
+
+        if !can_enter && !can_grab {
+            return CommandStepResult::running(base_update);
         }
 
         if self.should_issue_move(ctx.frame) {
@@ -1544,14 +1783,53 @@ impl AcquireState {
             self.candidate = self.find_candidate(ctx);
         }
 
-        let Some(candidate_id) = self.candidate else {
-            return CommandStepResult::running(self.update_to_stop(ctx));
-        };
+        if self.candidate.is_none() {
+            self.maybe_reset_buy(ctx.frame);
+            let mut result = CommandStepResult::running(self.update_to_stop(ctx));
+            if let Some(operation) = self.request_buy(ctx.frame) {
+                result.operations.push(operation);
+            }
+            return result;
+        }
 
+        let candidate_id = self.candidate.expect("candidate present");
         let Some(candidate) = ctx.resolve(candidate_id) else {
             self.candidate = None;
             return CommandStepResult::running(self.update_to_stop(ctx));
         };
+
+        self.buy_requested = false;
+        self.last_buy_request = None;
+
+        if let Some(container_id) = candidate.container {
+            if let Some(builder_container) = ctx.object.container {
+                if builder_container != container_id {
+                    let mut update = self.update_to_stop(ctx).unwrap_or_else(ObjectUpdate::new);
+                    if let Some(snapshot) = ctx.resolve(builder_container) {
+                        update.position = Some(snapshot.position);
+                    } else {
+                        update.position = Some(ctx.position);
+                    }
+                    update.velocity = Some(Vector2::ZERO);
+                    update.container = Some(None);
+                    return CommandStepResult::running(Some(update));
+                }
+            }
+        }
+
+        if candidate.container.is_none() {
+            if let Some(builder_container) = ctx.object.container {
+                let mut update = self.update_to_stop(ctx).unwrap_or_else(ObjectUpdate::new);
+                if let Some(snapshot) = ctx.resolve(builder_container) {
+                    update.position = Some(snapshot.position);
+                } else {
+                    update.position = Some(ctx.position);
+                }
+                update.velocity = Some(Vector2::ZERO);
+                update.container = Some(None);
+                return CommandStepResult::running(Some(update));
+            }
+        }
 
         let dx = candidate.position.x - ctx.position.x;
         let dy = candidate.position.y - ctx.position.y;
@@ -1575,6 +1853,40 @@ impl AcquireState {
         }
 
         CommandStepResult::running(self.update_to_stop(ctx))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BuyState {
+    _definition_id: DefinitionId,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+}
+
+impl BuyState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let definition_id =
+            command_data_to_definition_id(&request.data).ok_or(CommandError::Unsupported)?;
+        Ok(Self {
+            _definition_id: definition_id,
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+        })
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < self.update_interval as u64 {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+        let update = if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        };
+        CommandStepResult::failed(update)
     }
 }
 
@@ -1651,6 +1963,7 @@ enum CommandState {
     MoveTo(MoveToState),
     Build(BuildState),
     Attack(AttackState),
+    Buy(BuyState),
     Acquire(AcquireState),
     Energy(EnergyState),
     Unsupported,
@@ -1668,6 +1981,7 @@ impl ActiveCommand {
             CommandId::MoveTo => CommandState::MoveTo(MoveToState::from_request(&request)),
             CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
+            CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
             CommandId::Acquire => CommandState::Acquire(AcquireState::from_request(&request)?),
             CommandId::Energy => CommandState::Energy(EnergyState::from_request(&request)?),
             _ => CommandState::Unsupported,
@@ -1686,6 +2000,7 @@ impl ActiveCommand {
             CommandState::MoveTo(state) => state.step(ctx),
             CommandState::Build(state) => state.step(ctx),
             CommandState::Attack(state) => state.step(ctx),
+            CommandState::Buy(state) => state.step(ctx),
             CommandState::Acquire(state) => state.step(ctx),
             CommandState::Energy(state) => state.step(ctx),
             CommandState::Unsupported => {

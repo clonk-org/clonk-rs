@@ -27,10 +27,10 @@
 **Problem:** Command stack now supports MoveTo + Build; Follow/Attack/etc. still missing
 **Evidence:** `SetCommand("Build", ...)` starts Build procedure with material gating; `command::tests::acquire_requests_move_for_nearby_item` verifies ground pickup pathing; `compat::tests::set_command_clears_stack_and_pushes_command` still green
 **C++ Has:** 30 commands (Follow, MoveTo, Build, Attack, etc.) via `C4Command.cpp`
-**Rust Has:** Command trait infrastructure + MoveTo/Build/Follow/Attack + Acquire for loose items and shared-container withdrawal + Energy line-kit handshake; merchant `Buy` fallback still missing
+**Rust Has:** Command trait infrastructure + MoveTo/Build/Follow/Attack + Acquire for loose items, shared-container withdrawal, cross-container exit/grab heuristics, and Buy fallback requests + Energy line-kit handshake
 **Impact:** Build automation works (crew picks up components, honours material requirements) and Energize follows loose line-kit pickups; automation still incomplete without buy flows and non-container movement commands
 **Next:**
-1. Extend Acquire to trigger `Buy` fallback + cross-container access (Grab/Enter) parity
+1. Implement base/merchant handling so `Buy` commands actually purchase and enqueue acquired items
 2. Add command persistence to save-state snapshots + scenario world objects
 3. Expand tests to cover queue chaining, failure recovery, and scenario parity
 
@@ -76,7 +76,7 @@
 | **Tests** | ✅ Working | `cargo test --workspace` passes | TBD |
 | **Scenario Discovery** | ✅ Working | content/ assets discovered; sandbox no longer sole entry | TBD |
 | **Scenario Loading** | ⚠️ Unknown | Needs real scenarios to test | TBD |
-| **AI Commands** | ⚠️ Partial | MoveTo/Build/Follow/Attack + Acquire handles loose + shared-container transfers; buy/queue flows pending | TBD |
+| **AI Commands** | ⚠️ Partial | MoveTo/Build/Follow/Attack + Acquire handles loose/container/cross-container pickups and issues Buy fallback; merchant flow + persistence still pending | TBD |
 | **Graphics Rendering** | ✅ Implemented | Code exists; needs verification | TBD |
 | **Player Input** | ✅ Implemented | Keyboard/mouse/gamepad code exists | TBD |
 | **Landscape** | ✅ Implemented | Dig/blast/materials code exists | TBD |
@@ -101,7 +101,7 @@
 ✅ **Fallback Design:** Sandbox appears only when discovery fails (good design)
 ✅ **AI Build Command:** Rust `SetCommand("Build")` starts construction, respects component requirements
 ✅ **AI Follow/Attack:** Command stack issues MoveTo + direction updates mirroring baseline C4 behaviour (unit tested)
-✅ **AI Acquire (partial):** Shared-container withdraws now mirrored via command events + targeted tests
+✅ **AI Acquire (partial):** Shared/container/cross-container pulls mirrored via command events + Buy fallback request path covered by tests
 
 ---
 
