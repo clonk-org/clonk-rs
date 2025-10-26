@@ -303,6 +303,71 @@ mod tests {
     }
 
     #[test]
+    fn wait_stops_dig_and_completes_after_interval() {
+        let actor_id = ObjectId::new(50);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Dig;
+        actor.command_direction = CommandDirection::Left;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let request = CommandRequest::new(CommandId::Wait).with_update_interval(3);
+        let mut state = WaitState::from_request(&request);
+
+        let ctx0 = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let result0 = state.step(&ctx0);
+        assert_eq!(result0.status, CommandStatus::Running);
+        let update0 = result0
+            .update
+            .expect("wait should issue an update to stop digging");
+        assert_eq!(update0.command_direction, Some(CommandDirection::Stop));
+        let action_update = update0.action.expect("wait should reset the action");
+        assert_eq!(action_update.name.as_deref(), Some("Idle"));
+
+        let ctx1 = CommandRuntimeContext {
+            frame: 1,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let result1 = state.step(&ctx1);
+        assert_eq!(result1.status, CommandStatus::Running);
+
+        let ctx2 = CommandRuntimeContext {
+            frame: 2,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let result2 = state.step(&ctx2);
+        assert_eq!(result2.status, CommandStatus::Completed);
+    }
+
+    #[test]
     fn enter_enters_target_when_in_range() {
         let actor_id = ObjectId::new(30);
         let target_id = ObjectId::new(40);
@@ -2795,6 +2860,50 @@ impl UnGrabState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WaitState {
+    remaining: Option<u32>,
+}
+
+impl WaitState {
+    fn from_request(request: &CommandRequest) -> Self {
+        let remaining = if request.update_interval == 0 {
+            None
+        } else {
+            Some(request.update_interval)
+        };
+        Self { remaining }
+    }
+
+    fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.action_procedure != ActionProcedure::Dig {
+            return None;
+        }
+        let mut update = ObjectUpdate::new();
+        if ctx.object.command_direction != CommandDirection::Stop {
+            update = update.with_command_direction(CommandDirection::Stop);
+        }
+        let action_update = ActionUpdate::default().with_name("Idle").with_force(true);
+        Some(update.with_action_update(action_update))
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let update = self.prepare_update(ctx);
+
+        if let Some(remaining) = self.remaining.as_mut() {
+            if *remaining == 0 {
+                return CommandStepResult::completed(update);
+            }
+            *remaining -= 1;
+            if *remaining == 0 {
+                return CommandStepResult::completed(update);
+            }
+        }
+
+        CommandStepResult::running(update)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct FollowState {
     target: ObjectId,
     update_interval: u32,
@@ -3663,6 +3772,7 @@ enum CommandState {
     Build(BuildState),
     Grab(GrabState),
     UnGrab(UnGrabState),
+    Wait(WaitState),
     Attack(AttackState),
     Buy(BuyState),
     Acquire(AcquireState),
@@ -3685,6 +3795,7 @@ impl ActiveCommand {
             CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
             CommandId::Grab => CommandState::Grab(GrabState::from_request(&request)?),
             CommandId::UnGrab => CommandState::UnGrab(UnGrabState::from_request(&request)),
+            CommandId::Wait => CommandState::Wait(WaitState::from_request(&request)),
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
             CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
             CommandId::Acquire => CommandState::Acquire(AcquireState::from_request(&request)?),
@@ -3712,6 +3823,7 @@ impl ActiveCommand {
             CommandState::Build(state) => state.step(ctx),
             CommandState::Grab(state) => state.step(ctx),
             CommandState::UnGrab(state) => state.step(ctx),
+            CommandState::Wait(state) => state.step(ctx),
             CommandState::Attack(state) => state.step(ctx),
             CommandState::Buy(state) => state.step(ctx),
             CommandState::Acquire(state) => state.step(ctx),
