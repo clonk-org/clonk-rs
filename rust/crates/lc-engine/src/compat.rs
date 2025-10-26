@@ -12,14 +12,17 @@ use crate::message::{
 use crate::ocf;
 #[cfg(test)]
 use crate::LiquidSegment;
+#[cfg(test)]
+use crate::PlayerViewport;
 use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, AudioCommand,
-    CommandDirection, DefinitionId, DefinitionRect, Direction, DrawTransform, EnvironmentSettings,
-    FloatVector2, GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay, ObjectId, ObjectStatus,
-    ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope,
-    PathFinder, PhysicsSettings, PlayerState, QueuedCommand, SpawnConfig, TransferZoneCommand,
-    TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER,
-    CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
+    CommandDirection, CrewSelectionState, DefinitionId, DefinitionRect, Direction, DrawTransform,
+    EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectGraphicsOverlay,
+    ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig,
+    ParticleLayer, ParticleScope, PathFinder, PhysicsSettings, PlayerState, QueuedCommand,
+    SpawnConfig, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
+    CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT,
+    CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use rand::Rng;
@@ -312,6 +315,7 @@ pub(crate) struct HostWorldContext {
     transfer_zones: Rc<Vec<TransferZoneState>>,
     players: Rc<HashMap<i32, PlayerState>>,
     player_order: Rc<Vec<i32>>,
+    crew_selection: Rc<HashMap<i32, CrewSelectionState>>,
     next_object_id: u64,
     team_home_base_rule: bool,
 }
@@ -326,6 +330,7 @@ impl Default for HostWorldContext {
             transfer_zones: Rc::new(Vec::new()),
             players: Rc::new(HashMap::new()),
             player_order: Rc::new(Vec::new()),
+            crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
             team_home_base_rule: false,
         }
@@ -344,6 +349,7 @@ impl HostWorldContext {
             HashMap::new(),
             Vec::new(),
             HashMap::new(),
+            HashMap::new(),
             1,
             false,
         )
@@ -359,7 +365,16 @@ impl HostWorldContext {
             .into_iter()
             .map(|state| (state.id, state))
             .collect::<HashMap<_, _>>();
-        Self::with_landscape(objects, None, HashMap::new(), Vec::new(), map, 1, false)
+        Self::with_landscape(
+            objects,
+            None,
+            HashMap::new(),
+            Vec::new(),
+            map,
+            HashMap::new(),
+            1,
+            false,
+        )
     }
 
     pub(crate) fn with_landscape<I>(
@@ -368,6 +383,7 @@ impl HostWorldContext {
         definitions: HashMap<DefinitionId, DefinitionMetadata>,
         transfer_zones: Vec<TransferZoneState>,
         players: HashMap<i32, PlayerState>,
+        crew_selection: HashMap<i32, CrewSelectionState>,
         next_object_id: u64,
         team_home_base_rule: bool,
     ) -> Self
@@ -394,6 +410,7 @@ impl HostWorldContext {
                 ids
             }),
             players: Rc::new(players),
+            crew_selection: Rc::new(crew_selection),
             next_object_id,
             team_home_base_rule,
         }
@@ -437,6 +454,10 @@ impl HostWorldContext {
 
     pub(crate) fn player(&self, id: i32) -> Option<&PlayerState> {
         self.players.get(&id)
+    }
+
+    pub(crate) fn crew_selection(&self, id: i32) -> Option<&CrewSelectionState> {
+        self.crew_selection.get(&id)
     }
 }
 
@@ -812,6 +833,100 @@ fn get_crew_count(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         };
         Ok(Value::Int(truncate_to_i32(player.crew.len() as u64)))
+    })
+}
+
+fn get_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(RuntimeError::new(
+            "GetCursor expects 1 or 2 arguments: player and optional index",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetCursor", "player")?;
+    let index = if args.len() == 2 {
+        value_to_i32(&args[1], "GetCursor", "index")?
+    } else {
+        0
+    };
+    if index < 0 {
+        return Ok(Value::Nil);
+    }
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        if index == 0 {
+            return Ok(player
+                .cursor
+                .map(object_reference_value)
+                .unwrap_or(Value::Nil));
+        }
+        let selection = context.world.crew_selection(player_id);
+        let Some(selection) = selection else {
+            return Ok(Value::Nil);
+        };
+        if selection.selected.is_empty() {
+            return Ok(Value::Nil);
+        }
+        let mut remaining = index as usize;
+        for crew_id in &player.crew {
+            if player.cursor == Some(*crew_id) {
+                continue;
+            }
+            if !selection.selected.contains(crew_id) {
+                continue;
+            }
+            remaining -= 1;
+            if remaining == 0 {
+                return Ok(object_reference_value(*crew_id));
+            }
+        }
+        Ok(Value::Nil)
+    })
+}
+
+fn get_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new(
+            "GetViewCursor expects exactly 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetViewCursor", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        let focus = player.viewports.first().and_then(|viewport| viewport.focus);
+        Ok(focus.map(object_reference_value).unwrap_or(Value::Nil))
+    })
+}
+
+fn get_select_count(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new(
+            "GetSelectCount expects exactly 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "GetSelectCount", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let selection = context
+            .world
+            .crew_selection(player_id)
+            .map(|state| state.selected.len())
+            .unwrap_or(0);
+        Ok(Value::Int(truncate_to_i32(selection as u64)))
     })
 }
 
@@ -1742,6 +1857,9 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlrKnowledge", get_plr_knowledge);
     script.register_host_function("GetCrew", get_crew);
     script.register_host_function("GetCrewCount", get_crew_count);
+    script.register_host_function("GetCursor", get_cursor_host);
+    script.register_host_function("GetViewCursor", get_view_cursor);
+    script.register_host_function("GetSelectCount", get_select_count);
     script.register_host_function("SetPlrKnowledge", set_plr_knowledge);
     script.register_host_function("SetAction", set_action);
     script.register_host_function("SetBridgeActionData", set_bridge_action_data);
@@ -10001,6 +10119,7 @@ mod tests {
             HashMap::new(),
             Vec::new(),
             HashMap::new(),
+            HashMap::new(),
             1,
             false,
         );
@@ -10019,6 +10138,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             HashMap::new(),
             1,
             false,
@@ -10039,6 +10159,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             HashMap::new(),
             8,
             false,
@@ -10079,6 +10200,7 @@ mod tests {
             HashMap::new(),
             Vec::new(),
             HashMap::new(),
+            HashMap::new(),
             1,
             false,
         );
@@ -10117,6 +10239,7 @@ mod tests {
             HashMap::new(),
             Vec::new(),
             HashMap::new(),
+            HashMap::new(),
             1,
             false,
         );
@@ -10139,6 +10262,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             HashMap::new(),
             5,
             false,
@@ -10182,6 +10306,7 @@ mod tests {
             HashMap::new(),
             Vec::new(),
             HashMap::new(),
+            HashMap::new(),
             1,
             false,
         );
@@ -10201,6 +10326,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             HashMap::new(),
             1,
             false,
@@ -10367,6 +10493,7 @@ mod tests {
             definitions,
             Vec::new(),
             HashMap::from([(5, player)]),
+            HashMap::new(),
             1,
             false,
         );
@@ -10417,6 +10544,7 @@ mod tests {
             definitions,
             Vec::new(),
             HashMap::from([(6, player)]),
+            HashMap::new(),
             1,
             false,
         );
@@ -10453,6 +10581,7 @@ mod tests {
             definitions,
             Vec::new(),
             HashMap::from([(7, player)]),
+            HashMap::new(),
             1,
             false,
         );
@@ -10503,6 +10632,7 @@ mod tests {
             definitions,
             Vec::new(),
             HashMap::from([(8, player)]),
+            HashMap::new(),
             1,
             false,
         );
@@ -10579,6 +10709,7 @@ mod tests {
             HashMap::new(),
             Vec::new(),
             HashMap::from([(1, player)]),
+            HashMap::new(),
             1,
             false,
         );
@@ -10622,6 +10753,7 @@ mod tests {
             HashMap::new(),
             Vec::new(),
             HashMap::from([(3, player)]),
+            HashMap::new(),
             1,
             false,
         );
@@ -10670,6 +10802,7 @@ mod tests {
             HashMap::new(),
             Vec::new(),
             HashMap::from([(2, player)]),
+            HashMap::new(),
             1,
             false,
         );
@@ -10677,6 +10810,125 @@ mod tests {
         let (result, _) = with_effect_context(None, &[], world, 1, || get_crew_count(&args));
 
         assert_eq!(result.expect("GetCrewCount succeeds"), Value::Int(3));
+    }
+
+    #[test]
+    fn get_cursor_defaults_to_current_cursor() {
+        let cursor = ObjectId::new(900);
+        let mut player = PlayerState::default();
+        player.id = 12;
+        player.cursor = Some(cursor);
+        player.crew = vec![cursor];
+        let selection = CrewSelectionState {
+            selected: vec![cursor],
+            cursor: Some(cursor),
+        };
+
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::from([(12, player)]),
+            HashMap::from([(12, selection)]),
+            1,
+            false,
+        );
+        let args = [Value::Int(12)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_cursor_host(&args));
+
+        assert_eq!(
+            result.expect("GetCursor succeeds"),
+            object_reference_value(cursor)
+        );
+    }
+
+    #[test]
+    fn get_cursor_returns_selected_member_by_index() {
+        let cursor = ObjectId::new(910);
+        let other = ObjectId::new(920);
+        let mut player = PlayerState::default();
+        player.id = 13;
+        player.cursor = Some(cursor);
+        player.crew = vec![cursor, other];
+        let selection = CrewSelectionState {
+            selected: vec![cursor, other],
+            cursor: Some(cursor),
+        };
+
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::from([(13, player)]),
+            HashMap::from([(13, selection)]),
+            1,
+            false,
+        );
+        let args = [Value::Int(13), Value::Int(1)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_cursor_host(&args));
+
+        assert_eq!(
+            result.expect("GetCursor succeeds"),
+            object_reference_value(other)
+        );
+    }
+
+    #[test]
+    fn get_select_count_reports_selected_units() {
+        let cursor = ObjectId::new(930);
+        let other = ObjectId::new(940);
+        let mut player = PlayerState::default();
+        player.id = 14;
+        player.cursor = Some(cursor);
+        player.crew = vec![cursor, other];
+        let selection = CrewSelectionState {
+            selected: vec![cursor, other],
+            cursor: Some(cursor),
+        };
+
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::from([(14, player)]),
+            HashMap::from([(14, selection)]),
+            1,
+            false,
+        );
+        let args = [Value::Int(14)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_select_count(&args));
+
+        assert_eq!(result.expect("GetSelectCount succeeds"), Value::Int(2));
+    }
+
+    #[test]
+    fn get_view_cursor_returns_first_focus_target() {
+        let focus = ObjectId::new(950);
+        let mut player = PlayerState::default();
+        player.id = 15;
+        player
+            .viewports
+            .push(PlayerViewport::new(Vector2::ZERO).with_focus(Some(focus)));
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::from([(15, player)]),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let args = [Value::Int(15)];
+        let (result, _) = with_effect_context(None, &[], world, 1, || get_view_cursor(&args));
+
+        assert_eq!(
+            result.expect("GetViewCursor succeeds"),
+            object_reference_value(focus)
+        );
     }
 
     #[test]
@@ -10704,6 +10956,7 @@ mod tests {
             definitions,
             Vec::new(),
             HashMap::from([(1, player)]),
+            HashMap::new(),
             1,
             false,
         );
@@ -10738,6 +10991,7 @@ mod tests {
             definitions,
             Vec::new(),
             HashMap::from([(1, player)]),
+            HashMap::new(),
             1,
             false,
         );
@@ -10788,6 +11042,7 @@ mod tests {
             definitions,
             Vec::new(),
             HashMap::from([(1, player)]),
+            HashMap::new(),
             1,
             false,
         );
@@ -10840,6 +11095,7 @@ mod tests {
             HashMap::new(),
             Vec::new(),
             HashMap::new(),
+            HashMap::new(),
             1,
             false,
         );
@@ -10883,6 +11139,7 @@ mod tests {
             None,
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             HashMap::new(),
             1,
             false,
@@ -12086,6 +12343,7 @@ mod tests {
             HashMap::new(),
             Vec::new(),
             HashMap::new(),
+            HashMap::new(),
             1,
             false,
         );
@@ -12132,6 +12390,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             HashMap::new(),
             1,
             false,
@@ -12745,6 +13004,7 @@ mod tests {
             Some(landscape),
             HashMap::new(),
             Vec::new(),
+            HashMap::new(),
             HashMap::new(),
             1,
             false,
@@ -13586,6 +13846,7 @@ mod tests {
             definitions,
             Vec::new(),
             HashMap::new(),
+            HashMap::new(),
             1,
             false,
         );
@@ -13657,6 +13918,7 @@ mod tests {
             Some(landscape),
             definitions,
             Vec::new(),
+            HashMap::new(),
             HashMap::new(),
             1,
             false,

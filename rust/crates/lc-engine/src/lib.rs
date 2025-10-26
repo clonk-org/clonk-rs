@@ -5941,6 +5941,11 @@ impl Engine {
             .values()
             .map(|player| (player.id(), player.to_state()))
             .collect();
+        let crew_selection: HashMap<i32, CrewSelectionState> = self
+            .crew_selection
+            .iter()
+            .map(|(&owner, selection)| (owner, CrewSelectionState::from(selection)))
+            .collect();
         HostWorldContext::with_landscape(
             self.objects.iter().map(|object| {
                 let definition = self.definitions.get(&object.definition_id);
@@ -5993,6 +5998,7 @@ impl Engine {
             definition_metadata,
             transfer_zones,
             players,
+            crew_selection,
             self.next_object_id,
             self.team_home_base_rule,
         )
@@ -11335,6 +11341,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         .iter()
         .map(|state| (state.id, state.clone()))
         .collect();
+    let crew_selection = snapshot.crew_selection.clone();
     HostWorldContext::with_landscape(
         snapshot.objects.iter().map(|object| {
             HostWorldObject::with_category(
@@ -11364,6 +11371,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
         definition_metadata,
         snapshot.transfer_zones.clone(),
         players,
+        crew_selection,
         next_object_id,
         false,
     )

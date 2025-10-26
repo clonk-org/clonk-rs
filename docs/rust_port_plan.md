@@ -417,7 +417,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [ ] Verify ALL C4Aul host functions are implemented:
   - Object queries (FindObject, ObjectCount, etc.)
   - Object manipulation (CreateObject, RemoveObject, etc.)
-  - Player functions (GetCrew, GetMaterial, etc.) — GetCrew/GetCrewCount/GetMaterial/GetPlrKnowledge/SetPlrKnowledge ported; inventory queries pending
+  - Player functions (GetCrew, GetMaterial, etc.) — GetCrew/GetCrewCount/GetMaterial/GetPlrKnowledge/SetPlrKnowledge ported; inventory queries (GetCursor/GetViewCursor/GetSelectCount) now implemented
   - Landscape functions (Dig, Blast, etc.)
   - [x] Message functions (Message, PlayerMessage, etc.)
   - [x] Math/utility functions (Format, Log, DebugLog)
@@ -431,6 +431,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2028-04-27):** Ported `GetMaterial` into the Rust compatibility layer, mirroring C++ object-relative coordinates, returning `MNone` when the landscape lacks material, and covering it with regression tests in `rust/crates/lc-engine/src/compat.rs`.
 **Progress (2025-10-25):** Added `GetPlrKnowledge`/`SetPlrKnowledge` to the Rust host layer, mirroring LegacyClonk’s knowledge checks, recording engine synchronization commands, and covering both grants and revokes with regression tests in `lc-engine::compat` and engine-level command handling.
 **Progress (2028-05-20):** Added parity `Format`, `Log`, and `DebugLog` host functions so scripts can format data and emit debug output through the Rust tracing pipeline, backed by unit tests in `rust/crates/lc-engine/src/compat.rs`.
+**Progress (2028-05-30):** Ported the selection inventory host queries (`GetCursor`, `GetViewCursor`, `GetSelectCount`) to the Rust compatibility layer, extending the host-world snapshot with crew-selection state so script access mirrors LegacyClonk and covering each helper with regression tests in `rust/crates/lc-engine/src/compat.rs`.
 
 **Files:** lc-script, host function registration in lc-engine
 
