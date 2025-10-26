@@ -403,6 +403,164 @@ mod tests {
     }
 
     #[test]
+    fn exit_completes_when_not_contained() {
+        let actor_id = ObjectId::new(51);
+        let actor = snapshot_with_id(actor_id.as_u64());
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.update.is_none());
+        assert!(result.operations.is_empty());
+    }
+
+    #[test]
+    fn exit_moves_into_parent_container_when_nested() {
+        let actor_id = ObjectId::new(60);
+        let container_id = ObjectId::new(70);
+        let parent_id = ObjectId::new(80);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(container_id);
+        actor.command_direction = CommandDirection::Right;
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.container = Some(parent_id);
+        container.position = Vector2::new(12, 34);
+
+        let mut parent = snapshot_with_id(parent_id.as_u64());
+        parent.position = Vector2::new(100, -20);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(container.id, container);
+        objects.insert(parent.id, parent.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 10,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result.update.expect("exit should update actor");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert_eq!(update.container, Some(Some(parent_id)));
+        assert_eq!(update.position, Some(parent.position));
+        assert_eq!(update.velocity, Some(Vector2::ZERO));
+    }
+
+    #[test]
+    fn exit_leaves_container_when_no_parent() {
+        let actor_id = ObjectId::new(90);
+        let container_id = ObjectId::new(100);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(container_id);
+        actor.command_direction = CommandDirection::Left;
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.position = Vector2::new(-40, 5);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(container.id, container.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 20,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result.update.expect("exit should update actor");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert_eq!(update.container, Some(None));
+        assert_eq!(update.position, Some(container.position));
+        assert_eq!(update.velocity, Some(Vector2::ZERO));
+    }
+
+    #[test]
+    fn exit_stops_building_procedure() {
+        let actor_id = ObjectId::new(110);
+        let container_id = ObjectId::new(120);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(container_id);
+        actor.action_procedure = ActionProcedure::Build;
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.position = Vector2::new(0, 0);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(container.id, container);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 30,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit)).expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result.update.expect("exit should update actor");
+        let action = update.action.expect("exit should reset action");
+        assert_eq!(action.name.as_deref(), Some("Idle"));
+        assert!(action.force);
+    }
+
+    #[test]
     fn attack_completes_when_target_not_crew() {
         let attacker_id = ObjectId::new(7);
         let target_id = ObjectId::new(8);
@@ -1972,6 +2130,80 @@ impl EnterState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ExitState {
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+}
+
+impl ExitState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        Ok(Self {
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+        })
+    }
+
+    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> ObjectUpdate {
+        self.update_to_stop(ctx).unwrap_or_else(ObjectUpdate::new)
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        let Some(container_id) = ctx.object.container else {
+            return CommandStepResult::completed(self.update_to_stop(ctx));
+        };
+
+        let mut update = self.prepare_update(ctx);
+
+        if ctx.object.action_procedure == ActionProcedure::Build {
+            let action_update = ActionUpdate::default().with_name("Idle").with_force(true);
+            update = update.with_action_update(action_update);
+        }
+
+        let container_snapshot = match ctx.resolve(container_id) {
+            Some(snapshot) if snapshot.is_active() => snapshot,
+            _ => {
+                update.container = Some(None);
+                update.position = Some(ctx.position);
+                update.velocity = Some(Vector2::ZERO);
+                return CommandStepResult::completed(Some(update));
+            }
+        };
+
+        update.velocity = Some(Vector2::ZERO);
+
+        if let Some(parent_id) = container_snapshot.container {
+            update.container = Some(Some(parent_id));
+            if let Some(parent_snapshot) = ctx.resolve(parent_id) {
+                update.position = Some(parent_snapshot.position);
+            } else {
+                update.position = Some(container_snapshot.position);
+            }
+        } else {
+            update.container = Some(None);
+            update.position = Some(container_snapshot.position);
+        }
+
+        CommandStepResult::completed(Some(update))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct BuildState {
     target: ObjectId,
     site: Option<Vector2>,
@@ -2977,6 +3209,7 @@ enum CommandState {
     Follow(FollowState),
     MoveTo(MoveToState),
     Enter(EnterState),
+    Exit(ExitState),
     Build(BuildState),
     Attack(AttackState),
     Buy(BuyState),
@@ -2996,6 +3229,7 @@ impl ActiveCommand {
             CommandId::Follow => CommandState::Follow(FollowState::from_request(&request)?),
             CommandId::MoveTo => CommandState::MoveTo(MoveToState::from_request(&request)),
             CommandId::Enter => CommandState::Enter(EnterState::from_request(&request)?),
+            CommandId::Exit => CommandState::Exit(ExitState::from_request(&request)?),
             CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
             CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
@@ -3020,6 +3254,7 @@ impl ActiveCommand {
             CommandState::Follow(state) => state.step(ctx),
             CommandState::MoveTo(state) => state.step(ctx),
             CommandState::Enter(state) => state.step(ctx),
+            CommandState::Exit(state) => state.step(ctx),
             CommandState::Build(state) => state.step(ctx),
             CommandState::Attack(state) => state.step(ctx),
             CommandState::Buy(state) => state.step(ctx),
