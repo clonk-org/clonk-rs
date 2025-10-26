@@ -8,6 +8,7 @@ mod object_menu;
 mod save_browser;
 mod settings;
 
+use std::cmp::Ordering;
 use std::collections::{
     hash_map::DefaultHasher, hash_map::Entry, BTreeMap, HashMap, HashSet, VecDeque,
 };
@@ -2743,6 +2744,9 @@ struct FrontendScenario {
     path: Option<PathBuf>,
     preview: Option<ImageData>,
     children: Vec<FrontendScenario>,
+    folder_index: Option<i32>,
+    icon_index: Option<i32>,
+    difficulty: Option<i32>,
 }
 
 impl FrontendScenario {
@@ -2799,6 +2803,9 @@ impl FrontendScenario {
             path: Some(entry.path),
             preview,
             children,
+            folder_index: entry.folder_index,
+            icon_index: entry.icon_index,
+            difficulty: entry.difficulty,
         })
     }
 
@@ -2826,6 +2833,9 @@ impl FrontendScenario {
                 FALLBACK_SCENARIO_TITLE,
             )),
             children: Vec::new(),
+            folder_index: None,
+            icon_index: None,
+            difficulty: None,
         }
     }
 }
@@ -2846,6 +2856,7 @@ fn merge_frontend_scenarios(entries: Vec<FrontendScenario>) -> Vec<FrontendScena
         result.push(entry);
     }
 
+    sort_frontend_entries(&mut result);
     result
 }
 
@@ -2861,7 +2872,17 @@ fn merge_container(existing: &mut FrontendScenario, mut incoming: FrontendScenar
     }
     existing.is_editable |= incoming.is_editable;
     existing.is_playable |= incoming.is_playable;
+    if existing.folder_index.is_none() {
+        existing.folder_index = incoming.folder_index;
+    }
+    if existing.icon_index.is_none() {
+        existing.icon_index = incoming.icon_index;
+    }
+    if existing.difficulty.is_none() {
+        existing.difficulty = incoming.difficulty;
+    }
     merge_children(&mut existing.children, incoming.children);
+    sort_frontend_entries(&mut existing.children);
 }
 
 fn merge_children(
@@ -2895,6 +2916,76 @@ fn merge_children(
 
 fn is_container_kind(kind: &ScenarioKind) -> bool {
     matches!(kind, ScenarioKind::Folder | ScenarioKind::Editor)
+}
+
+fn sort_frontend_entries(entries: &mut [FrontendScenario]) {
+    entries.sort_by(compare_frontend_entries);
+    for entry in entries.iter_mut() {
+        sort_frontend_entries(&mut entry.children);
+    }
+}
+
+fn compare_frontend_entries(a: &FrontendScenario, b: &FrontendScenario) -> Ordering {
+    let a_is_folder = matches!(a.kind, ScenarioKind::Folder);
+    let b_is_folder = matches!(b.kind, ScenarioKind::Folder);
+    if a_is_folder != b_is_folder {
+        return if a_is_folder {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+
+    let a_folder_index = a.folder_index.unwrap_or(0);
+    let b_folder_index = b.folder_index.unwrap_or(0);
+    if a_folder_index != 0 || b_folder_index != 0 {
+        if a_folder_index == 0 {
+            return Ordering::Greater;
+        }
+        if b_folder_index == 0 {
+            return Ordering::Less;
+        }
+        match a_folder_index.cmp(&b_folder_index) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+
+    if let Some(icon) = a.icon_index {
+        if (2..=11).contains(&icon) {
+            let other_icon = b.icon_index.unwrap_or(-1);
+            let diff = icon - other_icon;
+            if diff != 0 {
+                return diff.cmp(&0);
+            }
+        }
+    }
+
+    let a_difficulty = a.difficulty.unwrap_or(0);
+    let b_difficulty = b.difficulty.unwrap_or(0);
+    if a_difficulty != 0 || b_difficulty != 0 {
+        if a_difficulty == 0 {
+            return Ordering::Greater;
+        }
+        if b_difficulty == 0 {
+            return Ordering::Less;
+        }
+        match a_difficulty.cmp(&b_difficulty) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+
+    let title_order = compare_case_insensitive(&a.title, &b.title);
+    if title_order != Ordering::Equal {
+        return title_order;
+    }
+
+    compare_case_insensitive(&a.identifier, &b.identifier)
+}
+
+fn compare_case_insensitive(a: &str, b: &str) -> Ordering {
+    a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase())
 }
 
 struct InstallDefinitionResolver {
@@ -3146,6 +3237,9 @@ impl SavedScenarioInfo {
                 &self.title,
             )),
             children: Vec::new(),
+            folder_index: None,
+            icon_index: None,
+            difficulty: None,
         }
     }
 }
@@ -8553,6 +8647,9 @@ mod tests {
             path: None,
             preview: None,
             children: Vec::new(),
+            folder_index: None,
+            icon_index: None,
+            difficulty: None,
         };
 
         let folder = FrontendScenario {
@@ -8565,6 +8662,9 @@ mod tests {
             path: None,
             preview: None,
             children: vec![child],
+            folder_index: None,
+            icon_index: None,
+            difficulty: None,
         };
 
         vec![folder]
@@ -8744,6 +8844,9 @@ mod tests {
             path: Some(PathBuf::from("/tmp/test.c4s")),
             preview: None,
             children: Vec::new(),
+            folder_index: None,
+            icon_index: None,
+            difficulty: None,
         };
         let info = SavedScenarioInfo::from_frontend(&original, "Label", 123);
         assert_eq!(info.identifier, original.identifier);
@@ -9241,25 +9344,123 @@ mod tests {
             2,
             "merged folder should expose children from all roots"
         );
-        assert_eq!(folder.children[0].identifier, "Worlds.c4f/Beta.c4s");
-        assert_eq!(folder.children[0].title, "Beta User");
+        let identifiers: Vec<_> = folder
+            .children
+            .iter()
+            .map(|child| child.identifier.as_str())
+            .collect();
+        assert_eq!(
+            identifiers,
+            vec!["Worlds.c4f/Alpha.c4s", "Worlds.c4f/Beta.c4s"],
+            "children should be sorted deterministically"
+        );
+        let user_entry = folder
+            .children
+            .iter()
+            .find(|child| child.identifier == "Worlds.c4f/Beta.c4s")
+            .expect("user scenario present");
+        assert_eq!(user_entry.title, "Beta User");
         assert!(
-            folder.children[0]
+            user_entry
                 .path
                 .as_ref()
                 .map(|path| path.starts_with(&user_dir))
                 .unwrap_or(false),
             "user scenario should retain user path"
         );
-        assert_eq!(folder.children[1].identifier, "Worlds.c4f/Alpha.c4s");
-        assert_eq!(folder.children[1].title, "Alpha Install");
+        let install_entry = folder
+            .children
+            .iter()
+            .find(|child| child.identifier == "Worlds.c4f/Alpha.c4s")
+            .expect("install scenario present");
+        assert_eq!(install_entry.title, "Alpha Install");
         assert!(
-            folder.children[1]
+            install_entry
                 .path
                 .as_ref()
                 .map(|path| path.starts_with(&install_dir))
                 .unwrap_or(false),
             "install scenario should retain install path"
+        );
+
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn load_frontend_scenarios_preserves_legacy_ordering() {
+        let _env_lock = crate::tests::env_lock().lock();
+        reset_cached_app_paths();
+
+        let install_dir = tempdir().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let install_folder = install_dir.path().join("Scenarios").join("Worlds.c4f");
+        fs::create_dir_all(&install_folder).unwrap();
+        fs::write(install_folder.join("Folder.txt"), "Title=Worlds\n").unwrap();
+        let install_bravo = install_folder.join("Bravo.c4s");
+        fs::create_dir_all(&install_bravo).unwrap();
+        fs::write(
+            install_bravo.join("Scenario.txt"),
+            "[Head]\nTitle=Bravo\nDifficulty=1\n",
+        )
+        .unwrap();
+        let install_charlie = install_folder.join("Charlie.c4s");
+        fs::create_dir_all(&install_charlie).unwrap();
+        fs::write(
+            install_charlie.join("Scenario.txt"),
+            "[Head]\nTitle=Charlie\nDifficulty=2\n",
+        )
+        .unwrap();
+
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+        let user_folder = user_dir.join("Scenarios").join("Worlds.c4f");
+        fs::create_dir_all(&user_folder).unwrap();
+        fs::write(user_folder.join("Folder.txt"), "Title=Worlds\n").unwrap();
+        let user_alpha = user_folder.join("Alpha.c4s");
+        fs::create_dir_all(&user_alpha).unwrap();
+        fs::write(
+            user_alpha.join("Scenario.txt"),
+            "[Head]\nTitle=Alpha Override\nDifficulty=3\n",
+        )
+        .unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+
+        let scenarios = load_frontend_scenarios();
+        assert_eq!(scenarios.len(), 1, "expected merged folder");
+        let folder = &scenarios[0];
+        assert_eq!(folder.identifier, "Worlds.c4f");
+        let identifiers: Vec<_> = folder
+            .children
+            .iter()
+            .map(|child| child.identifier.as_str())
+            .collect();
+        assert_eq!(
+            identifiers,
+            vec![
+                "Worlds.c4f/Bravo.c4s",
+                "Worlds.c4f/Charlie.c4s",
+                "Worlds.c4f/Alpha.c4s"
+            ],
+            "merged children should follow legacy ordering rules"
+        );
+        assert_eq!(
+            folder.children[2].title, "Alpha Override",
+            "user override title should be retained"
+        );
+        assert!(
+            folder.children[2]
+                .path
+                .as_ref()
+                .map(|path| path.starts_with(&user_dir))
+                .unwrap_or(false),
+            "user override should keep user path"
         );
 
         reset_cached_app_paths();

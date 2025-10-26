@@ -33,6 +33,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2026-03-18):** Scenario discovery now reads legacy `Scenario.txt` head metadata when no manifest/title files are present, restoring classic mission titles and descriptions in the browser.
 **Progress (2027-10-25):** Matched the legacy scenario browser ordering by honoring folder indices, mission icon ordering, and difficulty precedence in `lc-resources`, backed by regression tests, and removed the Rust frontend’s alphabetical resort so the tree mirrors C++ exactly.
 **Progress (2028-10-26):** Scenario browser now merges duplicate scenario folders across user and install roots, keeping overrides while inheriting fallback entries so the tree matches LegacyClonk without duplicate listings.
+**Progress (2025-10-26):** Frontend catalog now carries folder index/icon/difficulty metadata from `lc-resources` and re-sorts merged scenario trees so overrides keep LegacyClonk ordering; added regression coverage in `rust/crates/lc-app/src/main.rs`.
 
 **Files:** `main.rs:4631` (load_frontend_scenarios), scenario discovery in lc-resources
 
