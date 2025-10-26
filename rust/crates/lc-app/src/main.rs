@@ -9630,6 +9630,110 @@ mod tests {
     }
 
     #[test]
+    fn load_frontend_scenarios_orders_folders_by_index() {
+        let _env_lock = crate::tests::env_lock().lock();
+        reset_cached_app_paths();
+
+        let install_dir = tempdir().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let scenarios_dir = install_dir.path().join("Scenarios");
+        fs::create_dir_all(&scenarios_dir).unwrap();
+
+        let missions_folder = scenarios_dir.join("Missions.c4f");
+        fs::create_dir_all(&missions_folder).unwrap();
+        fs::write(
+            missions_folder.join("Folder.txt"),
+            "Title=Missions\nIndex=1\n",
+        )
+        .unwrap();
+
+        let arcade_folder = scenarios_dir.join("Arcade.c4f");
+        fs::create_dir_all(&arcade_folder).unwrap();
+        fs::write(
+            arcade_folder.join("Folder.txt"),
+            "Title=Arcade\nIndex=2\n",
+        )
+        .unwrap();
+
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+
+        let scenarios = load_frontend_scenarios();
+        let identifiers: Vec<_> = scenarios
+            .iter()
+            .map(|entry| entry.identifier.as_str())
+            .collect();
+        assert_eq!(
+            identifiers,
+            vec!["Missions.c4f", "Arcade.c4f"],
+            "folders should follow legacy indices"
+        );
+
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn load_frontend_scenarios_orders_by_icon_index() {
+        let _env_lock = crate::tests::env_lock().lock();
+        reset_cached_app_paths();
+
+        let install_dir = tempdir().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let scenarios_dir = install_dir.path().join("Scenarios");
+        let missions_folder = scenarios_dir.join("Missions.c4f");
+        fs::create_dir_all(&missions_folder).unwrap();
+        fs::write(missions_folder.join("Folder.txt"), "Title=Missions\n").unwrap();
+
+        let bravo_dir = missions_folder.join("Bravo.c4s");
+        fs::create_dir_all(&bravo_dir).unwrap();
+        fs::write(
+            bravo_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Bravo\nIcon=3\n",
+        )
+        .unwrap();
+
+        let alpha_dir = missions_folder.join("Alpha.c4s");
+        fs::create_dir_all(&alpha_dir).unwrap();
+        fs::write(
+            alpha_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Alpha\nIcon=5\n",
+        )
+        .unwrap();
+
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+
+        let scenarios = load_frontend_scenarios();
+        assert_eq!(scenarios.len(), 1, "expected single folder entry");
+        let folder = &scenarios[0];
+        assert_eq!(folder.identifier, "Missions.c4f");
+        let titles: Vec<_> = folder.children.iter().map(|child| child.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["Bravo", "Alpha"],
+            "icon indices should order scenarios before title fallback"
+        );
+
+        reset_cached_app_paths();
+    }
+
+    #[test]
     fn load_frontend_scenarios_preserves_legacy_ordering() {
         let _env_lock = crate::tests::env_lock().lock();
         reset_cached_app_paths();
