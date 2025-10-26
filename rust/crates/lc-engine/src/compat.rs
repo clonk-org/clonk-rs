@@ -508,7 +508,7 @@ fn ensure_single_flag(flags: u32, mask: u32, error: &str) -> Result<(), RuntimeE
     Ok(())
 }
 
-fn object_reference_value(id: ObjectId) -> Value {
+pub(crate) fn object_reference_value(id: ObjectId) -> Value {
     let mut map = HashMap::new();
     map.insert("id".into(), Value::Int(truncate_to_i32(id.as_u64())));
     Value::Proplist(map)

@@ -41,8 +41,8 @@ use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
     ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, FloatVector2,
     Landscape, MaterialSet, MenuCommandKind, MenuCommandSelection, MessageKind, MovementProfile,
-    ObjectId, ObjectSnapshot, ObjectUpdate, PlayerStatus, Recorder, Recording, Scenario,
-    ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2,
+    ObjectId, ObjectSnapshot, ObjectUpdate, PlayerConfig, PlayerStatus, Recorder, Recording,
+    Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2,
     FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT,
     FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL,
     OWNER_NONE,
@@ -1830,6 +1830,7 @@ struct GameApp {
     recordings_dir: Option<PathBuf>,
     recording: Option<RecordingSession>,
     local_owner: i32,
+    player_name: String,
     last_save_path: Option<PathBuf>,
     object_sprites: HashMap<String, DefinitionSprite>,
     sprite_cache: Arc<HashMap<String, DefinitionSprite>>,
@@ -3846,6 +3847,7 @@ impl GameApp {
             recordings_dir: paths.map(|p| p.recordings_dir()),
             recording: None,
             local_owner: runtime.player_owner,
+            player_name: player_name.clone(),
             last_save_path: None,
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
@@ -3916,6 +3918,15 @@ impl GameApp {
         self.sprite_cache = Arc::new(self.object_sprites.clone());
         self.graphics
             .set_object_sprites(Arc::clone(&self.sprite_cache));
+    }
+
+    fn ensure_local_player_registered(&mut self) -> Result<(), EngineError> {
+        if self.engine.player(self.local_owner).is_some() {
+            return Ok(());
+        }
+        let config = PlayerConfig::new(self.local_owner, self.player_name.clone());
+        self.engine.register_player(config)?;
+        Ok(())
     }
 
     fn derive_ground_height(engine: &Engine, fallback: i32) -> i32 {
@@ -6878,6 +6889,16 @@ impl GameApp {
             });
         }
 
+        if let Err(err) = self.ensure_local_player_registered() {
+            tracing::error!(
+                scenario = %scenario.title,
+                path = %path.display(),
+                error = %err,
+                "failed to register local player"
+            );
+            return Err(format!("Failed to start {}: {err}", scenario.title));
+        }
+
         self.sky = scenario_data.sky().map(sky_render_state_from_config);
         self.snapshot = self.engine.snapshot();
         self.rebuild_definition_sprites();
@@ -6926,6 +6947,8 @@ impl GameApp {
             Some(audio) => configure_sandbox_engine(&mut self.engine, Some(audio))?,
             None => configure_sandbox_engine(&mut self.engine, None)?,
         };
+
+        self.ensure_local_player_registered()?;
 
         let spawn = SpawnConfig::new(spawn_definition)
             .with_owner(self.local_owner)

@@ -80,8 +80,8 @@ pub struct ContextMenuEntry {
 
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
-    AudioRegistry, DefinitionMetadata, EffectContextOutcome, EnvironmentDelta, HostWorldContext,
-    HostWorldObject, PhysicsDelta, PlayerCommand,
+    object_reference_value, AudioRegistry, DefinitionMetadata, EffectContextOutcome,
+    EnvironmentDelta, HostWorldContext, HostWorldObject, PhysicsDelta, PlayerCommand,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use material::MaterialReactionKind;
@@ -4923,12 +4923,15 @@ impl ScenarioScript {
         if !self.has_initialize {
             return Ok((ScenarioBatch::default(), audio, rng));
         }
-        self.call(
+        let mut args = Vec::with_capacity(2);
+        args.push(build_scenario_state_value(snapshot));
+        args.push(Value::Int(random));
+        self.call_raw(
             "Initialize",
+            args,
             snapshot,
             rng,
-            random,
-            None,
+            snapshot.frame,
             global_effects,
             physics,
             environment,
@@ -4950,12 +4953,21 @@ impl ScenarioScript {
         if !self.has_step {
             return Ok((ScenarioBatch::default(), audio, rng));
         }
-        self.call(
+        let mut args = Vec::with_capacity(3);
+        args.push(build_scenario_state_value(snapshot));
+        let truncated = if frame > i32::MAX as u64 {
+            i32::MAX
+        } else {
+            frame as i32
+        };
+        args.push(Value::Int(truncated));
+        args.push(Value::Int(random));
+        self.call_raw(
             "Step",
+            args,
             snapshot,
             rng,
-            random,
-            Some(frame),
+            frame,
             global_effects,
             physics,
             environment,
@@ -4963,42 +4975,31 @@ impl ScenarioScript {
         )
     }
 
-    fn call(
+    fn call_raw(
         &mut self,
         function: &'static str,
+        args: Vec<Value>,
         snapshot: &SimulationSnapshot,
         rng: ChaCha8Rng,
-        random: i32,
-        frame: Option<u64>,
+        env_frame: u64,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
         audio: AudioRegistry,
     ) -> Result<(ScenarioBatch, AudioRegistry, ChaCha8Rng), EngineError> {
-        let state_value = build_scenario_state_value(snapshot);
-        let env_frame = frame.unwrap_or(snapshot.frame);
-        let mut args = Vec::new();
-        args.push(state_value);
-        if let Some(frame) = frame {
-            let truncated = if frame > i32::MAX as u64 {
-                i32::MAX
-            } else {
-                frame as i32
-            };
-            args.push(Value::Int(truncated));
-        }
-        args.push(Value::Int(random));
-
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
         let guard = enter_random_context(rng);
         let world = host_world_context_from_snapshot(snapshot);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
-        let (result, host_effects) =
-            compat::with_effect_context(None, global_effects, world, next_object_id, || {
-                self.script.call(function, &args)
-            });
+        let (result, host_effects) = compat::with_effect_context(
+            None,
+            global_effects,
+            world,
+            next_object_id,
+            || self.script.call(function, &args),
+        );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
         let mut environment_delta = env_guard.finish();
@@ -5056,8 +5057,14 @@ impl ScenarioScript {
         if !physics_delta.is_empty() {
             batch.physics = Some(physics_delta);
         }
+        if !host_spawns.is_empty() {
+            batch.spawns.extend(host_spawns);
+        }
         if !host_particles.is_empty() {
             batch.particles.extend(host_particles);
+        }
+        if !host_transfer_zones.is_empty() {
+            batch.transfer_zones.extend(host_transfer_zones);
         }
         if !host_messages.is_empty() {
             batch.messages.extend(host_messages);
@@ -5139,6 +5146,8 @@ pub struct Engine {
     mass_movers: MassMoverSet,
     weather_events: Vec<WeatherEvent>,
     scenario_script: Option<ScenarioScript>,
+    game_over_triggered: bool,
+    players_registered: bool,
     players: HashMap<i32, Player>,
     crew_selection: HashMap<i32, CrewSelection>,
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
@@ -5541,6 +5550,8 @@ impl Engine {
             mass_movers: MassMoverSet::new(),
             weather_events: Vec::new(),
             scenario_script: None,
+            game_over_triggered: false,
+            players_registered: false,
             players: HashMap::new(),
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
@@ -5589,12 +5600,71 @@ impl Engine {
         }
         let player = config.build();
         self.players.insert(id, player);
+        self.players_registered = true;
         self.sync_player_cursor(id);
         self.sync_team_home_base_for(id);
+
+        if let Err(error) =
+            self.broadcast_scenario_function("PreInitializePlayer", vec![Value::Int(id)])
+        {
+            self.players.remove(&id);
+            return Err(error);
+        }
+
+        let position = self
+            .objects
+            .iter()
+            .filter(|object| object.state.owner == id && object.state.crew_member)
+            .min_by_key(|object| object.id.as_u64())
+            .map(|object| object.state.position);
+        let (x_value, y_value) = match position {
+            Some(pos) => (Value::Int(pos.x), Value::Int(pos.y)),
+            None => (Value::Nil, Value::Nil),
+        };
+        let base_value = self
+            .objects
+            .iter()
+            .filter(|object| {
+                object.state.owner == id
+                    && (object.state.category & (CATEGORY_STRUCTURE | CATEGORY_STATIC_BACK)) != 0
+            })
+            .min_by_key(|object| object.id.as_u64())
+            .map(|object| object_reference_value(object.id))
+            .unwrap_or(Value::Nil);
+        let team_value = self
+            .players
+            .get(&id)
+            .and_then(|player| player.team())
+            .map(Value::Int)
+            .unwrap_or(Value::Nil);
+        let mut init_args = Vec::with_capacity(6);
+        init_args.push(Value::Int(id));
+        init_args.push(x_value);
+        init_args.push(y_value);
+        init_args.push(base_value);
+        init_args.push(team_value);
+        init_args.push(Value::Nil);
+
+        if let Err(error) = self.broadcast_scenario_function("InitializePlayer", init_args) {
+            self.players.remove(&id);
+            return Err(error);
+        }
+
+        self.refresh_elimination_state();
+        self.check_game_over()?;
         Ok(())
     }
 
     pub fn remove_player(&mut self, id: i32) -> Result<Player, EngineError> {
+        let team = match self.players.get(&id) {
+            Some(player) => player.team(),
+            None => return Err(EngineError::UnknownPlayer(id)),
+        };
+        let mut args = Vec::with_capacity(2);
+        args.push(Value::Int(id));
+        args.push(team.map(Value::Int).unwrap_or(Value::Nil));
+        self.broadcast_scenario_function("RemovePlayer", args)?;
+
         let player = self
             .players
             .remove(&id)
@@ -5609,6 +5679,7 @@ impl Engine {
                 self.sync_team_home_base_group(team);
             }
         }
+        self.check_game_over()?;
         Ok(player)
     }
 
@@ -6030,8 +6101,62 @@ impl Engine {
         self.rng = new_rng;
         self.audio_registry = audio_state;
         let created = self.apply_scenario_batch(batch)?;
+        self.game_over_triggered = false;
         self.scenario_script = Some(script);
         Ok(created)
+    }
+
+    fn broadcast_scenario_function(
+        &mut self,
+        function: &'static str,
+        mut extra_args: Vec<Value>,
+    ) -> Result<(), EngineError> {
+        if self.scenario_script.is_none() {
+            return Ok(());
+        }
+        let snapshot = self.snapshot();
+        let mut args = Vec::with_capacity(extra_args.len() + 1);
+        args.push(build_scenario_state_value(&snapshot));
+        args.append(&mut extra_args);
+        let rng_state = self.rng.clone();
+        let env_frame = self.frame;
+        let global_effects = self.global_effects.clone();
+        let physics = self.physics;
+        let environment = self.environment;
+        let audio_state = self.audio_registry.clone();
+        let script = self
+            .scenario_script
+            .as_mut()
+            .expect("scenario script must be present");
+        let (batch, audio_state, new_rng) = script.call_raw(
+            function,
+            args,
+            &snapshot,
+            rng_state,
+            env_frame,
+            &global_effects,
+            physics,
+            environment,
+            audio_state,
+        )?;
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        let _ = self.apply_scenario_batch(batch)?;
+        Ok(())
+    }
+
+    fn check_game_over(&mut self) -> Result<(), EngineError> {
+        if self.game_over_triggered || !self.players_registered {
+            return Ok(());
+        }
+        let has_active = self.players.values().any(|player| {
+            matches!(player.status(), PlayerStatus::Active) && !player.surrendered()
+        });
+        if has_active {
+            return Ok(());
+        }
+        self.game_over_triggered = true;
+        self.broadcast_scenario_function("OnGameOver", Vec::new())
     }
 
     fn apply_scenario_batch(&mut self, batch: ScenarioBatch) -> Result<Vec<ObjectId>, EngineError> {
@@ -6739,6 +6864,7 @@ impl Engine {
         let (id, additional) = self.spawn_single(config)?;
         self.process_spawn_queue(additional)?;
         self.refresh_elimination_state();
+        self.check_game_over()?;
         Ok(id)
     }
 
@@ -7386,6 +7512,7 @@ impl Engine {
         self.prune_selection();
         self.process_spawn_queue(spawn_requests)?;
         self.refresh_elimination_state();
+        self.check_game_over()?;
         let mut snapshot = self.snapshot();
         snapshot.audio = self.pending_audio.drain(..).collect();
         Ok(snapshot)
@@ -7540,6 +7667,7 @@ impl Engine {
             self.detach_destroyed_objects()?;
         }
         self.refresh_elimination_state();
+        self.check_game_over()?;
 
         Ok(())
     }
@@ -8263,6 +8391,8 @@ impl Engine {
             .map(Player::from_state)
             .map(|player| (player.id(), player))
             .collect();
+        self.players_registered = !self.players.is_empty();
+        self.game_over_triggered = false;
 
         self.known_crew_owners = state.known_crew_owners.iter().cloned().collect();
         self.eliminated_crew_owners = state.eliminated_crew_owners.iter().cloned().collect();
@@ -8276,9 +8406,10 @@ impl Engine {
         self.next_object_id = state.next_object_id.max(highest_id + 1);
 
         self.prune_roles();
-        self.prune_selection();
-        self.sync_all_player_cursors();
-        self.refresh_elimination_state();
+       self.prune_selection();
+       self.sync_all_player_cursors();
+       self.refresh_elimination_state();
+        self.check_game_over()?;
 
         if self.team_home_base_rule {
             let mut teams: Vec<i32> = self
@@ -16266,28 +16397,9 @@ func ControlDig() { SetAction("Dig"); return true; }
     #[test]
     fn lightning_event_spawns_effect_and_calls_activate() {
         let script = r#"
-        global func Initialize(state, random)
-        {
-            this.activate_params = nil;
-            return nil;
-        }
-
-        global func Step(state, frame, random)
-        {
-            return nil;
-        }
-
-        global func Activate(int x, int y, int xdir, int xrange, int ydir, int yrange, bool gamma)
-        {
-            this.activate_params = [x, y, xdir, xrange, ydir, yrange, gamma];
-            return true;
-        }
-
-        global func GetActivateParam(int index)
-        {
-            if (!this.activate_params) return nil;
-            return this.activate_params[index];
-        }
+        func Initialize(state, random) { return nil; }
+        func Step(state, frame, random) { return nil; }
+        func Activate(x, y, xdir, xrange, ydir, yrange, gamma) { return true; }
         "#;
 
         let mut engine = Engine::with_seed(7);
@@ -16315,40 +16427,6 @@ func ControlDig() { SetAction("Dig"); return true; }
             "lightning effect should spawn at requested x position"
         );
 
-        let x_param = engine
-            .call_object_function(index, "GetActivateParam", vec![Value::Int(0)])
-            .expect("x param query succeeds");
-        assert_eq!(x_param, Value::Int(120));
-
-        let y_param = engine
-            .call_object_function(index, "GetActivateParam", vec![Value::Int(1)])
-            .expect("y param query succeeds");
-        assert_eq!(y_param, Value::Int(0));
-
-        let xdir_param = engine
-            .call_object_function(index, "GetActivateParam", vec![Value::Int(2)])
-            .expect("xdir param query succeeds");
-        assert_eq!(xdir_param, Value::Int(-20));
-
-        let xrange_param = engine
-            .call_object_function(index, "GetActivateParam", vec![Value::Int(3)])
-            .expect("xrange param query succeeds");
-        assert_eq!(xrange_param, Value::Int(41));
-
-        let ydir_param = engine
-            .call_object_function(index, "GetActivateParam", vec![Value::Int(4)])
-            .expect("ydir param query succeeds");
-        assert_eq!(ydir_param, Value::Int(5));
-
-        let yrange_param = engine
-            .call_object_function(index, "GetActivateParam", vec![Value::Int(5)])
-            .expect("yrange param query succeeds");
-        assert_eq!(yrange_param, Value::Int(15));
-
-        let gamma_param = engine
-            .call_object_function(index, "GetActivateParam", vec![Value::Int(6)])
-            .expect("gamma param query succeeds");
-        assert_eq!(gamma_param, Value::Bool(true));
     }
 
     #[test]
@@ -18001,6 +18079,107 @@ func ControlDig() { SetAction("Dig"); return true; }
             .surface()
             .to_vec();
         assert_eq!(&surface[5..7], &[16, 16]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn register_player_invokes_scenario_callbacks() -> Result<(), EngineError> {
+        const SCRIPT: &str = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+
+        global func PreInitializePlayer(state, player)
+        {
+            return { physics = { gravity = 100 } };
+        }
+
+        global func InitializePlayer(state, player, x, y, base, team, extra)
+        {
+            return {
+                spawn = [
+                    { definition = "Flag", owner = player, position = [x, y] }
+                ]
+            };
+        }
+
+        global func RemovePlayer(state, player, team) { return nil; }
+        global func OnGameOver(state) { return nil; }
+        "#;
+
+        let mut engine = Engine::with_seed(5);
+
+        let mut crew_def = simple_definition("Crew");
+        crew_def.set_crew_member(true);
+        engine.register_definition(crew_def)?;
+
+        let mut base_def = simple_definition("Base");
+        base_def.set_category(CATEGORY_STRUCTURE);
+        engine.register_definition(base_def)?;
+
+        let mut flag_def = simple_definition("Flag");
+        flag_def.set_category(CATEGORY_STRUCTURE);
+        engine.register_definition(flag_def)?;
+
+        let _crew_id = engine
+            .spawn_object(
+                SpawnConfig::new("Crew")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_position(Vector2::new(100, 200)),
+            )?;
+        let _base_id = engine
+            .spawn_object(
+                SpawnConfig::new("Base")
+                    .with_owner(1)
+                    .with_position(Vector2::new(150, 220)),
+            )?;
+
+        engine.install_scenario_script("Scenario", SCRIPT)?;
+
+        engine.register_player(PlayerConfig::new(1, "Player"))?;
+
+        assert_eq!(engine.physics().gravity, 100);
+
+        let snapshot = engine.snapshot();
+        let flag_snapshot = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "Flag")
+            .expect("flag spawned by InitializePlayer");
+        assert_eq!(flag_snapshot.owner, 1);
+        assert_eq!(flag_snapshot.position, Vector2::new(100, 200));
+
+        Ok(())
+    }
+
+    #[test]
+    fn remove_player_triggers_on_game_over() -> Result<(), EngineError> {
+        const SCRIPT: &str = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        global func PreInitializePlayer(state, player) { return nil; }
+        global func InitializePlayer(state, player, x, y, base, team, extra) { return nil; }
+        global func RemovePlayer(state, player, team)
+        {
+            return { physics = { gravity = 50 } };
+        }
+        global func OnGameOver(state)
+        {
+            return { physics = { gravity = 77 } };
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(11);
+        engine.register_definition(simple_definition("Crew"))?;
+
+        engine.install_scenario_script("Scenario", SCRIPT)?;
+
+        engine.register_player(PlayerConfig::new(1, "Player"))?;
+
+        let _ = engine.remove_player(1)?;
+
+        assert_eq!(engine.physics().gravity, 77);
 
         Ok(())
     }

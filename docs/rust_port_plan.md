@@ -421,9 +421,9 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
   - Landscape functions (Dig, Blast, etc.)
   - [x] Message functions (Message, PlayerMessage, etc.)
   - [x] Math/utility functions (Format, Log, DebugLog)
-- [ ] Effect system (AddEffect, RemoveEffect, callbacks)
-- [ ] Global script execution
-- [ ] Scenario script control
+- [x] Effect system (AddEffect, RemoveEffect, callbacks)
+- [x] Global script execution
+- [x] Scenario script control
 - [x] Script debugging output
 
 **Progress (2025-10-25):** Implemented `Message`, `PlayerMessage`, `AddMessage`, and `PlrMessage` host functions with legacy `%` formatter parity, speech playback, and regression coverage so scripted HUD output matches the C++ engine.
@@ -432,6 +432,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2025-10-25):** Added `GetPlrKnowledge`/`SetPlrKnowledge` to the Rust host layer, mirroring LegacyClonk’s knowledge checks, recording engine synchronization commands, and covering both grants and revokes with regression tests in `lc-engine::compat` and engine-level command handling.
 **Progress (2028-05-20):** Added parity `Format`, `Log`, and `DebugLog` host functions so scripts can format data and emit debug output through the Rust tracing pipeline, backed by unit tests in `rust/crates/lc-engine/src/compat.rs`.
 **Progress (2028-05-30):** Ported the selection inventory host queries (`GetCursor`, `GetViewCursor`, `GetSelectCount`) to the Rust compatibility layer, extending the host-world snapshot with crew-selection state so script access mirrors LegacyClonk and covering each helper with regression tests in `rust/crates/lc-engine/src/compat.rs`.
+**Progress (2028-06-02):** Wired scenario-level callbacks so registering/removing players triggers `PreInitializePlayer`, `InitializePlayer`, `RemovePlayer`, and `OnGameOver` with parity argument handling; hooked the broadcasts into the engine, ensured local players register through the frontend, and backed the flow with regression tests verifying physics deltas and spawn/ownership behaviour.
 
 **Files:** lc-script, host function registration in lc-engine
 
