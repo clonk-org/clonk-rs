@@ -111,6 +111,13 @@ impl ScenarioBrowser {
         self.clear_selection_ui()
     }
 
+    pub fn select_entry_by_index(
+        &mut self,
+        index: usize,
+    ) -> GuiResult<Option<ScenarioBrowserMessage>> {
+        self.select_entry(index)
+    }
+
     pub fn set_button_textures(&mut self, textures: Option<ButtonTextures>) {
         let gui_textures = textures.clone();
         self.button_textures = textures;

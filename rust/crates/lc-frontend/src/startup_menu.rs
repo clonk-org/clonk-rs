@@ -116,6 +116,22 @@ impl StartupMenu {
         }
     }
 
+    pub fn select_entry_by_index(
+        &mut self,
+        index: usize,
+    ) -> StartupMenuResult<Vec<StartupMenuAction>> {
+        match self.browser.select_entry_by_index(index)? {
+            Some(message) => {
+                if let Some(action) = StartupMenuAction::from_browser_message(message) {
+                    Ok(vec![action])
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
     fn dispatch(&mut self, event: GuiEvent) -> Vec<StartupMenuAction> {
         let response = self.browser.handle_event(event);
         response

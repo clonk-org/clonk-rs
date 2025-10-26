@@ -15,9 +15,9 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - Can browse and select any scenario
 
 **Current Rust Behavior:**
-- Shows scenario browser immediately (no main menu)
-- Shows "Rust Sandbox" fallback only
-- Real scenarios not appearing in list
+- Main menu opens on startup
+- Scenario browser lists install and user scenarios with folder navigation
+- Default selection and preview highlight the first real scenario; sandbox fallback only appears when no catalog entries exist
 
 **What's Needed:**
 - [x] Fix scenario discovery to actually find real `.c4s` files from installation
@@ -28,6 +28,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [x] Window title: "Clonk Rust" not "LegacyClonk (Rust preview)"
 
 **Progress (2025-10-25):** Rust frontend still scans install roots per directory, tolerates missing assets, and decodes BMP previews so real scenarios populate the browser without sandbox fallback. Added a dedicated main menu with the LegacyClonk big-button layout, participants list, and reliable navigation (Back entry/Escape) back from the scenario browser; “Local Game” flows into the browser while other options surface placeholder status until their dialogs are ported.
+**Progress (2025-10-26):** Startup browser now preselects the first available entry, updates the path label to mirror the LegacyClonk catalog ("Scenarios / …"), and removes the "Rust Sandbox" headline so `cargo run` immediately surfaces the real scenario list instead of the preview fallback.
 **Progress (2025-12-27):** Scenario discovery now preserves the LegacyClonk search priority, letting user scenario overrides shadow installed variants so the browser matches the C++ catalog order.
 **Progress (2026-03-18):** Scenario discovery now reads legacy `Scenario.txt` head metadata when no manifest/title files are present, restoring classic mission titles and descriptions in the browser.
 **Progress (2027-10-25):** Matched the legacy scenario browser ordering by honoring folder indices, mission icon ordering, and difficulty precedence in `lc-resources`, backed by regression tests, and removed the Rust frontend’s alphabetical resort so the tree mirrors C++ exactly.
@@ -461,7 +462,7 @@ These are NOT needed for parity (C++ doesn't have them either or they're not cor
 **Test:** Can you play a real scenario (e.g., "Goldmine" from official scenarios) from start to finish with identical behavior to the C++ version?
 
 **Checklist:**
-- [ ] `cargo run` shows real game (not "preview")
+- [x] `cargo run` shows real game (not "preview")
 - [ ] Real scenarios listed and selectable
 - [ ] Scenario loads completely (landscape, objects, graphics, sounds)
 - [ ] All objects visible with correct graphics

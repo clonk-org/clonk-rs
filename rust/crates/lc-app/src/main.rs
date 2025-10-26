@@ -8,7 +8,9 @@ mod object_menu;
 mod save_browser;
 mod settings;
 
-use std::collections::{hash_map::DefaultHasher, hash_map::Entry, BTreeMap, HashMap, HashSet};
+use std::collections::{
+    hash_map::DefaultHasher, hash_map::Entry, BTreeMap, HashMap, HashSet, VecDeque,
+};
 use std::convert::TryFrom;
 use std::f32::consts::PI;
 use std::fmt;
@@ -54,7 +56,7 @@ use lc_frontend::{
     StartupMainMenu, StartupMenu, StartupMenuAction, ViewportInput, ViewportPointer,
 };
 use lc_graphics::{BitmapFont, Color, Rect, Surface, TextFont, TrueTypeFont};
-use lc_gui::{ButtonTextures, Rect as GuiRect, Size as GuiSize};
+use lc_gui::{ButtonTextures, Rect as GuiRect};
 use lc_network::{ClientId, ParticipantKind};
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
@@ -86,7 +88,7 @@ use winit::window::{Fullscreen, Window, WindowBuilder};
 const PLAYER_OWNER: i32 = 1;
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_666); // ~60 FPS
 const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp backlog to avoid runaway catch-up
-const DEFAULT_SCENARIO_LABEL: &str = "Rust Sandbox";
+const FALLBACK_SCENARIO_TITLE: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
 const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
 const BACK_ENTRY_TITLE: &str = "← Back";
@@ -2535,15 +2537,28 @@ impl MenuState {
     }
 
     fn label_path(&self) -> String {
-        if self.stack.len() <= 1 {
-            return DEFAULT_SCENARIO_LABEL.to_string();
+        if self.stack.is_empty() {
+            return String::new();
         }
         self.stack
             .iter()
-            .skip(1)
             .map(|layer| layer.title.clone())
             .collect::<Vec<_>>()
             .join(" / ")
+    }
+
+    fn select_default_entry(&mut self) -> Vec<StartupMenuAction> {
+        if self.current_entries().is_empty() {
+            return Vec::new();
+        }
+        let target_index = 1;
+        match self.menu.select_entry_by_index(target_index) {
+            Ok(actions) => actions,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to select default scenario entry");
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -2791,7 +2806,7 @@ impl FrontendScenario {
     fn fallback() -> Self {
         Self {
             identifier: "rust_sandbox".to_string(),
-            title: DEFAULT_SCENARIO_LABEL.to_string(),
+            title: FALLBACK_SCENARIO_TITLE.to_string(),
             description: Some("Spawn a Rust-driven walker in a flat test landscape.".to_string()),
             kind: ScenarioKind::Scenario,
             is_editable: true,
@@ -2799,7 +2814,7 @@ impl FrontendScenario {
             path: None,
             preview: Some(generate_preview_placeholder(
                 ScenarioKind::Scenario,
-                DEFAULT_SCENARIO_LABEL,
+                FALLBACK_SCENARIO_TITLE,
             )),
             children: Vec::new(),
         }
@@ -3843,18 +3858,6 @@ impl GameApp {
             engine.set_materials((**library).clone());
         }
         let snapshot = engine.snapshot();
-        let scenario_label = DEFAULT_SCENARIO_LABEL.to_string();
-        let mut graphics = GraphicsSystem::new(
-            width,
-            height,
-            DEFAULT_GROUND_HEIGHT,
-            &scenario_label,
-            assets.font_arc(),
-            Arc::clone(&sprite_cache),
-            assets.cursor_atlas(),
-            assets.hud_graphics(),
-        );
-        graphics.surface_mut().fill(Color::opaque(16, 28, 52));
 
         let scenarios = load_frontend_scenarios();
         let button_textures = assets.button_textures();
@@ -3868,7 +3871,19 @@ impl GameApp {
         let main_menu_state = MainMenuState::new(main_menu, participants_label);
 
         let scenario_catalog = build_scenario_catalog(&scenarios);
-        let menu_state = MenuState::new(menu, scenarios);
+        let mut menu_state = MenuState::new(menu, scenarios);
+        let scenario_label = menu_state.label_path();
+        let mut graphics = GraphicsSystem::new(
+            width,
+            height,
+            DEFAULT_GROUND_HEIGHT,
+            &scenario_label,
+            assets.font_arc(),
+            Arc::clone(&sprite_cache),
+            assets.cursor_atlas(),
+            assets.hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         let audio = match AudioContext::try_new(audio_options) {
             Ok(ctx) => Some(ctx),
             Err(err) => {
@@ -5613,8 +5628,9 @@ impl GameApp {
     ) -> (Option<String>, Option<String>) {
         let mut start_identifier: Option<String> = None;
         let mut updated_label: Option<String> = None;
+        let mut pending: VecDeque<StartupMenuAction> = actions.into();
 
-        for action in actions {
+        while let Some(action) = pending.pop_front() {
             match action {
                 StartupMenuAction::SelectionChanged(_) => {
                     self.play_ui_sound("Command");
@@ -5639,6 +5655,7 @@ impl GameApp {
                         } else {
                             self.menu_state.leave_folder();
                             updated_label = Some(self.menu_state.label_path());
+                            pending.extend(self.menu_state.select_default_entry());
                         }
                         continue;
                     }
@@ -5655,6 +5672,7 @@ impl GameApp {
                             self.play_ui_sound("DoorOpen");
                             self.menu_state.enter_folder(&summary.identifier);
                             updated_label = Some(self.menu_state.label_path());
+                            pending.extend(self.menu_state.select_default_entry());
                         }
                         Some(ScenarioKind::Scenario) => {
                             self.play_ui_sound("Click");
@@ -5683,6 +5701,7 @@ impl GameApp {
                             self.play_ui_sound("DoorOpen");
                             self.menu_state.enter_folder(&summary.identifier);
                             updated_label = Some(self.menu_state.label_path());
+                            pending.extend(self.menu_state.select_default_entry());
                         }
                     }
                 }
@@ -5698,7 +5717,6 @@ impl GameApp {
                 }
             }
         }
-
         (start_identifier, updated_label)
     }
 
@@ -5857,6 +5875,9 @@ impl GameApp {
         let width = self.graphics.surface().width() as f32;
         let height = self.graphics.surface().height() as f32;
         self.menu_state.menu().resize(width, height);
+        if let Err(err) = self.handle_menu_input(|menu| menu.select_default_entry()) {
+            tracing::error!(error = %err, "failed to select default scenario entry");
+        }
         self.scenario_label = self.menu_state.label_path();
         self.status_text.clear();
     }
@@ -5868,6 +5889,9 @@ impl GameApp {
         let width = self.graphics.surface().width() as f32;
         let height = self.graphics.surface().height() as f32;
         self.menu_state.menu().resize(width, height);
+        if let Err(err) = self.handle_menu_input(|menu| menu.select_default_entry()) {
+            tracing::error!(error = %err, "failed to select default scenario entry");
+        }
         if let Some(lobby) = self.network_lobby.as_mut() {
             lobby.update_layout(width, height);
             self.scenario_label = lobby.scenario_label();
@@ -5902,7 +5926,7 @@ impl GameApp {
             lobby.pointer_left();
         }
         self.refresh_participants_label();
-        self.scenario_label = DEFAULT_SCENARIO_LABEL.to_string();
+        self.scenario_label = self.menu_state.label_path();
         self.status_text.clear();
         if let Some(options) = self.control_options.as_mut() {
             options.set_pointer_position(None);
@@ -8714,7 +8738,17 @@ mod tests {
         assert_eq!(root_entries.len(), 2);
         assert_eq!(root_entries[0].identifier, BACK_ENTRY_IDENTIFIER);
         assert_eq!(root_entries[1].identifier, "folder_missions");
-        assert_eq!(state.label_path(), DEFAULT_SCENARIO_LABEL.to_string());
+        assert_eq!(state.label_path(), "Scenarios".to_string());
+        state.refresh_menu_entries();
+        let root_selection = state.select_default_entry();
+        assert!(
+            matches!(
+                root_selection.as_slice(),
+                [StartupMenuAction::SelectionChanged(summary)]
+                if summary.identifier == "folder_missions"
+            ),
+            "expected default selection to target folder_missions"
+        );
 
         state.enter_folder("folder_missions");
         assert_eq!(state.current_entries().len(), 1);
@@ -8723,7 +8757,16 @@ mod tests {
         assert_eq!(folder_entries.len(), 2);
         assert_eq!(folder_entries[0].identifier, BACK_ENTRY_IDENTIFIER);
         assert_eq!(folder_entries[1].identifier, "scenario_alpha");
-        assert_eq!(state.label_path(), "Missions".to_string());
+        assert_eq!(state.label_path(), "Scenarios / Missions".to_string());
+        let folder_selection = state.select_default_entry();
+        assert!(
+            matches!(
+                folder_selection.as_slice(),
+                [StartupMenuAction::SelectionChanged(summary)]
+                if summary.identifier == "scenario_alpha"
+            ),
+            "expected default selection to target scenario_alpha"
+        );
 
         state.leave_folder();
         assert_eq!(state.current_entries().len(), 1);
@@ -8732,7 +8775,17 @@ mod tests {
         assert_eq!(root_again.len(), 2);
         assert_eq!(root_again[0].identifier, BACK_ENTRY_IDENTIFIER);
         assert_eq!(root_again[1].identifier, "folder_missions");
-        assert_eq!(state.label_path(), DEFAULT_SCENARIO_LABEL.to_string());
+        assert_eq!(state.label_path(), "Scenarios".to_string());
+        let root_again_selection = state.select_default_entry();
+        assert!(
+            root_again_selection.is_empty()
+                || matches!(
+                    root_again_selection.as_slice(),
+                    [StartupMenuAction::SelectionChanged(summary)]
+                    if summary.identifier == "folder_missions"
+                ),
+            "expected default selection to target folder_missions after returning to root"
+        );
     }
 
     #[test]
@@ -9109,10 +9162,7 @@ mod tests {
         fs::create_dir_all(&planet_dir).unwrap();
         fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
 
-        let install_folder = install_dir
-            .path()
-            .join("Scenarios")
-            .join("Worlds.c4f");
+        let install_folder = install_dir.path().join("Scenarios").join("Worlds.c4f");
         fs::create_dir_all(&install_folder).unwrap();
         fs::write(install_folder.join("Folder.txt"), "Title=Worlds\n").unwrap();
         let install_scenario = install_folder.join("Alpha.c4s");
