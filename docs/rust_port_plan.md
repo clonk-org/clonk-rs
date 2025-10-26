@@ -1,14 +1,14 @@
 # LegacyClonk C++ → Rust Port Plan
 
-**Updated:** 2025-10-26 | **Goal:** Run ALL real scenarios with exact C++ parity | **Status:** ⛔ BLOCKED
+**Updated:** 2025-10-27 | **Goal:** Run ALL real scenarios with exact C++ parity | **Status:** ⛔ BLOCKED
 
 ---
 
 ## TL;DR
 
-- **P0 BLOCKERS:** (1) AI command system missing (2) Engine smoke tests failing (build/clear/objective parity)
+- **P0 BLOCKERS:** (1) AI command system partial (MoveTo + Build only) (2) Engine smoke tests failing (legacy objective / PreInitializePlayer parity)
 - **Scenario Discovery:** ✅ Official content repo wired; menu now lists full scenario catalog
-- **Current State:** Build compiles; targeted tests (`lc-platform`, `lc-app`) green; full workspace still red on legacy engine cases
+- **Current State:** Build compiles; targeted tests (`lc-platform`, `lc-app`) green; Build command implemented in command stack; workspace still red on legacy objective / PreInitializePlayer cases
 - **Next 48h:** Stabilize engine tests; sketch AI command trait; triage panics
 - **Exit Criteria:** P0 cleared + CI green + smoke tests pass
 
@@ -23,40 +23,36 @@
 
 ---
 
-### 1. AI Command System — MISSING ⛔
-**Problem:** Zero AI commands ported; no `AddCommand`/`SetCommand` host functions
-**Evidence:** `grep -r "AddCommand\|SetCommand" rust/crates/lc-engine/src/compat.rs` → 0 results
+### 1. AI Command System — PARTIAL ⚠️
+**Problem:** Command stack now supports MoveTo + Build; Follow/Attack/etc. still missing
+**Evidence:** `SetCommand("Build", ...)` starts Build procedure with material gating; `compat::tests::set_command_clears_stack_and_pushes_command` still green
 **C++ Has:** 30 commands (Follow, MoveTo, Build, Attack, etc.) via `C4Command.cpp`
-**Rust Has:** Nothing
-**Impact:** Buildings can't request materials; crew have no AI; production broken; animals static
+**Rust Has:** Command trait infrastructure + MoveTo/Build implementations; no Follow/Attack/Acquire queueing yet
+**Impact:** Build automation works (crew picks up components, honours material requirements); hauling/combat automation still absent
 **Next:**
-1. Extract C++ `C4Command` interface (signatures, lifecycle, queue mechanics)
-2. Design Rust command trait + queue in `lc-engine/src/command.rs`
-3. Implement 2 exemplar commands (MoveTo, Build) with acceptance tests
-4. Wire into object update loop
+1. Implement Follow/Attack to unblock AI companions/hostiles
+2. Teach Build to chain Acquire/Energy commands (line kits, activation)
+3. Add command persistence to save-state snapshots + scenario world objects
+4. Expand tests to cover queue chaining, failure recovery, and scen parity
 
-**Accept:** `AddCommand("MoveTo", ...)` works in script; crew moves to target; command queue processes
+**Accept:** `AddCommand("MoveTo", ...)` and `SetCommand("Build", ...)` reproduce C++ behaviour across parity scenarios
 **Owner:** TBD | **ETA:** Weeks 2-4 | **Risk:** HIGH (large system, hidden deps)
 
 ---
 
 ### 2. Test Suite — BROKEN ⛔
-**Problem:** Workspace tests compile again, but parity checks still fail (construction components, legacy objectives, missing host functions).
+**Problem:** Workspace tests compile again; build component parity fixed; legacy objectives + PreInitializePlayer still failing.
 **Evidence:**
 ```bash
 cargo test --workspace
-  compat::tests::host_function_registration_matches_expected
-  tests::build_procedure_requires_components_before_progress
-  tests::build_procedure_consumes_components_from_builder
   tests::legacy_clear_object_objective_triggers_after_removal
   tests::script_game_over_triggers_on_game_over
 ```
-**Impact:** Cannot claim scenario parity or CI green while these regressions remain.
+**Impact:** Cannot claim scenario parity or CI green while objective triggers + scenario script hooks remain missing.
 **Next:**
-1. Restore host API coverage once AI command trait exists.
-2. Port construction component bookkeeping (`C4ObjectCom`) to satisfy build tests.
-3. Implement legacy objective triggers / `PreInitializePlayer`.
-4. Gate workspace tests in CI after failures addressed.
+1. Implement legacy objective triggers / `PreInitializePlayer` flow.
+2. Audit host API coverage needed by objectives (clear/goal conditions).
+3. Gate workspace tests in CI after failures addressed.
 
 **Accept:** `cargo test --workspace` passes (no fails) locally + CI
 **Owner:** TBD | **ETA:** Week 1 | **Risk:** MEDIUM (breadth)
@@ -94,7 +90,7 @@ cargo test --workspace
 | **Tests** | ⛔ Broken | Workspace fail: host functions + construction/objective tests | TBD |
 | **Scenario Discovery** | ✅ Working | content/ assets discovered; sandbox no longer sole entry | TBD |
 | **Scenario Loading** | ⚠️ Unknown | Needs real scenarios to test | TBD |
-| **AI Commands** | ⛔ Missing | No AddCommand/SetCommand | TBD |
+| **AI Commands** | ⚠️ Partial | MoveTo + Build implemented in stack; Follow/Attack pending | TBD |
 | **Graphics Rendering** | ✅ Implemented | Code exists; needs verification | TBD |
 | **Player Input** | ✅ Implemented | Keyboard/mouse/gamepad code exists | TBD |
 | **Landscape** | ✅ Implemented | Dig/blast/materials code exists | TBD |
@@ -117,6 +113,7 @@ cargo test --workspace
 ✅ **Main Menu:** UI exists (`startup_main_menu.rs`) with correct buttons
 ✅ **Scenario Parser:** Scenario.txt, landscape, Objects.txt loading implemented
 ✅ **Fallback Design:** Sandbox appears only when discovery fails (good design)
+✅ **AI Build Command:** Rust `SetCommand("Build")` starts construction, respects component requirements
 
 ---
 
@@ -129,9 +126,9 @@ cargo test --workspace
 
 **Day 2: STUB AI COMMANDS**
 - [ ] Extract C++ AddCommand/SetCommand signatures from `C4Command.cpp`
-- [ ] Create `lc-engine/src/command.rs` skeleton
-- [ ] Wire stub into host function registry (returns "not implemented" for now)
-- [ ] Document AI command implementation plan
+- [x] Create `lc-engine/src/command.rs` skeleton
+- [x] Wire host functions into registry and return real MoveTo behaviour
+- [x] Document AI command implementation plan
 
 **Ongoing:**
 - [x] Fix test schema drift → get `cargo test` compiling

@@ -425,7 +425,6 @@ impl Picture {
 struct WidgetNode {
     id: WidgetId,
     #[allow(dead_code)]
-
     parent: Option<WidgetId>,
     children: Vec<WidgetId>,
     kind: WidgetKind,

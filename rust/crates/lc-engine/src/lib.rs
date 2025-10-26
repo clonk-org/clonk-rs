@@ -1,4 +1,5 @@
 mod action;
+mod command;
 mod compat;
 mod control;
 mod effect;
@@ -78,6 +79,7 @@ pub struct ContextMenuEntry {
     pub description: Option<String>,
 }
 
+use command::{CommandObjectSnapshot, CommandOperation, CommandRuntimeContext, CommandStack};
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
     object_reference_value, AudioRegistry, DefinitionMetadata, EffectContextOutcome,
@@ -2411,6 +2413,7 @@ struct Object {
     state: ObjectState,
     destroyed: bool,
     command_queue: VecDeque<QueuedCommand>,
+    commands: CommandStack,
     pending_action_events: VecDeque<ActionTransitionEvent>,
     material_contents: Vec<i32>,
 }
@@ -2451,9 +2454,36 @@ impl Object {
             destroyed: matches!(state.status, ObjectStatus::Deleted),
             state,
             command_queue: VecDeque::new(),
+            commands: CommandStack::new(),
             pending_action_events: VecDeque::new(),
             material_contents: Vec::new(),
         }
+    }
+
+    #[allow(dead_code)]
+    fn command_count(&self) -> usize {
+        self.commands.len()
+    }
+
+    fn apply_command_operations<I>(&mut self, operations: I)
+    where
+        I: IntoIterator<Item = CommandOperation>,
+    {
+        for operation in operations {
+            match operation {
+                CommandOperation::Clear => self.commands.clear(),
+                CommandOperation::PushFront(request) => {
+                    let _ = self.commands.push_front(request);
+                }
+                CommandOperation::PushBack(request) => {
+                    let _ = self.commands.push_back(request);
+                }
+            }
+        }
+    }
+
+    fn step_command_stack(&mut self, ctx: CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        self.commands.step(&ctx).and_then(|result| result.update)
     }
 
     fn mark_destroyed(&mut self) -> Vec<EffectEvent> {
@@ -3841,6 +3871,7 @@ impl Definition {
                     self.action_library.clone(),
                     state.direction,
                     state.command_direction,
+                    0,
                     state.action.target,
                     state.action.target2,
                     &state.vertices,
@@ -3875,6 +3906,7 @@ impl Definition {
             global: host_global_effects,
             object_update,
             object_commands,
+            command_operations,
             destroy_object,
             environment: environment_from_host,
             physics: physics_from_host,
@@ -3905,6 +3937,9 @@ impl Definition {
         }
         if !object_commands.is_empty() {
             batch.commands.extend(object_commands);
+        }
+        if !command_operations.is_empty() {
+            batch.command_ops.extend(command_operations);
         }
         if destroy_object {
             batch.destroy = true;
@@ -3995,6 +4030,7 @@ impl Definition {
                     self.action_library.clone(),
                     state.direction,
                     state.command_direction,
+                    0,
                     state.action.target,
                     state.action.target2,
                     &state.vertices,
@@ -4029,6 +4065,7 @@ impl Definition {
             global: host_global_effects,
             object_update,
             object_commands,
+            command_operations,
             destroy_object,
             environment: environment_from_host,
             physics: physics_from_host,
@@ -4059,6 +4096,9 @@ impl Definition {
         }
         if !object_commands.is_empty() {
             batch.commands.extend(object_commands);
+        }
+        if !command_operations.is_empty() {
+            batch.command_ops.extend(command_operations);
         }
         if destroy_object {
             batch.destroy = true;
@@ -4150,6 +4190,7 @@ impl Definition {
                     self.action_library.clone(),
                     state.direction,
                     state.command_direction,
+                    0,
                     state.action.target,
                     state.action.target2,
                     &state.vertices,
@@ -4249,6 +4290,7 @@ impl Definition {
             self.action_library.clone(),
             state.direction,
             state.command_direction,
+            0,
             state.action.target,
             state.action.target2,
             &state.vertices,
@@ -4372,6 +4414,7 @@ impl Definition {
             self.action_library.clone(),
             state.direction,
             state.command_direction,
+            0,
             state.action.target,
             state.action.target2,
             &state.vertices,
@@ -4479,6 +4522,7 @@ impl Definition {
             self.action_library.clone(),
             state.direction,
             state.command_direction,
+            0,
             state.action.target,
             state.action.target2,
             &state.vertices,
@@ -4591,6 +4635,7 @@ impl Definition {
             self.action_library.clone(),
             state.direction,
             state.command_direction,
+            0,
             state.action.target,
             state.action.target2,
             &state.vertices,
@@ -4699,6 +4744,7 @@ impl Definition {
             self.action_library.clone(),
             state.direction,
             state.command_direction,
+            0,
             state.action.target,
             state.action.target2,
             &state.vertices,
@@ -5004,6 +5050,7 @@ impl Definition {
                     self.action_library.clone(),
                     state.direction,
                     state.command_direction,
+                    0,
                     state.action.target,
                     state.action.target2,
                     &state.vertices,
@@ -5184,6 +5231,7 @@ impl ScenarioScript {
             global: host_global_effects,
             object_update,
             object_commands,
+            command_operations,
             destroy_object,
             environment: environment_from_host,
             physics: physics_from_host,
@@ -5201,6 +5249,7 @@ impl ScenarioScript {
         if !host_object_effects.is_empty()
             || object_update.is_some()
             || !object_commands.is_empty()
+            || !command_operations.is_empty()
             || destroy_object
         {
             return Err(EngineError::InvalidScriptOutput {
@@ -5282,6 +5331,7 @@ struct CommandBatch {
     spawns: Vec<SpawnConfig>,
     destroy: bool,
     commands: Vec<QueuedCommand>,
+    command_ops: Vec<CommandOperation>,
     effects: Vec<EffectCommand>,
     global_effects: Vec<EffectCommand>,
     environment: Option<EnvironmentDelta>,
@@ -7462,6 +7512,35 @@ impl Engine {
         }
         let mut spawn_requests = Vec::new();
         self.tick_global_effects();
+        let mut command_snapshots: HashMap<ObjectId, CommandObjectSnapshot> =
+            HashMap::with_capacity(self.objects.len());
+        for object in &self.objects {
+            let procedure = self
+                .definitions
+                .get(&object.definition_id)
+                .map(|definition| {
+                    definition
+                        .action_library()
+                        .procedure_for_action(&object.state.action.name)
+                })
+                .unwrap_or_default();
+            command_snapshots.insert(
+                object.id,
+                CommandObjectSnapshot {
+                    id: object.id,
+                    position: object.state.position,
+                    status: object.state.status,
+                    destroyed: object.destroyed,
+                    category: object.state.category,
+                    container: object.state.container,
+                    action_target: object.state.action.target,
+                    action_procedure: procedure,
+                    command_direction: object.state.command_direction,
+                    construction: object.state.construction,
+                },
+            );
+        }
+
         for idx in 0..self.objects.len() {
             let definition_id = self.objects[idx].definition_id.clone();
             let previous_action_state = self.objects[idx].state.action.clone();
@@ -7482,6 +7561,22 @@ impl Engine {
                 (object_id, previous_owner, new_owner, new_crew),
             ) = {
                 let object = &mut self.objects[idx];
+                let object_id = object.id;
+                let current_position = object.state.position;
+                let builder_snapshot = command_snapshots
+                    .get(&object_id)
+                    .expect("command snapshot exists");
+                let command_context = CommandRuntimeContext {
+                    frame: self.frame,
+                    position: current_position,
+                    object: builder_snapshot,
+                    objects: &command_snapshots,
+                };
+                if let Some(update) = object.step_command_stack(command_context) {
+                    object
+                        .command_queue
+                        .push_front(QueuedCommand::immediate(update));
+                }
                 let previous_owner = object.state.owner;
                 let outcome = object.execute_command_queue(
                     &self.physics,
@@ -7733,6 +7828,7 @@ impl Engine {
                 spawns,
                 destroy,
                 commands,
+                command_ops,
                 effects,
                 global_effects,
                 environment,
@@ -7787,6 +7883,9 @@ impl Engine {
                 self.physics.clamp_velocity(&mut object.state.velocity);
                 if destroy {
                     effect_events.extend(object.mark_destroyed());
+                }
+                if !command_ops.is_empty() {
+                    object.apply_command_operations(command_ops);
                 }
                 if !commands.is_empty() {
                     object.enqueue_commands(commands);
@@ -7893,6 +7992,22 @@ impl Engine {
 
             self.apply_landscape_at_index(idx);
             self.auto_collect_at_index(idx)?;
+            command_snapshots.insert(
+                object_id,
+                CommandObjectSnapshot {
+                    id: object_id,
+                    position: self.objects[idx].state.position,
+                    status: self.objects[idx].state.status,
+                    destroyed: self.objects[idx].destroyed,
+                    category: self.objects[idx].state.category,
+                    container: self.objects[idx].state.container,
+                    action_target: self.objects[idx].state.action.target,
+                    action_procedure: action_library
+                        .procedure_for_action(&self.objects[idx].state.action.name),
+                    command_direction: self.objects[idx].state.command_direction,
+                    construction: self.objects[idx].state.construction,
+                },
+            );
             spawn_requests.extend(spawns.into_iter());
         }
 
@@ -8202,6 +8317,7 @@ impl Engine {
             global: global_effects,
             object_update,
             object_commands,
+            command_operations,
             destroy_object,
             environment,
             physics,
@@ -8256,6 +8372,8 @@ impl Engine {
         let mut effect_events = Vec::new();
         let mut container_changes = Vec::new();
 
+        let mut command_operations = command_operations;
+
         let (previous_owner, previous_crew_member) = {
             let object = &self.objects[index];
             (object.state.owner, object.state.crew_member)
@@ -8279,6 +8397,11 @@ impl Engine {
 
             if destroy_object {
                 effect_events.extend(object.mark_destroyed());
+            }
+
+            if !command_operations.is_empty() {
+                let operations: Vec<_> = command_operations.drain(..).collect();
+                object.apply_command_operations(operations);
             }
 
             if !object_commands.is_empty() {
@@ -8957,6 +9080,7 @@ impl Engine {
                 global: mut global_effect_commands,
                 object_update,
                 object_commands,
+                command_operations,
                 destroy_object,
                 environment: environment_update,
                 physics: physics_update,
@@ -8995,6 +9119,10 @@ impl Engine {
                     object.record_action_event(change.previous, ActionTransitionKind::Forced);
                 }
                 state_snapshot = object.state.clone();
+            }
+
+            if !command_operations.is_empty() {
+                object.apply_command_operations(command_operations);
             }
 
             if !object_commands.is_empty() {
@@ -9828,18 +9956,6 @@ impl Engine {
             .get(&target_definition_id)
             .map(|definition| definition.components().to_vec())
             .unwrap_or_default();
-        if need_material
-            && !required_components.is_empty()
-            && !self.ensure_build_components(
-                idx,
-                target_idx,
-                self.objects[target_idx].state.construction,
-                &required_components,
-            )
-        {
-            return false;
-        }
-
         let level = if self.objects[target_idx].state.container.is_some() {
             1
         } else {
@@ -9857,11 +9973,25 @@ impl Engine {
         if delta <= 0 {
             delta = 1;
         }
+        let current_construction = self.objects[target_idx].state.construction;
+        let desired_construction =
+            (i64::from(current_construction) + delta).clamp(0, i64::from(FULL_CON)) as i32;
+
+        if need_material
+            && !required_components.is_empty()
+            && !self.ensure_build_components(
+                idx,
+                target_idx,
+                desired_construction,
+                &required_components,
+            )
+        {
+            return false;
+        }
 
         {
             let target = &mut self.objects[target_idx];
-            let next = (i64::from(target.state.construction) + delta).clamp(0, i64::from(FULL_CON));
-            target.state.construction = next as i32;
+            target.state.construction = desired_construction;
         }
 
         if self.objects[target_idx].state.construction >= FULL_CON {
@@ -9875,7 +10005,7 @@ impl Engine {
         &mut self,
         builder_idx: usize,
         target_idx: usize,
-        construction: i32,
+        desired_construction: i32,
         required: &[DefinitionComponent],
     ) -> bool {
         if required.is_empty() {
@@ -9902,11 +10032,14 @@ impl Engine {
                     .insert(component.id.clone(), inserted);
             }
 
-            while (i64::from(inserted) * i64::from(FULL_CON))
-                < (i64::from(component.count) * i64::from(construction))
-            {
+            let required_for_progress = ((i64::from(component.count)
+                * i64::from(desired_construction))
+                + (i64::from(FULL_CON) - 1))
+                / i64::from(FULL_CON);
+
+            while i64::from(inserted) < required_for_progress {
                 if inserted >= component.count {
-                    break;
+                    return false;
                 }
                 let consumed = self.consume_component_from_contents(builder_idx, &component.id)
                     || self.consume_component_from_container_of(builder_idx, &component.id)
@@ -11847,6 +11980,7 @@ impl Engine {
                     spawns,
                     destroy,
                     commands,
+                    command_ops,
                     effects,
                     global_effects,
                     environment,
@@ -11923,6 +12057,9 @@ impl Engine {
                 self.apply_global_effect_commands(&global_effects);
             }
             self.physics.clamp_velocity(&mut object.state.velocity);
+            if !command_ops.is_empty() {
+                object.apply_command_operations(command_ops);
+            }
             if !commands.is_empty() {
                 object.enqueue_commands(commands);
             }

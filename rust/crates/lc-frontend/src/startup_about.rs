@@ -87,10 +87,7 @@ const SCRIPTING: &[(&str, Option<&str>)] = &[
     ("Tobias Zwick", Some("Newton")),
     ("Bernhard Bonigl", Some("boni")),
     ("Viktor Yuschuk", Some("Viktor")),
-    (
-        "Raven",
-        None,
-    ),
+    ("Raven", None),
 ];
 
 const ADDITIONAL_ART: &[(&str, Option<&str>)] = &[

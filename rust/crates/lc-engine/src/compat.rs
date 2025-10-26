@@ -3,6 +3,9 @@ use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use std::convert::TryFrom;
 use std::rc::Rc;
 
+use crate::command::{
+    CommandData, CommandId, CommandMode, CommandOperation, CommandRequest, MAX_COMMAND_STACK,
+};
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::math::integer_distance;
 use crate::message::{
@@ -558,6 +561,93 @@ fn value_to_i32(value: &Value, function: &str, parameter: &str) -> Result<i32, R
             other.type_name()
         ))),
     }
+}
+
+fn parse_command_request(
+    id: CommandId,
+    args: &[Value],
+    function: &str,
+) -> Result<CommandRequest, RuntimeError> {
+    let target = if args.len() > 1 {
+        parse_object_reference_argument(&args[1], function, "target")?
+    } else {
+        None
+    };
+
+    let tx = if args.len() > 2 {
+        match &args[2] {
+            Value::Nil => None,
+            other => Some(value_to_i32(other, function, "Tx")?),
+        }
+    } else {
+        None
+    };
+
+    let ty = if args.len() > 3 {
+        match &args[3] {
+            Value::Nil => None,
+            other => Some(value_to_i32(other, function, "Ty")?),
+        }
+    } else {
+        None
+    };
+
+    let target2 = if args.len() > 4 {
+        parse_object_reference_argument(&args[4], function, "target2")?
+    } else {
+        None
+    };
+
+    let update_interval = if args.len() > 5 {
+        let interval = value_to_i32(&args[5], function, "update_interval")?;
+        if interval < 0 {
+            return Err(RuntimeError::new(format!(
+                "{}: update interval must be >= 0",
+                function
+            )));
+        }
+        interval as u32
+    } else {
+        0
+    };
+
+    let data_value = args.get(6).unwrap_or(&Value::Nil);
+    let data = match (id, data_value) {
+        (CommandId::Call, Value::String(text)) => CommandData::Text(text.clone()),
+        (CommandId::Call, Value::Nil) => CommandData::Text(String::new()),
+        (CommandId::Call, other) => {
+            return Err(RuntimeError::new(format!(
+                "{}: expected string for data when command is Call, got {}",
+                function,
+                other.type_name()
+            )))
+        }
+        (_, Value::Nil) => CommandData::Integer(0),
+        (_, other) => CommandData::Integer(value_to_i32(other, function, "data")?),
+    };
+
+    let retries = if args.len() > 7 {
+        value_to_i32(&args[7], function, "retries")?
+    } else {
+        0
+    };
+
+    let mode = if args.len() > 8 {
+        let raw = value_to_i32(&args[8], function, "mode")?;
+        CommandMode::from_i32(raw).unwrap_or(CommandMode::Base)
+    } else {
+        CommandMode::Base
+    };
+
+    Ok(CommandRequest::new(id)
+        .with_target(target)
+        .with_target2(target2)
+        .with_tx(tx)
+        .with_ty(ty)
+        .with_data(data)
+        .with_update_interval(update_interval)
+        .with_retries(retries)
+        .with_mode(mode))
 }
 
 fn parse_player_type_filter(value: Option<&Value>, function: &str) -> Result<i32, RuntimeError> {
@@ -1903,6 +1993,9 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetDir", get_dir);
     script.register_host_function("SetComDir", set_com_dir);
     script.register_host_function("GetComDir", get_com_dir);
+    script.register_host_function("SetCommand", set_command);
+    script.register_host_function("AddCommand", add_command);
+    script.register_host_function("AppendCommand", append_command);
     script.register_host_function("SetR", set_r);
     script.register_host_function("GetR", get_r);
     script.register_host_function("SetXDir", set_x_dir);
@@ -2994,6 +3087,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub action_library: ActionLibrary,
     pub direction: Direction,
     pub command_direction: CommandDirection,
+    pub command_count: usize,
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
     pub vertices: &'a [ObjectVertex],
@@ -3020,6 +3114,7 @@ impl<'a> HostObjectContext<'a> {
         action_library: ActionLibrary,
         direction: Direction,
         command_direction: CommandDirection,
+        command_count: usize,
         action_target: Option<ObjectId>,
         action_target2: Option<ObjectId>,
         vertices: &'a [ObjectVertex],
@@ -3043,6 +3138,7 @@ impl<'a> HostObjectContext<'a> {
             action_library,
             direction,
             command_direction,
+            command_count,
             action_target,
             action_target2,
             vertices,
@@ -3072,6 +3168,7 @@ impl<'a> HostObjectContext<'a> {
         action_library: ActionLibrary,
         direction: Direction,
         command_direction: CommandDirection,
+        command_count: usize,
         action_target: Option<ObjectId>,
         action_target2: Option<ObjectId>,
         vertices: &'a [ObjectVertex],
@@ -3104,6 +3201,7 @@ impl<'a> HostObjectContext<'a> {
             action_library,
             direction,
             command_direction,
+            command_count,
             action_target,
             action_target2,
             vertices,
@@ -3462,6 +3560,7 @@ pub(crate) struct EffectContextOutcome {
     pub global: Vec<EffectCommand>,
     pub object_update: Option<ObjectUpdate>,
     pub object_commands: Vec<QueuedCommand>,
+    pub command_operations: Vec<CommandOperation>,
     pub destroy_object: bool,
     pub environment: Option<EnvironmentDelta>,
     pub physics: Option<PhysicsDelta>,
@@ -3482,6 +3581,7 @@ impl EffectContextOutcome {
         global: Vec<EffectCommand>,
         object_update: Option<ObjectUpdate>,
         object_commands: Vec<QueuedCommand>,
+        command_operations: Vec<CommandOperation>,
         destroy_object: bool,
         environment: Option<EnvironmentDelta>,
         physics: Option<PhysicsDelta>,
@@ -3499,6 +3599,7 @@ impl EffectContextOutcome {
             global,
             object_update,
             object_commands,
+            command_operations,
             destroy_object,
             environment,
             physics,
@@ -3520,6 +3621,7 @@ impl EffectContextOutcome {
             global: Vec::new(),
             object_update: None,
             object_commands: Vec::new(),
+            command_operations: Vec::new(),
             destroy_object: false,
             environment: None,
             physics: None,
@@ -6652,6 +6754,132 @@ fn get_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetCommand expects at least 1 argument: command name",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetCommand requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        let command_name = match &args[0] {
+            Value::String(name) if !name.is_empty() => name.clone(),
+            Value::String(_) | Value::Nil => {
+                object.clear_command_stack();
+                return Ok(Value::Bool(false));
+            }
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "SetCommand: expected string for command name, got {}",
+                    other.type_name()
+                )))
+            }
+        };
+
+        let command_id = match CommandId::from_name(&command_name) {
+            Some(id) => id,
+            None => {
+                object.clear_command_stack();
+                return Ok(Value::Bool(false));
+            }
+        };
+
+        let request = parse_command_request(command_id, args, "SetCommand")?;
+        object.clear_command_stack();
+        let success = object.push_command_front(request);
+        Ok(Value::Bool(success))
+    })
+}
+
+fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "AddCommand expects at least 1 argument: command name",
+        ));
+    }
+
+    let command_name = match &args[0] {
+        Value::String(name) if !name.is_empty() => name.clone(),
+        Value::String(_) | Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "AddCommand: expected string for command name, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let command_id = match CommandId::from_name(&command_name) {
+        Some(id) => id,
+        None => return Ok(Value::Bool(false)),
+    };
+
+    let request = parse_command_request(command_id, args, "AddCommand")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("AddCommand requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        let success = object.push_command_front(request);
+        Ok(Value::Bool(success))
+    })
+}
+
+fn append_command(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "AppendCommand expects at least 1 argument: command name",
+        ));
+    }
+
+    let command_name = match &args[0] {
+        Value::String(name) if !name.is_empty() => name.clone(),
+        Value::String(_) | Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "AppendCommand: expected string for command name, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let command_id = match CommandId::from_name(&command_name) {
+        Some(id) => id,
+        None => return Ok(Value::Bool(false)),
+    };
+
+    let request = parse_command_request(command_id, args, "AppendCommand")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("AppendCommand requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        let success = object.push_command_back(request);
+        Ok(Value::Bool(success))
+    })
+}
+
 enum PositionComponent {
     X,
     Y,
@@ -9368,6 +9596,7 @@ impl EffectHostContext {
                 action_library,
                 direction,
                 command_direction,
+                command_count,
                 action_target,
                 action_target2,
                 vertices,
@@ -9399,6 +9628,7 @@ impl EffectHostContext {
                 action_data,
                 direction,
                 command_direction,
+                command_count,
                 action_target,
                 action_target2,
                 vertices.to_vec(),
@@ -9567,22 +9797,24 @@ impl EffectHostContext {
     }
 
     fn into_commands(mut self) -> EffectContextOutcome {
-        let (object_effects, object_update, object_commands, destroy) = match self.object {
-            Some(object) => {
-                let update = if object.pending_update.is_empty() {
-                    None
-                } else {
-                    Some(object.pending_update)
-                };
-                (
-                    object.effects.into_commands(),
-                    update,
-                    object.queued_commands,
-                    object.destroy,
-                )
-            }
-            None => (Vec::new(), None, Vec::new(), false),
-        };
+        let (object_effects, object_update, object_commands, command_operations, destroy) =
+            match self.object {
+                Some(object) => {
+                    let update = if object.pending_update.is_empty() {
+                        None
+                    } else {
+                        Some(object.pending_update)
+                    };
+                    (
+                        object.effects.into_commands(),
+                        update,
+                        object.queued_commands,
+                        object.command_operations,
+                        object.destroy,
+                    )
+                }
+                None => (Vec::new(), None, Vec::new(), Vec::new(), false),
+            };
 
         let global = self
             .global
@@ -9595,6 +9827,7 @@ impl EffectHostContext {
             global,
             object_update,
             object_commands,
+            command_operations,
             destroy,
             None,
             None,
@@ -9746,6 +9979,8 @@ struct ObjectScopeContext {
     effects: EffectScopeContext,
     pending_update: ObjectUpdate,
     queued_commands: Vec<QueuedCommand>,
+    command_count: usize,
+    command_operations: Vec<CommandOperation>,
     destroy: bool,
     action_library: ActionLibrary,
     current_action_name: String,
@@ -9795,6 +10030,7 @@ impl ObjectScopeContext {
         action_data: i32,
         direction: Direction,
         command_direction: CommandDirection,
+        command_count: usize,
         action_target: Option<ObjectId>,
         action_target2: Option<ObjectId>,
         vertices: Vec<ObjectVertex>,
@@ -9815,6 +10051,8 @@ impl ObjectScopeContext {
             effects: EffectScopeContext::new(effects),
             pending_update: ObjectUpdate::default(),
             queued_commands: Vec::new(),
+            command_count,
+            command_operations: Vec::new(),
             destroy: false,
             action_library,
             current_action_name: action_name,
@@ -9885,6 +10123,31 @@ impl ObjectScopeContext {
         let normalized = crate::normalize_category(category, self.current_category);
         self.current_category = normalized;
         self.pending_update.category = Some(normalized);
+    }
+
+    fn clear_command_stack(&mut self) {
+        self.command_operations.push(CommandOperation::Clear);
+        self.command_count = 0;
+    }
+
+    fn push_command_front(&mut self, request: CommandRequest) -> bool {
+        if self.command_count >= MAX_COMMAND_STACK {
+            return false;
+        }
+        self.command_operations
+            .push(CommandOperation::PushFront(request));
+        self.command_count += 1;
+        true
+    }
+
+    fn push_command_back(&mut self, request: CommandRequest) -> bool {
+        if self.command_count >= MAX_COMMAND_STACK {
+            return false;
+        }
+        self.command_operations
+            .push(CommandOperation::PushBack(request));
+        self.command_count += 1;
+        true
     }
 
     fn ocf(&self) -> u32 {
@@ -10300,6 +10563,7 @@ impl ObjectScopeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::{CommandId, CommandOperation};
     use crate::ocf;
     use crate::ActionSpec;
     use crate::AudioCommand;
@@ -10314,8 +10578,10 @@ mod tests {
     use tracing_subscriber::registry::Registry;
 
     const EXPECTED_HOST_FUNCTIONS: &[&str] = &[
+        "AddCommand",
         "AddEffect",
         "AddMessage",
+        "AppendCommand",
         "BlastFree",
         "ClearParticles",
         "Contained",
@@ -10344,6 +10610,7 @@ mod tests {
         "GBackSemiSolid",
         "GBackSky",
         "GBackSolid",
+        "GameOver",
         "GetActTime",
         "GetAction",
         "GetActionData",
@@ -10416,6 +10683,7 @@ mod tests {
         "SetCategory",
         "SetClimate",
         "SetComDir",
+        "SetCommand",
         "SetDir",
         "SetGraphics",
         "SetGravity",
@@ -10484,6 +10752,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -10989,6 +11258,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Left,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -11093,6 +11363,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -11209,6 +11480,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Left,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -12470,6 +12742,7 @@ mod tests {
                 library.clone(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -12501,6 +12774,7 @@ mod tests {
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -12545,6 +12819,7 @@ mod tests {
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -12588,6 +12863,7 @@ mod tests {
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -12626,6 +12902,7 @@ mod tests {
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -12668,6 +12945,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -12769,6 +13047,7 @@ mod tests {
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -12812,6 +13091,7 @@ mod tests {
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -12852,6 +13132,7 @@ mod tests {
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -12896,6 +13177,7 @@ mod tests {
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -13050,6 +13332,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -13099,6 +13382,7 @@ mod tests {
                 library,
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -13176,6 +13460,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &vertices,
@@ -13213,6 +13498,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &vertices,
@@ -13240,6 +13526,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &vertices,
@@ -13267,6 +13554,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &vertices,
@@ -13297,6 +13585,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &vertices,
@@ -13340,6 +13629,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &vertices,
@@ -13388,6 +13678,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &vertices,
@@ -13562,6 +13853,76 @@ mod tests {
     }
 
     #[test]
+    fn set_command_clears_stack_and_pushes_command() {
+        let args = vec![
+            Value::String("MoveTo".into()),
+            Value::Nil,
+            Value::Int(10),
+            Value::Int(15),
+        ];
+        let (result, outcome) = with_object_host_context(|| set_command(&args));
+        let value = result.expect("SetCommand succeeds");
+        assert_eq!(value, Value::Bool(true));
+        assert_eq!(outcome.command_operations.len(), 2);
+        match &outcome.command_operations[0] {
+            CommandOperation::Clear => {}
+            other => panic!("expected Clear operation, got {:?}", other),
+        }
+        match &outcome.command_operations[1] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.tx, Some(10));
+                assert_eq!(request.ty, Some(15));
+            }
+            other => panic!("expected PushFront operation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn add_command_pushes_front_without_clearing() {
+        let args = vec![
+            Value::String("MoveTo".into()),
+            Value::Nil,
+            Value::Int(5),
+            Value::Int(8),
+        ];
+        let (result, outcome) = with_object_host_context(|| add_command(&args));
+        let value = result.expect("AddCommand succeeds");
+        assert_eq!(value, Value::Bool(true));
+        assert_eq!(outcome.command_operations.len(), 1);
+        match &outcome.command_operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.tx, Some(5));
+                assert_eq!(request.ty, Some(8));
+            }
+            other => panic!("expected PushFront operation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_command_pushes_back() {
+        let args = vec![
+            Value::String("MoveTo".into()),
+            Value::Nil,
+            Value::Int(3),
+            Value::Int(4),
+        ];
+        let (result, outcome) = with_object_host_context(|| append_command(&args));
+        let value = result.expect("AppendCommand succeeds");
+        assert_eq!(value, Value::Bool(true));
+        assert_eq!(outcome.command_operations.len(), 1);
+        match &outcome.command_operations[0] {
+            CommandOperation::PushBack(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.tx, Some(3));
+                assert_eq!(request.ty, Some(4));
+            }
+            other => panic!("expected PushBack operation, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn get_x_returns_current_position() {
         let (result, _) = with_effect_context(
             Some(HostObjectContext::new(
@@ -13579,6 +13940,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -13612,6 +13974,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -13723,6 +14086,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -13807,6 +14171,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -13838,6 +14203,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Left,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -13868,6 +14234,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Left,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -14008,6 +14375,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[ObjectVertex::new(0, 0)],
@@ -14312,6 +14680,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -14372,6 +14741,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -14412,6 +14782,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -14447,6 +14818,7 @@ mod tests {
                     ActionLibrary::default(),
                     Direction::Left,
                     CommandDirection::Stop,
+                    0,
                     None,
                     None,
                     &[],
@@ -14488,6 +14860,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -14523,6 +14896,7 @@ mod tests {
                     ActionLibrary::default(),
                     Direction::Left,
                     CommandDirection::Stop,
+                    0,
                     None,
                     None,
                     &[],
@@ -14651,6 +15025,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -14684,6 +15059,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -14770,6 +15146,7 @@ mod tests {
                 ActionLibrary::default(),
                 Direction::Left,
                 CommandDirection::Stop,
+                0,
                 None,
                 None,
                 &[],
@@ -15136,6 +15513,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Left,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -15234,6 +15612,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -15310,6 +15689,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -15410,6 +15790,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Left,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -15430,6 +15811,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Left,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -15530,6 +15912,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Left,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -15628,6 +16011,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Left,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -15938,6 +16322,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Left,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -15983,6 +16368,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -16048,6 +16434,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -16139,6 +16526,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -16235,6 +16623,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -16277,6 +16666,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],
@@ -16343,6 +16733,7 @@ mod tests {
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
+            0,
             None,
             None,
             &[],

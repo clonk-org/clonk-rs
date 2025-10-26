@@ -19,7 +19,8 @@ use lc_core::std_config::Config;
 use lc_launcher::{
     append_support_bundle_report, build_support_bundle_report, create_support_bundle,
     digest_update_telemetry, regenerate_support_bundle, timestamp_for_filename, timestamp_for_log,
-    write_launcher_summary, LauncherLog, ReportSearchTriageSummary, SupportBundleReport, UpdateTelemetrySummary,
+    write_launcher_summary, LauncherLog, ReportSearchTriageSummary, SupportBundleReport,
+    UpdateTelemetrySummary,
 };
 use lc_platform::AppPaths;
 use serde::Serialize;

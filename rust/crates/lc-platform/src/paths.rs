@@ -239,8 +239,8 @@ fn env_path(key: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use std::ffi::OsString;
+    use std::fs;
     use std::io::Write;
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};

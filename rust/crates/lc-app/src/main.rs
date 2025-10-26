@@ -5416,8 +5416,12 @@ impl GameApp {
                     StartupView::About => {
                         if let Some(about) = self.about_dialog.as_mut() {
                             let actions = match state {
-                                ElementState::Pressed => about.dialog.handle_key_down(KeyCode::Enter),
-                                ElementState::Released => about.dialog.handle_key_up(KeyCode::Enter),
+                                ElementState::Pressed => {
+                                    about.dialog.handle_key_down(KeyCode::Enter)
+                                }
+                                ElementState::Released => {
+                                    about.dialog.handle_key_up(KeyCode::Enter)
+                                }
                             };
                             self.process_about_actions(actions)?;
                         }
@@ -5738,7 +5742,9 @@ impl GameApp {
                         if let Some(about) = self.about_dialog.as_mut() {
                             if let Some(point) = about.dialog.pointer_position() {
                                 let actions = match button_state {
-                                    ElementState::Pressed => about.dialog.handle_pointer_down(point),
+                                    ElementState::Pressed => {
+                                        about.dialog.handle_pointer_down(point)
+                                    }
                                     ElementState::Released => about.dialog.handle_pointer_up(point),
                                 };
                                 self.process_about_actions(actions)?;
@@ -8814,11 +8820,11 @@ mod tests {
         ObjectId, ObjectSnapshot, ObjectStatus, PlayerState, PlayerStatus, SimulationSnapshot,
         Vector2, DEFAULT_CATEGORY,
     };
+    use parking_lot::ReentrantMutex;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
     use std::collections::HashMap;
     use std::env;
-    use parking_lot::ReentrantMutex;
     use std::ffi::OsString;
     use std::fs;
     use std::io::BufWriter;
@@ -9745,7 +9751,9 @@ mod tests {
         let scenarios = load_frontend_scenarios();
 
         assert!(
-            scenarios.iter().any(|scenario| scenario.identifier != "rust_sandbox"),
+            scenarios
+                .iter()
+                .any(|scenario| scenario.identifier != "rust_sandbox"),
             "expected repository content scenarios to be discoverable"
         );
 

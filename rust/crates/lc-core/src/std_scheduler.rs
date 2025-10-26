@@ -654,9 +654,7 @@ impl StdSchedulerThread {
             let _ = self.unblocker.notify();
             match handle.join() {
                 Ok(_) => Ok(()),
-                Err(_) => Err(io::Error::other(
-                    "StdSchedulerThread panicked",
-                )),
+                Err(_) => Err(io::Error::other("StdSchedulerThread panicked")),
             }
         } else {
             Ok(())
