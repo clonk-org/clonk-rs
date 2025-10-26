@@ -80,8 +80,8 @@ pub struct ContextMenuEntry {
 }
 
 use command::{
-    CommandEvent, CommandObjectSnapshot, CommandOperation, CommandRuntimeContext, CommandStack,
-    CommandStepResult,
+    CommandDefinitionSnapshot, CommandEvent, CommandObjectSnapshot, CommandOperation,
+    CommandPlayerSnapshot, CommandRuntimeContext, CommandStack, CommandStepResult,
 };
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
@@ -5429,6 +5429,7 @@ pub struct Engine {
     team_home_base_rule: bool,
     construction_needs_material: bool,
     structures_need_energy: bool,
+    base_buy_enabled: bool,
     known_crew_owners: HashSet<i32>,
     eliminated_crew_owners: HashSet<i32>,
     transfer_zones: TransferZoneTable,
@@ -5837,6 +5838,7 @@ impl Engine {
             team_home_base_rule: false,
             construction_needs_material: false,
             structures_need_energy: false,
+            base_buy_enabled: true,
             known_crew_owners: HashSet::new(),
             eliminated_crew_owners: HashSet::new(),
             transfer_zones: TransferZoneTable::default(),
@@ -5884,6 +5886,10 @@ impl Engine {
 
     pub fn set_structures_need_energy(&mut self, enabled: bool) {
         self.structures_need_energy = enabled;
+    }
+
+    pub fn set_base_buy_enabled(&mut self, enabled: bool) {
+        self.base_buy_enabled = enabled;
     }
 
     pub fn register_player(&mut self, config: PlayerConfig) -> Result<(), EngineError> {
@@ -7626,6 +7632,35 @@ impl Engine {
             );
         }
 
+        let player_snapshots: HashMap<i32, CommandPlayerSnapshot> = self
+            .players
+            .iter()
+            .map(|(&id, player)| {
+                (
+                    id,
+                    CommandPlayerSnapshot {
+                        status: player.status(),
+                        surrendered: player.surrendered(),
+                        wealth: player.wealth(),
+                        home_base_material: player.home_base_material().clone(),
+                    },
+                )
+            })
+            .collect();
+
+        let definition_snapshots: HashMap<DefinitionId, CommandDefinitionSnapshot> = self
+            .definitions
+            .iter()
+            .map(|(id, definition)| {
+                (
+                    id.clone(),
+                    CommandDefinitionSnapshot {
+                        value: definition.value(),
+                    },
+                )
+            })
+            .collect();
+
         for idx in 0..self.objects.len() {
             let definition_id = self.objects[idx].definition_id.clone();
             let previous_action_state = self.objects[idx].state.action.clone();
@@ -7657,7 +7692,10 @@ impl Engine {
                     position: current_position,
                     object: builder_snapshot,
                     objects: &command_snapshots,
+                    players: &player_snapshots,
+                    definitions: &definition_snapshots,
                     structures_need_energy: self.structures_need_energy,
+                    base_buy_enabled: self.base_buy_enabled,
                 };
                 if let Some(result) = object.step_command_stack(command_context) {
                     if result.update.is_some() || !result.events.is_empty() {
@@ -11118,6 +11156,33 @@ impl Engine {
         match event {
             CommandEvent::ApplyObjectUpdate { object_id, update } => {
                 self.apply_object_update(object_id, update)?;
+            }
+            CommandEvent::SpawnObject {
+                definition_id,
+                owner,
+                position,
+                container,
+            } => {
+                if !self.definitions.contains_key(definition_id.as_str()) {
+                    return Err(EngineError::UnknownDefinition(definition_id));
+                }
+                let mut config = SpawnConfig::new(definition_id)
+                    .with_position(position)
+                    .with_owner(owner);
+                if let Some(container_id) = container {
+                    config = config.with_container(container_id);
+                }
+                let _ = self.spawn_object(config)?;
+            }
+            CommandEvent::AdjustPlayerHomeBaseMaterial {
+                player_id,
+                definition_id,
+                delta,
+            } => {
+                let _ = self.adjust_player_home_base_material(player_id, definition_id, delta)?;
+            }
+            CommandEvent::AdjustPlayerWealth { player_id, delta } => {
+                let _ = self.adjust_player_wealth(player_id, delta)?;
             }
         }
         Ok(())

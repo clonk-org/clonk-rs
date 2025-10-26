@@ -2,8 +2,8 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::{
     ocf, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, ObjectId, ObjectStatus,
-    ObjectUpdate, Vector2, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, CATEGORY_VEHICLE, FULL_CON,
-    LINE_CONNECT_POWER_INPUT, OWNER_NONE,
+    ObjectUpdate, PlayerStatus, Vector2, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE,
+    CATEGORY_VEHICLE, FULL_CON, LINE_CONNECT_POWER_INPUT, OWNER_NONE,
 };
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +39,32 @@ impl CommandObjectSnapshot {
     pub fn is_active(&self) -> bool {
         !self.destroyed && self.status.is_active() && self.alive
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandPlayerSnapshot {
+    pub status: PlayerStatus,
+    pub surrendered: bool,
+    pub wealth: i32,
+    pub home_base_material: HashMap<DefinitionId, u32>,
+}
+
+impl CommandPlayerSnapshot {
+    pub fn is_active(&self) -> bool {
+        matches!(self.status, PlayerStatus::Active) && !self.surrendered
+    }
+
+    pub fn material_count(&self, definition_id: &str) -> u32 {
+        self.home_base_material
+            .get(definition_id)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandDefinitionSnapshot {
+    pub value: i32,
 }
 
 /// Identifiers that map to the classic C4 command constants.
@@ -200,12 +226,17 @@ mod tests {
         objects.insert(follower.id, follower.clone());
         objects.insert(target.id, target);
 
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
             position: follower.position,
             object: objects.get(&follower_id).expect("follower present"),
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let mut state = FollowState::from_request(
@@ -236,12 +267,17 @@ mod tests {
         objects.insert(follower.id, follower.clone());
         objects.insert(target.id, target);
 
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
             position: follower.position,
             object: objects.get(&follower_id).expect("follower present"),
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let mut state = FollowState::from_request(
@@ -279,12 +315,17 @@ mod tests {
         objects.insert(attacker.id, attacker.clone());
         objects.insert(target.id, target);
 
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
             position: attacker.position,
             object: objects.get(&attacker_id).expect("attacker present"),
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let mut state = AttackState::from_request(
@@ -312,12 +353,17 @@ mod tests {
         objects.insert(attacker.id, attacker.clone());
         objects.insert(target.id, target);
 
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
             position: attacker.position,
             object: objects.get(&attacker_id).expect("attacker present"),
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let mut state = AttackState::from_request(
@@ -358,12 +404,17 @@ mod tests {
         objects.insert(builder.id, builder.clone());
         objects.insert(target.id, target);
 
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
             position: builder.position,
             object: &builder,
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let mut state = BuildState::from_request(
@@ -398,12 +449,17 @@ mod tests {
         objects.insert(builder.id, builder.clone());
         objects.insert(target.id, target);
 
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
             position: builder.position,
             object: &builder,
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: true,
+            base_buy_enabled: true,
         };
 
         let mut state = BuildState::from_request(
@@ -445,12 +501,17 @@ mod tests {
         objects.insert(item.id, item);
 
         let builder_snapshot = objects.get(&builder_id).expect("builder present");
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
             position: builder_snapshot.position,
             object: builder_snapshot,
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let mut state = AcquireState::from_request(
@@ -484,12 +545,17 @@ mod tests {
         objects.insert(item.id, item);
 
         let builder_snapshot = objects.get(&builder_id).expect("builder present");
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
             position: builder_snapshot.position,
             object: builder_snapshot,
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let mut state = AcquireState::from_request(
@@ -536,12 +602,17 @@ mod tests {
         objects.insert(item.id, item);
 
         let builder_snapshot = objects.get(&builder_id).expect("builder present");
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 42,
             position: builder_snapshot.position,
             object: builder_snapshot,
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let mut state = AcquireState::from_request(
@@ -560,6 +631,7 @@ mod tests {
                 assert_eq!(update.container, Some(Some(builder_id)));
                 assert_eq!(update.position, Some(builder_snapshot.position));
             }
+            other => panic!("unexpected event: {:?}", other),
         }
     }
 
@@ -592,12 +664,17 @@ mod tests {
         objects.insert(item.id, item);
 
         let builder_snapshot = objects.get(&builder_id).expect("builder present");
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 100,
             position: builder_snapshot.position,
             object: builder_snapshot,
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let mut state = AcquireState::from_request(
@@ -624,12 +701,17 @@ mod tests {
         let mut objects = HashMap::new();
         objects.insert(builder.id, builder.clone());
 
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
             position: builder.position,
             object: &builder,
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let mut state = AcquireState::from_request(
@@ -653,7 +735,10 @@ mod tests {
             position: builder.position,
             object: &builder,
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let second = state.step(&later_ctx);
@@ -694,12 +779,17 @@ mod tests {
         objects.insert(target_container.id, target_container);
         objects.insert(item.id, item);
 
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
             position: builder.position,
             object: &builder,
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let mut state = AcquireState::from_request(
@@ -741,12 +831,17 @@ mod tests {
         objects.insert(current_container.id, current_container.clone());
         objects.insert(item.id, item);
 
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
             position: builder.position,
             object: &builder,
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let mut state = AcquireState::from_request(
@@ -789,12 +884,17 @@ mod tests {
         objects.insert(container.id, container.clone());
         objects.insert(item.id, item);
 
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
             position: builder.position,
             object: &builder,
             objects: &objects,
+            players: &players,
+            definitions: &definitions,
             structures_need_energy: false,
+            base_buy_enabled: true,
         };
 
         let mut state = AcquireState::from_request(
@@ -806,6 +906,107 @@ mod tests {
         let update = result.update.expect("builder update");
         assert_eq!(update.container, Some(Some(container_id)));
         assert_eq!(update.position, Some(container.position));
+    }
+
+    #[test]
+    fn buy_spawns_item_and_updates_player_state() {
+        let builder_id = ObjectId::new(1);
+        let base_id = ObjectId::new(2);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.owner = 42;
+        builder.position = Vector2::new(10, 5);
+        builder.command_direction = CommandDirection::Right;
+
+        let mut base = snapshot_with_id(base_id.as_u64());
+        base.owner = 42;
+        base.position = Vector2::new(20, 10);
+        base.category = CATEGORY_STRUCTURE;
+        base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
+        base.collectible = false;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+        objects.insert(base.id, base.clone());
+
+        let mut home_base = HashMap::new();
+        home_base.insert("WOOD".to_string(), 2);
+
+        let mut players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        players.insert(
+            42,
+            CommandPlayerSnapshot {
+                status: PlayerStatus::Active,
+                surrendered: false,
+                wealth: 100,
+                home_base_material: home_base,
+            },
+        );
+
+        let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        definitions.insert("WOOD".to_string(), CommandDefinitionSnapshot { value: 25 });
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: objects.get(&builder_id).expect("builder present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = BuyState::from_request(
+            &CommandRequest::new(CommandId::Buy).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.operations.len(), 0);
+        assert!(result
+            .update
+            .as_ref()
+            .and_then(|update| update.command_direction)
+            .is_some());
+
+        assert_eq!(result.events.len(), 3);
+        match &result.events[0] {
+            CommandEvent::AdjustPlayerHomeBaseMaterial {
+                player_id,
+                definition_id,
+                delta,
+            } => {
+                assert_eq!(*player_id, 42);
+                assert_eq!(definition_id, "WOOD");
+                assert_eq!(*delta, -1);
+            }
+            event => panic!("unexpected event: {:?}", event),
+        }
+
+        match &result.events[1] {
+            CommandEvent::AdjustPlayerWealth { player_id, delta } => {
+                assert_eq!(*player_id, 42);
+                assert_eq!(*delta, -25);
+            }
+            event => panic!("unexpected event: {:?}", event),
+        }
+
+        match &result.events[2] {
+            CommandEvent::SpawnObject {
+                definition_id,
+                owner,
+                position,
+                container,
+            } => {
+                assert_eq!(definition_id, "WOOD");
+                assert_eq!(*owner, 42);
+                assert_eq!(*position, base.position);
+                assert_eq!(*container, Some(base_id));
+            }
+            event => panic!("unexpected event: {:?}", event),
+        }
     }
 }
 
@@ -918,6 +1119,21 @@ pub enum CommandEvent {
         object_id: ObjectId,
         update: ObjectUpdate,
     },
+    SpawnObject {
+        definition_id: DefinitionId,
+        owner: i32,
+        position: Vector2,
+        container: Option<ObjectId>,
+    },
+    AdjustPlayerHomeBaseMaterial {
+        player_id: i32,
+        definition_id: DefinitionId,
+        delta: i32,
+    },
+    AdjustPlayerWealth {
+        player_id: i32,
+        delta: i32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -965,6 +1181,11 @@ impl CommandStepResult {
 
     pub fn with_operations(mut self, operations: Vec<CommandOperation>) -> Self {
         self.operations = operations;
+        self
+    }
+
+    pub fn with_events(mut self, events: Vec<CommandEvent>) -> Self {
+        self.events = events;
         self
     }
 }
@@ -1015,7 +1236,10 @@ pub struct CommandRuntimeContext<'a> {
     pub position: Vector2,
     pub object: &'a CommandObjectSnapshot,
     pub objects: &'a HashMap<ObjectId, CommandObjectSnapshot>,
+    pub players: &'a HashMap<i32, CommandPlayerSnapshot>,
+    pub definitions: &'a HashMap<DefinitionId, CommandDefinitionSnapshot>,
     pub structures_need_energy: bool,
+    pub base_buy_enabled: bool,
 }
 
 impl<'a> CommandRuntimeContext<'a> {
@@ -1028,6 +1252,14 @@ impl<'a> CommandRuntimeContext<'a> {
             return Some(self.position);
         }
         self.resolve(id).map(|snapshot| snapshot.position)
+    }
+
+    pub fn player(&self, id: i32) -> Option<&CommandPlayerSnapshot> {
+        self.players.get(&id)
+    }
+
+    pub fn definition(&self, id: &str) -> Option<&CommandDefinitionSnapshot> {
+        self.definitions.get(id)
     }
 }
 
@@ -1858,7 +2090,8 @@ impl AcquireState {
 
 #[derive(Debug, Clone)]
 struct BuyState {
-    _definition_id: DefinitionId,
+    definition_id: DefinitionId,
+    target: Option<ObjectId>,
     update_interval: u32,
     last_evaluated: Option<u64>,
 }
@@ -1868,10 +2101,38 @@ impl BuyState {
         let definition_id =
             command_data_to_definition_id(&request.data).ok_or(CommandError::Unsupported)?;
         Ok(Self {
-            _definition_id: definition_id,
+            definition_id,
+            target: request.target,
             update_interval: request.update_interval.max(1),
             last_evaluated: None,
         })
+    }
+
+    fn resolve_base(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+        if let Some(target) = self.target {
+            if let Some(snapshot) = ctx.resolve(target) {
+                if snapshot.is_active() {
+                    return Some(target);
+                }
+            }
+        }
+
+        let buyer_owner = ctx.object.owner;
+        ctx.objects
+            .values()
+            .filter(|snapshot| {
+                snapshot.is_active()
+                    && snapshot.owner == buyer_owner
+                    && (snapshot.category & CATEGORY_STRUCTURE) != 0
+                    && (snapshot.ocf & ocf::ENTRANCE) != 0
+                    && !snapshot.collectible
+            })
+            .min_by_key(|snapshot| {
+                let dx = i64::from(snapshot.position.x - ctx.position.x);
+                let dy = i64::from(snapshot.position.y - ctx.position.y);
+                dx * dx + dy * dy
+            })
+            .map(|snapshot| snapshot.id)
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -1881,12 +2142,76 @@ impl BuyState {
             }
         }
         self.last_evaluated = Some(ctx.frame);
+
         let update = if ctx.object.command_direction != CommandDirection::Stop {
             Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
         } else {
             None
         };
-        CommandStepResult::failed(update)
+
+        if !ctx.base_buy_enabled {
+            return CommandStepResult::failed(update);
+        }
+
+        let buyer_owner = ctx.object.owner;
+        if buyer_owner == OWNER_NONE {
+            return CommandStepResult::failed(update);
+        }
+
+        let base_id = match self.resolve_base(ctx) {
+            Some(id) => id,
+            None => return CommandStepResult::failed(update),
+        };
+
+        let base_snapshot = match ctx.resolve(base_id) {
+            Some(snapshot) => snapshot,
+            None => return CommandStepResult::failed(update),
+        };
+
+        let base_owner = base_snapshot.owner;
+        if base_owner == OWNER_NONE {
+            return CommandStepResult::failed(update);
+        }
+
+        let base_player = match ctx.player(base_owner) {
+            Some(player) if player.is_active() => player,
+            _ => return CommandStepResult::failed(update),
+        };
+
+        let available = base_player.material_count(&self.definition_id);
+        if available == 0 {
+            return CommandStepResult::failed(update);
+        }
+
+        let price = ctx
+            .definition(&self.definition_id)
+            .map(|definition| definition.value.max(0))
+            .unwrap_or(0);
+
+        if price > base_player.wealth {
+            return CommandStepResult::failed(update);
+        }
+
+        let mut events = Vec::new();
+        events.push(CommandEvent::AdjustPlayerHomeBaseMaterial {
+            player_id: base_owner,
+            definition_id: self.definition_id.clone(),
+            delta: -1,
+        });
+        if price != 0 {
+            events.push(CommandEvent::AdjustPlayerWealth {
+                player_id: base_owner,
+                delta: -price,
+            });
+        }
+        events.push(CommandEvent::SpawnObject {
+            definition_id: self.definition_id.clone(),
+            owner: buyer_owner,
+            position: base_snapshot.position,
+            container: Some(base_id),
+        });
+
+        CommandStepResult::completed(update).with_events(events)
     }
 }
 
