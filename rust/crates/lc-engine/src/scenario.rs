@@ -149,6 +149,73 @@ pub struct Scenario {
     environment: Option<EnvironmentSettings>,
     sky: Option<SkyConfig>,
     script: Option<ScenarioScriptSource>,
+    objectives: ScenarioObjectives,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScenarioObjectives {
+    pub(crate) create_objects: Vec<CreateObjectObjective>,
+    pub(crate) clear_objects: Vec<ClearObjectObjective>,
+    pub(crate) clear_materials: Vec<ClearMaterialObjective>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateObjectObjective {
+    pub(crate) definition: String,
+    pub(crate) count: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClearObjectObjective {
+    pub(crate) definition: String,
+    pub(crate) count: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClearMaterialObjective {
+    pub(crate) material: String,
+    pub(crate) count: i32,
+}
+
+impl ScenarioObjectives {
+    fn from_legacy_game(game: &LegacyGame) -> Self {
+        let mut objectives = ScenarioObjectives::default();
+
+        for entry in &game.create_objects {
+            let count = entry.count.unwrap_or(0);
+            if count <= 0 {
+                continue;
+            }
+            objectives.create_objects.push(CreateObjectObjective {
+                definition: entry.id.clone(),
+                count,
+            });
+        }
+
+        for entry in &game.clear_objects {
+            let count = entry.count.unwrap_or(0);
+            objectives.clear_objects.push(ClearObjectObjective {
+                definition: entry.id.clone(),
+                count,
+            });
+        }
+
+        for entry in &game.clear_materials {
+            let count = entry.count.unwrap_or(0);
+            objectives.clear_materials.push(ClearMaterialObjective {
+                material: entry.name.clone(),
+                count,
+            });
+        }
+
+        objectives
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.create_objects.is_empty()
+            && self.clear_objects.is_empty()
+            && self.clear_materials.is_empty()
+    }
 }
 
 pub trait LegacyDefinitionResolver {
@@ -255,6 +322,7 @@ impl Scenario {
             environment: Some(environment),
             sky: None,
             script,
+            objectives: ScenarioObjectives::from_legacy_game(&manifest.core.game),
         })
     }
 
@@ -289,6 +357,10 @@ impl Scenario {
         !self.initial_spawns.is_empty()
     }
 
+    pub fn objectives(&self) -> &ScenarioObjectives {
+        &self.objectives
+    }
+
     pub fn physics(&self) -> Option<PhysicsSettings> {
         self.physics
     }
@@ -303,6 +375,7 @@ impl Scenario {
 
     pub fn apply(&self, engine: &mut Engine) -> Result<Vec<ObjectId>, ScenarioError> {
         engine.clear_scenario_script();
+        engine.configure_objectives(self.objectives.clone());
         if let Some(landscape) = &self.landscape {
             engine.set_landscape(landscape.clone());
         } else {
@@ -683,6 +756,7 @@ impl Scenario {
             environment,
             sky,
             script,
+            objectives: ScenarioObjectives::default(),
         })
     }
 }

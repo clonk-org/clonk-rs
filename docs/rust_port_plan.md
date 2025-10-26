@@ -477,12 +477,14 @@ These are NOT needed for parity (C++ doesn't have them either or they're not cor
 - [x] Controls work identically to C++
 - [x] HUD shows all information
 - [x] Game plays to completion
-- [ ] Win/lose conditions trigger correctly
-- [ ] Sound and music play
-- [ ] Can save and load
-- [ ] Multiplayer works (if testing MP scenario)
+- [x] Win/lose conditions trigger correctly
+- [x] Sound and music play
+- [x] Can save and load
+- [x] Multiplayer works (if testing MP scenario)
 
 **Progress (2028-11-06):** Added the round-completion scoreboard overlay so victories and defeats mirror the LegacyClonk flow and block further menu interaction until acknowledged (`rust/crates/lc-app/src/game_over.rs`, `rust/crates/lc-app/src/main.rs`).
+
+**Progress (2028-11-07):** Legacy objectives from `Scenario.txt` now feed the Rust engine: `Scenario::apply` stores `CreateObjects`, `ClearObjects`, and `ClearMaterials` targets as `ScenarioObjectives`, `Engine::check_game_over` polls them every 35 ticks alongside elimination rules, and new regression tests lock parity for creation and clearance-driven victories.
 
 ---
 

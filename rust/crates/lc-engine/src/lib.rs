@@ -45,7 +45,7 @@ pub use message::{
 pub use pathfinder::{PathFinder, PathWaypoint};
 pub use player::{Player, PlayerConfig, PlayerState, PlayerStatus, PlayerViewport};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
-pub use scenario::{Scenario, ScenarioError, SkyConfig};
+pub use scenario::{Scenario, ScenarioError, ScenarioObjectives, SkyConfig};
 pub use sky::{SkyFrame, SkyParallaxMode, SkySettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +115,7 @@ pub type DefinitionId = String;
 
 pub const OWNER_NONE: i32 = -1;
 pub const FULL_CON: i32 = 100_000;
+const GAME_OVER_CHECK_INTERVAL: u8 = 35;
 const FIRE_DEFINITION_ID: &str = "FLAM";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -5284,6 +5285,8 @@ pub struct Engine {
     weather_events: Vec<WeatherEvent>,
     scenario_script: Option<ScenarioScript>,
     game_over_triggered: bool,
+    objectives: ScenarioObjectives,
+    objective_check_counter: u8,
     players_registered: bool,
     players: HashMap<i32, Player>,
     crew_selection: HashMap<i32, CrewSelection>,
@@ -5688,6 +5691,8 @@ impl Engine {
             weather_events: Vec::new(),
             scenario_script: None,
             game_over_triggered: false,
+            objectives: ScenarioObjectives::default(),
+            objective_check_counter: 0,
             players_registered: false,
             players: HashMap::new(),
             crew_selection: HashMap::new(),
@@ -6017,6 +6022,11 @@ impl Engine {
         self.frame
     }
 
+    pub fn configure_objectives(&mut self, objectives: ScenarioObjectives) {
+        self.objectives = objectives;
+        self.objective_check_counter = 0;
+    }
+
     pub fn set_landscape(&mut self, mut landscape: Landscape) {
         let default = self.materials.default_ground_material();
         if default.is_some() {
@@ -6286,14 +6296,150 @@ impl Engine {
         if self.game_over_triggered || !self.players_registered {
             return Ok(());
         }
-        let has_active = self
-            .players
-            .values()
-            .any(|player| matches!(player.status(), PlayerStatus::Active) && !player.surrendered());
-        if has_active {
-            return Ok(());
+
+        let mut should_trigger = !self.has_active_players();
+
+        if !should_trigger && self.should_evaluate_objectives() && self.objectives_met() {
+            should_trigger = true;
         }
-        self.request_game_over().map(|_| ())
+
+        if should_trigger {
+            self.request_game_over()?;
+        }
+
+        Ok(())
+    }
+
+    fn has_active_players(&self) -> bool {
+        self.players
+            .values()
+            .any(|player| matches!(player.status(), PlayerStatus::Active) && !player.surrendered())
+    }
+
+    fn should_evaluate_objectives(&self) -> bool {
+        !self.objectives.is_empty() && self.objective_check_counter == 0
+    }
+
+    fn objectives_met(&self) -> bool {
+        if self.objectives.is_empty() {
+            return false;
+        }
+
+        let mut game_over_valid = false;
+        let mut game_over = true;
+
+        if !self.objectives.create_objects.is_empty() {
+            let mut condition_valid = false;
+            let mut condition_true = true;
+            for objective in &self.objectives.create_objects {
+                if objective.count <= 0 {
+                    continue;
+                }
+                condition_valid = true;
+                let target_id = objective.definition.as_str();
+                let current = self
+                    .objects
+                    .iter()
+                    .filter(|object| object.definition_id.as_str() == target_id)
+                    .filter(|object| object.state.status.is_active())
+                    .filter(|object| object.state.construction >= FULL_CON)
+                    .count() as i32;
+                if current < objective.count {
+                    condition_true = false;
+                }
+            }
+            if condition_valid {
+                game_over_valid = true;
+                if !condition_true {
+                    game_over = false;
+                }
+            }
+        }
+
+        if !self.objectives.clear_objects.is_empty() {
+            let mut condition_valid = false;
+            let mut condition_true = true;
+            for objective in &self.objectives.clear_objects {
+                condition_valid = true;
+                let limit = objective.count.max(0);
+                let target_id = objective.definition.as_str();
+                let alive_only = self
+                    .definitions
+                    .get(target_id)
+                    .map(|definition| definition.category() & CATEGORY_LIVING != 0)
+                    .unwrap_or(false);
+                let count = self
+                    .objects
+                    .iter()
+                    .filter(|object| object.definition_id.as_str() == target_id)
+                    .filter(|object| object.state.status.is_active())
+                    .filter(|object| !alive_only || object.state.alive)
+                    .count() as i32;
+                if count > limit {
+                    condition_true = false;
+                }
+            }
+            if condition_valid {
+                game_over_valid = true;
+                if !condition_true {
+                    game_over = false;
+                }
+            }
+        }
+
+        if !self.objectives.clear_materials.is_empty() {
+            let mut condition_valid = false;
+            let mut condition_true = true;
+            if let Some(landscape) = self.landscape.as_ref() {
+                for objective in &self.objectives.clear_materials {
+                    if let Some(material_id) = self.materials.id_of(&objective.material) {
+                        condition_valid = true;
+                        let limit = i64::from(objective.count.max(0));
+                        let total = self.count_material_pixels(landscape, material_id);
+                        if total > limit {
+                            condition_true = false;
+                        }
+                    }
+                }
+            }
+            if condition_valid {
+                game_over_valid = true;
+                if !condition_true {
+                    game_over = false;
+                }
+            }
+        }
+
+        game_over_valid && game_over
+    }
+
+    fn count_material_pixels(&self, landscape: &Landscape, material_id: MaterialId) -> i64 {
+        let mut total: i64 = 0;
+
+        for x in 0..landscape.width() {
+            if landscape.solid_material_at(x as i32) == Some(material_id) {
+                let height = landscape
+                    .surface()
+                    .get(x as usize)
+                    .copied()
+                    .unwrap_or_default()
+                    .max(0);
+                total += i64::from(height);
+            }
+        }
+
+        for column in landscape.liquids() {
+            for segment in column.segments() {
+                if segment.material == Some(material_id) {
+                    let span = i64::from(segment.bottom) - i64::from(segment.top);
+                    if span > 0 {
+                        total += span;
+                    }
+                }
+            }
+        }
+
+        total
     }
 
     fn request_game_over(&mut self) -> Result<bool, EngineError> {
@@ -7211,6 +7357,8 @@ impl Engine {
 
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
         self.frame += 1;
+        self.objective_check_counter =
+            (self.objective_check_counter + 1) % GAME_OVER_CHECK_INTERVAL;
         let frame = self.frame;
         self.tick_material_particles();
         self.tick_particles();
@@ -13279,6 +13427,7 @@ fn value_to_liquid_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scenario::{ClearObjectObjective, CreateObjectObjective, ScenarioObjectives};
     use lc_resources::MaterialLibrary;
     use lc_script::Value;
     use rand::Rng;
@@ -18759,6 +18908,111 @@ func ControlDig() { SetAction("Dig"); return true; }
         assert!(snapshot.game_over);
         assert_eq!(engine.physics().gravity, 42);
 
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_create_object_objective_triggers_game_over() -> Result<(), EngineError> {
+        let mut engine = Engine::with_seed(0);
+
+        let mut crew_def = simple_definition("Crew");
+        crew_def.set_crew_member(true);
+        engine.register_definition(crew_def)?;
+        engine.register_definition(simple_definition("FLAG"))?;
+
+        let objectives = ScenarioObjectives {
+            create_objects: vec![CreateObjectObjective {
+                definition: "FLAG".into(),
+                count: 1,
+            }],
+            ..ScenarioObjectives::default()
+        };
+        engine.configure_objectives(objectives);
+
+        engine.register_player(PlayerConfig::new(0, "Player"))?;
+
+        engine.spawn_object(
+            SpawnConfig::new("Crew")
+                .with_owner(0)
+                .with_crew_member(true)
+                .with_position(Vector2::new(10, 10)),
+        )?;
+        engine.spawn_object(
+            SpawnConfig::new("FLAG")
+                .with_owner(0)
+                .with_construction(FULL_CON),
+        )?;
+
+        let mut triggered = false;
+        for _ in 0..40 {
+            let snapshot = engine.tick()?;
+            if snapshot.game_over {
+                triggered = true;
+                break;
+            }
+        }
+
+        assert!(triggered, "expected game over once required object exists");
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_clear_object_objective_triggers_after_removal() -> Result<(), EngineError> {
+        let mut engine = Engine::with_seed(0);
+
+        let mut crew_def = simple_definition("Crew");
+        crew_def.set_crew_member(true);
+        engine.register_definition(crew_def)?;
+        engine.register_definition(simple_definition("ROCK"))?;
+
+        let objectives = ScenarioObjectives {
+            clear_objects: vec![ClearObjectObjective {
+                definition: "ROCK".into(),
+                count: 0,
+            }],
+            ..ScenarioObjectives::default()
+        };
+        engine.configure_objectives(objectives);
+
+        engine.register_player(PlayerConfig::new(0, "Player"))?;
+
+        engine.spawn_object(
+            SpawnConfig::new("Crew")
+                .with_owner(0)
+                .with_crew_member(true)
+                .with_position(Vector2::new(15, 20)),
+        )?;
+        let rock_id = engine.spawn_object(SpawnConfig::new("ROCK").with_owner(0))?;
+
+        for _ in 0..5 {
+            let snapshot = engine.tick()?;
+            assert!(
+                !snapshot.game_over,
+                "game over should not trigger before removal"
+            );
+        }
+
+        engine.apply_object_update(
+            rock_id,
+            ObjectUpdate::new().with_status(ObjectStatus::Deleted),
+        )?;
+
+        // Process removal and allow periodic polling to run.
+        let _ = engine.tick()?;
+
+        let mut triggered = false;
+        for _ in 0..40 {
+            let snapshot = engine.tick()?;
+            if snapshot.game_over {
+                triggered = true;
+                break;
+            }
+        }
+
+        assert!(
+            triggered,
+            "expected game over once disallowed objects are cleared"
+        );
         Ok(())
     }
 
