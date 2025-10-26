@@ -69,6 +69,7 @@ pub(crate) struct HostWorldObject {
     pub category: i32,
     pub energy: i32,
     pub construction: i32,
+    #[allow(dead_code)]
     pub damage: i32,
     pub ocf: u32,
     pub position: Vector2,
@@ -81,6 +82,7 @@ pub(crate) struct HostWorldObject {
     pub action_ticks: u32,
     container: Option<ObjectId>,
     contents: Vec<ObjectId>,
+    #[allow(dead_code)]
     pub draw_transform: Option<DrawTransform>,
 }
 
@@ -89,11 +91,14 @@ pub(crate) struct DefinitionMetadata {
     pub category: i32,
     pub ocf_base: u32,
     pub crew_member: bool,
+    #[allow(dead_code)]
     pub value: i32,
+    #[allow(dead_code)]
     pub mass: i32,
     pub constructable: bool,
     pub shape: Option<DefinitionRect>,
     pub construction_offset: i32,
+    #[allow(dead_code)]
     pub basement: i32,
 }
 
@@ -266,6 +271,7 @@ impl HostWorldObject {
         self.construction
     }
 
+    #[allow(dead_code)]
     pub fn damage(&self) -> i32 {
         self.damage
     }
@@ -3117,6 +3123,7 @@ impl<'a> HostObjectContext<'a> {
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_draw_transform(mut self, transform: Option<DrawTransform>) -> Self {
         self.draw_transform = transform;
         self
@@ -3132,14 +3139,17 @@ impl<'a> HostObjectContext<'a> {
         self
     }
 
+    #[allow(dead_code)]
     pub fn ocf(&self) -> u32 {
         self.ocf
     }
 
+    #[allow(dead_code)]
     pub fn ocf_base(&self) -> u32 {
         self.ocf_base
     }
 
+    #[allow(dead_code)]
     pub fn is_crew_member(&self) -> bool {
         self.crew_member
     }
@@ -3366,6 +3376,7 @@ pub(crate) fn enter_environment_context(
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn with_effect_context<F, T, E>(
     object: Option<HostObjectContext<'_>>,
     global_effects: &[EffectState],
@@ -9536,10 +9547,12 @@ impl EffectHostContext {
         self.object.as_ref()
     }
 
+    #[allow(dead_code)]
     fn audio_mut(&mut self) -> &mut AudioRegistry {
         &mut self.audio
     }
 
+    #[allow(dead_code)]
     fn audio(&self) -> &AudioRegistry {
         &self.audio
     }

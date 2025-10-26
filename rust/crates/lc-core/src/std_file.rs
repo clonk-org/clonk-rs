@@ -38,11 +38,9 @@ pub fn get_extension(path: impl AsRef<Path>) -> Option<String> {
 }
 
 pub fn default_extension(path: &mut String, extension: &str) {
-    if get_extension(&*path).is_none() {
-        if !extension.is_empty() {
-            path.push('.');
-            path.push_str(extension.trim_start_matches('.'));
-        }
+    if get_extension(&*path).is_none() && !extension.is_empty() {
+        path.push('.');
+        path.push_str(extension.trim_start_matches('.'));
     }
 }
 
@@ -87,7 +85,7 @@ pub fn file_size(path: impl AsRef<Path>) -> io::Result<u64> {
 }
 
 pub fn file_time(path: impl AsRef<Path>) -> io::Result<SystemTime> {
-    Ok(fs::metadata(path)?.modified()?)
+    fs::metadata(path)?.modified()
 }
 
 pub fn wildcard_match(pattern: &str, text: &str) -> bool {

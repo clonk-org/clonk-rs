@@ -752,7 +752,7 @@ impl StdStrBuf {
                 .position(|&b| b == separator)
                 .map(|pos| start + pos);
             if index == 0 {
-                let end = sep_pos.unwrap_or_else(|| data.len());
+                let end = sep_pos.unwrap_or(data.len());
                 if end > start {
                     out.copy_bytes(&data[start..end]);
                 }

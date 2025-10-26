@@ -1304,7 +1304,7 @@ mod tests {
 }
 
 async fn run_client(
-    mut stream: TcpStream,
+    stream: TcpStream,
     commands: mpsc::Receiver<ClientCommand>,
     event_tx: mpsc::Sender<ClientEvent>,
     shutdown_rx: oneshot::Receiver<()>,

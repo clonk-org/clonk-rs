@@ -70,6 +70,7 @@ impl MassMoverSet {
         (hash & 0xFFFF_FFFF) as i32
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.movers.len()
     }
@@ -100,6 +101,7 @@ impl MassMoverSet {
         }
     }
 
+    #[allow(dead_code)]
     pub fn create(
         &mut self,
         landscape: &mut Landscape,

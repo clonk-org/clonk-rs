@@ -262,6 +262,7 @@ fn interpret_base_command(base: u8, kind: CommandKind) -> Option<ControlEvent> {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RawPacket {
     id: Option<u8>,
@@ -269,6 +270,7 @@ struct RawPacket {
     fields: HashMap<String, String>,
 }
 
+#[allow(dead_code)]
 impl RawPacket {
     fn new() -> Self {
         Self {
@@ -314,6 +316,7 @@ impl RawPacket {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum ControlParseError {
     #[error("control log did not start with [Control] section")]
@@ -333,6 +336,7 @@ pub enum ControlParseError {
 /// The writer on the C++ side always produces CRLF separated output. The parser is permissive with
 /// respect to whitespace and therefore also accepts LF-only line endings which is convenient for
 /// unit tests.
+#[allow(dead_code)]
 pub fn parse_control_ini(input: &str) -> Result<Vec<ControlPacket>, ControlParseError> {
     enum ParserState {
         Start,
@@ -428,6 +432,7 @@ pub fn parse_control_ini(input: &str) -> Result<Vec<ControlPacket>, ControlParse
     Ok(packets)
 }
 
+#[allow(dead_code)]
 fn parse_int_field(fields: &HashMap<String, String>, name: &str) -> Result<i32, ControlParseError> {
     let Some(raw) = fields.get(name) else {
         return Err(ControlParseError::MissingField {
@@ -441,6 +446,7 @@ fn parse_int_field(fields: &HashMap<String, String>, name: &str) -> Result<i32, 
         })
 }
 
+#[allow(dead_code)]
 fn unescape_value(value: &str) -> String {
     let trimmed = value.trim();
     if !trimmed.starts_with('"') || !trimmed.ends_with('"') {

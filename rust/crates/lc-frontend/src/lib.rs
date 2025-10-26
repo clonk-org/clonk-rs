@@ -1826,8 +1826,8 @@ impl GraphicsSystem {
                 offset_x = transform.offset_x;
                 offset_y = transform.offset_y;
             }
-            let mut final_screen_x = screen_x + offset_x * zoom;
-            let mut final_screen_y = screen_y + offset_y * zoom;
+            let final_screen_x = screen_x + offset_x * zoom;
+            let final_screen_y = screen_y + offset_y * zoom;
             if scale_x < 0.0 {
                 flip_x = !flip_x;
                 scale_x = -scale_x;
@@ -2013,8 +2013,8 @@ impl GraphicsSystem {
             offset_y = transform.offset_y;
         }
 
-        let mut final_screen_x = screen_x + offset_x * zoom;
-        let mut final_screen_y = screen_y + offset_y * zoom;
+        let final_screen_x = screen_x + offset_x * zoom;
+        let final_screen_y = screen_y + offset_y * zoom;
 
         if scale_x < 0.0 {
             transform_flipped = !transform_flipped;
@@ -2235,8 +2235,8 @@ impl GraphicsSystem {
             offset_y = transform.offset_y;
         }
 
-        let mut final_screen_x = screen_x + offset_x * zoom;
-        let mut final_screen_y = screen_y + offset_y * zoom;
+        let final_screen_x = screen_x + offset_x * zoom;
+        let final_screen_y = screen_y + offset_y * zoom;
         if scale_x < 0.0 {
             flip_x = !flip_x;
             scale_x = -scale_x;

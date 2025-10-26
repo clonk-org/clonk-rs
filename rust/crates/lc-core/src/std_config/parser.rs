@@ -106,9 +106,9 @@ fn split_comment(line: &str) -> (&str, Option<&str>) {
 }
 
 fn split_key_value(line: &str) -> Option<(&str, &str)> {
-    let mut chars = line.char_indices().peekable();
+    let chars = line.char_indices().peekable();
     let mut in_quotes = false;
-    while let Some((idx, ch)) = chars.next() {
+    for (idx, ch) in chars {
         match ch {
             '"' => in_quotes = !in_quotes,
             '=' if !in_quotes => {

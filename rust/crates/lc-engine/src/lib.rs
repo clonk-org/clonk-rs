@@ -8612,7 +8612,7 @@ impl Engine {
 
     fn sync_rng_digest(&self) -> (i32, i32) {
         let bytes = serde_json::to_vec(&self.rng).unwrap_or_default();
-        let mut hash = fnv_update(FNV_OFFSET_BASIS, &bytes);
+        let hash = fnv_update(FNV_OFFSET_BASIS, &bytes);
         let lower = (hash & 0xFFFF_FFFF) as i32;
         let upper = ((hash >> 32) & 0xFFFF_FFFF) as i32;
         (upper, lower)

@@ -199,6 +199,7 @@ impl MessageManager {
         });
     }
 
+    #[allow(dead_code)]
     pub fn clear_for_object(&mut self, id: ObjectId) {
         self.messages
             .retain(|message| message.target.map_or(true, |target| target != id));

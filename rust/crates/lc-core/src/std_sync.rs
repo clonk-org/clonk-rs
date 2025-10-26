@@ -15,6 +15,12 @@ pub struct CriticalSection {
     cvar: Condvar,
 }
 
+impl Default for CriticalSection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CriticalSection {
     pub const fn new() -> Self {
         Self {
@@ -226,6 +232,12 @@ pub struct SharedCriticalSection {
     shared: Mutex<SharedState>,
     waiters: Condvar,
     callback: Mutex<Option<Arc<dyn ShareFreeCallback>>>,
+}
+
+impl Default for SharedCriticalSection {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SharedCriticalSection {

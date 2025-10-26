@@ -322,7 +322,7 @@ fn build_render_commands(commands: Vec<DrawCommand>) -> RenderHandle {
                 texts.push(stored);
             }
             DrawCommand::Image { rect, image } => {
-                let mut pixels = image.pixels().to_vec();
+                let pixels = image.pixels().to_vec();
                 let cmd = LcGuiDrawCommand::image(
                     rect,
                     image.width(),

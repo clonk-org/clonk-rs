@@ -367,11 +367,9 @@ impl StdScheduler {
             }
 
             for (proc, start, end) in &ranges {
-                if poll_fds[*start..*end].iter().any(|fd| fd.revents != 0) {
-                    if !proc.execute(0) {
-                        success = false;
-                        self.handle_error(proc);
-                    }
+                if poll_fds[*start..*end].iter().any(|fd| fd.revents != 0) && !proc.execute(0) {
+                    success = false;
+                    self.handle_error(proc);
                 }
             }
         } else if poll_result < 0 {
@@ -381,11 +379,9 @@ impl StdScheduler {
         }
 
         for entry in &self.procs {
-            if entry.proc.get_timeout() == 0 {
-                if !entry.proc.execute(INFINITE_TIMEOUT) {
-                    success = false;
-                    self.handle_error(&entry.proc);
-                }
+            if entry.proc.get_timeout() == 0 && !entry.proc.execute(INFINITE_TIMEOUT) {
+                success = false;
+                self.handle_error(&entry.proc);
             }
         }
 
@@ -658,8 +654,7 @@ impl StdSchedulerThread {
             let _ = self.unblocker.notify();
             match handle.join() {
                 Ok(_) => Ok(()),
-                Err(_) => Err(io::Error::new(
-                    io::ErrorKind::Other,
+                Err(_) => Err(io::Error::other(
                     "StdSchedulerThread panicked",
                 )),
             }

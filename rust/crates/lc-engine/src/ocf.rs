@@ -47,7 +47,7 @@ pub fn compute(
     base: u32,
     crew_member: bool,
     alive: bool,
-    status: ObjectStatus,
+    _status: ObjectStatus,
     is_contained: bool,
     construction: i32,
 ) -> u32 {

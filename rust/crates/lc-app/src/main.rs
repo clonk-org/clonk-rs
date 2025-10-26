@@ -18,7 +18,7 @@ use std::f32::consts::PI;
 use std::fmt;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -70,7 +70,6 @@ use lc_resources::{
 use menu_controls::map_menu_control_event;
 use network::{ClientSettings, HostSettings, NetworkEvent, NetworkManager, NetworkMode};
 use object_menu::{ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState};
-use parking_lot::ReentrantMutex;
 use pixels::{Pixels, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
@@ -965,7 +964,6 @@ impl AudioContext {
             let channel = info.channel;
             let (mut mix_volume, pan) = compute_mix_values(info, snapshot, focus, viewport_center);
             mix_volume *= self.options.sound_volume;
-            drop(info);
             self.system
                 .channel_set_volume_and_pan(channel, mix_volume, pan);
         }
@@ -1128,7 +1126,7 @@ impl SoundResolver {
             return;
         }
         let label = format!("definition::{}", definition_id);
-        let mut libs = collect_sound_libraries_from_group(group, label);
+        let libs = collect_sound_libraries_from_group(group, label);
         if !libs.is_empty() {
             self.global.extend(libs);
         }
@@ -1950,6 +1948,7 @@ struct IngameMouseState {
 struct LobbyParticipantState {
     name: String,
     ready: bool,
+    #[allow(dead_code)]
     kind: ParticipantKind,
 }
 
@@ -2879,7 +2878,7 @@ fn merge_frontend_scenarios(entries: Vec<FrontendScenario>) -> Vec<FrontendScena
     let mut result: Vec<FrontendScenario> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
 
-    for mut entry in entries {
+    for entry in entries {
         if let Some(&existing_idx) = index.get(&entry.identifier) {
             let existing = &mut result[existing_idx];
             if existing.kind == entry.kind {
@@ -3448,6 +3447,7 @@ struct SavedGameFile {
 
 #[derive(Debug, Clone, Deserialize)]
 struct SavedGameHeader {
+    #[allow(dead_code)]
     version: SaveFileVersion,
     saved_at_seconds: u64,
     scenario: SavedScenarioInfo,
@@ -3913,7 +3913,6 @@ fn load_save_thumbnail(path: &Path) -> Option<ImageData> {
             }
             rgba
         }
-        _ => return None,
     };
     Some(ImageData::new(info.width, info.height, pixels))
 }
@@ -4047,7 +4046,7 @@ impl GameApp {
         let main_menu_state = MainMenuState::new(main_menu, participants_label);
 
         let scenario_catalog = build_scenario_catalog(&scenarios);
-        let mut menu_state = MenuState::new(menu, scenarios);
+        let menu_state = MenuState::new(menu, scenarios);
         let scenario_label = menu_state.label_path();
         let mut graphics = GraphicsSystem::new(
             width,

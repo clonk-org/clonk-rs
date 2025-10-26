@@ -165,6 +165,8 @@ impl Config {
         self.entries.values()
     }
 
+    #[allow(dead_code)]
+
     pub(crate) fn entry_map(&self) -> &IndexMap<(Option<String>, String), Entry> {
         &self.entries
     }
@@ -194,7 +196,7 @@ impl Config {
         let mut current_section: Option<&Option<String>> = None;
         for entry in self.entries.values() {
             let section_ref = &entry.section;
-            if current_section.map_or(true, |s| s != section_ref) {
+            if current_section != Some(section_ref) {
                 if let Some(section_name) = section_ref.as_ref() {
                     let commented = self
                         .section_meta

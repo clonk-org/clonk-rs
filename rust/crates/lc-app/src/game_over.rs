@@ -75,6 +75,7 @@ impl GameOverOutcome {
 
 #[derive(Clone, Debug)]
 pub struct GameOverEntry {
+    #[allow(dead_code)]
     pub player_id: i32,
     pub name: String,
     pub outcome: GameOverOutcome,
@@ -130,6 +131,7 @@ impl GameOverState {
         &self.subtitle
     }
 
+    #[allow(dead_code)]
     pub fn entries(&self) -> &[GameOverEntry] {
         &self.entries
     }

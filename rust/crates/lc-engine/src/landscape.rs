@@ -522,6 +522,7 @@ impl Landscape {
         dirty
     }
 
+    #[allow(dead_code)]
     fn is_within_bounds(&self, x: i32, y: i32) -> bool {
         x >= 0 && (x as u32) < self.width && y >= 0
     }
