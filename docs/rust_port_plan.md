@@ -35,6 +35,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2028-10-26):** Scenario browser now merges duplicate scenario folders across user and install roots, keeping overrides while inheriting fallback entries so the tree matches LegacyClonk without duplicate listings.
 **Progress (2025-10-26):** Frontend catalog now carries folder index/icon/difficulty metadata from `lc-resources` and re-sorts merged scenario trees so overrides keep LegacyClonk ordering; added regression coverage in `rust/crates/lc-app/src/main.rs`.
 **Progress (2028-11-08):** Scenario root discovery now normalizes case-insensitive paths so identical install directories are scanned once; guarded by `scenario_roots_deduplicates_case_insensitive_variants` in `rust/crates/lc-app/src/main.rs`.
+**Progress (2025-10-26):** Scenario discovery now retains install preview art for user overrides that omit their own images by merging metadata during catalog deduplication; guarded by `load_frontend_scenarios_fills_missing_preview_from_install` in `rust/crates/lc-app/src/main.rs`.
 
 **Files:** `rust/crates/lc-app/src/main.rs` (scenario catalog + load_frontend_scenarios), `rust/crates/lc-resources/src/scenario.rs`
 

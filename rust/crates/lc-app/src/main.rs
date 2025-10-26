@@ -18,7 +18,7 @@ use std::f32::consts::PI;
 use std::fmt;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -2756,6 +2756,10 @@ struct FrontendScenario {
 
 impl FrontendScenario {
     fn to_ui_entry(&self) -> ScenarioEntry {
+        let preview = self
+            .preview
+            .clone()
+            .or_else(|| Some(generate_preview_placeholder(self.kind, &self.title)));
         ScenarioEntry {
             identifier: self.identifier.clone(),
             title: self.title.clone(),
@@ -2764,56 +2768,57 @@ impl FrontendScenario {
             is_editable: self.is_editable,
             is_playable: self.is_playable,
             location: self.location_label(),
-            preview: self.preview.clone(),
+            preview,
         }
     }
 
-    fn from_resource(
-        entry: resource_scenario::ScenarioEntry,
-        seen: &mut HashSet<String>,
-        root_label: &str,
-    ) -> Option<Self> {
-        let identifier = entry.identifier.clone();
-        let kind = match entry.kind {
+    fn from_resource(entry: resource_scenario::ScenarioEntry, root_label: &str) -> Self {
+        let resource_scenario::ScenarioEntry {
+            identifier,
+            path,
+            title,
+            description,
+            kind,
+            is_editable,
+            is_playable,
+            preview,
+            children,
+            folder_index,
+            icon_index,
+            difficulty,
+        } = entry;
+
+        let kind = match kind {
             resource_scenario::ScenarioEntryKind::Scenario => ScenarioKind::Scenario,
             resource_scenario::ScenarioEntryKind::Folder => ScenarioKind::Folder,
             resource_scenario::ScenarioEntryKind::Editor => ScenarioKind::Editor,
         };
 
-        let mut children = Vec::new();
-        for child in entry.children {
-            if let Some(converted) = FrontendScenario::from_resource(child, seen, root_label) {
-                children.push(converted);
-            }
-        }
+        let children = children
+            .into_iter()
+            .map(|child| FrontendScenario::from_resource(child, root_label))
+            .collect();
 
-        let preview = entry
-            .preview
-            .as_ref()
-            .map(|preview| {
-                ImageData::from_arc(preview.width(), preview.height(), preview.clone_data())
-            })
-            .or_else(|| Some(generate_preview_placeholder(kind.clone(), &entry.title)));
+        let preview = preview.map(|preview| {
+            let (width, height, pixels) = preview.into_arc();
+            ImageData::from_arc(width, height, pixels)
+        });
 
-        if matches!(kind, ScenarioKind::Scenario) && !seen.insert(identifier.clone()) {
-            return None;
-        }
-
-        Some(Self {
+        Self {
             identifier,
-            title: entry.title,
-            description: entry.description,
+            title,
+            description,
             kind,
-            is_editable: entry.is_editable,
-            is_playable: entry.is_playable,
-            path: Some(entry.path),
+            is_editable,
+            is_playable,
+            path: Some(path),
             root_label: Some(root_label.to_string()),
             preview,
             children,
-            folder_index: entry.folder_index,
-            icon_index: entry.icon_index,
-            difficulty: entry.difficulty,
-        })
+            folder_index,
+            icon_index,
+            difficulty,
+        }
     }
 
     fn location_label(&self) -> Option<String> {
@@ -2868,11 +2873,22 @@ fn merge_frontend_scenarios(entries: Vec<FrontendScenario>) -> Vec<FrontendScena
     let mut result: Vec<FrontendScenario> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
 
-    for entry in entries {
+    for mut entry in entries {
         if let Some(&existing_idx) = index.get(&entry.identifier) {
-            if is_container_kind(&entry.kind) && is_container_kind(&result[existing_idx].kind) {
-                let existing = &mut result[existing_idx];
-                merge_container(existing, entry);
+            let existing = &mut result[existing_idx];
+            if existing.kind == entry.kind {
+                if is_container_kind(&existing.kind) && is_container_kind(&entry.kind) {
+                    merge_container(existing, entry);
+                } else {
+                    merge_leaf(existing, entry);
+                }
+            } else {
+                tracing::warn!(
+                    identifier = %existing.identifier,
+                    existing_kind = ?existing.kind,
+                    incoming_kind = ?entry.kind,
+                    "scenario catalog contained identifier with mismatched kinds; keeping existing entry"
+                );
             }
             continue;
         }
@@ -2884,7 +2900,17 @@ fn merge_frontend_scenarios(entries: Vec<FrontendScenario>) -> Vec<FrontendScena
     result
 }
 
+fn merge_leaf(existing: &mut FrontendScenario, mut incoming: FrontendScenario) {
+    merge_metadata(existing, &mut incoming);
+}
+
 fn merge_container(existing: &mut FrontendScenario, mut incoming: FrontendScenario) {
+    merge_metadata(existing, &mut incoming);
+    merge_children(&mut existing.children, incoming.children);
+    sort_frontend_entries(&mut existing.children);
+}
+
+fn merge_metadata(existing: &mut FrontendScenario, incoming: &mut FrontendScenario) {
     if existing.description.is_none() {
         existing.description = incoming.description.take();
     }
@@ -2895,7 +2921,7 @@ fn merge_container(existing: &mut FrontendScenario, mut incoming: FrontendScenar
         existing.path = incoming.path.take();
     }
     if existing.root_label.is_none() {
-        existing.root_label = incoming.root_label.clone();
+        existing.root_label = incoming.root_label.take();
     }
     existing.is_editable |= incoming.is_editable;
     existing.is_playable |= incoming.is_playable;
@@ -2908,8 +2934,6 @@ fn merge_container(existing: &mut FrontendScenario, mut incoming: FrontendScenar
     if existing.difficulty.is_none() {
         existing.difficulty = incoming.difficulty;
     }
-    merge_children(&mut existing.children, incoming.children);
-    sort_frontend_entries(&mut existing.children);
 }
 
 fn merge_children(
@@ -8315,14 +8339,9 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
                 }
 
                 if !combined_entries.is_empty() {
-                    let mut seen = HashSet::new();
                     let mut scenarios = Vec::new();
                     for (entry, label) in combined_entries {
-                        if let Some(converted) =
-                            FrontendScenario::from_resource(entry, &mut seen, &label)
-                        {
-                            scenarios.push(converted);
-                        }
+                        scenarios.push(FrontendScenario::from_resource(entry, &label));
                     }
                     if !scenarios.is_empty() {
                         return merge_frontend_scenarios(scenarios);
@@ -8669,6 +8688,18 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         }
         panic!("scenario did not enter running mode in time");
+    }
+
+    fn write_preview_png(path: &Path, pixel: [u8; 4]) {
+        let file = File::create(path).expect("create preview image");
+        let writer = BufWriter::new(file);
+        let mut encoder = Encoder::new(writer, 1, 1);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_depth(BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("write PNG header");
+        writer
+            .write_image_data(&pixel)
+            .expect("write PNG pixel data");
     }
 
     fn make_object(id: u64, definition: &str, position: Vector2) -> ObjectSnapshot {
@@ -9577,6 +9608,56 @@ mod tests {
             path.starts_with(&user_dir),
             "expected scenario path to point at user overrides"
         );
+
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn load_frontend_scenarios_fills_missing_preview_from_install() {
+        let _env_lock = crate::tests::env_lock().lock();
+        reset_cached_app_paths();
+
+        let install_dir = tempdir().unwrap();
+
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let install_scenario_dir = install_dir.path().join("Scenarios").join("Alpha.c4s");
+        fs::create_dir_all(&install_scenario_dir).unwrap();
+        fs::write(
+            install_scenario_dir.join("Scenario.json"),
+            br#"{"name":"Install Alpha"}"#,
+        )
+        .unwrap();
+        write_preview_png(
+            &install_scenario_dir.join("Title.png"),
+            [0x10, 0x20, 0x30, 0x40],
+        );
+
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+        let user_scenario_dir = user_dir.join("Scenarios").join("Alpha.c4s");
+        fs::create_dir_all(&user_scenario_dir).unwrap();
+        fs::write(
+            user_scenario_dir.join("Scenario.json"),
+            br#"{"name":"User Alpha"}"#,
+        )
+        .unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+
+        let scenarios = load_frontend_scenarios();
+        assert_eq!(scenarios.len(), 1, "duplicate scenario should be merged");
+        let scenario = &scenarios[0];
+        assert_eq!(scenario.title, "User Alpha");
+        let preview = scenario.preview.as_ref().expect("merged preview");
+        assert_eq!(preview.width(), 1);
+        assert_eq!(preview.height(), 1);
+        assert_eq!(preview.pixels(), &[0x10, 0x20, 0x30, 0x40]);
 
         reset_cached_app_paths();
     }
