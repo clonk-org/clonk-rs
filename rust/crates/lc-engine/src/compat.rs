@@ -47,6 +47,13 @@ const MATERIAL_NONE: i32 = -1;
 const ANY_CONTAINER_SENTINEL: i32 = 123;
 const NO_CONTAINER_SENTINEL: i32 = 124;
 const MAX_VERTEX_COUNT: i32 = 30;
+const C4V_ANY: i32 = 0;
+const C4V_INT: i32 = 1;
+const C4V_BOOL: i32 = 2;
+const C4V_STRING: i32 = 5;
+const C4V_ARRAY: i32 = 6;
+const C4V_MAP: i32 = 7;
+const LEGACY_MAX_ARRAY_SIZE: i32 = 1_000_000;
 
 #[derive(Debug, Clone)]
 pub(crate) struct HostWorldObject {
@@ -1911,6 +1918,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Log", log_message);
     script.register_host_function("DebugLog", debug_log_message);
     script.register_host_function("Format", format_string);
+    script.register_host_function("GetType", get_type);
+    script.register_host_function("CreateArray", create_array);
+    script.register_host_function("GetLength", get_length);
+    script.register_host_function("GetIndexOf", get_index_of);
     script.register_host_function("GetKeys", get_keys);
     script.register_host_function("GetValues", get_values);
     script.register_host_function("Contents", contents);
@@ -2530,6 +2541,94 @@ fn get_values(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|(_, value)| value.clone())
         .collect();
     Ok(Value::Array(values))
+}
+
+fn get_type(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new("GetType expects 1 argument: value"));
+    }
+
+    let type_code = match &args[0] {
+        Value::Int(_) => C4V_INT,
+        Value::Bool(_) => C4V_BOOL,
+        Value::String(_) => C4V_STRING,
+        Value::Array(_) => C4V_ARRAY,
+        Value::Proplist(_) => C4V_MAP,
+        Value::Nil => C4V_ANY,
+    };
+
+    Ok(Value::Int(type_code))
+}
+
+fn create_array(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new("CreateArray expects 1 argument: size"));
+    }
+
+    let size = value_to_i32(&args[0], "CreateArray", "size")?;
+    if size < 0 || size > LEGACY_MAX_ARRAY_SIZE {
+        return Err(RuntimeError::new(format!(
+            "CreateArray: invalid array size ({size})"
+        )));
+    }
+
+    let values = vec![Value::Nil; size as usize];
+    Ok(Value::Array(values))
+}
+
+fn get_length(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new("GetLength expects 1 argument: value"));
+    }
+
+    let value = &args[0];
+    if !value.as_bool() {
+        return Ok(Value::Nil);
+    }
+
+    match value {
+        Value::String(text) => {
+            let len = i32::try_from(text.chars().count())
+                .map_err(|_| RuntimeError::new("GetLength: string length exceeds i32 range"))?;
+            Ok(Value::Int(len))
+        }
+        Value::Array(values) => {
+            let len = i32::try_from(values.len())
+                .map_err(|_| RuntimeError::new("GetLength: array length exceeds i32 range"))?;
+            Ok(Value::Int(len))
+        }
+        Value::Proplist(entries) => {
+            let len = i32::try_from(entries.len())
+                .map_err(|_| RuntimeError::new("GetLength: map entry count exceeds i32 range"))?;
+            Ok(Value::Int(len))
+        }
+        _ => Err(RuntimeError::new(
+            "func \"GetLength\" par 0 cannot be converted to string or array or map",
+        )),
+    }
+}
+
+fn get_index_of(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 2 {
+        return Err(RuntimeError::new(
+            "GetIndexOf expects 2 arguments: value and array",
+        ));
+    }
+
+    let search = &args[0];
+    let array = match &args[1] {
+        Value::Array(values) => values,
+        Value::Nil => return Ok(Value::Int(-1)),
+        _ => return Ok(Value::Int(-1)),
+    };
+
+    if let Some(index) = array.iter().position(|entry| entry == search) {
+        let index = i32::try_from(index)
+            .map_err(|_| RuntimeError::new("GetIndexOf: index exceeds i32 range"))?;
+        Ok(Value::Int(index))
+    } else {
+        Ok(Value::Int(-1))
+    }
 }
 
 fn format_string(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -10151,6 +10250,118 @@ mod tests {
         ];
         let result = format_string(&args).expect("Format succeeds");
         assert_eq!(result, Value::String("Crew 007 CLNK Ready 5 %".into()));
+    }
+
+    #[test]
+    fn get_type_reports_basic_value_kinds() {
+        assert_eq!(
+            get_type(&[Value::Nil]).expect("GetType succeeds"),
+            Value::Int(C4V_ANY)
+        );
+        assert_eq!(
+            get_type(&[Value::Int(7)]).expect("GetType succeeds"),
+            Value::Int(C4V_INT)
+        );
+        assert_eq!(
+            get_type(&[Value::Bool(true)]).expect("GetType succeeds"),
+            Value::Int(C4V_BOOL)
+        );
+        assert_eq!(
+            get_type(&[Value::String("Hi".into())]).expect("GetType succeeds"),
+            Value::Int(C4V_STRING)
+        );
+        assert_eq!(
+            get_type(&[Value::Array(vec![Value::Int(1)])]).expect("GetType succeeds"),
+            Value::Int(C4V_ARRAY)
+        );
+        let mut map = HashMap::new();
+        map.insert("key".into(), Value::Int(1));
+        assert_eq!(
+            get_type(&[Value::Proplist(map)]).expect("GetType succeeds"),
+            Value::Int(C4V_MAP)
+        );
+    }
+
+    #[test]
+    fn create_array_allocates_nil_initialised_values() {
+        let result = create_array(&[Value::Int(3)]).expect("CreateArray succeeds");
+        assert_eq!(
+            result,
+            Value::Array(vec![Value::Nil, Value::Nil, Value::Nil])
+        );
+    }
+
+    #[test]
+    fn create_array_rejects_out_of_range_sizes() {
+        let error = create_array(&[Value::Int(-1)]).expect_err("CreateArray rejects negative");
+        assert!(error
+            .message()
+            .starts_with("CreateArray: invalid array size"));
+
+        let error = create_array(&[Value::Int(LEGACY_MAX_ARRAY_SIZE + 1)])
+            .expect_err("CreateArray rejects oversized");
+        assert!(error
+            .message()
+            .starts_with("CreateArray: invalid array size"));
+    }
+
+    #[test]
+    fn get_length_returns_lengths_for_supported_types() {
+        let result = get_length(&[Value::String("abc".into())]).expect("GetLength succeeds");
+        assert_eq!(result, Value::Int(3));
+
+        let result =
+            get_length(&[Value::Array(vec![Value::Int(1), Value::Int(2)])]).expect("array length");
+        assert_eq!(result, Value::Int(2));
+
+        let mut map = HashMap::new();
+        map.insert("a".into(), Value::Int(1));
+        map.insert("b".into(), Value::Bool(true));
+        let result = get_length(&[Value::Proplist(map)]).expect("map length");
+        assert_eq!(result, Value::Int(2));
+    }
+
+    #[test]
+    fn get_length_returns_nil_for_falsey_values() {
+        assert_eq!(get_length(&[Value::Nil]).expect("nil handled"), Value::Nil);
+        assert_eq!(
+            get_length(&[Value::Bool(false)]).expect("false handled"),
+            Value::Nil
+        );
+        assert_eq!(
+            get_length(&[Value::Int(0)]).expect("zero handled"),
+            Value::Nil
+        );
+    }
+
+    #[test]
+    fn get_length_errors_for_unsupported_types() {
+        let error = get_length(&[Value::Int(5)]).expect_err("GetLength rejects unsupported");
+        assert_eq!(
+            error.message(),
+            "func \"GetLength\" par 0 cannot be converted to string or array or map"
+        );
+    }
+
+    #[test]
+    fn get_index_of_returns_matching_index_or_negative_one() {
+        let array = Value::Array(vec![
+            Value::Int(5),
+            Value::String("target".into()),
+            Value::Int(7),
+        ]);
+
+        let found = get_index_of(&[Value::String("target".into()), array.clone()])
+            .expect("GetIndexOf succeeds");
+        assert_eq!(found, Value::Int(1));
+
+        let missing =
+            get_index_of(&[Value::String("missing".into()), array]).expect("missing handled");
+        assert_eq!(missing, Value::Int(-1));
+
+        let non_array =
+            get_index_of(&[Value::Int(1), Value::Bool(true)]).expect("non-array handled");
+        assert_eq!(non_array, Value::Int(-1));
     }
 
     #[test]

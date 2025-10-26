@@ -434,6 +434,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2028-05-30):** Ported the selection inventory host queries (`GetCursor`, `GetViewCursor`, `GetSelectCount`) to the Rust compatibility layer, extending the host-world snapshot with crew-selection state so script access mirrors LegacyClonk and covering each helper with regression tests in `rust/crates/lc-engine/src/compat.rs`.
 **Progress (2028-06-02):** Wired scenario-level callbacks so registering/removing players triggers `PreInitializePlayer`, `InitializePlayer`, `RemovePlayer`, and `OnGameOver` with parity argument handling; hooked the broadcasts into the engine, ensured local players register through the frontend, and backed the flow with regression tests verifying physics deltas and spawn/ownership behaviour.
 **Progress (2028-07-03):** Implemented `GetKeys`/`GetValues` host functions with deterministic ordering so script proplists enumerate like LegacyClonk, including regression coverage in `rust/crates/lc-engine/src/compat.rs`.
+**Progress (2028-08-24):** Filled in the legacy script utility surface by porting `GetType`, `CreateArray`, `GetLength`, and `GetIndexOf` host functions to the Rust compatibility layer with regression tests covering nil handling, array/string/map sizing, and legacy search semantics in `rust/crates/lc-engine/src/compat.rs`.
 
 **Files:** lc-script, host function registration in lc-engine
 
