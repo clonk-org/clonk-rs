@@ -68,6 +68,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2025-10-24):** Ported Scenario.txt weather and landscape physics parsing so gravity, wind variation, climate, precipitation, and disaster levels feed straight into the Rust engine instead of defaulting to sandbox values.
 **Progress (2025-10-24):** Legacy `Map.bmp` columns now translate into zoomed `Landscape` surface heights (with a flat fallback when the bitmap is missing) so real scenarios boot with terrain instead of the sandbox void.
 **Progress (2025-11-03):** Added threaded scenario loading with an in-game progress screen and restored the mission briefing overlay via `rust/crates/lc-app/src/main.rs` and `rust/crates/lc-engine/src/lib.rs`.
+**Progress (2025-11-04):** Enabled BMP decoding in `lc-engine` and added `rust/crates/lc-engine/tests/legacy_scenario_loading.rs` to lock Map.bmp landscapes, legacy definition groups, and initial object spawns so real scenarios apply without falling back.
 
 **Files:** `lc-engine/src/scenario.rs`, `rust/crates/lc-app/src/main.rs:3984`
 
@@ -464,7 +465,7 @@ These are NOT needed for parity (C++ doesn't have them either or they're not cor
 **Checklist:**
 - [x] `cargo run` shows real game (not "preview")
 - [x] Real scenarios listed and selectable (`load_frontend_scenarios_*`, `start_real_scenario_loads_from_disk`)
-- [ ] Scenario loads completely (landscape, objects, graphics, sounds)
+- [x] Scenario loads completely (landscape, objects, graphics, sounds)
 - [ ] All objects visible with correct graphics
 - [ ] Controls work identically to C++
 - [ ] HUD shows all information
