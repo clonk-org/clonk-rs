@@ -449,6 +449,31 @@ impl Landscape {
                     }
                 }
             }
+        } else if !self.solid_materials.is_empty() {
+            let mut target: Option<MaterialId> = None;
+            let mut uniform = true;
+            for entry in &self.solid_materials {
+                match entry {
+                    Some(material_id) => {
+                        if let Some(existing) = target {
+                            if existing != *material_id {
+                                uniform = false;
+                                break;
+                            }
+                        } else {
+                            target = Some(*material_id);
+                        }
+                    }
+                    None => {
+                        uniform = false;
+                        break;
+                    }
+                }
+            }
+            if uniform && target != self.default_solid_material {
+                self.default_solid_material = target;
+                changed = true;
+            }
         }
 
         let mut liquids_changed = false;

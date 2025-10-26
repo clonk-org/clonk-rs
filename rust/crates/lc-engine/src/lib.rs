@@ -81,7 +81,8 @@ pub struct ContextMenuEntry {
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
     object_reference_value, AudioRegistry, DefinitionMetadata, EffectContextOutcome,
-    EnvironmentDelta, HostWorldContext, HostWorldObject, PhysicsDelta, PlayerCommand,
+    EnvironmentDelta, HostWorldContext, HostWorldObject, LandscapeOperation, PhysicsDelta,
+    PlayerCommand,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use material::MaterialReactionKind;
@@ -3765,6 +3766,7 @@ impl Definition {
             environment: environment_from_host,
             physics: physics_from_host,
             spawns: host_spawns,
+            landscape: host_landscape_ops,
             particles: host_particles,
             transfer_zones: host_transfer_zones,
             messages: host_messages,
@@ -3801,6 +3803,9 @@ impl Definition {
         }
         if !host_spawns.is_empty() {
             batch.spawns.extend(host_spawns);
+        }
+        if !host_landscape_ops.is_empty() {
+            batch.landscape_ops.extend(host_landscape_ops);
         }
         if !host_particles.is_empty() {
             batch.particles.extend(host_particles);
@@ -3907,6 +3912,7 @@ impl Definition {
             environment: environment_from_host,
             physics: physics_from_host,
             spawns: host_spawns,
+            landscape: host_landscape_ops,
             particles: host_particles,
             transfer_zones: host_transfer_zones,
             messages: host_messages,
@@ -3943,6 +3949,9 @@ impl Definition {
         }
         if !host_spawns.is_empty() {
             batch.spawns.extend(host_spawns);
+        }
+        if !host_landscape_ops.is_empty() {
+            batch.landscape_ops.extend(host_landscape_ops);
         }
         if !host_particles.is_empty() {
             batch.particles.extend(host_particles);
@@ -5015,6 +5024,7 @@ impl ScenarioScript {
             environment: environment_from_host,
             physics: physics_from_host,
             spawns: host_spawns,
+            landscape: host_landscape_ops,
             particles: host_particles,
             transfer_zones: host_transfer_zones,
             messages: host_messages,
@@ -5041,6 +5051,9 @@ impl ScenarioScript {
         }
         if !host_global_effects.is_empty() {
             batch.global_effects.extend(host_global_effects);
+        }
+        if !host_landscape_ops.is_empty() {
+            batch.landscape_ops.extend(host_landscape_ops);
         }
         if let Some(delta) = environment_from_host {
             merge_environment_delta(&mut environment_delta, &delta);
@@ -5105,6 +5118,7 @@ struct CommandBatch {
     global_effects: Vec<EffectCommand>,
     environment: Option<EnvironmentDelta>,
     physics: Option<PhysicsDelta>,
+    landscape_ops: Vec<LandscapeOperation>,
     particles: Vec<ParticleCommand>,
     transfer_zones: Vec<TransferZoneCommand>,
     audio: Vec<AudioCommand>,
@@ -5118,6 +5132,7 @@ struct ScenarioBatch {
     global_effects: Vec<EffectCommand>,
     environment: Option<EnvironmentDelta>,
     physics: Option<PhysicsDelta>,
+    landscape_ops: Vec<LandscapeOperation>,
     landscape: Vec<LandscapeCommand>,
     particles: Vec<ParticleCommand>,
     transfer_zones: Vec<TransferZoneCommand>,
@@ -6163,6 +6178,7 @@ impl Engine {
             global_effects,
             environment,
             physics,
+            landscape_ops,
             landscape,
             particles,
             transfer_zones,
@@ -6173,6 +6189,10 @@ impl Engine {
 
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
+        }
+
+        if !landscape_ops.is_empty() {
+            self.apply_landscape_operations(landscape_ops);
         }
 
         if let Some(delta) = environment {
@@ -7147,6 +7167,7 @@ impl Engine {
                     audio_events,
                     event_messages,
                     player_commands,
+                    landscape_ops,
                     audio_state,
                     new_rng,
                 ) = {
@@ -7171,6 +7192,9 @@ impl Engine {
                 };
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
+                if !landscape_ops.is_empty() {
+                    self.apply_landscape_operations(landscape_ops);
+                }
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
                 }
@@ -7220,6 +7244,7 @@ impl Engine {
                     audio_events,
                     event_messages,
                     player_commands,
+                    landscape_ops,
                     audio_state,
                     new_rng,
                 ) = {
@@ -7244,6 +7269,9 @@ impl Engine {
                 };
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
+                if !landscape_ops.is_empty() {
+                    self.apply_landscape_operations(landscape_ops);
+                }
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
                 }
@@ -7347,6 +7375,7 @@ impl Engine {
                 global_effects,
                 environment,
                 physics,
+                landscape_ops,
                 particles,
                 transfer_zones,
                 audio,
@@ -7356,6 +7385,10 @@ impl Engine {
 
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
+            }
+
+            if !landscape_ops.is_empty() {
+                self.apply_landscape_operations(landscape_ops);
             }
 
             if let Some(update) = environment {
@@ -7426,6 +7459,7 @@ impl Engine {
                     audio_events,
                     event_messages,
                     player_commands,
+                    landscape_ops,
                 ) = {
                     let definition = self
                         .definitions
@@ -7441,6 +7475,7 @@ impl Engine {
                         audio_events,
                         event_messages,
                         player_commands,
+                        landscape_ops,
                         audio_state,
                         new_rng,
                     ) = Self::run_effect_events_for_object(
@@ -7465,10 +7500,14 @@ impl Engine {
                         audio_events,
                         event_messages,
                         player_commands,
+                        landscape_ops,
                     )
                 };
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
+                }
+                if !landscape_ops.is_empty() {
+                    self.apply_landscape_operations(landscape_ops);
                 }
                 if !audio_events.is_empty() {
                     self.pending_audio.extend(audio_events);
@@ -7811,6 +7850,7 @@ impl Engine {
             environment,
             physics,
             spawns,
+            landscape: host_landscape_ops,
             particles,
             transfer_zones,
             messages,
@@ -7818,6 +7858,10 @@ impl Engine {
             audio: outcome_audio,
             next_object_id,
         } = outcome;
+
+        if !host_landscape_ops.is_empty() {
+            self.apply_landscape_operations(host_landscape_ops);
+        }
 
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
@@ -7923,6 +7967,7 @@ impl Engine {
                 audio_events,
                 event_messages,
                 player_commands,
+                landscape_ops,
                 audio_state,
                 new_rng,
             ) = Self::run_effect_events_for_object(
@@ -7940,6 +7985,9 @@ impl Engine {
             )?;
             self.rng = new_rng;
             self.audio_registry = audio_state;
+            if !landscape_ops.is_empty() {
+                self.apply_landscape_operations(landscape_ops);
+            }
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
@@ -8450,6 +8498,7 @@ impl Engine {
             Vec<AudioCommand>,
             Vec<MessageCommand>,
             Vec<PlayerCommand>,
+            Vec<LandscapeOperation>,
             AudioRegistry,
             ChaCha8Rng,
         ),
@@ -8460,6 +8509,7 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 PhysicsDelta::default(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -8479,6 +8529,7 @@ impl Engine {
         let mut pending_messages = Vec::new();
         let mut current_audio = audio;
         let mut pending_player_commands = Vec::new();
+        let mut pending_landscape_ops = Vec::new();
 
         while let Some(event) = queue.pop_front() {
             let snapshot_for_call = state_snapshot.clone();
@@ -8532,12 +8583,17 @@ impl Engine {
                 destroy_object,
                 environment: environment_update,
                 physics: physics_update,
+                landscape: host_landscape_ops,
                 particles: mut emitted_particles,
                 messages: event_messages,
                 player_commands: effect_player_commands,
                 audio: outcome_audio,
                 ..
             } = outcome;
+
+            if !host_landscape_ops.is_empty() {
+                pending_landscape_ops.extend(host_landscape_ops);
+            }
 
             if !effect_player_commands.is_empty() {
                 pending_player_commands.extend(effect_player_commands);
@@ -8608,6 +8664,7 @@ impl Engine {
             pending_audio,
             pending_messages,
             pending_player_commands,
+            pending_landscape_ops,
             current_audio,
             rng,
         ))
@@ -10374,6 +10431,134 @@ impl Engine {
         }
     }
 
+    fn apply_landscape_operations(&mut self, operations: Vec<LandscapeOperation>) {
+        if operations.is_empty() {
+            return;
+        }
+        for operation in operations {
+            match operation {
+                LandscapeOperation::DigCircle {
+                    center,
+                    radius,
+                    requested,
+                    by_object,
+                } => self.execute_dig_circle_operation(center, radius, requested, by_object),
+                LandscapeOperation::DigRect {
+                    origin,
+                    width,
+                    height,
+                    requested,
+                    by_object,
+                } => self.execute_dig_rect_operation(origin, width, height, requested, by_object),
+            }
+        }
+    }
+
+    fn execute_dig_circle_operation(
+        &mut self,
+        center: Vector2,
+        radius: i32,
+        requested: bool,
+        by_object: Option<ObjectId>,
+    ) {
+        if radius <= 0 {
+            return;
+        }
+        let Some(landscape) = self.landscape.as_mut() else {
+            return;
+        };
+        let mut removal_counts: HashMap<MaterialId, i32> = HashMap::new();
+        let width = landscape.width() as i32;
+        let radius_sq = i64::from(radius) * i64::from(radius);
+        for dx in -radius..=radius {
+            let column = center.x.saturating_add(dx);
+            if column < 0 || column >= width {
+                continue;
+            }
+            let dx_sq = i64::from(dx) * i64::from(dx);
+            if dx_sq > radius_sq {
+                continue;
+            }
+            let remaining = radius_sq - dx_sq;
+            if remaining < 0 {
+                continue;
+            }
+            let vertical = (remaining as f64).sqrt().floor() as i32;
+            let target = center.y.saturating_add(vertical);
+            if let Some((material_id, removed)) =
+                Self::dig_column(&self.materials, landscape, column, target)
+            {
+                removal_counts
+                    .entry(material_id)
+                    .and_modify(|value| *value = value.saturating_add(removed))
+                    .or_insert(removed);
+            }
+        }
+        self.apply_dig_removal_counts(removal_counts, requested, by_object);
+    }
+
+    fn execute_dig_rect_operation(
+        &mut self,
+        origin: Vector2,
+        width: i32,
+        height: i32,
+        requested: bool,
+        by_object: Option<ObjectId>,
+    ) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let Some(landscape) = self.landscape.as_mut() else {
+            return;
+        };
+        let mut removal_counts: HashMap<MaterialId, i32> = HashMap::new();
+        let landscape_width = landscape.width() as i32;
+        let bottom = origin.y.saturating_add(height);
+        for offset in 0..width {
+            let column = origin.x.saturating_add(offset);
+            if column < 0 || column >= landscape_width {
+                continue;
+            }
+            if let Some((material_id, removed)) =
+                Self::dig_column(&self.materials, landscape, column, bottom)
+            {
+                removal_counts
+                    .entry(material_id)
+                    .and_modify(|value| *value = value.saturating_add(removed))
+                    .or_insert(removed);
+            }
+        }
+        self.apply_dig_removal_counts(removal_counts, requested, by_object);
+    }
+
+    fn apply_dig_removal_counts(
+        &mut self,
+        removal_counts: HashMap<MaterialId, i32>,
+        requested: bool,
+        by_object: Option<ObjectId>,
+    ) {
+        if removal_counts.is_empty() {
+            return;
+        }
+        let Some(object_id) = by_object else {
+            return;
+        };
+        let Some(object_index) = self.find_object_index(object_id) else {
+            return;
+        };
+        if self.materials.is_empty() {
+            return;
+        }
+        {
+            let object = &mut self.objects[object_index];
+            object.ensure_material_capacity(self.materials.len());
+            for (material_id, removed) in &removal_counts {
+                object.add_material_content(*material_id, *removed);
+            }
+        }
+        self.process_dig_material_conversions(object_index, requested);
+    }
+
     fn process_blast_reactions(
         &mut self,
         center: Vector2,
@@ -11070,6 +11255,7 @@ impl Engine {
                     global_effects,
                     environment,
                     physics,
+                    landscape_ops,
                     particles,
                     transfer_zones,
                     audio,
@@ -11105,6 +11291,9 @@ impl Engine {
             }
             if let Some(delta) = physics {
                 self.apply_physics_delta(delta);
+            }
+            if !landscape_ops.is_empty() {
+                self.apply_landscape_operations(landscape_ops);
             }
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
@@ -11163,6 +11352,7 @@ impl Engine {
                 audio_events,
                 event_messages,
                 player_commands,
+                landscape_ops,
                 audio_state,
                 new_rng,
             ) = Self::run_effect_events_for_object(
@@ -11182,6 +11372,9 @@ impl Engine {
             self.audio_registry = audio_state;
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
+            }
+            if !landscape_ops.is_empty() {
+                self.apply_landscape_operations(landscape_ops);
             }
             if !audio_events.is_empty() {
                 self.pending_audio.extend(audio_events);

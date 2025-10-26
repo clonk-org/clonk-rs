@@ -1884,6 +1884,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("PathFree", path_free);
     script.register_host_function("GetPath", get_path);
     script.register_host_function("SetTransferZone", set_transfer_zone);
+    script.register_host_function("DigFree", dig_free);
+    script.register_host_function("DigFreeRect", dig_free_rect);
     script.register_host_function("GBackSolid", g_back_solid);
     script.register_host_function("GBackSemiSolid", g_back_semi_solid);
     script.register_host_function("GBackLiquid", g_back_liquid);
@@ -3361,16 +3363,33 @@ where
             audio_state,
         ));
         let result = func();
-        let mut context = cell
+        let context = cell
             .borrow_mut()
             .take()
             .expect("effect context must be present");
-        let mut outcome = context.into_commands();
+        let outcome = context.into_commands();
         AUDIO_CONTEXT.with(|cell| {
             *cell.borrow_mut() = Some(outcome.audio.state.clone());
         });
         (result, outcome)
     })
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum LandscapeOperation {
+    DigCircle {
+        center: Vector2,
+        radius: i32,
+        requested: bool,
+        by_object: Option<ObjectId>,
+    },
+    DigRect {
+        origin: Vector2,
+        width: i32,
+        height: i32,
+        requested: bool,
+        by_object: Option<ObjectId>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -3383,6 +3402,7 @@ pub(crate) struct EffectContextOutcome {
     pub environment: Option<EnvironmentDelta>,
     pub physics: Option<PhysicsDelta>,
     pub spawns: Vec<SpawnConfig>,
+    pub landscape: Vec<LandscapeOperation>,
     pub particles: Vec<ParticleCommand>,
     pub transfer_zones: Vec<TransferZoneCommand>,
     pub messages: Vec<MessageCommand>,
@@ -3401,6 +3421,7 @@ impl EffectContextOutcome {
         environment: Option<EnvironmentDelta>,
         physics: Option<PhysicsDelta>,
         spawns: Vec<SpawnConfig>,
+        landscape: Vec<LandscapeOperation>,
         transfer_zones: Vec<TransferZoneCommand>,
         messages: Vec<MessageCommand>,
         player_commands: Vec<PlayerCommand>,
@@ -3416,6 +3437,7 @@ impl EffectContextOutcome {
             environment,
             physics,
             spawns,
+            landscape,
             particles: Vec::new(),
             transfer_zones,
             messages,
@@ -3435,6 +3457,7 @@ impl EffectContextOutcome {
             environment: None,
             physics: None,
             spawns: Vec::new(),
+            landscape: Vec::new(),
             particles: Vec::new(),
             transfer_zones: Vec::new(),
             messages: Vec::new(),
@@ -5923,6 +5946,80 @@ fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
             .map(|material_id| material_id.index() as i32)
             .unwrap_or(MATERIAL_NONE);
         Ok(Value::Int(result))
+    })
+}
+
+fn dig_free(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 3 {
+        return Err(RuntimeError::new(
+            "DigFree expects at least 3 arguments: x, y, radius",
+        ));
+    }
+
+    let x = value_to_i32(&args[0], "DigFree", "x")?;
+    let y = value_to_i32(&args[1], "DigFree", "y")?;
+    let radius = value_to_i32(&args[2], "DigFree", "radius")?;
+    if radius < 0 {
+        return Ok(Value::Bool(false));
+    }
+
+    let requested = if let Some(arg) = args.get(3) {
+        value_to_bool(arg, "DigFree", "requested")?
+    } else {
+        false
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("DigFree requires an active engine context"))?;
+        let by_object = context.object_context().map(|object| object.id());
+        context.register_landscape_operation(LandscapeOperation::DigCircle {
+            center: Vector2::new(x, y),
+            radius,
+            requested,
+            by_object,
+        });
+        Ok(Value::Bool(true))
+    })
+}
+
+fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 4 {
+        return Err(RuntimeError::new(
+            "DigFreeRect expects at least 4 arguments: x, y, width, height",
+        ));
+    }
+
+    let x = value_to_i32(&args[0], "DigFreeRect", "x")?;
+    let y = value_to_i32(&args[1], "DigFreeRect", "y")?;
+    let width = value_to_i32(&args[2], "DigFreeRect", "width")?;
+    let height = value_to_i32(&args[3], "DigFreeRect", "height")?;
+    if width <= 0 || height <= 0 {
+        return Ok(Value::Bool(false));
+    }
+
+    let requested = if let Some(arg) = args.get(4) {
+        value_to_bool(arg, "DigFreeRect", "requested")?
+    } else {
+        false
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("DigFreeRect requires an active engine context"))?;
+        let by_object = context.object_context().map(|object| object.id());
+        context.register_landscape_operation(LandscapeOperation::DigRect {
+            origin: Vector2::new(x, y),
+            width,
+            height,
+            requested,
+            by_object,
+        });
+        Ok(Value::Bool(true))
     })
 }
 
@@ -9023,6 +9120,7 @@ struct EffectHostContext {
     pending_particles: Vec<ParticleCommand>,
     transfer_zone_commands: Vec<TransferZoneCommand>,
     pending_messages: Vec<MessageCommand>,
+    pending_landscape_ops: Vec<LandscapeOperation>,
     audio: AudioRegistry,
     next_object_id: u64,
 }
@@ -9109,6 +9207,7 @@ impl EffectHostContext {
             pending_particles: Vec::new(),
             transfer_zone_commands: Vec::new(),
             pending_messages: Vec::new(),
+            pending_landscape_ops: Vec::new(),
             audio,
             next_object_id,
         }
@@ -9157,6 +9256,10 @@ impl EffectHostContext {
 
     fn register_message(&mut self, command: MessageCommand) {
         self.pending_messages.push(command);
+    }
+
+    fn register_landscape_operation(&mut self, operation: LandscapeOperation) {
+        self.pending_landscape_ops.push(operation);
     }
 
     fn get_world_object(&self, id: ObjectId) -> Option<HostWorldObject> {
@@ -9267,6 +9370,7 @@ impl EffectHostContext {
             None,
             None,
             self.pending_spawns,
+            self.pending_landscape_ops,
             self.transfer_zone_commands,
             self.pending_messages,
             self.player_commands,
@@ -10594,6 +10698,71 @@ mod tests {
             result.expect("GetMaterial with object succeeds"),
             Value::Int(material.index() as i32)
         );
+    }
+
+    #[test]
+    fn dig_free_registers_landscape_operation() {
+        let args = [
+            Value::Int(42),
+            Value::Int(128),
+            Value::Int(6),
+            Value::Bool(true),
+        ];
+        let (result, outcome) = with_object_host_context(|| dig_free(&args));
+        assert_eq!(result.expect("DigFree succeeds"), Value::Bool(true));
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::DigCircle {
+                center,
+                radius,
+                requested,
+                by_object,
+            } => {
+                assert_eq!(*center, Vector2::new(42, 128));
+                assert_eq!(*radius, 6);
+                assert!(*requested);
+                assert!(by_object.is_some());
+            }
+            other => panic!("unexpected landscape operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dig_free_rect_requires_positive_dimensions() {
+        let args = [Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(4)];
+        let (result, outcome) = with_object_host_context(|| dig_free_rect(&args));
+        assert_eq!(result.expect("DigFreeRect succeeds"), Value::Bool(false));
+        assert!(outcome.landscape.is_empty());
+    }
+
+    #[test]
+    fn dig_free_rect_registers_landscape_operation() {
+        let args = [
+            Value::Int(10),
+            Value::Int(20),
+            Value::Int(5),
+            Value::Int(7),
+            Value::Bool(false),
+        ];
+        let (result, outcome) = with_object_host_context(|| dig_free_rect(&args));
+        assert_eq!(result.expect("DigFreeRect succeeds"), Value::Bool(true));
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::DigRect {
+                origin,
+                width,
+                height,
+                requested,
+                by_object,
+            } => {
+                assert_eq!(*origin, Vector2::new(10, 20));
+                assert_eq!(*width, 5);
+                assert_eq!(*height, 7);
+                assert!(!*requested);
+                assert!(by_object.is_some());
+            }
+            other => panic!("unexpected landscape operation: {:?}", other),
+        }
     }
 
     #[test]
