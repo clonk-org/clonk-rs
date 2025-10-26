@@ -2977,6 +2977,8 @@ pub struct ObjectSnapshot {
 pub struct SimulationSnapshot {
     pub frame: u64,
     #[serde(default)]
+    pub game_over: bool,
+    #[serde(default)]
     pub physics: Option<PhysicsSettings>,
     pub objects: Vec<ObjectSnapshot>,
     #[serde(default)]
@@ -3060,6 +3062,8 @@ pub struct EngineState {
     pub transfer_zones: Vec<TransferZoneState>,
     #[serde(default)]
     pub messages: Vec<PersistedMessage>,
+    #[serde(default)]
+    pub game_over: bool,
     pub rng: ChaCha8Rng,
 }
 
@@ -3141,6 +3145,7 @@ impl EngineState {
             eliminated_crew_owners,
             transfer_zones: snapshot.transfer_zones.clone(),
             messages: Vec::new(),
+            game_over: snapshot.game_over,
             rng: snapshot.rng.clone(),
         }
     }
@@ -3756,6 +3761,7 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
+        game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(CommandBatch, AudioRegistry, ChaCha8Rng, u64), EngineError> {
         if !self.has_initialize {
@@ -3770,7 +3776,7 @@ impl Definition {
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
-        let (result, host_effects) = compat::with_effect_context(
+        let (result, host_effects) = compat::with_effect_context_with_state(
             Some(
                 compat::HostObjectContext::with_category(
                     object_id,
@@ -3807,6 +3813,7 @@ impl Definition {
             global_effects,
             world,
             next_object_id,
+            game_over_triggered,
             || self.script.call("Initialize", &args),
         );
         let rng = guard.finish();
@@ -3833,6 +3840,7 @@ impl Definition {
             messages: host_messages,
             player_commands: host_player_commands,
             audio: host_audio,
+            trigger_game_over: host_trigger_game_over,
             next_object_id,
         } = host_effects;
         batch.audio.extend(host_audio.events);
@@ -3883,6 +3891,9 @@ impl Definition {
         if !physics_delta.is_empty() {
             batch.physics = Some(physics_delta);
         }
+        if host_trigger_game_over {
+            batch.trigger_game_over = true;
+        }
         let audio_state = audio_guard.finish();
         Ok((batch, audio_state, rng, next_object_id))
     }
@@ -3898,6 +3909,7 @@ impl Definition {
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
         world: HostWorldContext,
+        game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(CommandBatch, AudioRegistry, ChaCha8Rng, u64), EngineError> {
         if !self.has_step {
@@ -3918,7 +3930,7 @@ impl Definition {
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
-        let (result, host_effects) = compat::with_effect_context(
+        let (result, host_effects) = compat::with_effect_context_with_state(
             Some(
                 compat::HostObjectContext::with_category(
                     object_id,
@@ -3955,6 +3967,7 @@ impl Definition {
             global_effects,
             world,
             next_object_id,
+            game_over_triggered,
             || self.script.call("Step", &args),
         );
         let rng = guard.finish();
@@ -3981,6 +3994,7 @@ impl Definition {
             messages: host_messages,
             player_commands: host_player_commands,
             audio: host_audio,
+            trigger_game_over: host_trigger_game_over,
             next_object_id,
         } = host_effects;
         batch.audio.extend(host_audio.events);
@@ -4031,6 +4045,9 @@ impl Definition {
         if !physics_delta.is_empty() {
             batch.physics = Some(physics_delta);
         }
+        if host_trigger_game_over {
+            batch.trigger_game_over = true;
+        }
         let audio_state = audio_guard.finish();
         Ok((batch, audio_state, rng, next_object_id))
     }
@@ -4048,6 +4065,7 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
+        game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(compat::EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
         if !self.script.has_function(function) {
@@ -4067,7 +4085,7 @@ impl Definition {
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
-        let (result, host_effects) = compat::with_effect_context(
+        let (result, host_effects) = compat::with_effect_context_with_state(
             Some(
                 compat::HostObjectContext::with_category(
                     object_id,
@@ -4104,6 +4122,7 @@ impl Definition {
             global_effects,
             world,
             next_object_id,
+            game_over_triggered,
             || self.script.call(function, &args),
         );
         let rng = guard.finish();
@@ -4149,6 +4168,7 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
+        game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(Vec<ContextMenuEntry>, AudioRegistry, ChaCha8Rng), EngineError> {
         if !self.script.has_function("MenuEntries") {
@@ -4196,11 +4216,12 @@ impl Definition {
         .with_alive(state.alive)
         .with_base_graphics(state.base_graphics.clone())
         .with_ocf(self.compute_ocf(state));
-        let (result, outcome) = compat::with_effect_context(
+        let (result, outcome) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,
             world,
             next_object_id,
+            game_over_triggered,
             || self.script.call("MenuEntries", &args),
         );
         let rng = guard.finish();
@@ -4225,6 +4246,7 @@ impl Definition {
             || !outcome.transfer_zones.is_empty()
             || !outcome.messages.is_empty()
             || !outcome.audio.events.is_empty()
+            || outcome.trigger_game_over
         {
             return Err(EngineError::InvalidScriptOutput {
                 definition: self.id.clone(),
@@ -4256,6 +4278,7 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
+        game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<
         (
@@ -4316,11 +4339,12 @@ impl Definition {
         .with_alive(state.alive)
         .with_base_graphics(state.base_graphics.clone())
         .with_ocf(self.compute_ocf(state));
-        let (result, mut host_effects) = compat::with_effect_context(
+        let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,
             world,
             next_object_id,
+            game_over_triggered,
             || self.script.call("MenuCommand", &args),
         );
         let rng = guard.finish();
@@ -4365,6 +4389,7 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
+        game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<
         (
@@ -4422,11 +4447,12 @@ impl Definition {
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
         .with_ocf(self.compute_ocf(state));
-        let (result, mut host_effects) = compat::with_effect_context(
+        let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,
             world,
             next_object_id,
+            game_over_triggered,
             || self.script.call(function, &args),
         );
         let rng = guard.finish();
@@ -4475,6 +4501,7 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
+        game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<
         (
@@ -4532,11 +4559,12 @@ impl Definition {
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
         .with_ocf(self.compute_ocf(state));
-        let (result, mut host_effects) = compat::with_effect_context(
+        let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,
             world,
             next_object_id,
+            game_over_triggered,
             || self.script.call(function, &arg_values),
         );
         let rng = guard.finish();
@@ -4573,6 +4601,7 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
+        game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<
         (
@@ -4637,11 +4666,12 @@ impl Definition {
         .with_alive(state.alive)
         .with_base_graphics(state.base_graphics.clone())
         .with_ocf(self.compute_ocf(state));
-        let (result, mut host_effects) = compat::with_effect_context(
+        let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,
             world,
             next_object_id,
+            game_over_triggered,
             move || self.script.call(&function_call, &args_call),
         );
         let rng = guard.finish();
@@ -4783,6 +4813,7 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
+        game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
@@ -4798,6 +4829,7 @@ impl Definition {
             environment,
             frame,
             world,
+            game_over_triggered,
             audio,
         )
     }
@@ -4813,6 +4845,7 @@ impl Definition {
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
         world: HostWorldContext,
+        game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
@@ -4828,6 +4861,7 @@ impl Definition {
             environment,
             frame,
             world,
+            game_over_triggered,
             audio,
         )
     }
@@ -4844,6 +4878,7 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
+        game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
         self.dispatch_effect_callback(
@@ -4859,6 +4894,7 @@ impl Definition {
             environment,
             frame,
             world,
+            game_over_triggered,
             audio,
         )
     }
@@ -4877,6 +4913,7 @@ impl Definition {
         environment: EnvironmentSettings,
         frame: u64,
         world: HostWorldContext,
+        game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
         let next_object_id = world.next_object_id();
@@ -4902,7 +4939,7 @@ impl Definition {
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let audio_guard = enter_audio_context(audio);
-        let (result, mut commands) = compat::with_effect_context(
+        let (result, mut commands) = compat::with_effect_context_with_state(
             Some(
                 compat::HostObjectContext::with_category(
                     object_id,
@@ -4938,6 +4975,7 @@ impl Definition {
             global_effects,
             world,
             next_object_id,
+            game_over_triggered,
             || {
                 self.script
                     .call_effect_callback(&effect.name, event, &args)
@@ -5079,10 +5117,14 @@ impl ScenarioScript {
         let world = host_world_context_from_snapshot(snapshot);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
-        let (result, host_effects) =
-            compat::with_effect_context(None, global_effects, world, next_object_id, || {
-                self.script.call(function, &args)
-            });
+        let (result, host_effects) = compat::with_effect_context_with_state(
+            None,
+            global_effects,
+            world,
+            next_object_id,
+            snapshot.game_over,
+            || self.script.call(function, &args),
+        );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
         let mut environment_delta = env_guard.finish();
@@ -5107,6 +5149,7 @@ impl ScenarioScript {
             messages: host_messages,
             player_commands: host_player_commands,
             audio: host_audio,
+            trigger_game_over: host_trigger_game_over,
             next_object_id: _,
         } = host_effects;
 
@@ -5159,6 +5202,9 @@ impl ScenarioScript {
         if !host_audio.events.is_empty() {
             batch.audio.extend(host_audio.events);
         }
+        if host_trigger_game_over {
+            batch.trigger_game_over = true;
+        }
         let audio_state = audio_guard.finish();
         Ok((batch, audio_state, rng))
     }
@@ -5201,6 +5247,7 @@ struct CommandBatch {
     audio: Vec<AudioCommand>,
     messages: Vec<MessageCommand>,
     player_commands: Vec<PlayerCommand>,
+    trigger_game_over: bool,
 }
 
 #[derive(Debug, Default)]
@@ -5216,6 +5263,7 @@ struct ScenarioBatch {
     audio: Vec<AudioCommand>,
     messages: Vec<MessageCommand>,
     player_commands: Vec<PlayerCommand>,
+    trigger_game_over: bool,
 }
 
 pub struct Engine {
@@ -6245,8 +6293,16 @@ impl Engine {
         if has_active {
             return Ok(());
         }
+        self.request_game_over().map(|_| ())
+    }
+
+    fn request_game_over(&mut self) -> Result<bool, EngineError> {
+        if self.game_over_triggered {
+            return Ok(false);
+        }
         self.game_over_triggered = true;
-        self.broadcast_scenario_function("OnGameOver", Vec::new())
+        self.broadcast_scenario_function("OnGameOver", Vec::new())?;
+        Ok(true)
     }
 
     fn apply_scenario_batch(&mut self, batch: ScenarioBatch) -> Result<Vec<ObjectId>, EngineError> {
@@ -6262,6 +6318,7 @@ impl Engine {
             audio,
             messages,
             player_commands,
+            trigger_game_over,
         } = batch;
 
         if !player_commands.is_empty() {
@@ -6313,6 +6370,9 @@ impl Engine {
         for spawn in spawns {
             let id = self.spawn_object(spawn)?;
             created.push(id);
+        }
+        if trigger_game_over {
+            self.request_game_over()?;
         }
         Ok(created)
     }
@@ -6507,6 +6567,7 @@ impl Engine {
             self.environment,
             self.frame,
             world,
+            self.game_over_triggered,
             self.audio_registry.clone(),
         )?;
         self.rng = new_rng;
@@ -6546,6 +6607,7 @@ impl Engine {
             self.environment,
             self.frame,
             world,
+            self.game_over_triggered,
             self.audio_registry.clone(),
         )?;
         self.rng = new_rng;
@@ -6590,6 +6652,7 @@ impl Engine {
             self.environment,
             self.frame,
             world,
+            self.game_over_triggered,
             self.audio_registry.clone(),
         )?;
         self.rng = new_rng;
@@ -6640,6 +6703,7 @@ impl Engine {
             self.environment,
             self.frame,
             world,
+            self.game_over_triggered,
             self.audio_registry.clone(),
         )?;
         self.rng = new_rng;
@@ -6694,6 +6758,7 @@ impl Engine {
             self.environment,
             self.frame,
             world,
+            self.game_over_triggered,
             self.audio_registry.clone(),
         )?;
         self.rng = new_rng;
@@ -7256,6 +7321,7 @@ impl Engine {
                     event_messages,
                     player_commands,
                     landscape_ops,
+                    triggered_game_over,
                     audio_state,
                     new_rng,
                 ) = {
@@ -7266,6 +7332,7 @@ impl Engine {
                     let object = &mut self.objects[idx];
                     Self::run_effect_events_for_object(
                         definition,
+                        self.game_over_triggered,
                         rng_state,
                         object_id,
                         object,
@@ -7293,6 +7360,9 @@ impl Engine {
                     for command in event_messages {
                         self.messages.apply_command(command);
                     }
+                }
+                if triggered_game_over {
+                    self.request_game_over()?;
                 }
                 if !physics_delta.is_empty() {
                     self.apply_physics_delta(physics_delta);
@@ -7333,6 +7403,7 @@ impl Engine {
                     event_messages,
                     player_commands,
                     landscape_ops,
+                    triggered_game_over,
                     audio_state,
                     new_rng,
                 ) = {
@@ -7343,6 +7414,7 @@ impl Engine {
                     let object = &mut self.objects[idx];
                     Self::run_effect_events_for_object(
                         definition,
+                        self.game_over_triggered,
                         rng_state,
                         object_id,
                         object,
@@ -7370,6 +7442,9 @@ impl Engine {
                     for command in event_messages {
                         self.messages.apply_command(command);
                     }
+                }
+                if triggered_game_over {
+                    self.request_game_over()?;
                 }
                 if !physics_delta.is_empty() {
                     self.apply_physics_delta(physics_delta);
@@ -7447,6 +7522,7 @@ impl Engine {
                     self.physics,
                     self.environment,
                     self.host_world_context(),
+                    self.game_over_triggered,
                     self.audio_registry.clone(),
                 )?
             };
@@ -7469,7 +7545,12 @@ impl Engine {
                 audio,
                 messages,
                 player_commands,
+                trigger_game_over,
             } = command;
+
+            if trigger_game_over {
+                self.request_game_over()?;
+            }
 
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
@@ -7548,6 +7629,9 @@ impl Engine {
                     event_messages,
                     player_commands,
                     landscape_ops,
+                    triggered_game_over,
+                    audio_state,
+                    new_rng,
                 ) = {
                     let definition = self
                         .definitions
@@ -7556,18 +7640,9 @@ impl Engine {
                     let global_view = self.global_effects.clone();
                     let rng_state = self.rng.clone();
                     let object = &mut self.objects[idx];
-                    let (
-                        global_cmds,
-                        emitted_particles,
-                        physics_delta,
-                        audio_events,
-                        event_messages,
-                        player_commands,
-                        landscape_ops,
-                        audio_state,
-                        new_rng,
-                    ) = Self::run_effect_events_for_object(
+                    Self::run_effect_events_for_object(
                         definition,
+                        self.game_over_triggered,
                         rng_state,
                         object_id,
                         object,
@@ -7578,19 +7653,10 @@ impl Engine {
                         self.frame,
                         world.clone(),
                         self.audio_registry.clone(),
-                    )?;
-                    self.rng = new_rng;
-                    self.audio_registry = audio_state;
-                    (
-                        global_cmds,
-                        emitted_particles,
-                        physics_delta,
-                        audio_events,
-                        event_messages,
-                        player_commands,
-                        landscape_ops,
-                    )
+                    )?
                 };
+                self.rng = new_rng;
+                self.audio_registry = audio_state;
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
                 }
@@ -7604,6 +7670,9 @@ impl Engine {
                     for command in event_messages {
                         self.messages.apply_command(command);
                     }
+                }
+                if triggered_game_over {
+                    self.request_game_over()?;
                 }
                 if !physics_delta.is_empty() {
                     self.apply_physics_delta(physics_delta);
@@ -7907,6 +7976,7 @@ impl Engine {
             self.environment,
             self.frame,
             world,
+            self.game_over_triggered,
             self.audio_registry.clone(),
         )?;
         self.rng = new_rng;
@@ -7944,6 +8014,7 @@ impl Engine {
             messages,
             player_commands,
             audio: outcome_audio,
+            trigger_game_over,
             next_object_id,
         } = outcome;
 
@@ -7978,6 +8049,10 @@ impl Engine {
             for command in messages {
                 self.messages.apply_command(command);
             }
+        }
+
+        if trigger_game_over {
+            self.request_game_over()?;
         }
 
         let mut effect_events = Vec::new();
@@ -8056,10 +8131,12 @@ impl Engine {
                 event_messages,
                 player_commands,
                 landscape_ops,
+                triggered_game_over,
                 audio_state,
                 new_rng,
             ) = Self::run_effect_events_for_object(
                 definition,
+                self.game_over_triggered,
                 rng_state,
                 object_id,
                 object,
@@ -8086,6 +8163,9 @@ impl Engine {
                 for command in event_messages {
                     self.messages.apply_command(command);
                 }
+            }
+            if triggered_game_over {
+                self.request_game_over()?;
             }
             if !physics_delta.is_empty() {
                 self.apply_physics_delta(physics_delta);
@@ -8270,6 +8350,7 @@ impl Engine {
         let message_snapshots = self.messages.snapshot();
         SimulationSnapshot {
             frame: self.frame,
+            game_over: self.game_over_triggered,
             physics: Some(self.physics),
             objects,
             environment,
@@ -8401,6 +8482,7 @@ impl Engine {
             eliminated_crew_owners,
             transfer_zones: self.transfer_zones.states(),
             messages: self.messages.persisted(),
+            game_over: self.game_over_triggered,
             rng: self.rng.clone(),
         }
     }
@@ -8527,7 +8609,7 @@ impl Engine {
             .map(|player| (player.id(), player))
             .collect();
         self.players_registered = !self.players.is_empty();
-        self.game_over_triggered = false;
+        self.game_over_triggered = state.game_over;
 
         self.known_crew_owners = state.known_crew_owners.iter().cloned().collect();
         self.eliminated_crew_owners = state.eliminated_crew_owners.iter().cloned().collect();
@@ -8569,6 +8651,7 @@ impl Engine {
 
     fn run_effect_events_for_object(
         definition: &Definition,
+        game_over_triggered: bool,
         mut rng: ChaCha8Rng,
         object_id: ObjectId,
         object: &mut Object,
@@ -8588,6 +8671,7 @@ impl Engine {
             Vec<MessageCommand>,
             Vec<PlayerCommand>,
             Vec<LandscapeOperation>,
+            bool,
             AudioRegistry,
             ChaCha8Rng,
         ),
@@ -8602,6 +8686,7 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                false,
                 audio,
                 rng,
             ));
@@ -8619,6 +8704,7 @@ impl Engine {
         let mut current_audio = audio;
         let mut pending_player_commands = Vec::new();
         let mut pending_landscape_ops = Vec::new();
+        let mut game_over_requested = false;
 
         while let Some(event) = queue.pop_front() {
             let snapshot_for_call = state_snapshot.clone();
@@ -8633,6 +8719,7 @@ impl Engine {
                     current_environment,
                     frame,
                     world.clone(),
+                    game_over_triggered,
                     current_audio,
                 )?,
                 EffectEventKind::Timer => definition.call_effect_timer(
@@ -8645,6 +8732,7 @@ impl Engine {
                     current_physics,
                     current_environment,
                     world.clone(),
+                    game_over_triggered,
                     current_audio,
                 )?,
                 EffectEventKind::Stopped(reason) => definition.call_effect_stop(
@@ -8658,6 +8746,7 @@ impl Engine {
                     current_environment,
                     frame,
                     world.clone(),
+                    game_over_triggered,
                     current_audio,
                 )?,
             };
@@ -8677,6 +8766,7 @@ impl Engine {
                 messages: event_messages,
                 player_commands: effect_player_commands,
                 audio: outcome_audio,
+                trigger_game_over,
                 ..
             } = outcome;
 
@@ -8742,6 +8832,10 @@ impl Engine {
             if !event_messages.is_empty() {
                 pending_messages.extend(event_messages);
             }
+
+            if trigger_game_over {
+                game_over_requested = true;
+            }
         }
 
         *environment = current_environment;
@@ -8754,6 +8848,7 @@ impl Engine {
             pending_messages,
             pending_player_commands,
             pending_landscape_ops,
+            game_over_requested,
             current_audio,
             rng,
         ))
@@ -11438,6 +11533,7 @@ impl Engine {
                     audio,
                     messages,
                     player_commands,
+                    trigger_game_over,
                 },
                 audio_state,
                 new_rng,
@@ -11457,12 +11553,16 @@ impl Engine {
                     self.environment,
                     self.frame,
                     self.host_world_context(),
+                    self.game_over_triggered,
                     self.audio_registry.clone(),
                 )?
             };
             self.rng = new_rng;
             self.next_object_id = next_object_id;
             self.audio_registry = audio_state;
+            if trigger_game_over {
+                self.request_game_over()?;
+            }
             if let Some(update) = environment {
                 update.apply(&mut self.environment);
             }
@@ -11530,10 +11630,12 @@ impl Engine {
                 event_messages,
                 player_commands,
                 landscape_ops,
+                triggered_game_over,
                 audio_state,
                 new_rng,
             ) = Self::run_effect_events_for_object(
                 definition,
+                self.game_over_triggered,
                 rng_state,
                 id,
                 &mut object,
@@ -11560,6 +11662,9 @@ impl Engine {
                 for command in event_messages {
                     self.messages.apply_command(command);
                 }
+            }
+            if triggered_game_over {
+                self.request_game_over()?;
             }
             if !physics_delta.is_empty() {
                 self.apply_physics_delta(physics_delta);
@@ -11884,6 +11989,7 @@ fn build_scenario_state_value(snapshot: &SimulationSnapshot) -> Value {
         snapshot.frame as i32
     };
     map.insert("frame".into(), Value::Int(frame_value));
+    map.insert("game_over".into(), Value::Bool(snapshot.game_over));
     match snapshot.physics {
         Some(physics) => {
             map.insert("physics".into(), Value::Proplist(physics_to_map(physics)));
@@ -18615,6 +18721,43 @@ func ControlDig() { SetAction("Dig"); return true; }
         let _ = engine.remove_player(1)?;
 
         assert_eq!(engine.physics().gravity, 77);
+
+        Ok(())
+    }
+
+    #[test]
+    fn script_game_over_triggers_on_game_over() -> Result<(), EngineError> {
+        const SCRIPT: &str = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random)
+        {
+            if (frame == 1)
+            {
+                GameOver();
+            }
+            return nil;
+        }
+        global func OnGameOver(state)
+        {
+            return { physics = { gravity = 42 } };
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine.register_definition(simple_definition("Crew"))?;
+        engine.spawn_object(
+            SpawnConfig::new("Crew")
+                .with_owner(0)
+                .with_crew_member(true)
+                .with_position(Vector2::new(50, 50)),
+        )?;
+
+        engine.install_scenario_script("Scenario", SCRIPT)?;
+        engine.register_player(PlayerConfig::new(0, "Player"))?;
+
+        let snapshot = engine.tick()?;
+        assert!(snapshot.game_over);
+        assert_eq!(engine.physics().gravity, 42);
 
         Ok(())
     }

@@ -1850,6 +1850,7 @@ struct GameApp {
     ingame_pointer: Option<ViewportPointer>,
     mouse_state: Option<IngameMouseState>,
     exit_requested: bool,
+    game_over_handled: bool,
 }
 
 struct RecordingSession {
@@ -2742,6 +2743,7 @@ struct FrontendScenario {
     is_editable: bool,
     is_playable: bool,
     path: Option<PathBuf>,
+    root_label: Option<String>,
     preview: Option<ImageData>,
     children: Vec<FrontendScenario>,
     folder_index: Option<i32>,
@@ -2766,6 +2768,7 @@ impl FrontendScenario {
     fn from_resource(
         entry: resource_scenario::ScenarioEntry,
         seen: &mut HashSet<String>,
+        root_label: &str,
     ) -> Option<Self> {
         let identifier = entry.identifier.clone();
         let kind = match entry.kind {
@@ -2776,7 +2779,7 @@ impl FrontendScenario {
 
         let mut children = Vec::new();
         for child in entry.children {
-            if let Some(converted) = FrontendScenario::from_resource(child, seen) {
+            if let Some(converted) = FrontendScenario::from_resource(child, seen, root_label) {
                 children.push(converted);
             }
         }
@@ -2801,6 +2804,7 @@ impl FrontendScenario {
             is_editable: entry.is_editable,
             is_playable: entry.is_playable,
             path: Some(entry.path),
+            root_label: Some(root_label.to_string()),
             preview,
             children,
             folder_index: entry.folder_index,
@@ -2811,6 +2815,22 @@ impl FrontendScenario {
 
     fn location_label(&self) -> Option<String> {
         if let Some(path) = self.path.as_ref() {
+            if let Some(root) = self.root_label.as_ref() {
+                let components: Vec<&str> = self
+                    .identifier
+                    .split('/')
+                    .filter(|component| !component.is_empty())
+                    .collect();
+                let relative = if components.is_empty() {
+                    String::new()
+                } else {
+                    components.join(" / ")
+                };
+                if relative.is_empty() {
+                    return Some(root.clone());
+                }
+                return Some(format!("{root} / {relative}"));
+            }
             return Some(path.display().to_string());
         }
         if self.path.is_none() && matches!(self.kind, ScenarioKind::Scenario) {
@@ -2828,6 +2848,7 @@ impl FrontendScenario {
             is_editable: true,
             is_playable: true,
             path: None,
+            root_label: None,
             preview: Some(generate_preview_placeholder(
                 ScenarioKind::Scenario,
                 FALLBACK_SCENARIO_TITLE,
@@ -2869,6 +2890,9 @@ fn merge_container(existing: &mut FrontendScenario, mut incoming: FrontendScenar
     }
     if existing.path.is_none() {
         existing.path = incoming.path.take();
+    }
+    if existing.root_label.is_none() {
+        existing.root_label = incoming.root_label.clone();
     }
     existing.is_editable |= incoming.is_editable;
     existing.is_playable |= incoming.is_playable;
@@ -3201,6 +3225,8 @@ struct SavedScenarioInfo {
     title: String,
     description: Option<String>,
     path: Option<PathBuf>,
+    #[serde(default)]
+    root_label: Option<String>,
     is_editable: bool,
     is_playable: bool,
     label: String,
@@ -3215,6 +3241,7 @@ impl SavedScenarioInfo {
             title: frontend.title.clone(),
             description: frontend.description.clone(),
             path: frontend.path.clone(),
+            root_label: frontend.root_label.clone(),
             is_editable: frontend.is_editable,
             is_playable: frontend.is_playable,
             label: label.to_string(),
@@ -3232,6 +3259,7 @@ impl SavedScenarioInfo {
             is_editable: self.is_editable,
             is_playable: self.is_playable,
             path: self.path.clone(),
+            root_label: self.root_label.clone(),
             preview: Some(generate_preview_placeholder(
                 ScenarioKind::Scenario,
                 &self.title,
@@ -4044,6 +4072,7 @@ impl GameApp {
             ingame_pointer: None,
             mouse_state: None,
             exit_requested: false,
+            game_over_handled: false,
         };
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);
@@ -6136,6 +6165,9 @@ impl GameApp {
                     network.finalize_tick(tick);
                 }
                 self.snapshot = self.engine.tick()?;
+                if self.snapshot.game_over && !self.game_over_handled {
+                    self.handle_game_over();
+                }
                 self.record_current_snapshot();
                 self.refresh_object_menu();
                 self.refresh_focus();
@@ -6167,6 +6199,21 @@ impl GameApp {
                 viewport_center,
             );
         }
+    }
+
+    fn handle_game_over(&mut self) {
+        let finished_label = self
+            .active_scenario
+            .as_ref()
+            .map(|scenario| format!("{} complete", scenario.title))
+            .unwrap_or_else(|| "Scenario complete".to_string());
+        self.finish_recording();
+        self.game_over_handled = true;
+        self.mode = AppMode::Menu;
+        self.show_main_menu();
+        self.status_text = finished_label;
+        self.active_scenario = None;
+        self.ensure_menu_music();
     }
 
     fn maybe_emit_sync_check(&mut self) {
@@ -7394,6 +7441,7 @@ impl GameApp {
         self.menu_state.set_pointer_position(None);
         self.object_menu = None;
         self.ingame_menu = None;
+        self.game_over_handled = false;
         self.mode = AppMode::Running;
     }
 
@@ -8115,16 +8163,18 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
     match AppPaths::discover() {
         Ok(paths) => {
             let roots = scenario_roots(&paths);
-            let existing_roots: Vec<_> = roots.into_iter().filter(|path| path.exists()).collect();
+            let existing_roots: Vec<_> = roots.iter().filter(|root| root.path.exists()).collect();
             if !existing_roots.is_empty() {
-                let mut combined_entries = Vec::new();
-                for root in &existing_roots {
-                    match resource_scenario::discover(root) {
-                        Ok(mut entries) => combined_entries.append(&mut entries),
+                let mut combined_entries: Vec<(resource_scenario::ScenarioEntry, String)> =
+                    Vec::new();
+                for root in existing_roots {
+                    match resource_scenario::discover(&root.path) {
+                        Ok(entries) => combined_entries
+                            .extend(entries.into_iter().map(|entry| (entry, root.label.clone()))),
                         Err(err) => {
                             tracing::warn!(
                                 error = %err,
-                                path = %root.display(),
+                                path = %root.path.display(),
                                 "failed to discover scenarios from install root"
                             );
                         }
@@ -8134,8 +8184,10 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
                 if !combined_entries.is_empty() {
                     let mut seen = HashSet::new();
                     let mut scenarios = Vec::new();
-                    for entry in combined_entries {
-                        if let Some(converted) = FrontendScenario::from_resource(entry, &mut seen) {
+                    for (entry, label) in combined_entries {
+                        if let Some(converted) =
+                            FrontendScenario::from_resource(entry, &mut seen, &label)
+                        {
                             scenarios.push(converted);
                         }
                     }
@@ -8156,22 +8208,41 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
     vec![FrontendScenario::fallback()]
 }
 
-fn scenario_roots(paths: &AppPaths) -> Vec<PathBuf> {
-    let candidates = vec![
-        paths.scenario_dir(),
-        paths.install_root().join("Scenarios"),
-        paths.install_root().join("scenarios"),
-        paths.planet_dir().to_path_buf(),
-        paths.system_group_path().to_path_buf(),
-    ];
+struct ScenarioRoot {
+    path: PathBuf,
+    label: String,
+}
+
+fn scenario_roots(paths: &AppPaths) -> Vec<ScenarioRoot> {
     let mut roots = Vec::new();
-    for candidate in candidates {
-        if roots.iter().any(|existing| existing == &candidate) {
-            continue;
-        }
-        roots.push(candidate);
-    }
+    push_root(&mut roots, paths.scenario_dir(), "Scenarios");
+    push_root(
+        &mut roots,
+        paths.install_root().join("Scenarios"),
+        "Scenarios",
+    );
+    push_root(
+        &mut roots,
+        paths.install_root().join("scenarios"),
+        "Scenarios",
+    );
+    push_root(&mut roots, paths.planet_dir().to_path_buf(), "Scenarios");
+    push_root(
+        &mut roots,
+        paths.system_group_path().to_path_buf(),
+        "System",
+    );
     roots
+}
+
+fn push_root(roots: &mut Vec<ScenarioRoot>, path: PathBuf, label: &str) {
+    if roots.iter().any(|existing| existing.path == path) {
+        return;
+    }
+    roots.push(ScenarioRoot {
+        path,
+        label: label.to_string(),
+    });
 }
 
 fn load_scenario_music_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
@@ -8458,6 +8529,7 @@ mod tests {
 
         SimulationSnapshot {
             frame: 0,
+            game_over: false,
             physics: None,
             objects,
             environment: EnvironmentFrame::default(),
@@ -8649,6 +8721,7 @@ mod tests {
                 title: "Test Scenario".to_string(),
                 description: None,
                 path: None,
+                root_label: None,
                 is_editable: false,
                 is_playable: true,
                 label: "Test".to_string(),
@@ -8678,6 +8751,7 @@ mod tests {
             is_editable: true,
             is_playable: true,
             path: None,
+            root_label: None,
             preview: None,
             children: Vec::new(),
             folder_index: None,
@@ -8693,6 +8767,7 @@ mod tests {
             is_editable: false,
             is_playable: false,
             path: None,
+            root_label: None,
             preview: None,
             children: vec![child],
             folder_index: None,
@@ -8788,6 +8863,7 @@ mod tests {
 
         let mut snapshot = SimulationSnapshot {
             frame: 0,
+            game_over: false,
             physics: None,
             objects,
             environment: EnvironmentFrame::default(),
@@ -8875,6 +8951,7 @@ mod tests {
             is_editable: true,
             is_playable: true,
             path: Some(PathBuf::from("/tmp/test.c4s")),
+            root_label: Some("Scenarios".into()),
             preview: None,
             children: Vec::new(),
             folder_index: None,
@@ -9494,6 +9571,43 @@ mod tests {
                 .map(|path| path.starts_with(&user_dir))
                 .unwrap_or(false),
             "user override should keep user path"
+        );
+
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn load_frontend_scenarios_sets_human_readable_location() {
+        reset_cached_app_paths();
+
+        let install_dir = tempdir().unwrap();
+
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+        let scenario_dir = user_dir.join("Scenarios").join("Alpha.c4s");
+        fs::create_dir_all(&scenario_dir).unwrap();
+        fs::write(
+            scenario_dir.join("Scenario.json"),
+            br#"{"name":"Alpha Mission"}"#,
+        )
+        .unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+
+        let scenarios = load_frontend_scenarios();
+        assert_eq!(scenarios.len(), 1, "expected single scenario entry");
+        let scenario = &scenarios[0];
+        assert_eq!(
+            scenario.location_label().as_deref(),
+            Some("Scenarios / Alpha.c4s"),
+            "location label should mirror catalog path"
         );
 
         reset_cached_app_paths();

@@ -1921,6 +1921,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("PlrMessage", plr_message);
     script.register_host_function("Log", log_message);
     script.register_host_function("DebugLog", debug_log_message);
+    script.register_host_function("GameOver", game_over);
     script.register_host_function("Format", format_string);
     script.register_host_function("GetType", get_type);
     script.register_host_function("CreateArray", create_array);
@@ -2502,6 +2503,23 @@ fn log_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn debug_log_message(args: &[Value]) -> Result<Value, RuntimeError> {
     log_internal("DebugLog", args, LogLevel::Debug)
+}
+
+fn game_over(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GameOver expects at most 1 argument: game over state",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("GameOver requires an active engine context"))?;
+        let triggered = context.request_game_over();
+        Ok(Value::Bool(triggered))
+    })
 }
 
 fn get_keys(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -3358,6 +3376,20 @@ pub(crate) fn with_effect_context<F, T, E>(
 where
     F: FnOnce() -> Result<T, E>,
 {
+    with_effect_context_with_state(object, global_effects, world, next_object_id, false, func)
+}
+
+pub(crate) fn with_effect_context_with_state<F, T, E>(
+    object: Option<HostObjectContext<'_>>,
+    global_effects: &[EffectState],
+    world: HostWorldContext,
+    next_object_id: u64,
+    game_over_triggered: bool,
+    func: F,
+) -> (Result<T, E>, EffectContextOutcome)
+where
+    F: FnOnce() -> Result<T, E>,
+{
     let audio_state = AUDIO_CONTEXT
         .with(|cell| cell.borrow_mut().take())
         .unwrap_or_else(AudioRegistry::new);
@@ -3372,6 +3404,7 @@ where
             world,
             next_object_id,
             audio_state,
+            game_over_triggered,
         ));
         let result = func();
         let context = cell
@@ -3428,6 +3461,7 @@ pub(crate) struct EffectContextOutcome {
     pub messages: Vec<MessageCommand>,
     pub player_commands: Vec<PlayerCommand>,
     pub audio: AudioOutcome,
+    pub trigger_game_over: bool,
     pub next_object_id: u64,
 }
 
@@ -3446,6 +3480,7 @@ impl EffectContextOutcome {
         messages: Vec<MessageCommand>,
         player_commands: Vec<PlayerCommand>,
         audio: AudioOutcome,
+        trigger_game_over: bool,
         next_object_id: u64,
     ) -> Self {
         Self {
@@ -3463,6 +3498,7 @@ impl EffectContextOutcome {
             messages,
             player_commands,
             audio,
+            trigger_game_over,
             next_object_id,
         }
     }
@@ -3486,6 +3522,7 @@ impl EffectContextOutcome {
                 state: audio,
                 events: Vec::new(),
             },
+            trigger_game_over: false,
             next_object_id,
         }
     }
@@ -9286,6 +9323,8 @@ struct EffectHostContext {
     pending_landscape_ops: Vec<LandscapeOperation>,
     audio: AudioRegistry,
     next_object_id: u64,
+    trigger_game_over: bool,
+    game_over_triggered: bool,
 }
 
 impl EffectHostContext {
@@ -9295,6 +9334,7 @@ impl EffectHostContext {
         world: HostWorldContext,
         next_object_id: u64,
         audio: AudioRegistry,
+        game_over_triggered: bool,
     ) -> Self {
         let team_home_base_rule = world.team_home_base_rule();
         let object = object.map(|ctx| {
@@ -9375,6 +9415,8 @@ impl EffectHostContext {
             pending_landscape_ops: Vec::new(),
             audio,
             next_object_id,
+            trigger_game_over: false,
+            game_over_triggered,
         }
     }
 
@@ -9502,6 +9544,15 @@ impl EffectHostContext {
         &self.audio
     }
 
+    fn request_game_over(&mut self) -> bool {
+        if self.game_over_triggered {
+            return false;
+        }
+        self.game_over_triggered = true;
+        self.trigger_game_over = true;
+        true
+    }
+
     fn into_commands(mut self) -> EffectContextOutcome {
         let (object_effects, object_update, object_commands, destroy) = match self.object {
             Some(object) => {
@@ -9543,6 +9594,7 @@ impl EffectHostContext {
                 state: self.audio,
                 events: audio_events,
             },
+            self.trigger_game_over,
             self.next_object_id,
         );
         outcome.particles = self.pending_particles;
@@ -10814,6 +10866,36 @@ mod tests {
         assert_eq!(record.level, Level::DEBUG);
         assert_eq!(record.target, "lc-script");
         assert_eq!(record.message, "Debug 42");
+    }
+
+    #[test]
+    fn game_over_returns_true_only_once_per_context() {
+        let (result, outcome) = with_effect_context_with_state(
+            None,
+            &[],
+            HostWorldContext::default(),
+            1,
+            false,
+            || {
+                let first = game_over(&[])?;
+                assert_eq!(first, Value::Bool(true));
+                game_over(&[])
+            },
+        );
+        let second = result.expect("GameOver second call succeeds");
+        assert_eq!(second, Value::Bool(false));
+        assert!(outcome.trigger_game_over);
+    }
+
+    #[test]
+    fn game_over_respects_existing_state() {
+        let (result, outcome) =
+            with_effect_context_with_state(None, &[], HostWorldContext::default(), 1, true, || {
+                game_over(&[])
+            });
+        let value = result.expect("GameOver call succeeds");
+        assert_eq!(value, Value::Bool(false));
+        assert!(!outcome.trigger_game_over);
     }
 
     #[test]

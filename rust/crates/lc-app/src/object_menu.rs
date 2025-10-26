@@ -981,6 +981,7 @@ mod tests {
         objects.insert(0, crew);
         SimulationSnapshot {
             frame: 0,
+            game_over: false,
             physics: None,
             objects,
             environment: Default::default(),

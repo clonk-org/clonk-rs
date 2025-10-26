@@ -331,6 +331,7 @@ mod tests {
     fn make_snapshot(frame: u64, energy: i32) -> SimulationSnapshot {
         SimulationSnapshot {
             frame,
+            game_over: false,
             physics: None,
             objects: vec![ObjectSnapshot {
                 id: crate::ObjectId::new(1),

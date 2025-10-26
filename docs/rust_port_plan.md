@@ -28,14 +28,14 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [x] Window title: "Clonk Rust" not "LegacyClonk (Rust preview)"
 
 **Progress (2025-10-25):** Rust frontend still scans install roots per directory, tolerates missing assets, and decodes BMP previews so real scenarios populate the browser without sandbox fallback. Added a dedicated main menu with the LegacyClonk big-button layout, participants list, and reliable navigation (Back entry/Escape) back from the scenario browser; “Local Game” flows into the browser while other options surface placeholder status until their dialogs are ported.
-**Progress (2025-10-26):** Startup browser now preselects the first available entry, updates the path label to mirror the LegacyClonk catalog ("Scenarios / …"), and removes the "Rust Sandbox" headline so `cargo run` immediately surfaces the real scenario list instead of the preview fallback.
+**Progress (2025-10-26):** Startup browser now preselects the first available entry, derives the location label from the catalog path ("Scenarios / …") for both live and saved scenarios, and removes the "Rust Sandbox" headline so `cargo run` immediately surfaces the real scenario list instead of the preview fallback. Backed by `load_frontend_scenarios_sets_human_readable_location` in `rust/crates/lc-app/src/main.rs`.
 **Progress (2025-12-27):** Scenario discovery now preserves the LegacyClonk search priority, letting user scenario overrides shadow installed variants so the browser matches the C++ catalog order.
 **Progress (2026-03-18):** Scenario discovery now reads legacy `Scenario.txt` head metadata when no manifest/title files are present, restoring classic mission titles and descriptions in the browser.
 **Progress (2027-10-25):** Matched the legacy scenario browser ordering by honoring folder indices, mission icon ordering, and difficulty precedence in `lc-resources`, backed by regression tests, and removed the Rust frontend’s alphabetical resort so the tree mirrors C++ exactly.
 **Progress (2028-10-26):** Scenario browser now merges duplicate scenario folders across user and install roots, keeping overrides while inheriting fallback entries so the tree matches LegacyClonk without duplicate listings.
 **Progress (2025-10-26):** Frontend catalog now carries folder index/icon/difficulty metadata from `lc-resources` and re-sorts merged scenario trees so overrides keep LegacyClonk ordering; added regression coverage in `rust/crates/lc-app/src/main.rs`.
 
-**Files:** `main.rs:4631` (load_frontend_scenarios), scenario discovery in lc-resources
+**Files:** `rust/crates/lc-app/src/main.rs` (scenario catalog + load_frontend_scenarios), `rust/crates/lc-resources/src/scenario.rs`
 
 ---
 

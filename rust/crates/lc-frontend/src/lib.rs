@@ -3388,6 +3388,7 @@ mod tests {
     fn make_snapshot() -> SimulationSnapshot {
         SimulationSnapshot {
             frame: 0,
+            game_over: false,
             physics: None,
             objects: vec![ObjectSnapshot {
                 id: ObjectId::new(1),

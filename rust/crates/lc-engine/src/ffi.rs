@@ -1073,6 +1073,7 @@ unsafe fn make_snapshot(
 
     Some(SimulationSnapshot {
         frame,
+        game_over: false,
         physics: None,
         objects: snapshots,
         environment: EnvironmentFrame::default(),
