@@ -5191,6 +5191,10 @@ impl ScenarioScript {
         )
     }
 
+    fn has_function(&self, function: &str) -> bool {
+        self.script.has_function(function)
+    }
+
     fn call_raw(
         &mut self,
         function: &'static str,
@@ -6124,7 +6128,7 @@ impl Engine {
 
     pub fn configure_objectives(&mut self, objectives: ScenarioObjectives) {
         self.objectives = objectives;
-        self.objective_check_counter = 0;
+        self.objective_check_counter = GAME_OVER_CHECK_INTERVAL.saturating_sub(1);
     }
 
     pub fn set_landscape(&mut self, mut landscape: Landscape) {
@@ -6371,10 +6375,11 @@ impl Engine {
         let physics = self.physics;
         let environment = self.environment;
         let audio_state = self.audio_registry.clone();
-        let script = self
-            .scenario_script
-            .as_mut()
-            .expect("scenario script must be present");
+        let script = match self.scenario_script.as_mut() {
+            Some(script) if script.has_function(function) => script,
+            Some(_) => return Ok(()),
+            None => unreachable!("scenario script must be present"),
+        };
         let (batch, audio_state, new_rng) = script.call_raw(
             function,
             args,

@@ -6,10 +6,10 @@
 
 ## TL;DR
 
-- **P0 BLOCKERS:** (1) AI command system partial (MoveTo + Build only) (2) Engine smoke tests failing (legacy objective / PreInitializePlayer parity)
+- **P0 BLOCKERS:** AI command system partial (MoveTo + Build only)
 - **Scenario Discovery:** ✅ Official content repo wired; menu now lists full scenario catalog
-- **Current State:** Build compiles; targeted tests (`lc-platform`, `lc-app`) green; Build command implemented in command stack; workspace still red on legacy objective / PreInitializePlayer cases
-- **Next 48h:** Stabilize engine tests; sketch AI command trait; triage panics
+- **Current State:** Build compiles; workspace tests green; Build command implemented in command stack
+- **Next 48h:** Keep engine tests green; sketch AI command trait; triage panics
 - **Exit Criteria:** P0 cleared + CI green + smoke tests pass
 
 ---
@@ -40,22 +40,9 @@
 
 ---
 
-### 2. Test Suite — BROKEN ⛔
-**Problem:** Workspace tests compile again; build component parity fixed; legacy objectives + PreInitializePlayer still failing.
-**Evidence:**
-```bash
-cargo test --workspace
-  tests::legacy_clear_object_objective_triggers_after_removal
-  tests::script_game_over_triggers_on_game_over
-```
-**Impact:** Cannot claim scenario parity or CI green while objective triggers + scenario script hooks remain missing.
-**Next:**
-1. Implement legacy objective triggers / `PreInitializePlayer` flow.
-2. Audit host API coverage needed by objectives (clear/goal conditions).
-3. Gate workspace tests in CI after failures addressed.
-
-**Accept:** `cargo test --workspace` passes (no fails) locally + CI
-**Owner:** TBD | **ETA:** Week 1 | **Risk:** MEDIUM (breadth)
+### 2. Test Suite — ✅
+**Fix:** Delay objective polling until after the first simulation tick and make scenario callbacks tolerant of missing `PreInitializePlayer`.
+**Verification:** `cargo test --workspace`
 
 ---
 
@@ -87,7 +74,7 @@ cargo test --workspace
 | System | Status | Evidence | Owner |
 |--------|--------|----------|-------|
 | **Build/Compile** | ✅ Working | `cargo build --release` succeeds | - |
-| **Tests** | ⛔ Broken | Workspace fail: host functions + construction/objective tests | TBD |
+| **Tests** | ✅ Working | `cargo test --workspace` passes | TBD |
 | **Scenario Discovery** | ✅ Working | content/ assets discovered; sandbox no longer sole entry | TBD |
 | **Scenario Loading** | ⚠️ Unknown | Needs real scenarios to test | TBD |
 | **AI Commands** | ⚠️ Partial | MoveTo + Build implemented in stack; Follow/Attack pending | TBD |
@@ -100,7 +87,7 @@ cargo test --workspace
 | **Scripting** | ⚠️ Partial | 121 host functions; missing commands | TBD |
 | **Menus/HUD** | ✅ Implemented | Code exists; needs verification | TBD |
 | **Weather** | ✅ Implemented | Code exists; needs verification | TBD |
-| **CI** | ⛔ Presumed Red | Tests don't compile | TBD |
+| **CI** | ⛔ Presumed Red | Pipeline still disabled pending AI parity | TBD |
 
 **Legend:** ✅ Working | ⚠️ Unknown/Partial | ⛔ Blocked/Missing
 
@@ -122,7 +109,7 @@ cargo test --workspace
 **Day 1: ENGINE TEST TRIAGE**
 - [ ] Summarize failing engine tests + map missing C++ subsystems (commands, construction, objectives)
 - [ ] Draft plan to port construction component bookkeeping (C4ObjectCom) and associated tests
-- [ ] Identify minimal `PreInitializePlayer`/objective hooks needed for parity smoke test
+- [x] Identify minimal `PreInitializePlayer`/objective hooks needed for parity smoke test
 
 **Day 2: STUB AI COMMANDS**
 - [ ] Extract C++ AddCommand/SetCommand signatures from `C4Command.cpp`
@@ -139,11 +126,11 @@ cargo test --workspace
 
 ## QUALITY GATES (Definition of Done)
 
-- ✅ P0 blockers cleared
-- ✅ CI green (build + tests compile + smokes pass)
+- ⛔ P0 blockers cleared
+- ⚠️ CI green (build + tests compile + smokes pass)
 - ✅ Scenario list shows real scenarios
-- ✅ 0 panic!/todo! in production src
-- ✅ Each system has ≥1 passing smoke test
+- ⛔ 0 panic!/todo! in production src
+- ⚠️ Each system has ≥1 passing smoke test
 
 ---
 
@@ -156,7 +143,7 @@ cargo test -p lc-app load_frontend_scenarios_discovers_repository_content
 
 **Test Status:**
 ```bash
-cargo test --workspace  # currently fails on engine parity cases
+cargo test --workspace  # passes
 ```
 
 **Panic Count:**
