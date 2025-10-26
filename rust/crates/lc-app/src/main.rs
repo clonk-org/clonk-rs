@@ -8348,34 +8348,85 @@ struct ScenarioRoot {
 
 fn scenario_roots(paths: &AppPaths) -> Vec<ScenarioRoot> {
     let mut roots = Vec::new();
-    push_root(&mut roots, paths.scenario_dir(), "Scenarios");
+    let mut seen = HashSet::new();
+    push_root(&mut roots, &mut seen, paths.scenario_dir(), "Scenarios");
     push_root(
         &mut roots,
+        &mut seen,
         paths.install_root().join("Scenarios"),
         "Scenarios",
     );
     push_root(
         &mut roots,
+        &mut seen,
         paths.install_root().join("scenarios"),
         "Scenarios",
     );
-    push_root(&mut roots, paths.planet_dir().to_path_buf(), "Scenarios");
     push_root(
         &mut roots,
+        &mut seen,
+        paths.planet_dir().to_path_buf(),
+        "Scenarios",
+    );
+    push_root(
+        &mut roots,
+        &mut seen,
         paths.system_group_path().to_path_buf(),
         "System",
     );
     roots
 }
 
-fn push_root(roots: &mut Vec<ScenarioRoot>, path: PathBuf, label: &str) {
-    if roots.iter().any(|existing| existing.path == path) {
+fn push_root(
+    roots: &mut Vec<ScenarioRoot>,
+    seen: &mut HashSet<String>,
+    path: PathBuf,
+    label: &str,
+) {
+    let key = scenario_root_key(&path);
+    if !seen.insert(key) {
         return;
     }
     roots.push(ScenarioRoot {
         path,
         label: label.to_string(),
     });
+}
+
+fn scenario_root_key(path: &Path) -> String {
+    let mut key = String::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                key.push_str(&prefix.as_os_str().to_string_lossy().replace('\\', "/"));
+            }
+            Component::RootDir => {
+                if !key.ends_with('/') {
+                    key.push('/');
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !key.ends_with('/') && !key.is_empty() {
+                    key.push('/');
+                }
+                key.push_str("..");
+            }
+            Component::Normal(part) => {
+                if !key.ends_with('/') && !key.is_empty() {
+                    key.push('/');
+                }
+                key.push_str(&part.to_string_lossy());
+            }
+        }
+    }
+    if key.is_empty() {
+        key.push('.');
+    }
+    if cfg!(windows) || cfg!(target_os = "macos") {
+        key = key.to_ascii_lowercase();
+    }
+    key
 }
 
 fn load_scenario_music_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
@@ -9652,11 +9703,7 @@ mod tests {
 
         let arcade_folder = scenarios_dir.join("Arcade.c4f");
         fs::create_dir_all(&arcade_folder).unwrap();
-        fs::write(
-            arcade_folder.join("Folder.txt"),
-            "Title=Arcade\nIndex=2\n",
-        )
-        .unwrap();
+        fs::write(arcade_folder.join("Folder.txt"), "Title=Arcade\nIndex=2\n").unwrap();
 
         let user_dir = install_dir.path().join("user-data");
         fs::create_dir_all(&user_dir).unwrap();
@@ -9723,7 +9770,11 @@ mod tests {
         assert_eq!(scenarios.len(), 1, "expected single folder entry");
         let folder = &scenarios[0];
         assert_eq!(folder.identifier, "Missions.c4f");
-        let titles: Vec<_> = folder.children.iter().map(|child| child.title.as_str()).collect();
+        let titles: Vec<_> = folder
+            .children
+            .iter()
+            .map(|child| child.title.as_str())
+            .collect();
         assert_eq!(
             titles,
             vec!["Bravo", "Alpha"],
@@ -9845,6 +9896,44 @@ mod tests {
             scenario.location_label().as_deref(),
             Some("Scenarios / Alpha.c4s"),
             "location label should mirror catalog path"
+        );
+
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scenario_roots_deduplicates_case_insensitive_variants() {
+        reset_cached_app_paths();
+
+        let install_dir = tempdir().unwrap();
+
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+        let install_scenarios = install_dir.path().join("Scenarios");
+        fs::create_dir_all(&install_scenarios).unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+
+        let paths = AppPaths::discover().expect("discover app paths");
+        let roots = scenario_roots(&paths);
+
+        let expected_key = scenario_root_key(&install_scenarios);
+        let duplicate_count = roots
+            .iter()
+            .map(|root| scenario_root_key(&root.path))
+            .filter(|key| key == &expected_key)
+            .count();
+
+        assert_eq!(
+            duplicate_count, 1,
+            "install scenarios path should appear once despite case variants"
         );
 
         reset_cached_app_paths();
