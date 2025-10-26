@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::{
-    ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, ObjectId, ObjectStatus,
+    ocf, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, ObjectId, ObjectStatus,
     ObjectUpdate, Vector2, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, CATEGORY_VEHICLE, FULL_CON,
     LINE_CONNECT_POWER_INPUT, OWNER_NONE,
 };
@@ -30,6 +30,8 @@ pub struct CommandObjectSnapshot {
     pub alive: bool,
     pub contents: Vec<ObjectId>,
     pub line_connect: u32,
+    pub ocf: u32,
+    pub collectible: bool,
 }
 
 impl CommandObjectSnapshot {
@@ -153,6 +155,8 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    use crate::ocf;
+
     fn snapshot_with_id(id: u64) -> CommandObjectSnapshot {
         CommandObjectSnapshot {
             id: ObjectId::new(id),
@@ -172,6 +176,8 @@ mod tests {
             alive: true,
             contents: Vec::new(),
             line_connect: 0,
+            ocf: ocf::AVAILABLE,
+            collectible: false,
         }
     }
 
@@ -413,6 +419,92 @@ mod tests {
                 assert_eq!(request.target, Some(target_id));
             }
             other => panic!("expected energy request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn acquire_completes_when_inventory_contains_item() {
+        let builder_id = ObjectId::new(1);
+        let item_id = ObjectId::new(2);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        builder.collectible = false;
+        builder.contents.push(item_id);
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "WOOD".into();
+        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+        item.collectible = true;
+        item.construction = FULL_CON;
+        item.container = Some(builder_id);
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder);
+        objects.insert(item.id, item);
+
+        let builder_snapshot = objects.get(&builder_id).expect("builder present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder_snapshot.position,
+            object: builder_snapshot,
+            objects: &objects,
+            structures_need_energy: false,
+        };
+
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.operations.is_empty());
+    }
+
+    #[test]
+    fn acquire_requests_move_for_nearby_item() {
+        let builder_id = ObjectId::new(10);
+        let item_id = ObjectId::new(20);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        builder.collectible = false;
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "WOOD".into();
+        item.position = Vector2::new(100, 0);
+        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+        item.collectible = true;
+        item.construction = FULL_CON;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder);
+        objects.insert(item.id, item);
+
+        let builder_snapshot = objects.get(&builder_id).expect("builder present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder_snapshot.position,
+            object: builder_snapshot,
+            objects: &objects,
+            structures_need_energy: false,
+        };
+
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.target, Some(item_id));
+            }
+            other => panic!("expected move request, got {:?}", other),
         }
     }
 }
@@ -1139,13 +1231,115 @@ impl AttackState {
 #[derive(Debug, Clone)]
 struct AcquireState {
     definition_id: DefinitionId,
+    ignore_container: Option<ObjectId>,
+    range_x: i32,
+    range_y: i32,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    last_move_order: Option<u64>,
+    candidate: Option<ObjectId>,
 }
 
 impl AcquireState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
         let definition_id =
             command_data_to_definition_id(&request.data).ok_or(CommandError::Unsupported)?;
-        Ok(Self { definition_id })
+        let raw_range_x = request.tx.unwrap_or(0);
+        let raw_range_y = request.ty.unwrap_or(0);
+        let range_x = if raw_range_x == 0 {
+            500
+        } else {
+            raw_range_x.abs()
+        };
+        let range_y = if raw_range_y == 0 {
+            250
+        } else {
+            raw_range_y.abs()
+        };
+        Ok(Self {
+            definition_id,
+            ignore_container: request.target2,
+            range_x,
+            range_y,
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            last_move_order: None,
+            candidate: None,
+        })
+    }
+
+    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn should_issue_move(&mut self, frame: u64) -> bool {
+        const MOVE_COOLDOWN: u64 = 12;
+        match self.last_move_order {
+            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
+            _ => {
+                self.last_move_order = Some(frame);
+                true
+            }
+        }
+    }
+
+    fn candidate_is_valid(
+        &self,
+        candidate: &CommandObjectSnapshot,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> bool {
+        if candidate.destroyed || !candidate.status.is_active() || !candidate.alive {
+            return false;
+        }
+        if candidate.definition_id != self.definition_id {
+            return false;
+        }
+        if candidate.id == ctx.object.id {
+            return false;
+        }
+        if candidate.ocf & ocf::AVAILABLE == 0 {
+            return false;
+        }
+        if candidate.construction < FULL_CON {
+            return false;
+        }
+        if let Some(ignore) = self.ignore_container {
+            if candidate.container == Some(ignore) {
+                return false;
+            }
+        }
+        if let Some(container) = candidate.container {
+            let builder_container = ctx.object.container;
+            if Some(container) != builder_container && container != ctx.object.id {
+                return false;
+            }
+        } else if !candidate.collectible {
+            return false;
+        }
+        true
+    }
+
+    fn find_candidate(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+        let mut best: Option<(ObjectId, i32)> = None;
+        for (id, snapshot) in ctx.objects.iter() {
+            if !self.candidate_is_valid(snapshot, ctx) {
+                continue;
+            }
+            let dx = snapshot.position.x - ctx.position.x;
+            let dy = snapshot.position.y - ctx.position.y;
+            if dx.abs() > self.range_x || dy.abs() > self.range_y {
+                continue;
+            }
+            let distance = dx.abs() + dy.abs();
+            if best.map_or(true, |(_, best_dist)| distance < best_dist) {
+                best = Some((*id, distance));
+            }
+        }
+        best.map(|(id, _)| id)
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -1160,12 +1354,54 @@ impl AcquireState {
             return CommandStepResult::completed(None);
         }
 
-        let update = if ctx.object.command_direction != CommandDirection::Stop {
-            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
-        } else {
-            None
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        if let Some(candidate_id) = self.candidate {
+            let candidate = ctx.resolve(candidate_id);
+            if candidate
+                .filter(|snapshot| self.candidate_is_valid(snapshot, ctx))
+                .is_none()
+            {
+                self.candidate = None;
+            }
+        }
+
+        if self.candidate.is_none() {
+            self.candidate = self.find_candidate(ctx);
+        }
+
+        let Some(candidate_id) = self.candidate else {
+            return CommandStepResult::running(self.update_to_stop(ctx));
         };
-        CommandStepResult::failed(update)
+
+        let Some(candidate) = ctx.resolve(candidate_id) else {
+            self.candidate = None;
+            return CommandStepResult::running(self.update_to_stop(ctx));
+        };
+
+        let dx = candidate.position.x - ctx.position.x;
+        let dy = candidate.position.y - ctx.position.y;
+        const PICKUP_RANGE: i32 = 12;
+        if dx.abs() <= PICKUP_RANGE && dy.abs() <= PICKUP_RANGE {
+            return CommandStepResult::running(self.update_to_stop(ctx));
+        }
+
+        if self.should_issue_move(ctx.frame) {
+            let request = CommandRequest::new(CommandId::MoveTo)
+                .with_target(Some(candidate_id))
+                .with_update_interval(10);
+            let operations = vec![CommandOperation::PushFront(request)];
+            return CommandStepResult::running(self.update_to_stop(ctx))
+                .with_operations(operations);
+        }
+
+        CommandStepResult::running(self.update_to_stop(ctx))
     }
 }
 

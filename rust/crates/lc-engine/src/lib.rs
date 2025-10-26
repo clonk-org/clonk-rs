@@ -7561,16 +7561,29 @@ impl Engine {
         let mut command_snapshots: HashMap<ObjectId, CommandObjectSnapshot> =
             HashMap::with_capacity(self.objects.len());
         for object in &self.objects {
-            let (procedure, line_connect) = self
+            let (procedure, line_connect, ocf_base, collectible) = self
                 .definitions
                 .get(&object.definition_id)
                 .map(|definition| {
                     let procedure = definition
                         .action_library()
                         .procedure_for_action(&object.state.action.name);
-                    (procedure, definition.line_connect())
+                    (
+                        procedure,
+                        definition.line_connect(),
+                        definition.ocf_base(),
+                        definition.is_collectible(),
+                    )
                 })
-                .unwrap_or((ActionProcedure::default(), 0));
+                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, OCF_NORMAL, false));
+            let ocf = ocf::compute(
+                ocf_base,
+                object.state.crew_member,
+                object.state.alive,
+                object.state.status,
+                object.state.container.is_some(),
+                object.state.construction,
+            );
             command_snapshots.insert(
                 object.id,
                 CommandObjectSnapshot {
@@ -7591,6 +7604,8 @@ impl Engine {
                     alive: object.state.alive,
                     contents: object.state.contents.clone(),
                     line_connect,
+                    ocf,
+                    collectible,
                 },
             );
         }
@@ -8047,11 +8062,33 @@ impl Engine {
 
             self.apply_landscape_at_index(idx);
             self.auto_collect_at_index(idx)?;
-            let line_connect = self
+            let (procedure, line_connect, ocf_base, collectible) = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
-                .map(|definition| definition.line_connect())
-                .unwrap_or(0);
+                .map(|definition| {
+                    (
+                        definition
+                            .action_library()
+                            .procedure_for_action(&self.objects[idx].state.action.name),
+                        definition.line_connect(),
+                        definition.ocf_base(),
+                        definition.is_collectible(),
+                    )
+                })
+                .unwrap_or((
+                    action_library.procedure_for_action(&self.objects[idx].state.action.name),
+                    OCF_NORMAL,
+                    OCF_NORMAL,
+                    false,
+                ));
+            let ocf = ocf::compute(
+                ocf_base,
+                self.objects[idx].state.crew_member,
+                self.objects[idx].state.alive,
+                self.objects[idx].state.status,
+                self.objects[idx].state.container.is_some(),
+                self.objects[idx].state.construction,
+            );
             command_snapshots.insert(
                 object_id,
                 CommandObjectSnapshot {
@@ -8063,8 +8100,7 @@ impl Engine {
                     category: self.objects[idx].state.category,
                     container: self.objects[idx].state.container,
                     action_target: self.objects[idx].state.action.target,
-                    action_procedure: action_library
-                        .procedure_for_action(&self.objects[idx].state.action.name),
+                    action_procedure: procedure,
                     command_direction: self.objects[idx].state.command_direction,
                     construction: self.objects[idx].state.construction,
                     owner: self.objects[idx].state.owner,
@@ -8073,6 +8109,8 @@ impl Engine {
                     alive: self.objects[idx].state.alive,
                     contents: self.objects[idx].state.contents.clone(),
                     line_connect,
+                    ocf,
+                    collectible,
                 },
             );
             spawn_requests.extend(spawns.into_iter());
