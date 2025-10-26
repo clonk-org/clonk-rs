@@ -418,7 +418,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
   - Object queries (FindObject, ObjectCount, etc.)
   - Object manipulation (CreateObject, RemoveObject, etc.)
   - Player functions (GetCrew, GetMaterial, etc.) — GetCrew/GetCrewCount/GetMaterial/GetPlrKnowledge/SetPlrKnowledge ported; inventory queries (GetCursor/GetViewCursor/GetSelectCount) now implemented
-  - Landscape functions (Dig, Blast, etc.) — DigFree/DigFreeRect now ported; Blast/Shake operations still TODO
+  - [x] Landscape functions (Dig, Blast, etc.) — DigFree/DigFreeRect plus BlastFree/ShakeFree now ported with parity behaviour
   - [x] Message functions (Message, PlayerMessage, etc.)
   - [x] Math/utility functions (Format, Log, DebugLog)
 - [x] Effect system (AddEffect, RemoveEffect, callbacks)
@@ -436,6 +436,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2028-07-03):** Implemented `GetKeys`/`GetValues` host functions with deterministic ordering so script proplists enumerate like LegacyClonk, including regression coverage in `rust/crates/lc-engine/src/compat.rs`.
 **Progress (2028-08-24):** Filled in the legacy script utility surface by porting `GetType`, `CreateArray`, `GetLength`, and `GetIndexOf` host functions to the Rust compatibility layer with regression tests covering nil handling, array/string/map sizing, and legacy search semantics in `rust/crates/lc-engine/src/compat.rs`.
 **Progress (2028-09-14):** Ported the digging host functions (`DigFree`, `DigFreeRect`) and threaded them through the effect context so script calls mutate the Rust landscape with LegacyClonk parity, returning removed materials to the acting object and reusing the engine’s conversion/particle flow; added regression coverage in `rust/crates/lc-engine/src/compat.rs` and `rust/crates/lc-engine/src/lib.rs`.
+**Progress (2028-10-05):** Landed `BlastFree` and `ShakeFree` in the Rust compatibility layer, backing them with engine-side blast and shake operations so scripts excavate terrain with the correct controller attribution, particle spawning, and legacy-grade handling, covered by new regression tests in `rust/crates/lc-engine/src/compat.rs` and `rust/crates/lc-engine/src/lib.rs`.
 
 **Files:** lc-script, host function registration in lc-engine
 

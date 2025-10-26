@@ -1886,6 +1886,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetTransferZone", set_transfer_zone);
     script.register_host_function("DigFree", dig_free);
     script.register_host_function("DigFreeRect", dig_free_rect);
+    script.register_host_function("BlastFree", blast_free);
+    script.register_host_function("ShakeFree", shake_free);
     script.register_host_function("GBackSolid", g_back_solid);
     script.register_host_function("GBackSemiSolid", g_back_semi_solid);
     script.register_host_function("GBackLiquid", g_back_liquid);
@@ -3389,6 +3391,15 @@ pub(crate) enum LandscapeOperation {
         height: i32,
         requested: bool,
         by_object: Option<ObjectId>,
+    },
+    BlastCircle {
+        center: Vector2,
+        radius: i32,
+        controller: Option<i32>,
+    },
+    ShakeCircle {
+        center: Vector2,
+        radius: i32,
     },
 }
 
@@ -5946,6 +5957,103 @@ fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
             .map(|material_id| material_id.index() as i32)
             .unwrap_or(MATERIAL_NONE);
         Ok(Value::Int(result))
+    })
+}
+
+fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 3 {
+        return Err(RuntimeError::new(
+            "BlastFree expects at least 3 arguments: x, y, level",
+        ));
+    }
+    if args.len() > 4 {
+        return Err(RuntimeError::new(
+            "BlastFree expects at most 4 arguments: x, y, level, caused_by",
+        ));
+    }
+
+    let mut x = value_to_i32(&args[0], "BlastFree", "x")?;
+    let mut y = value_to_i32(&args[1], "BlastFree", "y")?;
+    let level = value_to_i32(&args[2], "BlastFree", "level")?;
+    if level <= 0 {
+        return Ok(Value::Bool(false));
+    }
+
+    let mut caused_by_plus_one = 0;
+    if let Some(arg) = args.get(3) {
+        caused_by_plus_one = match arg {
+            Value::Int(value) => *value,
+            Value::Nil => 0,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "BlastFree: expected int or nil for caused by, got {}",
+                    other.type_name()
+                )))
+            }
+        };
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("BlastFree requires an active engine context"))?;
+
+        let mut controller = if caused_by_plus_one > 0 {
+            Some(caused_by_plus_one - 1)
+        } else {
+            None
+        };
+
+        if caused_by_plus_one <= 0 {
+            if let Some(object) = context.object_context() {
+                let position = object.effective_position();
+                x = x.saturating_add(position.x);
+                y = y.saturating_add(position.y);
+                if controller.is_none() {
+                    controller = Some(object.owner());
+                }
+            }
+        }
+
+        context.register_landscape_operation(LandscapeOperation::BlastCircle {
+            center: Vector2::new(x, y),
+            radius: level,
+            controller,
+        });
+        Ok(Value::Bool(true))
+    })
+}
+
+fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() < 3 {
+        return Err(RuntimeError::new(
+            "ShakeFree expects at least 3 arguments: x, y, radius",
+        ));
+    }
+    if args.len() > 3 {
+        return Err(RuntimeError::new(
+            "ShakeFree expects exactly 3 arguments: x, y, radius",
+        ));
+    }
+
+    let x = value_to_i32(&args[0], "ShakeFree", "x")?;
+    let y = value_to_i32(&args[1], "ShakeFree", "y")?;
+    let radius = value_to_i32(&args[2], "ShakeFree", "radius")?;
+    if radius <= 0 {
+        return Ok(Value::Bool(false));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("ShakeFree requires an active engine context"))?;
+        context.register_landscape_operation(LandscapeOperation::ShakeCircle {
+            center: Vector2::new(x, y),
+            radius,
+        });
+        Ok(Value::Bool(true))
     })
 }
 
@@ -10763,6 +10871,108 @@ mod tests {
             }
             other => panic!("unexpected landscape operation: {:?}", other),
         }
+    }
+
+    #[test]
+    fn blast_free_registers_landscape_operation() {
+        let args = [Value::Int(12), Value::Int(34), Value::Int(5), Value::Int(3)];
+        let (result, outcome) = with_object_host_context(|| blast_free(&args));
+        assert_eq!(result.expect("BlastFree succeeds"), Value::Bool(true));
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::BlastCircle {
+                center,
+                radius,
+                controller,
+            } => {
+                assert_eq!(*center, Vector2::new(12, 34));
+                assert_eq!(*radius, 5);
+                assert_eq!(*controller, Some(2));
+            }
+            other => panic!("unexpected landscape operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn blast_free_offsets_coordinates_without_explicit_controller() {
+        let object_context = HostObjectContext::new(
+            ObjectId::new(1),
+            None,
+            ObjectStatus::Normal,
+            100,
+            4,
+            Vector2::new(5, 10),
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            None,
+            None,
+            &[],
+            FULL_CON,
+        );
+        let (result, outcome) = with_effect_context(
+            Some(object_context),
+            &[],
+            HostWorldContext::default(),
+            1,
+            || blast_free(&[Value::Int(3), Value::Int(7), Value::Int(6)]),
+        );
+        assert_eq!(result.expect("BlastFree succeeds"), Value::Bool(true));
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::BlastCircle {
+                center,
+                radius,
+                controller,
+            } => {
+                assert_eq!(*center, Vector2::new(8, 17));
+                assert_eq!(*radius, 6);
+                assert_eq!(*controller, Some(4));
+            }
+            other => panic!("unexpected landscape operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn blast_free_rejects_non_positive_level() {
+        let args = [Value::Int(0), Value::Int(0), Value::Int(0)];
+        let (result, outcome) = with_object_host_context(|| blast_free(&args));
+        assert_eq!(
+            result.expect("BlastFree handles zero level"),
+            Value::Bool(false)
+        );
+        assert!(outcome.landscape.is_empty());
+    }
+
+    #[test]
+    fn shake_free_registers_landscape_operation() {
+        let args = [Value::Int(30), Value::Int(40), Value::Int(5)];
+        let (result, outcome) = with_object_host_context(|| shake_free(&args));
+        assert_eq!(result.expect("ShakeFree succeeds"), Value::Bool(true));
+        assert_eq!(outcome.landscape.len(), 1);
+        match &outcome.landscape[0] {
+            LandscapeOperation::ShakeCircle { center, radius } => {
+                assert_eq!(*center, Vector2::new(30, 40));
+                assert_eq!(*radius, 5);
+            }
+            other => panic!("unexpected landscape operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn shake_free_rejects_non_positive_radius() {
+        let args = [Value::Int(10), Value::Int(20), Value::Int(0)];
+        let (result, outcome) = with_object_host_context(|| shake_free(&args));
+        assert_eq!(
+            result.expect("ShakeFree handles zero radius"),
+            Value::Bool(false)
+        );
+        assert!(outcome.landscape.is_empty());
     }
 
     #[test]

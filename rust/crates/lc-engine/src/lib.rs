@@ -10450,6 +10450,14 @@ impl Engine {
                     requested,
                     by_object,
                 } => self.execute_dig_rect_operation(origin, width, height, requested, by_object),
+                LandscapeOperation::BlastCircle {
+                    center,
+                    radius,
+                    controller,
+                } => self.execute_blast_circle_operation(center, radius, controller),
+                LandscapeOperation::ShakeCircle { center, radius } => {
+                    self.execute_shake_circle_operation(center, radius)
+                }
             }
         }
     }
@@ -10557,6 +10565,75 @@ impl Engine {
             }
         }
         self.process_dig_material_conversions(object_index, requested);
+    }
+
+    fn execute_blast_circle_operation(
+        &mut self,
+        center: Vector2,
+        radius: i32,
+        controller: Option<i32>,
+    ) {
+        if radius <= 0 {
+            return;
+        }
+        let _ = self.blast_circle(center, radius, controller);
+    }
+
+    fn execute_shake_circle_operation(&mut self, center: Vector2, radius: i32) {
+        if radius <= 0 {
+            return;
+        }
+        let Some(landscape) = self.landscape.as_mut() else {
+            return;
+        };
+        if self.materials.is_empty() {
+            return;
+        }
+        let width = landscape.width() as i32;
+        if width <= 0 {
+            return;
+        }
+        let radius_sq = i64::from(radius) * i64::from(radius);
+        for dx in -radius..=radius {
+            let column = center.x.saturating_add(dx);
+            if column < 0 || column >= width {
+                continue;
+            }
+            let dx_sq = i64::from(dx) * i64::from(dx);
+            if dx_sq > radius_sq {
+                continue;
+            }
+            let remaining = radius_sq - dx_sq;
+            if remaining < 0 {
+                continue;
+            }
+            let vertical = (remaining as f64).sqrt().floor() as i32;
+            let target_height = center.y.saturating_add(vertical);
+            let previous_height = landscape.surface_height(column).unwrap_or(0);
+            let Some((material_id, removed)) =
+                Self::dig_column(&self.materials, landscape, column, target_height)
+            else {
+                continue;
+            };
+            if removed <= 0 {
+                continue;
+            }
+            let count = match usize::try_from(removed) {
+                Ok(count) if count > 0 => count,
+                _ => continue,
+            };
+            let span = removed.max(1) as f32;
+            for _ in 0..count {
+                let px = column as f32 + self.rng.gen_range(-0.4..0.4);
+                let base_y = previous_height as f32 + self.rng.gen_range(0.0..span);
+                let py = (base_y + self.rng.gen_range(-0.25..0.25)).max(0.0);
+                let velocity =
+                    FloatVector2::new(self.rng.gen_range(-0.4..0.4), self.rng.gen_range(-0.8..0.0));
+                let particle =
+                    MaterialParticle::new(material_id, FloatVector2::new(px, py), velocity);
+                self.material_particles.push(particle);
+            }
+        }
     }
 
     fn process_blast_reactions(
@@ -13157,6 +13234,76 @@ mod tests {
                 "expected spawned object owner to match controller"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn apply_landscape_operations_executes_blast_circle() -> Result<(), EngineError> {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+            BlastFree=1
+            Blast2PXSRatio=2
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(5);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(17, 40, Some(earth)));
+
+        engine.apply_landscape_operations(vec![LandscapeOperation::BlastCircle {
+            center: Vector2::new(8, 40),
+            radius: 4,
+            controller: Some(1),
+        }]);
+
+        let snapshot = engine.snapshot();
+        assert!(
+            snapshot
+                .particles
+                .iter()
+                .any(|particle| particle.definition_id == "material/pxs/earth"),
+            "blast operation should emit earth particles"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn apply_landscape_operations_executes_shake_circle() -> Result<(), EngineError> {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+            DigFree=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(9);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(17, 40, Some(earth)));
+
+        engine.apply_landscape_operations(vec![LandscapeOperation::ShakeCircle {
+            center: Vector2::new(8, 35),
+            radius: 3,
+        }]);
+
+        let snapshot = engine.snapshot();
+        assert!(
+            snapshot
+                .particles
+                .iter()
+                .any(|particle| particle.definition_id == "material/pxs/earth"),
+            "shake operation should release earth particles"
+        );
         Ok(())
     }
 
