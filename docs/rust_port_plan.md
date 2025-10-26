@@ -31,6 +31,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 **Progress (2025-12-27):** Scenario discovery now preserves the LegacyClonk search priority, letting user scenario overrides shadow installed variants so the browser matches the C++ catalog order.
 **Progress (2026-03-18):** Scenario discovery now reads legacy `Scenario.txt` head metadata when no manifest/title files are present, restoring classic mission titles and descriptions in the browser.
 **Progress (2027-10-25):** Matched the legacy scenario browser ordering by honoring folder indices, mission icon ordering, and difficulty precedence in `lc-resources`, backed by regression tests, and removed the Rust frontend’s alphabetical resort so the tree mirrors C++ exactly.
+**Progress (2028-10-26):** Scenario browser now merges duplicate scenario folders across user and install roots, keeping overrides while inheriting fallback entries so the tree matches LegacyClonk without duplicate listings.
 
 **Files:** `main.rs:4631` (load_frontend_scenarios), scenario discovery in lc-resources
 
@@ -93,7 +94,7 @@ Core scenarios boot, but complex object procedures (push/build/inventory) still 
 - [x] Z-order rendering (background → objects → overlays)
 - [x] Rotation and scaling for graphics
 
-**Progress (2025-11-26):** Frontend now respects per-object rotations from `SetR`/snapshots when rendering action sprites and overlays, matching LegacyClonk's spinning/tilting objects (scaling still pending).
+**Progress (2025-11-26):** Frontend now respects per-object rotations from `SetR`/snapshots when rendering action sprites and overlays, matching LegacyClonk's spinning/tilting objects.
 **Progress (2025-11-22):** Action rendering now mirrors C++ ping-pong playback for ActMap entries with `Reverse=1`, so animations like bridge and swim cycle forward and back instead of flipping the sprite list order.
 **Progress (2025-11-18):** Graphics rendering now buckets snapshot objects into background, midground, foreground, and parallax lanes and sorts them by legacy `C4D_SortLimit` before drawing, matching the C++ draw order so static backs no longer overdraw crew sprites.
 **Progress (2025-11-15):** Frontend now applies `ColorByOwner` tint masks using player palette colors, with fallback hues when explicit player colors are unavailable, covering both ActMap slices and overlay sprites.

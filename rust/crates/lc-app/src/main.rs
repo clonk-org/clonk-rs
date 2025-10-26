@@ -2806,6 +2806,73 @@ impl FrontendScenario {
     }
 }
 
+fn merge_frontend_scenarios(entries: Vec<FrontendScenario>) -> Vec<FrontendScenario> {
+    let mut result: Vec<FrontendScenario> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+
+    for entry in entries {
+        if let Some(&existing_idx) = index.get(&entry.identifier) {
+            if is_container_kind(&entry.kind) && is_container_kind(&result[existing_idx].kind) {
+                let existing = &mut result[existing_idx];
+                merge_container(existing, entry);
+            }
+            continue;
+        }
+        index.insert(entry.identifier.clone(), result.len());
+        result.push(entry);
+    }
+
+    result
+}
+
+fn merge_container(existing: &mut FrontendScenario, mut incoming: FrontendScenario) {
+    if existing.description.is_none() {
+        existing.description = incoming.description.take();
+    }
+    if existing.preview.is_none() {
+        existing.preview = incoming.preview.take();
+    }
+    if existing.path.is_none() {
+        existing.path = incoming.path.take();
+    }
+    existing.is_editable |= incoming.is_editable;
+    existing.is_playable |= incoming.is_playable;
+    merge_children(&mut existing.children, incoming.children);
+}
+
+fn merge_children(
+    existing_children: &mut Vec<FrontendScenario>,
+    incoming_children: Vec<FrontendScenario>,
+) {
+    if incoming_children.is_empty() {
+        return;
+    }
+
+    let mut index: HashMap<String, usize> = existing_children
+        .iter()
+        .enumerate()
+        .map(|(idx, child)| (child.identifier.clone(), idx))
+        .collect();
+
+    for child in incoming_children {
+        if let Some(&existing_idx) = index.get(&child.identifier) {
+            if is_container_kind(&existing_children[existing_idx].kind)
+                && is_container_kind(&child.kind)
+            {
+                let existing_child = &mut existing_children[existing_idx];
+                merge_container(existing_child, child);
+            }
+            continue;
+        }
+        index.insert(child.identifier.clone(), existing_children.len());
+        existing_children.push(child);
+    }
+}
+
+fn is_container_kind(kind: &ScenarioKind) -> bool {
+    matches!(kind, ScenarioKind::Folder | ScenarioKind::Editor)
+}
+
 struct InstallDefinitionResolver {
     app_paths: Option<Arc<AppPaths>>,
 }
@@ -7906,7 +7973,7 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
                         }
                     }
                     if !scenarios.is_empty() {
-                        return scenarios;
+                        return merge_frontend_scenarios(scenarios);
                     }
                 }
             }
@@ -9026,6 +9093,90 @@ mod tests {
         assert!(
             path.starts_with(&user_dir),
             "expected scenario path to point at user overrides"
+        );
+
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn load_frontend_scenarios_merges_folder_children_across_roots() {
+        let _env_lock = crate::tests::env_lock().lock();
+        reset_cached_app_paths();
+
+        let install_dir = tempdir().unwrap();
+
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
+
+        let install_folder = install_dir
+            .path()
+            .join("Scenarios")
+            .join("Worlds.c4f");
+        fs::create_dir_all(&install_folder).unwrap();
+        fs::write(install_folder.join("Folder.txt"), "Title=Worlds\n").unwrap();
+        let install_scenario = install_folder.join("Alpha.c4s");
+        fs::create_dir_all(&install_scenario).unwrap();
+        fs::write(
+            install_scenario.join("Scenario.json"),
+            br#"{"name":"Alpha Install"}"#,
+        )
+        .unwrap();
+
+        let user_dir = install_dir.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+        let user_folder = user_dir.join("Scenarios").join("Worlds.c4f");
+        fs::create_dir_all(&user_folder).unwrap();
+        fs::write(user_folder.join("Folder.txt"), "Title=Worlds\n").unwrap();
+        let user_scenario = user_folder.join("Beta.c4s");
+        fs::create_dir_all(&user_scenario).unwrap();
+        fs::write(
+            user_scenario.join("Scenario.json"),
+            br#"{"name":"Beta User"}"#,
+        )
+        .unwrap();
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
+        ]);
+
+        let scenarios = load_frontend_scenarios();
+        assert_eq!(
+            scenarios.len(),
+            1,
+            "duplicate folders should merge instead of duplicating entries"
+        );
+        let folder = &scenarios[0];
+        assert_eq!(folder.identifier, "Worlds.c4f");
+        assert!(
+            matches!(folder.kind, ScenarioKind::Folder),
+            "expected merged entry to remain a folder"
+        );
+        assert_eq!(
+            folder.children.len(),
+            2,
+            "merged folder should expose children from all roots"
+        );
+        assert_eq!(folder.children[0].identifier, "Worlds.c4f/Beta.c4s");
+        assert_eq!(folder.children[0].title, "Beta User");
+        assert!(
+            folder.children[0]
+                .path
+                .as_ref()
+                .map(|path| path.starts_with(&user_dir))
+                .unwrap_or(false),
+            "user scenario should retain user path"
+        );
+        assert_eq!(folder.children[1].identifier, "Worlds.c4f/Alpha.c4s");
+        assert_eq!(folder.children[1].title, "Alpha Install");
+        assert!(
+            folder.children[1]
+                .path
+                .as_ref()
+                .map(|path| path.starts_with(&install_dir))
+                .unwrap_or(false),
+            "install scenario should retain install path"
         );
 
         reset_cached_app_paths();
