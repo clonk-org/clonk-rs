@@ -282,6 +282,7 @@ impl<'a> Lexer<'a> {
             "private" => TokenKind::Keyword(Keyword::Private),
             "protected" => TokenKind::Keyword(Keyword::Protected),
             "public" => TokenKind::Keyword(Keyword::Public),
+            "local" => TokenKind::Keyword(Keyword::Local),
             "var" => TokenKind::Keyword(Keyword::Var),
             "if" => TokenKind::Keyword(Keyword::If),
             "else" => TokenKind::Keyword(Keyword::Else),

@@ -23,6 +23,7 @@ pub enum Keyword {
     Private,
     Protected,
     Public,
+    Local,
     Var,
     If,
     Else,

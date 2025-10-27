@@ -71,6 +71,15 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // Parse top-level local variable declarations
+        while !self.is_eof()? {
+            if self.consume_if_keyword(Keyword::Local)?.is_some() {
+                self.parse_top_level_local_decl()?;
+            } else {
+                break;
+            }
+        }
+
         // Parse functions
         let mut functions = Vec::new();
         while !self.is_eof()? {
@@ -605,5 +614,21 @@ impl<'a> Parser<'a> {
             }
             _ => Ok(None),
         }
+    }
+
+    fn parse_top_level_local_decl(&mut self) -> Result<(), ParseError> {
+        // local name (, name)* ;
+        // Parse first variable name
+        self.expect_identifier("expected variable name after 'local'")?;
+
+        // Parse additional comma-separated names
+        while self.consume_if_symbol(Symbol::Comma)?.is_some() {
+            self.expect_identifier("expected variable name after ','")?;
+        }
+
+        // Expect semicolon
+        self.expect_symbol(Symbol::Semicolon, "expected ';' after local declaration")?;
+
+        Ok(())
     }
 }
