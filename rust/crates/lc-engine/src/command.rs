@@ -2,8 +2,8 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::{
     ocf, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, Direction, ObjectId,
-    ObjectStatus, ObjectUpdate, PlayerStatus, Vector2, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE,
-    CATEGORY_VEHICLE, FULL_CON, LINE_CONNECT_POWER_INPUT, OWNER_NONE,
+    ObjectStatus, ObjectUpdate, PlayerStatus, Vector2, CATEGORY_OBJECT, CATEGORY_STATIC_BACK,
+    CATEGORY_STRUCTURE, CATEGORY_VEHICLE, FULL_CON, LINE_CONNECT_POWER_INPUT, OWNER_NONE,
 };
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +14,7 @@ const ACQUIRE_REQUEST_INTERVAL: u32 = 50;
 const COMMAND_FLAG_ENTER_PUSH_TARGET: i32 = 0b10;
 const DIG_MOVE_TO_RANGE_DEFAULT: i32 = 5;
 const DIG_DIRECTION_RANGE: i32 = 1;
+const CATEGORY_SELECT_KNOWLEDGE: i32 = 1 << 10;
 
 #[derive(Debug, Clone)]
 pub struct CommandObjectSnapshot {
@@ -840,7 +841,9 @@ mod tests {
         assert!(
             result.operations.iter().any(|operation| match operation {
                 CommandOperation::PushFront(request) => {
-                    request.id == CommandId::MoveTo && request.tx == Some(120) && request.ty == Some(0)
+                    request.id == CommandId::MoveTo
+                        && request.tx == Some(120)
+                        && request.ty == Some(0)
                 }
                 _ => false,
             }),
@@ -2210,6 +2213,160 @@ mod tests {
                 assert_eq!(request.target, Some(target_id));
             }
             other => panic!("expected activate request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn activate_completes_when_target_outside_container() {
+        let actor_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+
+        let actor = snapshot_with_id(actor_id.as_u64());
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.container = None;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(target.id, target);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ActivateState::from_request(
+            &CommandRequest::new(CommandId::Activate).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.operations.is_empty());
+        assert!(result.events.is_empty());
+    }
+
+    #[test]
+    fn activate_requests_enter_when_actor_outside_container() {
+        let actor_id = ObjectId::new(10);
+        let container_id = ObjectId::new(20);
+        let target_id = ObjectId::new(30);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(100, 0);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.position = Vector2::new(0, 0);
+        container.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
+        container.contents.push(target_id);
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = container.position;
+        target.container = Some(container_id);
+        target.collectible = true;
+        target.construction = FULL_CON;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(container.id, container);
+        objects.insert(target.id, target);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ActivateState::from_request(
+            &CommandRequest::new(CommandId::Activate)
+                .with_target(Some(target_id))
+                .with_update_interval(5),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Enter);
+                assert_eq!(request.target, Some(container_id));
+            }
+            other => panic!("expected enter request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn activate_releases_target_when_inside_container() {
+        let actor_id = ObjectId::new(5);
+        let container_id = ObjectId::new(6);
+        let target_id = ObjectId::new(7);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.owner = 42;
+        actor.position = Vector2::new(15, 5);
+        actor.container = Some(container_id);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.position = Vector2::new(12, 4);
+        container.contents.push(target_id);
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = container.position;
+        target.container = Some(container_id);
+        target.collectible = true;
+        target.construction = FULL_CON;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(container.id, container);
+        objects.insert(target.id, target);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ActivateState::from_request(
+            &CommandRequest::new(CommandId::Activate).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            CommandEvent::ApplyObjectUpdate { object_id, update } => {
+                assert_eq!(*object_id, target_id);
+                assert_eq!(update.container, Some(None));
+                assert_eq!(update.position, Some(Vector2::new(12, 4)));
+                assert_eq!(update.velocity, Some(Vector2::ZERO));
+                assert_eq!(update.owner, Some(42));
+            }
+            other => panic!("unexpected event: {:?}", other),
         }
     }
 
@@ -4659,6 +4816,266 @@ impl GrabState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ActivateState {
+    target: Option<ObjectId>,
+    container: Option<ObjectId>,
+    definition_id: Option<DefinitionId>,
+    remaining: i32,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    exit_requested: bool,
+    enter_requested: bool,
+}
+
+impl ActivateState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let definition_id = command_data_to_definition_id(&request.data);
+        let remaining = if definition_id.is_some() {
+            request.tx.unwrap_or(1).max(1)
+        } else {
+            1
+        };
+        Ok(Self {
+            target: request.target,
+            container: request.target2,
+            definition_id,
+            remaining,
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            exit_requested: false,
+            enter_requested: false,
+        })
+    }
+
+    fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        let mut update = None;
+        if ctx.object.command_direction != CommandDirection::Stop {
+            let mut object_update = ObjectUpdate::new();
+            object_update.command_direction = Some(CommandDirection::Stop);
+            update = Some(object_update);
+        }
+        if ctx.object.action_procedure == ActionProcedure::Dig {
+            let mut object_update = update.unwrap_or_else(ObjectUpdate::new);
+            let action_update = ActionUpdate::default()
+                .with_name("Idle")
+                .with_force(true)
+                .with_phase(0)
+                .with_ticks(0);
+            object_update = object_update.with_action_update(action_update);
+            update = Some(object_update);
+        }
+        update
+    }
+
+    fn resolve_container(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+        if self.container.is_none() {
+            if let Some(target_id) = self.target {
+                if let Some(snapshot) = ctx.resolve(target_id) {
+                    self.container = snapshot.container;
+                }
+            }
+        }
+        self.container
+    }
+
+    fn check_minimum_con(&self, target: &CommandObjectSnapshot) -> bool {
+        if (target.category & (CATEGORY_VEHICLE | CATEGORY_OBJECT)) == 0 {
+            return true;
+        }
+        if (target.category & CATEGORY_SELECT_KNOWLEDGE) == 0 {
+            return true;
+        }
+        target.construction >= FULL_CON
+    }
+
+    fn release_target(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        container_id: ObjectId,
+        target_id: ObjectId,
+        update: Option<ObjectUpdate>,
+    ) -> CommandStepResult {
+        let container_position = if container_id == ctx.object.id {
+            ctx.position
+        } else {
+            ctx.resolve(container_id)
+                .map(|snapshot| snapshot.position)
+                .unwrap_or(ctx.position)
+        };
+
+        let mut target_update = ObjectUpdate::new();
+        target_update.position = Some(container_position);
+        target_update.velocity = Some(Vector2::ZERO);
+        target_update.container = Some(None);
+        target_update.command_direction = Some(CommandDirection::Stop);
+        if ctx.object.owner != OWNER_NONE {
+            target_update.owner = Some(ctx.object.owner);
+        }
+
+        let mut result = if self.remaining > 1 {
+            self.remaining -= 1;
+            if self.definition_id.is_some() {
+                self.target = None;
+            }
+            CommandStepResult::running(update)
+        } else {
+            CommandStepResult::completed(update)
+        };
+
+        result.events.push(CommandEvent::ApplyObjectUpdate {
+            object_id: target_id,
+            update: target_update,
+        });
+
+        result
+    }
+
+    fn request_exit(&mut self, update: Option<ObjectUpdate>) -> CommandStepResult {
+        if self.exit_requested {
+            CommandStepResult::running(update)
+        } else {
+            self.exit_requested = true;
+            let mut result = CommandStepResult::running(update);
+            let request = CommandRequest::new(CommandId::Exit)
+                .with_update_interval(50)
+                .with_mode(CommandMode::Sub);
+            result.operations.push(CommandOperation::PushFront(request));
+            result
+        }
+    }
+
+    fn request_enter(
+        &mut self,
+        container_id: ObjectId,
+        update: Option<ObjectUpdate>,
+    ) -> CommandStepResult {
+        if self.enter_requested {
+            CommandStepResult::running(update)
+        } else {
+            self.enter_requested = true;
+            let mut result = CommandStepResult::running(update);
+            let request = CommandRequest::new(CommandId::Enter)
+                .with_target(Some(container_id))
+                .with_update_interval(50)
+                .with_mode(CommandMode::Sub);
+            result.operations.push(CommandOperation::PushFront(request));
+            result
+        }
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        if self.target.is_none() && self.definition_id.is_none() {
+            return if self.container.is_some() {
+                CommandStepResult::completed(None)
+            } else {
+                CommandStepResult::failed(None)
+            };
+        }
+
+        let update = self.prepare_update(ctx);
+
+        if let Some(target_id) = self.target {
+            match ctx.resolve(target_id) {
+                Some(snapshot) if snapshot.container.is_none() => {
+                    return CommandStepResult::completed(update);
+                }
+                Some(_) => {}
+                None => return CommandStepResult::failed(update),
+            }
+        }
+
+        let Some(container_id) = self.resolve_container(ctx) else {
+            return CommandStepResult::failed(update);
+        };
+
+        if ctx.object.container.is_none() {
+            self.exit_requested = false;
+        }
+        if ctx.object.container == Some(container_id) {
+            self.enter_requested = false;
+        }
+
+        let target_id = if let Some(target_id) = self.target {
+            target_id
+        } else {
+            let Some(definition_id) = self.definition_id.clone() else {
+                return CommandStepResult::failed(update);
+            };
+            let Some(container_snapshot) = ctx.resolve(container_id) else {
+                return CommandStepResult::failed(update);
+            };
+            let mut candidate = None;
+            for object_id in &container_snapshot.contents {
+                if let Some(snapshot) = ctx.resolve(*object_id) {
+                    if snapshot.is_active()
+                        && snapshot.definition_id == definition_id
+                        && snapshot.container == Some(container_id)
+                    {
+                        candidate = Some(*object_id);
+                        break;
+                    }
+                }
+            }
+            let Some(candidate_id) = candidate else {
+                return CommandStepResult::failed(update);
+            };
+            self.target = Some(candidate_id);
+            candidate_id
+        };
+
+        let target_snapshot = match ctx.resolve(target_id) {
+            Some(snapshot) => snapshot,
+            None => return CommandStepResult::failed(update),
+        };
+
+        if !target_snapshot.is_active() {
+            return CommandStepResult::failed(update);
+        }
+
+        if target_snapshot.container.is_none() {
+            return CommandStepResult::completed(update);
+        }
+
+        if target_snapshot.container != Some(container_id) {
+            return CommandStepResult::failed(update);
+        }
+
+        if !self.check_minimum_con(target_snapshot) {
+            return CommandStepResult::failed(update);
+        }
+
+        if ctx.object.id == container_id || ctx.object.container == Some(container_id) {
+            return self.release_target(ctx, container_id, target_id, update);
+        }
+
+        if let Some(current_container) = ctx.object.container {
+            if current_container != container_id {
+                return self.request_exit(update);
+            }
+        }
+
+        if let Some(container_snapshot) = ctx.resolve(container_id) {
+            if container_snapshot.destroyed || !container_snapshot.status.is_active() {
+                return CommandStepResult::failed(update);
+            }
+            if container_snapshot.ocf & ocf::ENTRANCE != 0 {
+                return self.request_enter(container_id, update);
+            }
+        }
+
+        CommandStepResult::failed(update)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct UnGrabState {
     update_interval: u32,
     last_evaluated: Option<u64>,
@@ -5014,7 +5431,10 @@ impl DropState {
     fn from_request(request: &CommandRequest) -> Self {
         let has_coordinates = request.tx.is_some() || request.ty.is_some();
         let target_position = if has_coordinates {
-            Some(Vector2::new(request.tx.unwrap_or(0), request.ty.unwrap_or(0)))
+            Some(Vector2::new(
+                request.tx.unwrap_or(0),
+                request.ty.unwrap_or(0),
+            ))
         } else {
             None
         };
@@ -6779,6 +7199,7 @@ enum CommandState {
     Drop(DropState),
     Get(GetState),
     Dig(DigState),
+    Activate(ActivateState),
     Retry(RetryState),
     Attack(AttackState),
     Buy(BuyState),
@@ -6811,6 +7232,7 @@ impl ActiveCommand {
             CommandId::Drop => CommandState::Drop(DropState::from_request(&request)),
             CommandId::Get => CommandState::Get(GetState::from_request(&request)?),
             CommandId::Dig => CommandState::Dig(DigState::from_request(&request)?),
+            CommandId::Activate => CommandState::Activate(ActivateState::from_request(&request)?),
             CommandId::Retry => CommandState::Retry(RetryState::from_request(&request)),
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
             CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
@@ -6848,6 +7270,7 @@ impl ActiveCommand {
             CommandState::Drop(state) => state.step(ctx),
             CommandState::Get(state) => state.step(ctx),
             CommandState::Dig(state) => state.step(ctx),
+            CommandState::Activate(state) => state.step(ctx),
             CommandState::Retry(state) => state.step(ctx),
             CommandState::Attack(state) => state.step(ctx),
             CommandState::Buy(state) => state.step(ctx),
