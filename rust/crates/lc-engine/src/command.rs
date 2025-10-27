@@ -12,6 +12,8 @@ pub const MAX_COMMAND_STACK: usize = 35;
 const LINEKIT_DEFINITION: &str = "LNKT";
 const ACQUIRE_REQUEST_INTERVAL: u32 = 50;
 const COMMAND_FLAG_ENTER_PUSH_TARGET: i32 = 0b10;
+const DIG_MOVE_TO_RANGE_DEFAULT: i32 = 5;
+const DIG_DIRECTION_RANGE: i32 = 1;
 
 #[derive(Debug, Clone)]
 pub struct CommandObjectSnapshot {
@@ -369,6 +371,165 @@ mod tests {
 
         let result2 = state.step(&ctx2);
         assert_eq!(result2.status, CommandStatus::Completed);
+    }
+
+    #[test]
+    fn dig_requests_ungrab_when_pushing() {
+        let actor_id = ObjectId::new(60);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Push;
+        actor.command_direction = CommandDirection::Right;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let request = CommandRequest::new(CommandId::Dig)
+            .with_tx(Some(15))
+            .with_ty(Some(25));
+        let mut state = DigState::from_request(&request).expect("state created");
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(
+            result.operations.iter().any(|operation| match operation {
+                CommandOperation::PushFront(request) => request.id == CommandId::UnGrab,
+                _ => false,
+            }),
+            "dig should request ungrab when pushing"
+        );
+    }
+
+    #[test]
+    fn dig_requests_exit_when_contained() {
+        let actor_id = ObjectId::new(61);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(ObjectId::new(99));
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let request = CommandRequest::new(CommandId::Dig)
+            .with_tx(Some(0))
+            .with_ty(Some(0));
+        let mut state = DigState::from_request(&request).expect("state created");
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(
+            result.operations.iter().any(|operation| match operation {
+                CommandOperation::PushFront(request) => request.id == CommandId::Exit,
+                _ => false,
+            }),
+            "dig should request exit when contained"
+        );
+    }
+
+    #[test]
+    fn dig_sets_dig_action_when_walking() {
+        let actor_id = ObjectId::new(62);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Walk;
+        actor.command_direction = CommandDirection::Stop;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let request = CommandRequest::new(CommandId::Dig)
+            .with_tx(Some(actor.position.x))
+            .with_ty(Some(actor.position.y + 20))
+            .with_data(CommandData::Integer(1));
+        let mut state = DigState::from_request(&request).expect("state created");
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        let update = result.update.expect("dig should issue an update");
+        assert_eq!(
+            update.command_direction,
+            Some(CommandDirection::Down),
+            "dig should direct the crew towards the target"
+        );
+        let action_update = update.action.expect("dig should start the dig action");
+        assert_eq!(action_update.name.as_deref(), Some("Dig"));
+        assert_eq!(action_update.data, Some(1));
+    }
+
+    #[test]
+    fn dig_completes_when_within_move_range() {
+        let actor_id = ObjectId::new(63);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Dig;
+        actor.command_direction = CommandDirection::Left;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let request = CommandRequest::new(CommandId::Dig)
+            .with_tx(Some(actor.position.x))
+            .with_ty(Some(actor.position.y));
+        let mut state = DigState::from_request(&request).expect("state created");
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result.update.expect("dig should stop when done");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        let action_update = update.action.expect("dig should reset to idle");
+        assert_eq!(action_update.name.as_deref(), Some("Idle"));
     }
 
     #[test]
@@ -3473,6 +3634,194 @@ impl ChopState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct DigState {
+    target: Vector2,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    dig_out_material: bool,
+    ungrab_requested: bool,
+    exit_requested: bool,
+}
+
+impl DigState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let tx = request.tx.ok_or(CommandError::Unsupported)?;
+        let ty = request.ty.ok_or(CommandError::Unsupported)?;
+        let dig_out_material = match &request.data {
+            CommandData::Integer(value) => *value != 0,
+            CommandData::Text(text) => !text.is_empty(),
+            CommandData::None => false,
+        };
+        Ok(Self {
+            target: Vector2::new(tx, ty),
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            dig_out_material,
+            ungrab_requested: false,
+            exit_requested: false,
+        })
+    }
+
+    fn ensure_stop(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        update: Option<ObjectUpdate>,
+    ) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction == CommandDirection::Stop {
+            update
+        } else {
+            let update = update.unwrap_or_else(ObjectUpdate::new);
+            Some(update.with_command_direction(CommandDirection::Stop))
+        }
+    }
+
+    fn apply_idle(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        update: Option<ObjectUpdate>,
+    ) -> Option<ObjectUpdate> {
+        let update = self
+            .ensure_stop(ctx, update)
+            .unwrap_or_else(ObjectUpdate::new);
+        Some(
+            update.with_action_update(
+                ActionUpdate::default()
+                    .with_name("Idle")
+                    .with_force(true)
+                    .with_phase(0)
+                    .with_ticks(0),
+            ),
+        )
+    }
+
+    fn move_to_range(&self, _ctx: &CommandRuntimeContext<'_>) -> i32 {
+        DIG_MOVE_TO_RANGE_DEFAULT
+    }
+
+    fn desired_direction(&self, position: Vector2) -> CommandDirection {
+        let mut direction = CommandDirection::Stop;
+
+        if position.x < self.target.x - DIG_DIRECTION_RANGE {
+            direction = CommandDirection::Right;
+        } else if position.x > self.target.x + DIG_DIRECTION_RANGE {
+            direction = CommandDirection::Left;
+        }
+
+        if position.y < self.target.y - DIG_DIRECTION_RANGE {
+            direction = match direction {
+                CommandDirection::Right => CommandDirection::DownRight,
+                CommandDirection::Left => CommandDirection::DownLeft,
+                _ => CommandDirection::Down,
+            };
+        } else if position.y > self.target.y + DIG_DIRECTION_RANGE {
+            direction = match direction {
+                CommandDirection::Right => CommandDirection::UpRight,
+                CommandDirection::Left => CommandDirection::UpLeft,
+                _ => CommandDirection::Up,
+            };
+        }
+
+        direction
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        let mut pending_update: Option<ObjectUpdate> = None;
+
+        if matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Build | ActionProcedure::Chop
+        ) {
+            pending_update = self.apply_idle(ctx, pending_update);
+        }
+
+        if matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Hang | ActionProcedure::Scale
+        ) {
+            pending_update = self.apply_idle(ctx, pending_update);
+        }
+
+        if ctx.object.action_procedure == ActionProcedure::Push {
+            pending_update = self.ensure_stop(ctx, pending_update);
+            if !self.ungrab_requested {
+                self.ungrab_requested = true;
+                let mut result = CommandStepResult::running(pending_update.clone());
+                let request = CommandRequest::new(CommandId::UnGrab)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::Sub);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
+            return CommandStepResult::running(pending_update);
+        }
+        self.ungrab_requested = false;
+
+        if ctx.object.container.is_some() {
+            pending_update = self.ensure_stop(ctx, pending_update);
+            if !self.exit_requested {
+                self.exit_requested = true;
+                let mut result = CommandStepResult::running(pending_update.clone());
+                let request = CommandRequest::new(CommandId::Exit)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::Sub);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
+            return CommandStepResult::running(pending_update);
+        }
+        self.exit_requested = false;
+
+        let move_to_range = self.move_to_range(ctx);
+        let dx = self.target.x - ctx.position.x;
+        let dy = self.target.y - ctx.position.y;
+        if dx.abs() <= move_to_range && dy.abs() <= move_to_range {
+            let update = self.apply_idle(ctx, pending_update);
+            return CommandStepResult::completed(update);
+        }
+
+        if ctx.object.action_procedure != ActionProcedure::Dig {
+            if ctx.object.action_procedure != ActionProcedure::Walk {
+                return CommandStepResult::running(pending_update);
+            }
+            let mut update = self
+                .ensure_stop(ctx, pending_update)
+                .unwrap_or_else(ObjectUpdate::new);
+            let mut action_update = ActionUpdate::default()
+                .with_name("Dig")
+                .with_force(true)
+                .with_phase(0)
+                .with_ticks(0);
+            if self.dig_out_material {
+                action_update = action_update.with_data(1);
+            }
+            update = update.with_action_update(action_update);
+            pending_update = Some(update);
+        }
+
+        let direction = self.desired_direction(ctx.position);
+        if direction == CommandDirection::Stop {
+            return CommandStepResult::running(pending_update);
+        }
+
+        if ctx.object.command_direction != direction {
+            let mut update = pending_update.unwrap_or_else(ObjectUpdate::new);
+            update = update.with_command_direction(direction);
+            pending_update = Some(update);
+        }
+
+        CommandStepResult::running(pending_update)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct GrabState {
     target: ObjectId,
     offset_x: i32,
@@ -4828,6 +5177,7 @@ enum CommandState {
     UnGrab(UnGrabState),
     Jump(JumpState),
     Wait(WaitState),
+    Dig(DigState),
     Retry(RetryState),
     Attack(AttackState),
     Buy(BuyState),
@@ -4855,6 +5205,7 @@ impl ActiveCommand {
             CommandId::UnGrab => CommandState::UnGrab(UnGrabState::from_request(&request)),
             CommandId::Jump => CommandState::Jump(JumpState::from_request(&request)),
             CommandId::Wait => CommandState::Wait(WaitState::from_request(&request)),
+            CommandId::Dig => CommandState::Dig(DigState::from_request(&request)?),
             CommandId::Retry => CommandState::Retry(RetryState::from_request(&request)),
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
             CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
@@ -4887,6 +5238,7 @@ impl ActiveCommand {
             CommandState::UnGrab(state) => state.step(ctx),
             CommandState::Jump(state) => state.step(ctx),
             CommandState::Wait(state) => state.step(ctx),
+            CommandState::Dig(state) => state.step(ctx),
             CommandState::Retry(state) => state.step(ctx),
             CommandState::Attack(state) => state.step(ctx),
             CommandState::Buy(state) => state.step(ctx),

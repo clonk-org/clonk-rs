@@ -1,6 +1,6 @@
 # LegacyClonk C++ → Rust Port Plan
 
-**Updated:** 2025-10-27 | **Goal:** Run ALL real scenarios with exact C++ parity | **Status:** ⛔ BLOCKED
+**Updated:** 2025-10-26 | **Goal:** Run ALL real scenarios with exact C++ parity | **Status:** ⛔ BLOCKED
 
 ---
 
@@ -24,14 +24,14 @@
 ---
 
 ### 1. AI Command System — PARTIAL ⚠️
-**Problem:** Command stack covers MoveTo/Follow/Enter/Exit/Build/Attack/Acquire/Buy/Energy + Grab/UnGrab/Throw/Wait/Jump/Chop; Dig/Put/etc. still unported so many C++ behaviours remain unavailable
+**Problem:** Command stack covers MoveTo/Follow/Enter/Exit/Build/Attack/Acquire/Buy/Energy + Grab/UnGrab/Throw/Wait/Jump/Chop/Dig; Put/Drop/Activate/PushTo/Construct/Transfer/Context/Sell/Home/Call/Take/Take2 still unported so many C++ behaviours remain unavailable
 **Evidence:** `command::tests::exit_moves_into_parent_container_when_nested` + `command::tests::exit_leaves_container_when_no_parent` ensure Exit parity; `command::tests::acquire_requests_move_for_nearby_item` verifies ground pickup pathing; `command::tests::grab_starts_push_when_in_range` + `command::tests::ungrab_sets_idle_and_completes` cover push/release flow; `command::tests::wait_stops_dig_and_completes_after_interval` anchors Wait parity; `command::tests::retry_command_waits_then_completes` covers failure cooldowns; `command::tests::chop_sets_action_when_in_range` + `command::tests::chop_requests_ungrab_when_pushing` validate Chop parity; `command::tests::jump_sets_direction_and_action_when_walking` + `command::tests::jump_skips_action_when_not_walking` cover Jump behaviour; `compat::tests::set_command_clears_stack_and_pushes_command` still green
 **C++ Has:** 30 commands (Follow, MoveTo, Build, Attack, etc.) via `C4Command.cpp`
-**Rust Has:** Command trait infrastructure + MoveTo/Follow/Enter/Exit/Build/Attack/Throw/Chop/Wait/Jump + Retry countdown for failure back-off; Acquire for loose items, shared-container withdrawal, cross-container exit heuristics; Buy commands that deduct home base stock/wealth, spawn purchased items in bases, and hand off targeted shop purchases; Energy line-kit handshake; Grab/UnGrab mirror C++ push start/stop (auto queues UnGrab when switching targets); Chop respects approach heuristics, ungrabs push targets, and starts forced Chop action; Jump aligns facing and injects Jump action when walkers command it; command stack snapshots persist across engine saves and scenario exports
+**Rust Has:** Command trait infrastructure + MoveTo/Follow/Enter/Exit/Build/Attack/Throw/Chop/Wait/Jump/Dig + Retry countdown for failure back-off; Acquire for loose items, shared-container withdrawal, cross-container exit heuristics; Buy commands that deduct home base stock/wealth, spawn purchased items in bases, and hand off targeted shop purchases; Energy line-kit handshake; Grab/UnGrab mirror C++ push start/stop (auto queues UnGrab when switching targets); Chop respects approach heuristics, ungrabs push targets, and starts forced Chop action; Dig mirrors C++ flow (auto-ungrab, exit containers, forces dig action, enforces `Dig2Object` flag, stops at destination); Jump aligns facing and injects Jump action when walkers command it; command stack snapshots persist across engine saves and scenario exports
 **Impact:** Build automation works (crew picks up components, honours material requirements); Exit mirrors C++ nested-container behaviour and stops builders before ejecting; Grab reproduces push engagement and respects hang/build dig-outs; Throw handles targeted throws with Acquire fallback; Jump applies C++-style orientation + action forcing; Energize follows loose line-kit pickups; merchant/shop buys succeed and survive save/load; broader command coverage still missing
 **Next:**
 1. Expand tests to cover queue chaining, failure recovery, and scenario parity
-2. Implement remaining command types (Get/Put/Drop/Dig/Activate/PushTo/Construct/Transfer/Context/Sell/Home/Call/Take/Take2) and associated movement heuristics
+2. Implement remaining command types (Get/Put/Drop/Activate/PushTo/Construct/Transfer/Context/Sell/Home/Call/Take/Take2) and associated movement heuristics
 
 **Accept:** `AddCommand("MoveTo", ...)` and `SetCommand("Build", ...)` reproduce C++ behaviour across parity scenarios
 **Owner:** TBD | **ETA:** Weeks 2-4 | **Risk:** HIGH (large system, hidden deps)
@@ -186,6 +186,15 @@ cargo test -p lc-engine \
   command::tests::throw_pushes_move_to_target_when_out_of_range \
   command::tests::throw_sets_throw_action_when_in_range \
   command::tests::throw_requests_ungrab_when_pushing
+```
+
+**Dig Command:**
+```bash
+cargo test -p lc-engine \
+  command::tests::dig_requests_ungrab_when_pushing \
+  command::tests::dig_requests_exit_when_contained \
+  command::tests::dig_sets_dig_action_when_walking \
+  command::tests::dig_completes_when_within_move_range
 ```
 
 ---
