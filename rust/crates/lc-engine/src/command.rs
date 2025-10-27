@@ -1227,6 +1227,128 @@ mod tests {
     }
 
     #[test]
+    fn home_completes_when_already_in_owner_base() {
+        let builder_id = ObjectId::new(510);
+        let base_id = ObjectId::new(520);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.owner = 7;
+        builder.container = Some(base_id);
+
+        let mut base = snapshot_with_id(base_id.as_u64());
+        base.owner = 7;
+        base.category = CATEGORY_STRUCTURE;
+        base.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
+        base.collectible = false;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+        objects.insert(base.id, base);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: objects.get(&builder_id).expect("builder present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state =
+            HomeState::from_request(&CommandRequest::new(CommandId::Home)).expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.operations.is_empty());
+        assert!(result.events.is_empty());
+    }
+
+    #[test]
+    fn home_requests_enter_when_not_in_base() {
+        let builder_id = ObjectId::new(530);
+        let base_id = ObjectId::new(540);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.owner = 11;
+        builder.position = Vector2::new(0, 0);
+
+        let mut base = snapshot_with_id(base_id.as_u64());
+        base.owner = 11;
+        base.category = CATEGORY_STRUCTURE;
+        base.ocf = ocf::ENTRANCE | ocf::AVAILABLE;
+        base.position = Vector2::new(100, 0);
+        base.collectible = false;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+        objects.insert(base.id, base);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: objects.get(&builder_id).expect("builder present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state =
+            HomeState::from_request(&CommandRequest::new(CommandId::Home)).expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        if let Some(update) = &result.update {
+            assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        }
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Enter);
+                assert_eq!(request.target, Some(base_id));
+            }
+            other => panic!("unexpected operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn home_fails_when_no_base_available() {
+        let builder_id = ObjectId::new(550);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.owner = 23;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: objects.get(&builder_id).expect("builder present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state =
+            HomeState::from_request(&CommandRequest::new(CommandId::Home)).expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Failed);
+    }
+
+    #[test]
     fn exit_completes_when_not_contained() {
         let actor_id = ObjectId::new(51);
         let actor = snapshot_with_id(actor_id.as_u64());
@@ -5098,6 +5220,115 @@ impl BuyState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct HomeState {
+    target: Option<ObjectId>,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    last_enter_request: Option<u64>,
+}
+
+impl HomeState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        Ok(Self {
+            target: request.target,
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            last_enter_request: None,
+        })
+    }
+
+    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn is_base(snapshot: &CommandObjectSnapshot, owner: i32) -> bool {
+        snapshot.is_active()
+            && snapshot.owner == owner
+            && (snapshot.category & CATEGORY_STRUCTURE) != 0
+            && (snapshot.ocf & ocf::ENTRANCE) != 0
+            && !snapshot.collectible
+    }
+
+    fn is_home(&self, ctx: &CommandRuntimeContext<'_>) -> bool {
+        match ctx.object.container {
+            Some(container_id) => ctx
+                .resolve(container_id)
+                .map(|snapshot| Self::is_base(snapshot, ctx.object.owner))
+                .unwrap_or(false),
+            None => false,
+        }
+    }
+
+    fn resolve_base(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+        let owner = ctx.object.owner;
+        if let Some(target_id) = self.target {
+            if let Some(snapshot) = ctx.resolve(target_id) {
+                if Self::is_base(snapshot, owner) {
+                    return Some(target_id);
+                }
+            }
+        }
+
+        ctx.objects
+            .values()
+            .filter(|snapshot| snapshot.id != ctx.object.id && Self::is_base(snapshot, owner))
+            .min_by_key(|snapshot| {
+                let dx = i64::from(snapshot.position.x - ctx.position.x);
+                let dy = i64::from(snapshot.position.y - ctx.position.y);
+                dx * dx + dy * dy
+            })
+            .map(|snapshot| snapshot.id)
+    }
+
+    fn should_issue_enter(&self, frame: u64) -> bool {
+        const ENTER_COOLDOWN: u64 = 12;
+        match self.last_enter_request {
+            Some(last) => frame.saturating_sub(last) >= ENTER_COOLDOWN,
+            None => true,
+        }
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.is_home(ctx) {
+            return CommandStepResult::completed(self.update_to_stop(ctx));
+        }
+
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        let base_id = match self.resolve_base(ctx) {
+            Some(id) => {
+                self.target = Some(id);
+                id
+            }
+            None => return CommandStepResult::failed(self.update_to_stop(ctx)),
+        };
+
+        let update = self.update_to_stop(ctx);
+        if self.should_issue_enter(ctx.frame) {
+            self.last_enter_request = Some(ctx.frame);
+            let request = CommandRequest::new(CommandId::Enter)
+                .with_target(Some(base_id))
+                .with_update_interval(25)
+                .with_mode(CommandMode::Sub);
+            return CommandStepResult::running(update)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+
+        CommandStepResult::running(update)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct EnergyState {
     target: ObjectId,
     acquire_requested: bool,
@@ -5182,6 +5413,7 @@ enum CommandState {
     Attack(AttackState),
     Buy(BuyState),
     Acquire(AcquireState),
+    Home(HomeState),
     Energy(EnergyState),
     Unsupported,
 }
@@ -5210,6 +5442,7 @@ impl ActiveCommand {
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
             CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
             CommandId::Acquire => CommandState::Acquire(AcquireState::from_request(&request)?),
+            CommandId::Home => CommandState::Home(HomeState::from_request(&request)?),
             CommandId::Energy => CommandState::Energy(EnergyState::from_request(&request)?),
             _ => CommandState::Unsupported,
         };
@@ -5243,6 +5476,7 @@ impl ActiveCommand {
             CommandState::Attack(state) => state.step(ctx),
             CommandState::Buy(state) => state.step(ctx),
             CommandState::Acquire(state) => state.step(ctx),
+            CommandState::Home(state) => state.step(ctx),
             CommandState::Energy(state) => state.step(ctx),
             CommandState::Unsupported => {
                 let update = ObjectUpdate::new().with_command_direction(CommandDirection::Stop);
