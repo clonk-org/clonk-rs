@@ -119,6 +119,12 @@ struct Cli {
     #[arg(long = "test-load", value_name = "PATH", help = "Test scenario loading without starting the UI")]
     test_load: Option<std::path::PathBuf>,
 
+    #[arg(long = "integration-test", value_name = "PATH", help = "Run full scenario integration test (load, apply, start, run frames)")]
+    integration_test: Option<std::path::PathBuf>,
+
+    #[arg(long = "test-frames", value_name = "N", default_value_t = 60, help = "Number of frames to run during integration test")]
+    test_frames: u32,
+
     #[arg(long = "host", value_name = "ADDR", conflicts_with = "join")]
     host: Option<String>,
 
@@ -597,6 +603,91 @@ fn test_scenario_load(path: &std::path::Path, app_paths: Option<&Arc<AppPaths>>)
     }
 }
 
+fn run_integration_test(
+    scenario_path: &std::path::Path,
+    test_frames: u32,
+    app_paths: Option<&Arc<AppPaths>>,
+    runtime: RuntimeConfig,
+) -> Result<()> {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    println!("Running integration test: {}", scenario_path.display());
+    println!("Test frames: {}", test_frames);
+
+    let start = Instant::now();
+
+    // Create app (reuses test infrastructure)
+    let mut app = GameApp::new(
+        640, // width
+        480, // height
+        AudioOptions::default(),
+        app_paths.map(|v| &**v),
+        runtime,
+    )
+    .context("failed to initialize app for integration test")?;
+
+    // Create FrontendScenario from path
+    let title = scenario_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Test Scenario")
+        .to_string();
+
+    let scenario = FrontendScenario {
+        identifier: title.clone(),
+        title,
+        description: None,
+        kind: ScenarioKind::Scenario,
+        is_editable: false,
+        is_playable: true,
+        path: Some(scenario_path.to_path_buf()),
+        root_label: None,
+        preview: None,
+        children: Vec::new(),
+        folder_index: None,
+        icon_index: None,
+        difficulty: None,
+    };
+
+    println!("Starting scenario: {}", scenario.title);
+
+    // Start scenario (begins async loading)
+    app.start_scenario(scenario)
+        .context("failed to start scenario")?;
+
+    // Wait for running state (reuses test helper pattern)
+    let mut waited_frames = 0;
+    for _ in 0..480 {
+        if matches!(app.mode, AppMode::Running) {
+            println!("Scenario reached Running state after {} update cycles", waited_frames);
+            break;
+        }
+        app.update()
+            .context("failed to update app while waiting for Running state")?;
+        waited_frames += 1;
+        thread::sleep(Duration::from_millis(2));
+    }
+
+    if !matches!(app.mode, AppMode::Running) {
+        anyhow::bail!("Scenario did not enter Running mode after 480 update cycles");
+    }
+
+    // Run test frames
+    println!("Running {} test frames...", test_frames);
+    for frame in 0..test_frames {
+        app.update()
+            .with_context(|| format!("failed to update app at frame {}", frame))?;
+    }
+
+    let elapsed = start.elapsed();
+    println!("\n✓ Integration test PASSED in {:.2}s", elapsed.as_secs_f32());
+    println!("  Scenario started successfully");
+    println!("  Ran {} frames without errors", test_frames);
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     lc_core::logging::init();
 
@@ -622,6 +713,11 @@ fn main() -> Result<()> {
         network: resolve_network_mode(&cli)?,
         record_enabled: load_recording_flag(app_paths.as_deref()),
     };
+
+    // Handle integration-test mode: full scenario lifecycle test
+    if let Some(test_path) = &cli.integration_test {
+        return run_integration_test(test_path, cli.test_frames, app_paths.as_ref(), runtime);
+    }
 
     let event_loop = EventLoop::new();
     let mut display_options = DisplayOptions::load(app_paths.as_deref());
