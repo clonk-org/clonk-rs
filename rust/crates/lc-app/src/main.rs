@@ -8792,8 +8792,50 @@ fn is_audio_path(path: &Path) -> bool {
 
 fn sandbox_music_bytes() -> &'static [u8] {
     static DATA: OnceLock<Vec<u8>> = OnceLock::new();
-    DATA.get_or_init(|| generate_sine_wave_wav(220.0, 1.5))
-        .as_slice()
+    DATA.get_or_init(|| {
+        load_menu_music().unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "failed to load menu music, using synthetic tone");
+            generate_sine_wave_wav(220.0, 1.5)
+        })
+    })
+    .as_slice()
+}
+
+fn load_menu_music() -> Result<Vec<u8>> {
+    let paths = AppPaths::discover()?;
+    let music_group_path = find_music_group(&paths)?;
+    let group = Group::open(&music_group_path)
+        .with_context(|| format!("failed to open music group at {}", music_group_path.display()))?;
+
+    // Try Frontend.ogg first (main menu music in C++)
+    let music_data = group
+        .read_file(Path::new("Frontend.ogg"))
+        .or_else(|_| group.read_file(Path::new("frontend.ogg")))
+        .context("failed to read Frontend.ogg from music group")?;
+
+    Ok(music_data)
+}
+
+fn find_music_group(paths: &AppPaths) -> Result<PathBuf> {
+    let mut search_roots = vec![
+        paths.install_root().to_path_buf(),
+        paths.planet_dir().to_path_buf(),
+        paths.user_data_dir().to_path_buf(),
+    ];
+    if let Some(content) = paths.content_dir() {
+        search_roots.push(content.to_path_buf());
+    }
+
+    for root in search_roots {
+        for name in ["Music.c4g", "music.c4g", "Music.ocg", "music.ocg"] {
+            let candidate = root.join(name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(anyhow!("Music.c4g not found in standard directories"))
 }
 
 fn compute_mix_values(
