@@ -81,9 +81,9 @@ pub struct ContextMenuEntry {
 }
 
 use command::{
-    CallResultAction, CommandDefinitionSnapshot, CommandEvent, CommandId, CommandObjectSnapshot,
-    CommandOperation, CommandPlayerSnapshot, CommandRuntimeContext, CommandStack,
-    CommandStepResult,
+    definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandDefinitionSnapshot,
+    CommandEvent, CommandId, CommandObjectSnapshot, CommandOperation, CommandPlayerSnapshot,
+    CommandRuntimeContext, CommandStack, CommandStepResult,
 };
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
@@ -11207,6 +11207,24 @@ impl Engine {
             CommandEvent::ApplyObjectUpdate { object_id, update } => {
                 self.apply_object_update(object_id, update)?;
             }
+            CommandEvent::ControlCommandAcquire {
+                caller,
+                target,
+                range_x,
+                range_y,
+                ignore_container,
+                definition_id,
+            } => {
+                let result = self.call_control_command_acquire(
+                    caller,
+                    target,
+                    range_x,
+                    range_y,
+                    ignore_container,
+                    &definition_id,
+                )?;
+                self.set_acquire_script_result(caller, result)?;
+            }
             CommandEvent::SpawnObject {
                 definition_id,
                 owner,
@@ -11306,6 +11324,59 @@ impl Engine {
             .ok_or_else(|| EngineError::UnknownObject(object_id))?;
         object.commands.complete_front_if(command);
         Ok(())
+    }
+
+    fn set_acquire_script_result(
+        &mut self,
+        object_id: ObjectId,
+        result: AcquireScriptResult,
+    ) -> Result<(), EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        if let Some(object) = self.objects.get_mut(index) {
+            let _ = object.commands.set_acquire_script_result(result);
+        }
+        Ok(())
+    }
+
+    fn call_control_command_acquire(
+        &mut self,
+        caller: ObjectId,
+        target: Option<ObjectId>,
+        range_x: i32,
+        range_y: i32,
+        ignore_container: Option<ObjectId>,
+        definition_id: &str,
+    ) -> Result<AcquireScriptResult, EngineError> {
+        let Some(index) = self.find_object_index(caller) else {
+            return Ok(AcquireScriptResult::Continue);
+        };
+        let mut args = Vec::new();
+        args.push(target.map(object_reference_value).unwrap_or(Value::Nil));
+        args.push(Value::Int(range_x));
+        args.push(Value::Int(range_y));
+        args.push(
+            ignore_container
+                .map(object_reference_value)
+                .unwrap_or(Value::Nil),
+        );
+        let definition_value = definition_id_to_c4id(definition_id)
+            .map(Value::Int)
+            .unwrap_or_else(|| Value::String(definition_id.to_string()));
+        args.push(definition_value);
+
+        let value = self.call_object_function(index, "~ControlCommandAcquire", args)?;
+        let code = match value {
+            Value::Int(code) => Some(code),
+            Value::Bool(flag) => Some(if flag { 1 } else { 0 }),
+            _ => None,
+        };
+
+        Ok(match code.and_then(AcquireScriptResult::from_code) {
+            Some(result) => result,
+            None => AcquireScriptResult::Continue,
+        })
     }
 
     fn detach_destroyed_objects(&mut self) -> Result<(), EngineError> {

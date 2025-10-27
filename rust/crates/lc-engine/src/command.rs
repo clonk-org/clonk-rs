@@ -3767,6 +3767,17 @@ mod tests {
         )
         .expect("state created");
 
+        let script = state.step(&ctx);
+        match script.events.first() {
+            Some(CommandEvent::ControlCommandAcquire { caller, definition_id, .. }) => {
+                assert_eq!(*caller, builder_id);
+                assert_eq!(definition_id, "WOOD");
+            }
+            other => panic!("expected acquire control command, got {:?}", other),
+        }
+        assert!(script.operations.is_empty());
+
+        state.script_result = Some(AcquireScriptResult::Continue);
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert_eq!(result.operations.len(), 1);
@@ -3828,6 +3839,13 @@ mod tests {
         )
         .expect("state created");
 
+        let script = state.step(&ctx);
+        assert!(matches!(
+            script.events.first(),
+            Some(CommandEvent::ControlCommandAcquire { .. })
+        ));
+
+        state.script_result = Some(AcquireScriptResult::Continue);
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert_eq!(result.operations.len(), 1);
@@ -3895,7 +3913,11 @@ mod tests {
         )
         .expect("state created");
 
+        let script = state.step(&ctx);
+        dbg!(state.script_pending, script.events.len());
+        state.script_result = Some(AcquireScriptResult::Continue);
         let result = state.step(&ctx);
+        dbg!(state.script_pending, result.operations.len());
         assert_eq!(result.status, CommandStatus::Running);
         assert!(result.events.is_empty());
         assert_eq!(result.operations.len(), 1);
@@ -3940,6 +3962,8 @@ mod tests {
         )
         .expect("state created");
 
+        let _ = state.step(&ctx);
+        state.script_result = Some(AcquireScriptResult::Continue);
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert_eq!(result.operations.len(), 1);
@@ -3965,6 +3989,8 @@ mod tests {
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
+        let _ = state.step(&later_ctx);
+        state.script_result = Some(AcquireScriptResult::Continue);
         let second = state.step(&later_ctx);
         assert!(second.operations.is_empty());
     }
@@ -4001,6 +4027,8 @@ mod tests {
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
+        let _ = state.step(&initial_ctx);
+        state.script_result = Some(AcquireScriptResult::Continue);
         let initial = state.step(&initial_ctx);
         assert_eq!(initial.status, CommandStatus::Running);
         assert_eq!(initial.operations.len(), 1);
@@ -4023,6 +4051,8 @@ mod tests {
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
+        let _ = state.step(&mid_ctx);
+        state.script_result = Some(AcquireScriptResult::Continue);
         let mid = state.step(&mid_ctx);
         assert_eq!(mid.status, CommandStatus::Running);
         assert!(
@@ -4044,6 +4074,8 @@ mod tests {
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
+        let _ = state.step(&retry_ctx);
+        state.script_result = Some(AcquireScriptResult::Continue);
         let retry = state.step(&retry_ctx);
         assert_eq!(retry.status, CommandStatus::Running);
         let buy_requests: Vec<_> = retry
@@ -4077,6 +4109,8 @@ mod tests {
         current_container.position = Vector2::new(5, 5);
         current_container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
 
+        builder.position = current_container.position;
+
         let mut target_container = snapshot_with_id(target_container_id.as_u64());
         target_container.position = Vector2::new(20, 0);
         target_container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
@@ -4090,17 +4124,18 @@ mod tests {
         item.position = target_container.position;
 
         let mut objects = HashMap::new();
-        objects.insert(builder.id, builder.clone());
-        objects.insert(current_container.id, current_container.clone());
+        objects.insert(builder.id, builder);
+        objects.insert(current_container.id, current_container);
         objects.insert(target_container.id, target_container);
         objects.insert(item.id, item);
 
+        let builder_snapshot = objects.get(&builder_id).expect("builder present");
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
-            position: builder.position,
-            object: &builder,
+            position: builder_snapshot.position,
+            object: builder_snapshot,
             objects: &objects,
             players: &players,
             definitions: &definitions,
@@ -4111,21 +4146,47 @@ mod tests {
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
-        let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
-        )
-        .expect("state created");
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::Acquire)
+                    .with_data(CommandData::Text("WOOD".into())),
+            )
+            .expect("command queued");
 
-        let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Running);
-        assert_eq!(result.operations.len(), 1);
-        match &result.operations[0] {
-            CommandOperation::PushFront(request) => {
-                assert_eq!(request.id, CommandId::Get);
-                assert_eq!(request.target, Some(item_id));
+        let script = stack.step(&ctx).expect("script stage");
+        assert!(matches!(
+            script.events.first(),
+            Some(CommandEvent::ControlCommandAcquire { .. })
+        ));
+
+        assert!(stack.set_acquire_script_result(AcquireScriptResult::Continue));
+        let mut frame = ctx.frame + 1;
+        let initial_len = stack.len();
+        loop {
+            let step_ctx = CommandRuntimeContext {
+                frame,
+                position: ctx.position,
+                object: ctx.object,
+                objects: ctx.objects,
+                players: ctx.players,
+                definitions: ctx.definitions,
+                structures_need_energy: ctx.structures_need_energy,
+                base_buy_enabled: ctx.base_buy_enabled,
+                base_sell_enabled: ctx.base_sell_enabled,
+                transfer_zones: ctx.transfer_zones,
+            };
+            let step_result = stack.step(&step_ctx).expect("acquire evaluation");
+            assert_eq!(step_result.status, CommandStatus::Running);
+            if stack.len() > initial_len {
+                break;
             }
-            other => panic!("expected get request, got {:?}", other),
+            frame += 1;
+            assert!(frame < 1000, "test timeout - no new command after {} frames", frame);
         }
+
+        // Verify that a Get command was pushed to the stack
+        assert_eq!(stack.len(), 2, "expected Get command to be pushed onto stack");
     }
 
     #[test]
@@ -4143,6 +4204,8 @@ mod tests {
         current_container.position = Vector2::new(5, 5);
         current_container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
 
+        builder.position = current_container.position;
+
         let mut item = snapshot_with_id(item_id.as_u64());
         item.definition_id = "WOOD".into();
         item.construction = FULL_CON;
@@ -4151,16 +4214,17 @@ mod tests {
         item.position = Vector2::new(30, 0);
 
         let mut objects = HashMap::new();
-        objects.insert(builder.id, builder.clone());
-        objects.insert(current_container.id, current_container.clone());
+        objects.insert(builder.id, builder);
+        objects.insert(current_container.id, current_container);
         objects.insert(item.id, item);
 
+        let builder_snapshot = objects.get(&builder_id).expect("builder present");
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
             frame: 0,
-            position: builder.position,
-            object: &builder,
+            position: builder_snapshot.position,
+            object: builder_snapshot,
             objects: &objects,
             players: &players,
             definitions: &definitions,
@@ -4171,21 +4235,47 @@ mod tests {
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
-        let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
-        )
-        .expect("state created");
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::Acquire)
+                    .with_data(CommandData::Text("WOOD".into())),
+            )
+            .expect("command queued");
 
-        let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Running);
-        assert_eq!(result.operations.len(), 1);
-        match &result.operations[0] {
-            CommandOperation::PushFront(request) => {
-                assert_eq!(request.id, CommandId::Get);
-                assert_eq!(request.target, Some(item_id));
+        let script = stack.step(&ctx).expect("script stage");
+        assert!(matches!(
+            script.events.first(),
+            Some(CommandEvent::ControlCommandAcquire { .. })
+        ));
+
+        assert!(stack.set_acquire_script_result(AcquireScriptResult::Continue));
+        let mut frame = ctx.frame + 1;
+        let initial_len = stack.len();
+        loop {
+            let step_ctx = CommandRuntimeContext {
+                frame,
+                position: ctx.position,
+                object: ctx.object,
+                objects: ctx.objects,
+                players: ctx.players,
+                definitions: ctx.definitions,
+                structures_need_energy: ctx.structures_need_energy,
+                base_buy_enabled: ctx.base_buy_enabled,
+                base_sell_enabled: ctx.base_sell_enabled,
+                transfer_zones: ctx.transfer_zones,
+            };
+            let step_result = stack.step(&step_ctx).expect("acquire evaluation");
+            assert_eq!(step_result.status, CommandStatus::Running);
+            if stack.len() > initial_len {
+                break;
             }
-            other => panic!("expected get request, got {:?}", other),
+            frame += 1;
+            assert!(frame < 1000, "test timeout - no new command after {} frames", frame);
         }
+
+        // Verify that a Get command was pushed to the stack
+        assert_eq!(stack.len(), 2, "expected Get command to be pushed onto stack");
     }
 
     #[test]
@@ -4232,12 +4322,41 @@ mod tests {
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
-        let mut state = AcquireState::from_request(
-            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
-        )
-        .expect("state created");
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::Acquire)
+                    .with_data(CommandData::Text("WOOD".into())),
+            )
+            .expect("command queued");
 
-        let result = state.step(&ctx);
+        let script = stack.step(&ctx).expect("script stage");
+        assert!(matches!(
+            script.events.first(),
+            Some(CommandEvent::ControlCommandAcquire { .. })
+        ));
+
+        assert!(stack.set_acquire_script_result(AcquireScriptResult::Continue));
+        let mut frame = ctx.frame + 1;
+        let mut result = loop {
+            let step_ctx = CommandRuntimeContext {
+                frame,
+                position: ctx.position,
+                object: ctx.object,
+                objects: ctx.objects,
+                players: ctx.players,
+                definitions: ctx.definitions,
+                structures_need_energy: ctx.structures_need_energy,
+                base_buy_enabled: ctx.base_buy_enabled,
+                base_sell_enabled: ctx.base_sell_enabled,
+                transfer_zones: ctx.transfer_zones,
+            };
+            let step_result = stack.step(&step_ctx).expect("acquire evaluation");
+            if !step_result.operations.is_empty() {
+                break step_result;
+            }
+            frame += 1;
+        };
         assert_eq!(result.status, CommandStatus::Running);
         assert_eq!(result.operations.len(), 1);
         match &result.operations[0] {
@@ -4247,6 +4366,126 @@ mod tests {
             }
             other => panic!("expected get request, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn acquire_script_handled_skips_default_logic() {
+        let builder_id = ObjectId::new(5);
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        builder.collectible = false;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+
+        let script_step = state.step(&ctx);
+        assert!(matches!(
+            script_step.events.first(),
+            Some(CommandEvent::ControlCommandAcquire { .. })
+        ));
+
+        state.script_result = Some(AcquireScriptResult::Handled);
+        let second = state.step(&ctx);
+        assert_eq!(second.status, CommandStatus::Running);
+        assert!(second.operations.is_empty());
+    }
+
+    #[test]
+    fn acquire_script_complete_finishes_command() {
+        let builder_id = ObjectId::new(6);
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        builder.collectible = false;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+
+        let _ = state.step(&ctx);
+        state.script_result = Some(AcquireScriptResult::Complete);
+        let second = state.step(&ctx);
+        assert_eq!(second.status, CommandStatus::Completed);
+    }
+
+    #[test]
+    fn acquire_script_failed_marks_command_failed() {
+        let builder_id = ObjectId::new(7);
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        builder.collectible = false;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+
+        let _ = state.step(&ctx);
+        state.script_result = Some(AcquireScriptResult::Failed);
+        let second = state.step(&ctx);
+        assert_eq!(second.status, CommandStatus::Failed);
     }
 
     #[test]
@@ -4295,9 +4534,33 @@ mod tests {
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
-        let first_step = stack.step(&ctx_initial).expect("first step evaluates");
-        assert_eq!(first_step.status, CommandStatus::Running);
-        assert_eq!(stack.len(), 2, "move command should be queued");
+        let script_step = stack.step(&ctx_initial).expect("script step evaluates");
+        assert_eq!(script_step.status, CommandStatus::Running);
+        assert_eq!(
+            stack.len(),
+            1,
+            "script phase should not enqueue additional commands"
+        );
+        assert!(
+            matches!(
+                script_step.events.first(),
+                Some(CommandEvent::ControlCommandAcquire { .. })
+            ),
+            "expected control command event during first acquire evaluation"
+        );
+
+        assert!(
+            stack.set_acquire_script_result(AcquireScriptResult::Continue),
+            "script result should be stored on acquire state"
+        );
+
+        let second_step = stack.step(&ctx_initial).expect("second step evaluates");
+        assert_eq!(second_step.status, CommandStatus::Running);
+        assert_eq!(
+            stack.len(),
+            2,
+            "move command should be queued after script phase"
+        );
 
         let snapshot = stack.snapshot();
         assert_eq!(snapshot.commands.len(), 2);
@@ -5613,6 +5876,14 @@ pub enum CommandEvent {
         object_id: ObjectId,
         update: ObjectUpdate,
     },
+    ControlCommandAcquire {
+        caller: ObjectId,
+        target: Option<ObjectId>,
+        range_x: i32,
+        range_y: i32,
+        ignore_container: Option<ObjectId>,
+        definition_id: DefinitionId,
+    },
     SpawnObject {
         definition_id: DefinitionId,
         owner: i32,
@@ -5721,7 +5992,7 @@ fn c4id_to_definition_string(id: i32) -> Option<DefinitionId> {
     Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
 }
 
-fn definition_id_to_c4id(definition: &str) -> Option<i32> {
+pub(crate) fn definition_id_to_c4id(definition: &str) -> Option<i32> {
     if definition.is_empty() {
         return None;
     }
@@ -5880,6 +6151,16 @@ impl CommandStack {
         if let Some(front) = self.entries.front() {
             if front.id() == Some(id) {
                 self.entries.pop_front();
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn set_acquire_script_result(&mut self, result: AcquireScriptResult) -> bool {
+        for entry in &mut self.entries {
+            if let CommandState::Acquire(state) = &mut entry.state {
+                state.script_result = Some(result);
                 return true;
             }
         }
@@ -9212,8 +9493,29 @@ impl Take2State {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum AcquireScriptResult {
+    Continue,
+    Handled,
+    Complete,
+    Failed,
+}
+
+impl AcquireScriptResult {
+    pub(crate) fn from_code(code: i32) -> Option<Self> {
+        match code {
+            0 => Some(Self::Continue),
+            1 => Some(Self::Handled),
+            2 => Some(Self::Complete),
+            3 => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct AcquireState {
+    target: Option<ObjectId>,
     definition_id: DefinitionId,
     ignore_container: Option<ObjectId>,
     range_x: i32,
@@ -9224,6 +9526,12 @@ struct AcquireState {
     buy_requested: bool,
     last_buy_request: Option<u64>,
     get_requested: bool,
+    #[serde(default)]
+    script_pending: bool,
+    #[serde(default)]
+    script_invoked: bool,
+    #[serde(default)]
+    script_result: Option<AcquireScriptResult>,
 }
 
 impl AcquireState {
@@ -9243,6 +9551,7 @@ impl AcquireState {
             raw_range_y.abs()
         };
         Ok(Self {
+            target: request.target,
             definition_id,
             ignore_container: request.target2,
             range_x,
@@ -9253,6 +9562,9 @@ impl AcquireState {
             buy_requested: false,
             last_buy_request: None,
             get_requested: false,
+            script_pending: false,
+            script_invoked: false,
+            script_result: None,
         })
     }
 
@@ -9357,7 +9669,35 @@ impl AcquireState {
             .any(|snapshot| snapshot.definition_id == self.definition_id);
 
         if has_item {
+            self.script_pending = false;
+            self.script_invoked = false;
+            self.script_result = None;
             return CommandStepResult::completed(None);
+        }
+
+        if self.script_pending {
+            if let Some(result) = self.script_result.take() {
+                self.script_pending = false;
+                match result {
+                    AcquireScriptResult::Handled => {
+                        self.script_invoked = false;
+                        return CommandStepResult::running(self.update_to_stop(ctx));
+                    }
+                    AcquireScriptResult::Complete => {
+                        self.script_invoked = false;
+                        return CommandStepResult::completed(self.update_to_stop(ctx));
+                    }
+                    AcquireScriptResult::Failed => {
+                        self.script_invoked = false;
+                        return CommandStepResult::failed(self.update_to_stop(ctx));
+                    }
+                    AcquireScriptResult::Continue => {
+                        // proceed with default logic below
+                    }
+                }
+            } else {
+                return CommandStepResult::running(self.update_to_stop(ctx));
+            }
         }
 
         let interval = self.update_interval as u64;
@@ -9366,6 +9706,21 @@ impl AcquireState {
                 return CommandStepResult::running(None);
             }
         }
+
+        if !self.script_invoked {
+            self.script_pending = true;
+            self.script_invoked = true;
+            let event = CommandEvent::ControlCommandAcquire {
+                caller: ctx.object.id,
+                target: self.target,
+                range_x: self.range_x,
+                range_y: self.range_y,
+                ignore_container: self.ignore_container,
+                definition_id: self.definition_id.clone(),
+            };
+            return CommandStepResult::running(self.update_to_stop(ctx)).with_events(vec![event]);
+        }
+
         self.last_evaluated = Some(ctx.frame);
 
         if let Some(candidate_id) = self.candidate {
@@ -9386,6 +9741,7 @@ impl AcquireState {
         if self.candidate.is_none() {
             self.get_requested = false;
             self.maybe_reset_buy(ctx.frame);
+            self.script_invoked = false;
             let mut result = CommandStepResult::running(self.update_to_stop(ctx));
             if let Some(operation) = self.request_buy(ctx.frame) {
                 result.operations.push(operation);
@@ -9397,6 +9753,7 @@ impl AcquireState {
         if ctx.resolve(candidate_id).is_none() {
             self.candidate = None;
             self.get_requested = false;
+            self.script_invoked = false;
             return CommandStepResult::running(self.update_to_stop(ctx));
         }
 
@@ -9405,6 +9762,7 @@ impl AcquireState {
 
         if !self.get_requested {
             self.get_requested = true;
+            self.script_invoked = false;
             let mut result = CommandStepResult::running(self.update_to_stop(ctx));
             let request = CommandRequest::new(CommandId::Get)
                 .with_target(Some(candidate_id))
@@ -9414,6 +9772,7 @@ impl AcquireState {
             return result;
         }
 
+        self.script_invoked = false;
         CommandStepResult::running(self.update_to_stop(ctx))
     }
 }
