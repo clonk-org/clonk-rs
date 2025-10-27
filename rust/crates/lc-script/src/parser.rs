@@ -175,19 +175,38 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_var_decl(&mut self) -> Result<Stmt, ParseError> {
-        let name_token = self.expect_identifier("expected variable name")?;
-        let name = if let TokenKind::Identifier(name) = name_token.kind {
-            name
-        } else {
-            unreachable!()
-        };
-        let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
-            Some(self.parse_expression()?)
-        } else {
-            None
-        };
+        let mut decls = Vec::new();
+
+        loop {
+            // Parse one variable
+            let name_token = self.expect_identifier("expected variable name")?;
+            let name = if let TokenKind::Identifier(name) = name_token.kind {
+                name
+            } else {
+                unreachable!()
+            };
+            let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
+                Some(self.parse_expression()?)
+            } else {
+                None
+            };
+            decls.push(Stmt::VarDecl { name, init });
+
+            // Check what's next: comma means more variables, otherwise expect semicolon
+            if self.consume_if_symbol(Symbol::Comma)?.is_some() {
+                continue;
+            }
+            break;
+        }
+
         self.expect_symbol(Symbol::Semicolon, "expected ';' after variable declaration")?;
-        Ok(Stmt::VarDecl { name, init })
+
+        // Return single declaration if only one, otherwise return block
+        if decls.len() == 1 {
+            Ok(decls.into_iter().next().unwrap())
+        } else {
+            Ok(Stmt::Block(decls))
+        }
     }
 
     fn parse_return(&mut self) -> Result<Stmt, ParseError> {
