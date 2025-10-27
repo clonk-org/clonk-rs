@@ -14,7 +14,6 @@ use std::collections::{
     hash_map::DefaultHasher, hash_map::Entry, BTreeMap, HashMap, HashSet, VecDeque,
 };
 use std::convert::TryFrom;
-use std::f32::consts::PI;
 use std::fmt;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
@@ -8794,8 +8793,8 @@ fn sandbox_music_bytes() -> &'static [u8] {
     static DATA: OnceLock<Vec<u8>> = OnceLock::new();
     DATA.get_or_init(|| {
         load_menu_music().unwrap_or_else(|err| {
-            tracing::warn!(error = %err, "failed to load menu music, using synthetic tone");
-            generate_sine_wave_wav(220.0, 1.5)
+            tracing::warn!(error = %err, "failed to load menu music, no music will play");
+            Vec::new()
         })
     })
     .as_slice()
@@ -8911,43 +8910,6 @@ fn compute_mix_values(
     (base_volume * best_audibility, pan.clamp(-1.0, 1.0))
 }
 
-fn generate_sine_wave_wav(frequency_hz: f32, duration_seconds: f32) -> Vec<u8> {
-    let safe_duration = duration_seconds.max(0.1);
-    let sample_rate = 44_100u32;
-    let channels = 2u16;
-    let bits_per_sample = 16u16;
-    let frame_count = (sample_rate as f32 * safe_duration).round().max(1.0) as usize;
-    let block_align = (channels * (bits_per_sample / 8)) as u16;
-    let byte_rate = sample_rate * block_align as u32;
-    let data_len = frame_count * block_align as usize;
-    let chunk_size = 36 + data_len;
-
-    let mut buffer = Vec::with_capacity(44 + data_len);
-    buffer.extend_from_slice(b"RIFF");
-    buffer.extend_from_slice(&(chunk_size as u32).to_le_bytes());
-    buffer.extend_from_slice(b"WAVE");
-    buffer.extend_from_slice(b"fmt ");
-    buffer.extend_from_slice(&16u32.to_le_bytes());
-    buffer.extend_from_slice(&1u16.to_le_bytes());
-    buffer.extend_from_slice(&channels.to_le_bytes());
-    buffer.extend_from_slice(&sample_rate.to_le_bytes());
-    buffer.extend_from_slice(&byte_rate.to_le_bytes());
-    buffer.extend_from_slice(&block_align.to_le_bytes());
-    buffer.extend_from_slice(&bits_per_sample.to_le_bytes());
-    buffer.extend_from_slice(b"data");
-    buffer.extend_from_slice(&(data_len as u32).to_le_bytes());
-
-    let amplitude = i16::MAX as f32 * 0.2;
-    for frame in 0..frame_count {
-        let t = frame as f32 / sample_rate as f32;
-        let sample = (2.0 * PI * frequency_hz * t).sin();
-        let value = (sample * amplitude).round() as i16;
-        buffer.extend_from_slice(&value.to_le_bytes());
-        buffer.extend_from_slice(&value.to_le_bytes());
-    }
-
-    buffer
-}
 
 fn walker_script() -> &'static str {
     r#"
