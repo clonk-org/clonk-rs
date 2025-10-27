@@ -155,6 +155,7 @@ pub struct Scenario {
     construction_needs_material: bool,
     structures_need_energy: bool,
     base_buy_enabled: bool,
+    base_sell_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -331,6 +332,7 @@ impl Scenario {
             construction_needs_material: manifest.core.game.realism.construction_needs_material,
             structures_need_energy: manifest.core.game.realism.structures_need_energy,
             base_buy_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_BUY) != 0,
+            base_sell_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_SELL) != 0,
         })
     }
 
@@ -404,6 +406,7 @@ impl Scenario {
         engine.set_construction_needs_material(self.construction_needs_material);
         engine.set_structures_need_energy(self.structures_need_energy);
         engine.set_base_buy_enabled(self.base_buy_enabled);
+        engine.set_base_sell_enabled(self.base_sell_enabled);
 
         for definition in &self.definitions {
             let name = definition.name.as_deref().unwrap_or(&definition.id);
@@ -776,6 +779,7 @@ impl Scenario {
             construction_needs_material: false,
             structures_need_energy: false,
             base_buy_enabled: false,
+            base_sell_enabled: false,
         })
     }
 }
@@ -5068,6 +5072,7 @@ global func Step(state, frame, random)
             construction_needs_material: false,
             structures_need_energy: false,
             base_buy_enabled: true,
+            base_sell_enabled: true,
         };
 
         let mut engine = Engine::with_seed(11);
@@ -5147,6 +5152,7 @@ global func Step(state, frame, random)
             construction_needs_material: false,
             structures_need_energy: false,
             base_buy_enabled: true,
+            base_sell_enabled: true,
         };
 
         let mut engine = Engine::with_seed(7);

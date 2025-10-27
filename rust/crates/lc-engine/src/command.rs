@@ -1,11 +1,11 @@
 use std::collections::{HashMap, VecDeque};
 
+use crate::transfer::{TransferZone, TransferZoneTable};
 use crate::{
     ocf, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, Direction, ObjectId,
     ObjectStatus, ObjectUpdate, PlayerStatus, Vector2, CATEGORY_OBJECT, CATEGORY_STATIC_BACK,
     CATEGORY_STRUCTURE, CATEGORY_VEHICLE, FULL_CON, LINE_CONNECT_POWER_INPUT, OWNER_NONE,
 };
-use crate::transfer::{TransferZone, TransferZoneTable};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of commands that may be queued for an object.
@@ -205,8 +205,7 @@ mod tests {
     use crate::transfer::TransferZoneRect;
     use once_cell::sync::Lazy;
 
-    static EMPTY_TRANSFER_ZONES: Lazy<TransferZoneTable> =
-        Lazy::new(TransferZoneTable::default);
+    static EMPTY_TRANSFER_ZONES: Lazy<TransferZoneTable> = Lazy::new(TransferZoneTable::default);
 
     use crate::ocf;
 
@@ -263,6 +262,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -305,6 +306,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -354,6 +357,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -375,6 +380,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -390,6 +397,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -430,6 +439,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -490,6 +501,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -554,6 +567,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -604,6 +619,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -653,6 +670,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -713,6 +732,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -765,6 +786,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -813,6 +836,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -859,6 +884,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -916,6 +943,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -967,6 +996,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1011,6 +1042,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1051,6 +1084,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1093,6 +1128,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1136,6 +1173,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1173,7 +1212,9 @@ mod tests {
                 definitions: &definitions,
                 structures_need_energy: false,
                 base_buy_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
+
+                base_sell_enabled: true,
+                transfer_zones: &EMPTY_TRANSFER_ZONES,
             };
             let result = stack.step(&ctx).expect("running result");
             assert_eq!(result.status, CommandStatus::Running);
@@ -1189,6 +1230,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
         let result = stack.step(&ctx).expect("completion result");
@@ -1225,6 +1268,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1272,6 +1317,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1327,6 +1374,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1383,6 +1432,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1428,6 +1479,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1475,6 +1528,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1528,6 +1583,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1573,6 +1630,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1649,6 +1708,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1711,6 +1772,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1773,6 +1836,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1824,6 +1889,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1877,6 +1944,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1928,6 +1997,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -1982,6 +2053,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2036,6 +2109,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2072,6 +2147,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2104,6 +2181,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2140,6 +2219,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2185,6 +2266,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2241,6 +2324,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2296,6 +2381,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2354,6 +2441,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2405,6 +2494,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2448,6 +2539,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2490,6 +2583,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2519,6 +2614,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2564,6 +2661,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2606,6 +2705,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2648,6 +2749,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2687,6 +2790,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2726,6 +2831,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2782,6 +2889,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -2871,6 +2980,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &transfer_zones,
         };
 
@@ -2940,6 +3051,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &transfer_zones,
         };
 
@@ -2984,6 +3097,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &transfer_zones,
         };
 
@@ -3019,6 +3134,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3059,6 +3176,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3104,6 +3223,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3154,6 +3275,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3213,6 +3336,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3262,6 +3387,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: true,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3315,6 +3442,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3360,6 +3489,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3418,6 +3549,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3481,6 +3614,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3519,6 +3654,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3547,6 +3684,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3581,6 +3720,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3601,6 +3742,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3620,6 +3763,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3685,6 +3830,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3738,6 +3885,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3792,6 +3941,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3847,6 +3998,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3889,6 +4042,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -3956,6 +4111,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -4035,6 +4192,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -4154,6 +4313,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -4175,6 +4336,275 @@ mod tests {
             }
             other => panic!("expected move request, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn sell_requires_definition() {
+        let request = CommandRequest::new(CommandId::Sell);
+        assert!(SellState::from_request(&request).is_err());
+    }
+
+    #[test]
+    fn sell_requests_enter_when_outside() {
+        let builder_id = ObjectId::new(1);
+        let base_id = ObjectId::new(2);
+        let item_id = ObjectId::new(3);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.owner = 7;
+        builder.position = Vector2::new(-50, 0);
+        builder.command_direction = CommandDirection::Left;
+
+        let mut base = snapshot_with_id(base_id.as_u64());
+        base.owner = 7;
+        base.position = Vector2::new(0, 0);
+        base.category = CATEGORY_STRUCTURE;
+        base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
+        base.collectible = false;
+        base.contents.push(item_id);
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "ORE1".into();
+        item.collectible = true;
+        item.container = Some(base_id);
+        item.position = base.position;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+        objects.insert(base.id, base.clone());
+        objects.insert(item.id, item);
+
+        let mut players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        players.insert(
+            7,
+            CommandPlayerSnapshot {
+                status: PlayerStatus::Active,
+                surrendered: false,
+                wealth: 100,
+                home_base_material: HashMap::new(),
+                knowledge: Vec::new(),
+            },
+        );
+
+        let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        definitions.insert(
+            "ORE1".to_string(),
+            CommandDefinitionSnapshot {
+                value: 30,
+                can_chop: false,
+                chop_action: None,
+                constructable: false,
+            },
+        );
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: objects.get(&builder_id).expect("builder present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state = SellState::from_request(
+            &CommandRequest::new(CommandId::Sell)
+                .with_target(Some(base_id))
+                .with_data(CommandData::Text("ORE1".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_some());
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Enter);
+                assert_eq!(request.target, Some(base_id));
+            }
+            other => panic!("expected enter request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sell_completes_when_inside() {
+        let builder_id = ObjectId::new(1);
+        let base_id = ObjectId::new(2);
+        let item_id = ObjectId::new(3);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.owner = 11;
+        builder.container = Some(base_id);
+        builder.position = Vector2::new(0, 0);
+        builder.command_direction = CommandDirection::Right;
+
+        let mut base = snapshot_with_id(base_id.as_u64());
+        base.owner = 11;
+        base.position = Vector2::new(0, 0);
+        base.category = CATEGORY_STRUCTURE;
+        base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
+        base.collectible = false;
+        base.contents.push(item_id);
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "ORE1".into();
+        item.collectible = true;
+        item.container = Some(base_id);
+        item.position = base.position;
+        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+        item.construction = FULL_CON;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+        objects.insert(base.id, base.clone());
+        objects.insert(item.id, item.clone());
+
+        let mut players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        players.insert(
+            11,
+            CommandPlayerSnapshot {
+                status: PlayerStatus::Active,
+                surrendered: false,
+                wealth: 10,
+                home_base_material: HashMap::new(),
+                knowledge: Vec::new(),
+            },
+        );
+
+        let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        definitions.insert(
+            "ORE1".to_string(),
+            CommandDefinitionSnapshot {
+                value: 15,
+                can_chop: false,
+                chop_action: None,
+                constructable: false,
+            },
+        );
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: objects.get(&builder_id).expect("builder present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state = SellState::from_request(
+            &CommandRequest::new(CommandId::Sell)
+                .with_target(Some(base_id))
+                .with_data(CommandData::Text("ORE1".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.operations.is_empty());
+        let update = result.update.expect("seller stops");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+
+        assert_eq!(result.events.len(), 3);
+        match &result.events[0] {
+            CommandEvent::AdjustPlayerWealth { player_id, delta } => {
+                assert_eq!(*player_id, 11);
+                assert_eq!(*delta, 15);
+            }
+            event => panic!("unexpected event: {:?}", event),
+        }
+
+        match &result.events[1] {
+            CommandEvent::AdjustPlayerHomeBaseMaterial {
+                player_id,
+                definition_id,
+                delta,
+            } => {
+                assert_eq!(*player_id, 11);
+                assert_eq!(definition_id, "ORE1");
+                assert_eq!(*delta, 1);
+            }
+            event => panic!("unexpected event: {:?}", event),
+        }
+
+        match &result.events[2] {
+            CommandEvent::ApplyObjectUpdate { object_id, update } => {
+                assert_eq!(*object_id, item_id);
+                assert_eq!(update.status, Some(ObjectStatus::Deleted));
+                assert_eq!(update.alive, Some(false));
+                assert_eq!(update.container, Some(None));
+            }
+            event => panic!("unexpected event: {:?}", event),
+        }
+
+        let follow_up = state.step(&ctx);
+        assert_eq!(follow_up.status, CommandStatus::Completed);
+    }
+
+    #[test]
+    fn sell_fails_when_disabled() {
+        let builder_id = ObjectId::new(1);
+        let base_id = ObjectId::new(2);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.owner = 5;
+        builder.container = Some(base_id);
+        builder.position = Vector2::new(0, 0);
+
+        let mut base = snapshot_with_id(base_id.as_u64());
+        base.owner = 5;
+        base.position = Vector2::new(0, 0);
+        base.category = CATEGORY_STRUCTURE;
+        base.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
+        base.collectible = false;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+        objects.insert(base.id, base.clone());
+
+        let mut players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        players.insert(
+            5,
+            CommandPlayerSnapshot {
+                status: PlayerStatus::Active,
+                surrendered: false,
+                wealth: 0,
+                home_base_material: HashMap::new(),
+                knowledge: Vec::new(),
+            },
+        );
+
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: objects.get(&builder_id).expect("builder present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: false,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state = SellState::from_request(
+            &CommandRequest::new(CommandId::Sell)
+                .with_target(Some(base_id))
+                .with_data(CommandData::Text("ORE1".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Failed);
     }
 
     #[test]
@@ -4239,6 +4669,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -4320,6 +4752,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -4397,6 +4831,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -4456,6 +4892,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -4514,6 +4952,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -4570,6 +5010,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -4621,6 +5063,8 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+
+            base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
@@ -4882,6 +5326,7 @@ pub struct CommandRuntimeContext<'a> {
     pub definitions: &'a HashMap<DefinitionId, CommandDefinitionSnapshot>,
     pub structures_need_energy: bool,
     pub base_buy_enabled: bool,
+    pub base_sell_enabled: bool,
     pub transfer_zones: &'a TransferZoneTable,
 }
 
@@ -5782,9 +6227,8 @@ impl TransferState {
                     .with_tx(Some(entry.x))
                     .with_ty(Some(entry.y))
                     .with_update_interval(10);
-                return CommandStepResult::running(update).with_operations(vec![
-                    CommandOperation::PushFront(request),
-                ]);
+                return CommandStepResult::running(update)
+                    .with_operations(vec![CommandOperation::PushFront(request)]);
             }
             return CommandStepResult::running(update);
         }
@@ -8474,6 +8918,228 @@ impl AcquireState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct SellState {
+    definition_id: DefinitionId,
+    target: Option<ObjectId>,
+    preferred: Option<ObjectId>,
+    remaining: i32,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    last_enter_request: Option<u64>,
+}
+
+impl SellState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let definition_id =
+            command_data_to_definition_id(&request.data).ok_or(CommandError::Unsupported)?;
+        let remaining = request.tx.unwrap_or(1).max(1);
+        Ok(Self {
+            definition_id,
+            target: request.target,
+            preferred: request.target2,
+            remaining,
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            last_enter_request: None,
+        })
+    }
+
+    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn should_issue_enter(&self, frame: u64) -> bool {
+        const ENTER_COOLDOWN: u64 = 12;
+        match self.last_enter_request {
+            Some(last) => frame.saturating_sub(last) >= ENTER_COOLDOWN,
+            None => true,
+        }
+    }
+
+    fn is_base(snapshot: &CommandObjectSnapshot, owner: i32) -> bool {
+        snapshot.is_active()
+            && snapshot.owner == owner
+            && (snapshot.category & CATEGORY_STRUCTURE) != 0
+            && (snapshot.ocf & ocf::ENTRANCE) != 0
+            && !snapshot.collectible
+    }
+
+    fn resolve_base(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+        let owner = ctx.object.owner;
+        if owner == OWNER_NONE {
+            return None;
+        }
+
+        if let Some(target_id) = self.target {
+            if let Some(snapshot) = ctx.resolve(target_id) {
+                if Self::is_base(snapshot, owner) {
+                    return Some(target_id);
+                }
+            }
+        }
+
+        ctx.objects
+            .values()
+            .filter(|snapshot| snapshot.id != ctx.object.id && Self::is_base(snapshot, owner))
+            .min_by_key(|snapshot| {
+                let dx = i64::from(snapshot.position.x - ctx.position.x);
+                let dy = i64::from(snapshot.position.y - ctx.position.y);
+                dx * dx + dy * dy
+            })
+            .map(|snapshot| {
+                let id = snapshot.id;
+                self.target = Some(id);
+                id
+            })
+    }
+
+    fn resolve_candidate(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        base: &CommandObjectSnapshot,
+    ) -> Option<ObjectId> {
+        if let Some(candidate_id) = self.preferred {
+            if let Some(snapshot) = ctx.resolve(candidate_id) {
+                if snapshot.is_active()
+                    && snapshot.container == Some(base.id)
+                    && snapshot.definition_id == self.definition_id
+                {
+                    return Some(candidate_id);
+                }
+            }
+            self.preferred = None;
+        }
+
+        for item_id in &base.contents {
+            if let Some(snapshot) = ctx.resolve(*item_id) {
+                if snapshot.is_active()
+                    && snapshot.container == Some(base.id)
+                    && snapshot.definition_id == self.definition_id
+                {
+                    self.preferred = Some(*item_id);
+                    return Some(*item_id);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.remaining <= 0 {
+            return CommandStepResult::completed(self.update_to_stop(ctx));
+        }
+
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        let update_to_stop = self.update_to_stop(ctx);
+
+        if !ctx.base_sell_enabled {
+            return CommandStepResult::failed(update_to_stop);
+        }
+
+        let base_id = match self.resolve_base(ctx) {
+            Some(id) => id,
+            None => return CommandStepResult::failed(update_to_stop),
+        };
+
+        let base_snapshot = match ctx.resolve(base_id) {
+            Some(snapshot) => snapshot,
+            None => return CommandStepResult::failed(update_to_stop),
+        };
+
+        let base_owner = base_snapshot.owner;
+        if base_owner == OWNER_NONE {
+            return CommandStepResult::failed(update_to_stop);
+        }
+
+        if ctx.object.container != Some(base_id) {
+            let mut result = CommandStepResult::running(update_to_stop);
+            if self.should_issue_enter(ctx.frame) {
+                self.last_enter_request = Some(ctx.frame);
+                let request = CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(base_id))
+                    .with_update_interval(25)
+                    .with_mode(CommandMode::Sub);
+                result.operations.push(CommandOperation::PushFront(request));
+            }
+            return result;
+        }
+        self.last_enter_request = None;
+
+        let candidate_id = match self.resolve_candidate(ctx, base_snapshot) {
+            Some(id) => id,
+            None => return CommandStepResult::failed(update_to_stop),
+        };
+
+        let candidate_snapshot = match ctx.resolve(candidate_id) {
+            Some(snapshot) => snapshot,
+            None => return CommandStepResult::failed(update_to_stop),
+        };
+
+        if candidate_snapshot.definition_id != self.definition_id
+            || candidate_snapshot.container != Some(base_id)
+        {
+            self.preferred = None;
+            return CommandStepResult::failed(update_to_stop);
+        }
+
+        if !candidate_snapshot.contents.is_empty() {
+            return CommandStepResult::failed(update_to_stop);
+        }
+
+        let value = ctx
+            .definition(&self.definition_id)
+            .map(|definition| definition.value.max(0))
+            .unwrap_or(0);
+
+        let mut events = Vec::new();
+        if value != 0 {
+            events.push(CommandEvent::AdjustPlayerWealth {
+                player_id: base_owner,
+                delta: value,
+            });
+        }
+        events.push(CommandEvent::AdjustPlayerHomeBaseMaterial {
+            player_id: base_owner,
+            definition_id: self.definition_id.clone(),
+            delta: 1,
+        });
+
+        let mut item_update = ObjectUpdate::new();
+        item_update.container = Some(None);
+        item_update.position = Some(base_snapshot.position);
+        item_update.velocity = Some(Vector2::ZERO);
+        item_update.status = Some(ObjectStatus::Deleted);
+        item_update.alive = Some(false);
+        item_update.command_direction = Some(CommandDirection::Stop);
+        events.push(CommandEvent::ApplyObjectUpdate {
+            object_id: candidate_id,
+            update: item_update,
+        });
+
+        self.preferred = None;
+        self.remaining = self.remaining.saturating_sub(1);
+
+        if self.remaining == 0 {
+            CommandStepResult::completed(self.update_to_stop(ctx)).with_events(events)
+        } else {
+            CommandStepResult::running(self.update_to_stop(ctx)).with_events(events)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct BuyState {
     definition_id: DefinitionId,
     target: Option<ObjectId>,
@@ -8948,6 +9614,7 @@ enum CommandState {
     Attack(AttackState),
     Call(CallState),
     Buy(BuyState),
+    Sell(SellState),
     Acquire(AcquireState),
     Home(HomeState),
     Energy(EnergyState),
@@ -8980,6 +9647,7 @@ impl CommandState {
             CommandState::Attack(_) => Some(CommandId::Attack),
             CommandState::Call(_) => Some(CommandId::Call),
             CommandState::Buy(_) => Some(CommandId::Buy),
+            CommandState::Sell(_) => Some(CommandId::Sell),
             CommandState::Acquire(_) => Some(CommandId::Acquire),
             CommandState::Home(_) => Some(CommandId::Home),
             CommandState::Energy(_) => Some(CommandId::Energy),
@@ -9004,9 +9672,7 @@ impl ActiveCommand {
             CommandId::Construct => {
                 CommandState::Construct(ConstructState::from_request(&request)?)
             }
-            CommandId::Transfer => {
-                CommandState::Transfer(TransferState::from_request(&request)?)
-            }
+            CommandId::Transfer => CommandState::Transfer(TransferState::from_request(&request)?),
             CommandId::Chop => CommandState::Chop(ChopState::from_request(&request)?),
             CommandId::Grab => CommandState::Grab(GrabState::from_request(&request)?),
             CommandId::Throw => CommandState::Throw(ThrowState::from_request(&request)?),
@@ -9023,6 +9689,7 @@ impl ActiveCommand {
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
             CommandId::Call => CommandState::Call(CallState::from_request(&request)?),
             CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
+            CommandId::Sell => CommandState::Sell(SellState::from_request(&request)?),
             CommandId::Acquire => CommandState::Acquire(AcquireState::from_request(&request)?),
             CommandId::Home => CommandState::Home(HomeState::from_request(&request)?),
             CommandId::Energy => CommandState::Energy(EnergyState::from_request(&request)?),
@@ -9069,6 +9736,7 @@ impl ActiveCommand {
             CommandState::Attack(state) => state.step(ctx),
             CommandState::Call(state) => state.step(ctx),
             CommandState::Buy(state) => state.step(ctx),
+            CommandState::Sell(state) => state.step(ctx),
             CommandState::Acquire(state) => state.step(ctx),
             CommandState::Home(state) => state.step(ctx),
             CommandState::Energy(state) => state.step(ctx),

@@ -5441,6 +5441,7 @@ pub struct Engine {
     construction_needs_material: bool,
     structures_need_energy: bool,
     base_buy_enabled: bool,
+    base_sell_enabled: bool,
     known_crew_owners: HashSet<i32>,
     eliminated_crew_owners: HashSet<i32>,
     transfer_zones: TransferZoneTable,
@@ -5850,6 +5851,7 @@ impl Engine {
             construction_needs_material: false,
             structures_need_energy: false,
             base_buy_enabled: true,
+            base_sell_enabled: true,
             known_crew_owners: HashSet::new(),
             eliminated_crew_owners: HashSet::new(),
             transfer_zones: TransferZoneTable::default(),
@@ -5901,6 +5903,10 @@ impl Engine {
 
     pub fn set_base_buy_enabled(&mut self, enabled: bool) {
         self.base_buy_enabled = enabled;
+    }
+
+    pub fn set_base_sell_enabled(&mut self, enabled: bool) {
+        self.base_sell_enabled = enabled;
     }
 
     pub fn register_player(&mut self, config: PlayerConfig) -> Result<(), EngineError> {
@@ -7723,6 +7729,7 @@ impl Engine {
                     definitions: &definition_snapshots,
                     structures_need_energy: self.structures_need_energy,
                     base_buy_enabled: self.base_buy_enabled,
+                    base_sell_enabled: self.base_sell_enabled,
                     transfer_zones: &self.transfer_zones,
                 };
                 if let Some(result) = object.step_command_stack(command_context) {

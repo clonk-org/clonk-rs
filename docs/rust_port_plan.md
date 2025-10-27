@@ -1,6 +1,6 @@
 # LegacyClonk C++ → Rust Port Plan
 
-**Updated:** 2025-10-28 | **Goal:** Run ALL real scenarios with exact C++ parity | **Status:** ⛔ BLOCKED
+**Updated:** 2025-10-26 | **Goal:** Run ALL real scenarios with exact C++ parity | **Status:** ⛔ BLOCKED
 
 ---
 
@@ -8,7 +8,7 @@
 
 - **P0 BLOCKERS:** AI command system still partial (Acquire/Buy persist across saves; long-tail commands still missing)
 - **Scenario Discovery:** ✅ Official content repo wired; menu now lists full scenario catalog
-- **Current State:** Build compiles; workspace tests green; Build/Construct/Exit/Grab/UnGrab/Throw/Wait/Jump/Chop/Get commands implemented in command stack
+- **Current State:** Build compiles; workspace tests green; Build/Construct/Exit/Grab/UnGrab/Throw/Wait/Jump/Chop/Get/Sell commands implemented in command stack
 - **Next 48h:** Keep engine tests green; sketch AI command trait; triage panics
 - **Exit Criteria:** P0 cleared + CI green + smoke tests pass
 
@@ -24,7 +24,7 @@
 ---
 
 ### 1. AI Command System — PARTIAL ⚠️
-**Problem:** Command stack covers MoveTo/Follow/Enter/Exit/Build/Attack/Acquire/Buy/Energy + Grab/UnGrab/Throw/Wait/Jump/Chop/Dig/Home/Put/Drop/Transfer; Context/Sell/Take/Take2 still unported so many C++ behaviours remain unavailable
+**Problem:** Command stack covers MoveTo/Follow/Enter/Exit/Build/Attack/Acquire/Buy/Energy + Grab/UnGrab/Throw/Wait/Jump/Chop/Dig/Home/Put/Drop/Transfer; Context/Take/Take2 still unported so many C++ behaviours remain unavailable; Sell now mirrors base transactions via Rust command state and tests
 **Evidence:** `command::tests::exit_moves_into_parent_container_when_nested` + `command::tests::exit_leaves_container_when_no_parent` ensure Exit parity; `command::tests::acquire_requests_move_for_nearby_item` verifies ground pickup pathing; `command::tests::grab_starts_push_when_in_range` + `command::tests::ungrab_sets_idle_and_completes` cover push/release flow; `command::tests::wait_stops_dig_and_completes_after_interval` anchors Wait parity; `command::tests::retry_command_waits_then_completes` covers failure cooldowns; `command::tests::chop_sets_action_when_in_range` + `command::tests::chop_requests_ungrab_when_pushing` validate Chop parity; `command::tests::jump_sets_direction_and_action_when_walking` + `command::tests::jump_skips_action_when_not_walking` cover Jump behaviour; `command::tests::home_requests_enter_when_not_in_base` confirms base targeting; PushTo parity ensured via `command::tests::push_to_requests_grab_when_actor_not_pushing`, `command::tests::push_to_requests_enter_when_destination_requires_container`, and `command::tests::push_to_completes_with_wait_and_ungrab_when_in_position`; `compat::tests::set_command_clears_stack_and_pushes_command` still green
 **C++ Has:** 30 commands (Follow, MoveTo, Build, Attack, etc.) via `C4Command.cpp`
 **Rust Has:** Command trait infrastructure + MoveTo/Follow/Enter/Exit/Build/Attack/Throw/Chop/Wait/Jump/Dig/Get/Home/Put/Drop/Construct/Activate/PushTo + Retry countdown for failure back-off; Acquire for loose items, shared-container withdrawal, cross-container exit heuristics; Buy commands that deduct home base stock/wealth, spawn purchased items in bases, and hand off targeted shop purchases; Activate now mirrors container activation (enter/exit + owner handoff) with tests `command::tests::activate_completes_when_target_outside_container`, `command::tests::activate_requests_enter_when_actor_outside_container`, and `command::tests::activate_releases_target_when_inside_container`; PushTo now queues Activate/Grab/Enter/MoveTo/Wait/UnGrab in the same sequence as C++ and guards build/dig cancellation (see `command::tests::push_to_completes_with_wait_and_ungrab_when_in_position`); Get now moves targeted pickups from ground and containers (exit/enter/grab heuristics, dig-out fallback) with parity tests; Put transfers inventory into structures and requests Exit/Move/UnGrab when needed; Drop covers targeted ground releases and delegates to Put for container flows (see `command::tests::put_transfers_item_into_target_container`, `command::tests::drop_transfers_item_to_ground`); Construct consumes conkits, spawns construction sites, and queues Build parity (see `command::tests::construct_spawns_construction_and_queues_build`); Energy line-kit handshake; Grab/UnGrab mirror C++ push start/stop (auto queues UnGrab when switching targets); Home seeks the nearest friendly base and queues Enter until crew arrive; Chop respects approach heuristics, ungrabs push targets, and starts forced Chop action; Dig mirrors C++ flow (auto-ungrab, exit containers, forces dig action, enforces `Dig2Object` flag, stops at destination); Jump aligns facing and injects Jump action when walkers command it; Call dispatches scripted callbacks via `command::tests::call_emits_event_and_completes`; command stack snapshots persist across engine saves and scenario exports
@@ -173,6 +173,15 @@ cargo test -p lc-engine \
   command::tests::get_transfers_item_when_in_range \
   command::tests::get_requests_exit_when_actor_contained \
   command::tests::get_requests_ungrab_when_pushing_other_target
+```
+
+**Sell Command:**
+```bash
+cargo test -p lc-engine \
+  command::tests::sell_requires_definition \
+  command::tests::sell_requests_enter_when_outside \
+  command::tests::sell_completes_when_inside \
+  command::tests::sell_fails_when_disabled
 ```
 
 **Chop Command:**
