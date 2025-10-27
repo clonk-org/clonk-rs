@@ -3276,6 +3276,89 @@ mod tests {
     }
 
     #[test]
+    fn acquire_retries_buy_after_cooldown() {
+        let builder_id = ObjectId::new(11);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        builder.collectible = false;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let mut state = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
+        )
+        .expect("state created");
+
+        let initial_ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let initial = state.step(&initial_ctx);
+        assert_eq!(initial.status, CommandStatus::Running);
+        assert_eq!(initial.operations.len(), 1);
+        match &initial.operations[0] {
+            CommandOperation::PushFront(request) => assert_eq!(request.id, CommandId::Buy),
+            other => panic!("expected initial buy request, got {:?}", other),
+        }
+
+        let mid_ctx = CommandRuntimeContext {
+            frame: 60,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mid = state.step(&mid_ctx);
+        assert_eq!(mid.status, CommandStatus::Running);
+        assert!(
+            mid.operations.is_empty(),
+            "buy request should not repeat before cooldown elapses"
+        );
+
+        let retry_ctx = CommandRuntimeContext {
+            frame: 150,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let retry = state.step(&retry_ctx);
+        assert_eq!(retry.status, CommandStatus::Running);
+        let buy_requests: Vec<_> = retry
+            .operations
+            .iter()
+            .filter_map(|operation| match operation {
+                CommandOperation::PushFront(request) if request.id == CommandId::Buy => Some(()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            buy_requests.len(),
+            1,
+            "expected a single buy retry after cooldown elapsed"
+        );
+    }
+
+    #[test]
     fn acquire_exits_other_container_before_access() {
         let builder_id = ObjectId::new(1);
         let current_container_id = ObjectId::new(2);
@@ -3486,6 +3569,21 @@ mod tests {
         assert_eq!(stack.len(), 2, "move command should be queued");
 
         let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 2);
+        match &snapshot.commands[0] {
+            CommandState::MoveTo(state) => {
+                assert_eq!(
+                    state.target,
+                    Some(item_id),
+                    "move command should target the acquire candidate"
+                );
+            }
+            other => panic!("expected move command at front, got {:?}", other),
+        }
+        match &snapshot.commands[1] {
+            CommandState::Acquire(_) => {}
+            other => panic!("expected acquire command second, got {:?}", other),
+        }
         let encoded = serde_json::to_value(&snapshot).expect("serialize snapshot");
         let acquire_state = encoded["commands"]
             .as_array()
@@ -3516,6 +3614,81 @@ mod tests {
             .expect("restored step evaluates");
 
         assert_eq!(original_second, restored_second);
+    }
+
+    #[test]
+    fn command_stack_put_transfers_item_into_container() {
+        let actor_id = ObjectId::new(20);
+        let item_id = ObjectId::new(21);
+        let container_id = ObjectId::new(22);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        actor.collectible = false;
+        actor.position = Vector2::new(0, 0);
+        actor.contents.push(item_id);
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "WOOD".into();
+        item.position = actor.position;
+        item.collectible = true;
+        item.ocf = ocf::AVAILABLE | ocf::FULL_CON;
+        item.construction = FULL_CON;
+        item.container = Some(actor_id);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.position = Vector2::new(10, 0);
+        container.collectible = false;
+        container.category = CATEGORY_STRUCTURE;
+        container.ocf = ocf::AVAILABLE | ocf::ENTRANCE;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(item.id, item.clone());
+        objects.insert(container.id, container.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::Put)
+                    .with_target(Some(container_id))
+                    .with_target2(Some(item_id)),
+            )
+            .expect("put enqueued");
+
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor_snapshot.position,
+            object: actor_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let result = stack.step(&ctx).expect("put evaluates");
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.operations.is_empty());
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            CommandEvent::ApplyObjectUpdate { object_id, update } => {
+                assert_eq!(*object_id, item_id);
+                assert_eq!(
+                    update.container,
+                    Some(Some(container_id)),
+                    "item should enter destination container"
+                );
+                assert_eq!(update.position, Some(container.position));
+            }
+            other => panic!("unexpected put event: {:?}", other),
+        }
+
+        assert_eq!(stack.len(), 0, "completed command should be removed");
     }
 
     #[test]

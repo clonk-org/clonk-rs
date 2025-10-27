@@ -1,6 +1,6 @@
 # LegacyClonk C++ → Rust Port Plan
 
-**Updated:** 2025-10-27 | **Goal:** Run ALL real scenarios with exact C++ parity | **Status:** ⛔ BLOCKED
+**Updated:** 2025-10-28 | **Goal:** Run ALL real scenarios with exact C++ parity | **Status:** ⛔ BLOCKED
 
 ---
 
@@ -30,7 +30,7 @@
 **Rust Has:** Command trait infrastructure + MoveTo/Follow/Enter/Exit/Build/Attack/Throw/Chop/Wait/Jump/Dig/Get/Home/Put/Drop/Construct/Activate/PushTo + Retry countdown for failure back-off; Acquire for loose items, shared-container withdrawal, cross-container exit heuristics; Buy commands that deduct home base stock/wealth, spawn purchased items in bases, and hand off targeted shop purchases; Activate now mirrors container activation (enter/exit + owner handoff) with tests `command::tests::activate_completes_when_target_outside_container`, `command::tests::activate_requests_enter_when_actor_outside_container`, and `command::tests::activate_releases_target_when_inside_container`; PushTo now queues Activate/Grab/Enter/MoveTo/Wait/UnGrab in the same sequence as C++ and guards build/dig cancellation (see `command::tests::push_to_completes_with_wait_and_ungrab_when_in_position`); Get now moves targeted pickups from ground and containers (exit/enter/grab heuristics, dig-out fallback) with parity tests; Put transfers inventory into structures and requests Exit/Move/UnGrab when needed; Drop covers targeted ground releases and delegates to Put for container flows (see `command::tests::put_transfers_item_into_target_container`, `command::tests::drop_transfers_item_to_ground`); Construct consumes conkits, spawns construction sites, and queues Build parity (see `command::tests::construct_spawns_construction_and_queues_build`); Energy line-kit handshake; Grab/UnGrab mirror C++ push start/stop (auto queues UnGrab when switching targets); Home seeks the nearest friendly base and queues Enter until crew arrive; Chop respects approach heuristics, ungrabs push targets, and starts forced Chop action; Dig mirrors C++ flow (auto-ungrab, exit containers, forces dig action, enforces `Dig2Object` flag, stops at destination); Jump aligns facing and injects Jump action when walkers command it; Call dispatches scripted callbacks via `command::tests::call_emits_event_and_completes`; command stack snapshots persist across engine saves and scenario exports
 **Impact:** Build automation works (crew picks up components, honours material requirements); Exit mirrors C++ nested-container behaviour and stops builders before ejecting; Grab reproduces push engagement and respects hang/build dig-outs; PushTo preserves the C++ Activate→Grab→Enter/MoveTo→Wait/UnGrab queue so pushed items reach structures/positions reliably; Throw handles targeted throws with Acquire fallback; Get delivers ground/container pickups and queues Exit/UnGrab as needed; Put hands contents into bases with matching heuristics; Drop releases to ground or delegates to Put while respecting push/containment; Jump applies C++-style orientation + action forcing; Energize follows loose line-kit pickups; merchant/shop buys succeed and survive save/load; broader command coverage still missing
 **Next:**
-1. Expand tests to cover queue chaining, failure recovery, and scenario parity
+1. ✅ Expand tests to cover queue chaining, failure recovery, and scenario parity (new `command_stack_snapshot_preserves_acquire_state` ordering assertions, `acquire_retries_buy_after_cooldown`, `command_stack_put_transfers_item_into_container`)
 2. Implement remaining command types (Transfer/Context/Sell/Take/Take2) and associated movement heuristics
 
 **Accept:** `AddCommand("MoveTo", ...)` and `SetCommand("Build", ...)` reproduce C++ behaviour across parity scenarios
@@ -168,6 +168,8 @@ cargo test -p lc-engine \
   command::tests::buy_spawns_item_and_updates_player_state \
   command::tests::buy_collects_item_from_explicit_target \
   command::tests::command_stack_snapshot_preserves_acquire_state \
+  command::tests::acquire_retries_buy_after_cooldown \
+  command::tests::command_stack_put_transfers_item_into_container \
   command::tests::get_transfers_item_when_in_range \
   command::tests::get_requests_exit_when_actor_contained \
   command::tests::get_requests_ungrab_when_pushing_other_target
