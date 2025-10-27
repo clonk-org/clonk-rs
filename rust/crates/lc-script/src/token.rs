@@ -20,6 +20,9 @@ pub enum TokenKind {
 pub enum Keyword {
     Func,
     Global,
+    Private,
+    Protected,
+    Public,
     Var,
     If,
     Else,

@@ -1,4 +1,4 @@
-use crate::ast::{AppendTo, AssignmentTarget, BinaryOp, Expr, Function, Script, Stmt, UnaryOp};
+use crate::ast::{AccessLevel, AppendTo, AssignmentTarget, BinaryOp, Expr, Function, Script, Stmt, UnaryOp};
 use crate::error::ParseError;
 use crate::lexer::Lexer;
 use crate::token::{Keyword, Symbol, Token, TokenKind};
@@ -81,7 +81,20 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_function(&mut self) -> Result<Function, ParseError> {
-        let is_global = self.consume_if_keyword(Keyword::Global)?.is_some();
+        // Parse optional access modifier (private/protected/public/global)
+        // Default is public if no modifier specified
+        let access = if self.consume_if_keyword(Keyword::Private)?.is_some() {
+            AccessLevel::Private
+        } else if self.consume_if_keyword(Keyword::Protected)?.is_some() {
+            AccessLevel::Protected
+        } else if self.consume_if_keyword(Keyword::Public)?.is_some() {
+            AccessLevel::Public
+        } else if self.consume_if_keyword(Keyword::Global)?.is_some() {
+            AccessLevel::Global
+        } else {
+            AccessLevel::Public // Default access level
+        };
+
         self.expect_keyword(Keyword::Func, "expected 'func' declaration")?;
         let name_token = self.expect_identifier("expected function name")?;
         let name = if let TokenKind::Identifier(name) = name_token.kind.clone() {
@@ -100,7 +113,7 @@ impl<'a> Parser<'a> {
             name,
             params,
             body,
-            is_global,
+            access,
         })
     }
 

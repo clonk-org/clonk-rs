@@ -1,5 +1,19 @@
 use crate::value::Literal;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessLevel {
+    Public,    // Default, accessible from anywhere
+    Protected, // Accessible within definition and derived definitions
+    Private,   // Only accessible within the definition
+    Global,    // Global scope, accessible across all definitions
+}
+
+impl Default for AccessLevel {
+    fn default() -> Self {
+        AccessLevel::Public
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppendTo {
     Id(String),      // Append to specific definition
@@ -44,7 +58,7 @@ pub struct Function {
     pub name: String,
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
-    pub is_global: bool,
+    pub access: AccessLevel,
 }
 
 #[derive(Debug, Clone, PartialEq)]

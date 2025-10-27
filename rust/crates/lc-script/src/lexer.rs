@@ -279,6 +279,9 @@ impl<'a> Lexer<'a> {
         let kind = match lexeme {
             "func" => TokenKind::Keyword(Keyword::Func),
             "global" => TokenKind::Keyword(Keyword::Global),
+            "private" => TokenKind::Keyword(Keyword::Private),
+            "protected" => TokenKind::Keyword(Keyword::Protected),
+            "public" => TokenKind::Keyword(Keyword::Public),
             "var" => TokenKind::Keyword(Keyword::Var),
             "if" => TokenKind::Keyword(Keyword::If),
             "else" => TokenKind::Keyword(Keyword::Else),
