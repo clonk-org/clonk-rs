@@ -780,6 +780,78 @@ mod tests {
     }
 
     #[test]
+    fn jump_sets_direction_and_action_when_walking() {
+        let actor_id = ObjectId::new(400);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Walk;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 6,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = JumpState::from_request(
+            &CommandRequest::new(CommandId::Jump).with_tx(Some(actor.position.x + 10)),
+        );
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result.update.expect("jump should update actor");
+        assert_eq!(update.direction, Some(Direction::Right));
+        let action = update.action.expect("jump should trigger action");
+        assert_eq!(action.name.as_deref(), Some("Jump"));
+    }
+
+    #[test]
+    fn jump_skips_action_when_not_walking() {
+        let actor_id = ObjectId::new(401);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Hang;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 7,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = JumpState::from_request(
+            &CommandRequest::new(CommandId::Jump).with_tx(Some(actor.position.x - 15)),
+        );
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result.update.expect("jump should update actor");
+        assert_eq!(update.direction, Some(Direction::Left));
+        assert!(
+            update.action.is_none(),
+            "jump should not change action when not walking"
+        );
+    }
+
+    #[test]
     fn throw_requests_acquire_when_item_missing() {
         let actor_id = ObjectId::new(410);
         let target_id = ObjectId::new(420);
@@ -3590,6 +3662,60 @@ impl UnGrabState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct JumpState {
+    tx: Option<i32>,
+    evaluated: bool,
+}
+
+impl JumpState {
+    fn from_request(request: &CommandRequest) -> Self {
+        Self {
+            tx: request.tx,
+            evaluated: false,
+        }
+    }
+
+    fn desired_direction(&self, ctx: &CommandRuntimeContext<'_>) -> Option<Direction> {
+        let target_x = self.tx?;
+        if target_x < ctx.position.x {
+            Some(Direction::Left)
+        } else if target_x > ctx.position.x {
+            Some(Direction::Right)
+        } else {
+            None
+        }
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.evaluated {
+            return CommandStepResult::completed(None);
+        }
+        self.evaluated = true;
+
+        let mut update: Option<ObjectUpdate> = None;
+
+        if let Some(direction) = self.desired_direction(ctx) {
+            let mut object_update = update.unwrap_or_else(ObjectUpdate::new);
+            object_update.direction = Some(direction);
+            update = Some(object_update);
+        }
+
+        if ctx.object.action_procedure == ActionProcedure::Walk {
+            let mut object_update = update.unwrap_or_else(ObjectUpdate::new);
+            let action_update = ActionUpdate::default()
+                .with_name("Jump")
+                .with_phase(0)
+                .with_ticks(0)
+                .with_force(true);
+            object_update = object_update.with_action_update(action_update);
+            update = Some(object_update);
+        }
+
+        CommandStepResult::completed(update)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct WaitState {
     remaining: Option<u32>,
 }
@@ -4700,6 +4826,7 @@ enum CommandState {
     Grab(GrabState),
     Throw(ThrowState),
     UnGrab(UnGrabState),
+    Jump(JumpState),
     Wait(WaitState),
     Retry(RetryState),
     Attack(AttackState),
@@ -4726,6 +4853,7 @@ impl ActiveCommand {
             CommandId::Grab => CommandState::Grab(GrabState::from_request(&request)?),
             CommandId::Throw => CommandState::Throw(ThrowState::from_request(&request)?),
             CommandId::UnGrab => CommandState::UnGrab(UnGrabState::from_request(&request)),
+            CommandId::Jump => CommandState::Jump(JumpState::from_request(&request)),
             CommandId::Wait => CommandState::Wait(WaitState::from_request(&request)),
             CommandId::Retry => CommandState::Retry(RetryState::from_request(&request)),
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
@@ -4757,6 +4885,7 @@ impl ActiveCommand {
             CommandState::Grab(state) => state.step(ctx),
             CommandState::Throw(state) => state.step(ctx),
             CommandState::UnGrab(state) => state.step(ctx),
+            CommandState::Jump(state) => state.step(ctx),
             CommandState::Wait(state) => state.step(ctx),
             CommandState::Retry(state) => state.step(ctx),
             CommandState::Attack(state) => state.step(ctx),
