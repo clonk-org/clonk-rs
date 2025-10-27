@@ -367,6 +367,10 @@ impl<'a> Parser<'a> {
             let expr = self.parse_unary()?;
             return Ok(Expr::Unary(UnaryOp::Negate, Box::new(expr)));
         }
+        // Unary plus is a no-op (identity operation)
+        if self.consume_if_symbol(Symbol::Plus)?.is_some() {
+            return self.parse_unary();
+        }
         self.parse_postfix()
     }
 
