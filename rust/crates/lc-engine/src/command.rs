@@ -1,8 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::{
-    ocf, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, ObjectId, ObjectStatus,
-    ObjectUpdate, PlayerStatus, Vector2, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE,
+    ocf, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, Direction, ObjectId,
+    ObjectStatus, ObjectUpdate, PlayerStatus, Vector2, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE,
     CATEGORY_VEHICLE, FULL_CON, LINE_CONNECT_POWER_INPUT, OWNER_NONE,
 };
 use serde::{Deserialize, Serialize};
@@ -773,6 +773,220 @@ mod tests {
         assert_eq!(result.status, CommandStatus::Completed);
         assert!(result.update.is_none());
         assert!(result.operations.is_empty());
+    }
+
+    #[test]
+    fn throw_requests_acquire_when_item_missing() {
+        let actor_id = ObjectId::new(410);
+        let target_id = ObjectId::new(420);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.contents.clear();
+
+        let mut item = snapshot_with_id(target_id.as_u64());
+        item.definition_id = "STON".into();
+        item.collectible = true;
+        item.construction = FULL_CON;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(item.id, item);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 32,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ThrowState::from_request(
+            &CommandRequest::new(CommandId::Throw)
+                .with_target(Some(target_id))
+                .with_update_interval(1),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none());
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Acquire);
+                assert_eq!(request.mode, CommandMode::Sub);
+                match &request.data {
+                    CommandData::Text(text) => assert_eq!(text, "STON"),
+                    other => panic!("unexpected acquire data: {:?}", other),
+                }
+            }
+            other => panic!("unexpected operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn throw_pushes_move_to_target_when_out_of_range() {
+        let actor_id = ObjectId::new(430);
+        let target_id = ObjectId::new(440);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.contents = vec![target_id];
+
+        let mut item = snapshot_with_id(target_id.as_u64());
+        item.definition_id = "STON".into();
+        item.collectible = true;
+        item.construction = FULL_CON;
+        item.container = Some(actor_id);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(item.id, item);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 48,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ThrowState::from_request(
+            &CommandRequest::new(CommandId::Throw)
+                .with_target(Some(target_id))
+                .with_tx(Some(actor.position.x + 64))
+                .with_ty(Some(actor.position.y))
+                .with_update_interval(1),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.tx, Some(actor.position.x + 64));
+                assert_eq!(request.ty, Some(actor.position.y));
+            }
+            other => panic!("unexpected operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn throw_sets_throw_action_when_in_range() {
+        let actor_id = ObjectId::new(450);
+        let target_id = ObjectId::new(460);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(100, 200);
+        actor.contents = vec![target_id];
+
+        let mut item = snapshot_with_id(target_id.as_u64());
+        item.definition_id = "STON".into();
+        item.collectible = true;
+        item.construction = FULL_CON;
+        item.container = Some(actor_id);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(item.id, item);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 52,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ThrowState::from_request(
+            &CommandRequest::new(CommandId::Throw)
+                .with_target(Some(target_id))
+                .with_tx(Some(actor.position.x + 8))
+                .with_ty(Some(actor.position.y))
+                .with_update_interval(1),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result.update.expect("throw should update actor");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        let action = update.action.expect("throw should set action");
+        assert_eq!(action.name.as_deref(), Some("Throw"));
+        assert_eq!(action.target, Some(Some(target_id)));
+        assert_eq!(update.direction, Some(Direction::Right));
+    }
+
+    #[test]
+    fn throw_requests_ungrab_when_pushing() {
+        let actor_id = ObjectId::new(470);
+        let push_target_id = ObjectId::new(471);
+        let item_id = ObjectId::new(472);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Push;
+        actor.action_target = Some(push_target_id);
+        actor.contents = vec![item_id];
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.definition_id = "STON".into();
+        item.collectible = true;
+        item.construction = FULL_CON;
+        item.container = Some(actor_id);
+
+        let mut push_target = snapshot_with_id(push_target_id.as_u64());
+        push_target.ocf = ocf::GRAB;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(item.id, item);
+        objects.insert(push_target.id, push_target);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 60,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ThrowState::from_request(
+            &CommandRequest::new(CommandId::Throw)
+                .with_target(Some(item_id))
+                .with_update_interval(1),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::UnGrab);
+            }
+            other => panic!("unexpected operation: {:?}", other),
+        }
     }
 
     #[test]
@@ -3087,6 +3301,177 @@ impl FollowState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ThrowState {
+    target: Option<ObjectId>,
+    tx: Option<i32>,
+    ty: Option<i32>,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    last_move_order: Option<u64>,
+    acquire_requested: bool,
+    ungrab_requested: bool,
+}
+
+impl ThrowState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        Ok(Self {
+            target: request.target,
+            tx: request.tx,
+            ty: request.ty,
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            last_move_order: None,
+            acquire_requested: false,
+            ungrab_requested: false,
+        })
+    }
+
+    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn throw_position(&self) -> Option<Vector2> {
+        match (self.tx, self.ty) {
+            (Some(x), Some(y)) if x != 0 || y != 0 => Some(Vector2::new(x, y)),
+            _ => None,
+        }
+    }
+
+    fn should_issue_move(&mut self, frame: u64) -> bool {
+        const MOVE_COOLDOWN: u64 = 12;
+        match self.last_move_order {
+            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
+            _ => {
+                self.last_move_order = Some(frame);
+                true
+            }
+        }
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        let mut pending_update = self.update_to_stop(ctx);
+
+        if ctx.object.action_procedure == ActionProcedure::Dig {
+            let idle_action = ActionUpdate::default().with_name("Idle").with_force(true);
+            let update = pending_update.take().unwrap_or_else(ObjectUpdate::new);
+            pending_update = Some(update.with_action_update(idle_action));
+        }
+
+        if ctx.object.action_procedure == ActionProcedure::Push {
+            if !self.ungrab_requested {
+                self.ungrab_requested = true;
+                let request = CommandRequest::new(CommandId::UnGrab)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::Sub);
+                let mut result = CommandStepResult::running(pending_update);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
+            return CommandStepResult::running(pending_update);
+        }
+        self.ungrab_requested = false;
+
+        if let Some(target_id) = self.target {
+            let mut has_item = false;
+            for id in &ctx.object.contents {
+                if *id == target_id {
+                    has_item = true;
+                    break;
+                }
+            }
+            if !has_item {
+                let target_snapshot = match ctx.resolve(target_id) {
+                    Some(snapshot) => snapshot,
+                    None => return CommandStepResult::failed(self.update_to_stop(ctx)),
+                };
+                if !target_snapshot.is_active() {
+                    return CommandStepResult::failed(self.update_to_stop(ctx));
+                }
+                if !self.acquire_requested {
+                    let acquire_request = CommandRequest::new(CommandId::Acquire)
+                        .with_data(CommandData::Text(target_snapshot.definition_id.clone()))
+                        .with_update_interval(ACQUIRE_REQUEST_INTERVAL)
+                        .with_mode(CommandMode::Sub)
+                        .with_tx(Some(500))
+                        .with_ty(Some(250));
+                    self.acquire_requested = true;
+                    let mut result = CommandStepResult::running(pending_update);
+                    result
+                        .operations
+                        .push(CommandOperation::PushFront(acquire_request));
+                    return result;
+                }
+                return CommandStepResult::running(pending_update);
+            }
+        }
+        self.acquire_requested = false;
+
+        if let Some(position) = self.throw_position() {
+            const THROW_HORIZONTAL_RANGE: i32 = 15;
+            const THROW_VERTICAL_RANGE: i32 = 15;
+            let dx = position.x - ctx.position.x;
+            let dy = position.y - ctx.position.y;
+            if dx.abs() > THROW_HORIZONTAL_RANGE || dy.abs() > THROW_VERTICAL_RANGE {
+                if self.should_issue_move(ctx.frame) {
+                    let request = CommandRequest::new(CommandId::MoveTo)
+                        .with_tx(Some(position.x))
+                        .with_ty(Some(position.y))
+                        .with_update_interval(20);
+                    let mut result = CommandStepResult::running(pending_update);
+                    result.operations.push(CommandOperation::PushFront(request));
+                    return result;
+                }
+                return CommandStepResult::running(pending_update);
+            }
+        }
+
+        let mut update = pending_update.unwrap_or_else(ObjectUpdate::new);
+        update.command_direction = Some(CommandDirection::Stop);
+
+        if let Some(position) = self.throw_position() {
+            if position.x > ctx.position.x {
+                update.direction = Some(Direction::Right);
+            } else if position.x < ctx.position.x {
+                update.direction = Some(Direction::Left);
+            }
+        } else if let Some(target_id) = self.target {
+            if let Some(snapshot) = ctx.resolve(target_id) {
+                if snapshot.position.x > ctx.position.x {
+                    update.direction = Some(Direction::Right);
+                } else if snapshot.position.x < ctx.position.x {
+                    update.direction = Some(Direction::Left);
+                }
+            }
+        }
+
+        let mut action_update = ActionUpdate::default()
+            .with_name("Throw")
+            .with_force(true)
+            .with_phase(0)
+            .with_ticks(0);
+
+        if let Some(target_id) = self.target {
+            action_update = action_update.with_target(Some(target_id));
+        }
+
+        update = update.with_action_update(action_update);
+        CommandStepResult::completed(Some(update))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct AttackState {
     target: ObjectId,
     update_interval: u32,
@@ -3843,6 +4228,7 @@ enum CommandState {
     Exit(ExitState),
     Build(BuildState),
     Grab(GrabState),
+    Throw(ThrowState),
     UnGrab(UnGrabState),
     Wait(WaitState),
     Retry(RetryState),
@@ -3867,6 +4253,7 @@ impl ActiveCommand {
             CommandId::Exit => CommandState::Exit(ExitState::from_request(&request)?),
             CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
             CommandId::Grab => CommandState::Grab(GrabState::from_request(&request)?),
+            CommandId::Throw => CommandState::Throw(ThrowState::from_request(&request)?),
             CommandId::UnGrab => CommandState::UnGrab(UnGrabState::from_request(&request)),
             CommandId::Wait => CommandState::Wait(WaitState::from_request(&request)),
             CommandId::Retry => CommandState::Retry(RetryState::from_request(&request)),
@@ -3896,6 +4283,7 @@ impl ActiveCommand {
             CommandState::Exit(state) => state.step(ctx),
             CommandState::Build(state) => state.step(ctx),
             CommandState::Grab(state) => state.step(ctx),
+            CommandState::Throw(state) => state.step(ctx),
             CommandState::UnGrab(state) => state.step(ctx),
             CommandState::Wait(state) => state.step(ctx),
             CommandState::Retry(state) => state.step(ctx),

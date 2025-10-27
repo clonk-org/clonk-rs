@@ -8,7 +8,7 @@
 
 - **P0 BLOCKERS:** AI command system still partial (Acquire/Buy persist across saves; long-tail commands still missing)
 - **Scenario Discovery:** ✅ Official content repo wired; menu now lists full scenario catalog
-- **Current State:** Build compiles; workspace tests green; Build/Exit/Grab/UnGrab/Wait commands implemented in command stack
+- **Current State:** Build compiles; workspace tests green; Build/Exit/Grab/UnGrab/Throw/Wait commands implemented in command stack
 - **Next 48h:** Keep engine tests green; sketch AI command trait; triage panics
 - **Exit Criteria:** P0 cleared + CI green + smoke tests pass
 
@@ -24,14 +24,14 @@
 ---
 
 ### 1. AI Command System — PARTIAL ⚠️
-**Problem:** Command stack covers MoveTo/Follow/Enter/Exit/Build/Attack/Acquire/Buy/Energy + Grab/UnGrab; Throw/Chop/Dig/etc. remain unported so many C++ behaviours still unavailable
+**Problem:** Command stack covers MoveTo/Follow/Enter/Exit/Build/Attack/Acquire/Buy/Energy + Grab/UnGrab/Throw; Chop/Dig/etc. remain unported so many C++ behaviours still unavailable
 **Evidence:** `command::tests::exit_moves_into_parent_container_when_nested` + `command::tests::exit_leaves_container_when_no_parent` ensure Exit parity; `command::tests::acquire_requests_move_for_nearby_item` verifies ground pickup pathing; `command::tests::grab_starts_push_when_in_range` + `command::tests::ungrab_sets_idle_and_completes` cover push/release flow; `command::tests::wait_stops_dig_and_completes_after_interval` anchors Wait parity; `command::tests::retry_command_waits_then_completes` covers failure cooldowns; `compat::tests::set_command_clears_stack_and_pushes_command` still green
 **C++ Has:** 30 commands (Follow, MoveTo, Build, Attack, etc.) via `C4Command.cpp`
-**Rust Has:** Command trait infrastructure + MoveTo/Follow/Enter/Exit/Build/Attack/Wait + Retry countdown for failure back-off; Acquire for loose items, shared-container withdrawal, cross-container exit heuristics; Buy commands that deduct home base stock/wealth, spawn purchased items in bases, and hand off targeted shop purchases; Energy line-kit handshake; Grab/UnGrab mirror C++ push start/stop (auto queues UnGrab when switching targets); command stack snapshots persist across engine saves and scenario exports
-**Impact:** Build automation works (crew picks up components, honours material requirements); Exit mirrors C++ nested-container behaviour and stops builders before ejecting; Grab reproduces push engagement and respects hang/build dig-outs; Energize follows loose line-kit pickups; merchant/shop buys succeed and survive save/load; broader command coverage still missing
+**Rust Has:** Command trait infrastructure + MoveTo/Follow/Enter/Exit/Build/Attack/Throw/Wait + Retry countdown for failure back-off; Acquire for loose items, shared-container withdrawal, cross-container exit heuristics; Buy commands that deduct home base stock/wealth, spawn purchased items in bases, and hand off targeted shop purchases; Energy line-kit handshake; Grab/UnGrab mirror C++ push start/stop (auto queues UnGrab when switching targets); command stack snapshots persist across engine saves and scenario exports
+**Impact:** Build automation works (crew picks up components, honours material requirements); Exit mirrors C++ nested-container behaviour and stops builders before ejecting; Grab reproduces push engagement and respects hang/build dig-outs; Throw handles targeted throws with Acquire fallback; Energize follows loose line-kit pickups; merchant/shop buys succeed and survive save/load; broader command coverage still missing
 **Next:**
 1. Expand tests to cover queue chaining, failure recovery, and scenario parity
-2. Implement remaining command types (Throw/Chop/Jump/Get/Put/Drop/Dig/Activate/PushTo/Construct/Transfer/Context/Sell/Home/Call/Take/Take2) and associated movement heuristics
+2. Implement remaining command types (Chop/Jump/Get/Put/Drop/Dig/Activate/PushTo/Construct/Transfer/Context/Sell/Home/Call/Take/Take2) and associated movement heuristics
 
 **Accept:** `AddCommand("MoveTo", ...)` and `SetCommand("Build", ...)` reproduce C++ behaviour across parity scenarios
 **Owner:** TBD | **ETA:** Weeks 2-4 | **Risk:** HIGH (large system, hidden deps)
@@ -168,6 +168,15 @@ cargo test -p lc-engine \
   command::tests::buy_spawns_item_and_updates_player_state \
   command::tests::buy_collects_item_from_explicit_target \
   command::tests::command_stack_snapshot_preserves_acquire_state
+```
+
+**Throw Command:**
+```bash
+cargo test -p lc-engine \
+  command::tests::throw_requests_acquire_when_item_missing \
+  command::tests::throw_pushes_move_to_target_when_out_of_range \
+  command::tests::throw_sets_throw_action_when_in_range \
+  command::tests::throw_requests_ungrab_when_pushing
 ```
 
 ---
