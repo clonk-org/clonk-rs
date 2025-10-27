@@ -269,6 +269,14 @@ impl<'a> Vm<'a> {
                 let proplist = self.evaluate(target, env, depth)?;
                 self.eval_property(proplist, name)
             }
+            Expr::Assignment(target, value_expr) => {
+                // Evaluate the value first
+                let value = self.evaluate(value_expr, env, depth)?;
+                // Assign to target
+                self.assign_target(env, target, value.clone())?;
+                // Return the assigned value (assignment is an expression)
+                Ok(value)
+            }
         }
     }
 

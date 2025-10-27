@@ -102,6 +102,8 @@ pub enum Expr {
     Proplist(Vec<(String, Expr)>),
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
+    // Assignment as an expression (lowest precedence, right-associative)
+    Assignment(AssignmentTarget, Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

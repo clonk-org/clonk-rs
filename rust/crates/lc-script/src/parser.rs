@@ -252,14 +252,15 @@ impl<'a> Parser<'a> {
 
     fn parse_assignment_or_expr(&mut self) -> Result<Stmt, ParseError> {
         let expr = self.parse_expression()?;
-        if let Some(eq_token) = self.consume_if_symbol(Symbol::Equal)? {
-            let target = self.expression_to_assignment_target(expr, &eq_token)?;
-            let value = self.parse_expression()?;
-            self.expect_symbol(Symbol::Semicolon, "expected ';' after assignment")?;
-            Ok(Stmt::Assignment { target, value })
-        } else {
-            self.expect_symbol(Symbol::Semicolon, "expected ';' after expression")?;
-            Ok(Stmt::Expr(expr))
+        // At statement level, we always expect a trailing semicolon
+        self.expect_symbol(Symbol::Semicolon, "expected ';' after expression")?;
+
+        match expr {
+            Expr::Assignment(target, value) => Ok(Stmt::Assignment {
+                target,
+                value: *value,
+            }),
+            _ => Ok(Stmt::Expr(expr)),
         }
     }
 
@@ -283,7 +284,25 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-        self.parse_or()
+        self.parse_assignment()
+    }
+
+    fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
+        // Parse the next higher-precedence level first
+        let left = self.parse_or()?;
+
+        // If there is an '=', treat this as an assignment expression
+        if let Some(eq_token) = self.consume_if_symbol(Symbol::Equal)? {
+            // Validate the left side is a legal assignment target now (parser-level error)
+            let target = self.expression_to_assignment_target(left, &eq_token)?;
+
+            // Right-associative: a = b = c parses as a = (b = c)
+            let value = self.parse_assignment()?;
+
+            Ok(Expr::Assignment(target, Box::new(value)))
+        } else {
+            Ok(left)
+        }
     }
 
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
