@@ -1,4 +1,4 @@
-use crate::ast::{AssignmentTarget, BinaryOp, Expr, Function, Script, Stmt, UnaryOp};
+use crate::ast::{AppendTo, AssignmentTarget, BinaryOp, Expr, Function, Script, Stmt, UnaryOp};
 use crate::error::ParseError;
 use crate::lexer::Lexer;
 use crate::token::{Keyword, Symbol, Token, TokenKind};
@@ -18,11 +18,66 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_script(&mut self) -> Result<Script, ParseError> {
+        // Parse directives first (before functions)
+        let mut includes = Vec::new();
+        let mut appendto = None;
+        let mut strict_level = None;
+
+        while !self.is_eof()? {
+            // Check if next token is a directive
+            if let Some(directive) = self.try_parse_directive()? {
+                match directive.as_str() {
+                    "#include" => {
+                        let id = self.expect_identifier("expected definition ID after #include")?;
+                        if let TokenKind::Identifier(id_str) = id.kind {
+                            includes.push(id_str);
+                        }
+                    }
+                    "#appendto" => {
+                        let next = self.next()?;
+                        appendto = Some(match &next.kind {
+                            TokenKind::Identifier(id) => AppendTo::Id(id.clone()),
+                            TokenKind::Symbol(Symbol::Star) => AppendTo::Wildcard,
+                            _ => {
+                                return Err(ParseError::new(
+                                    "expected definition ID or '*' after #appendto",
+                                    next.line,
+                                    next.column,
+                                ))
+                            }
+                        });
+                    }
+                    "#strict" => {
+                        // Default to level 1
+                        let mut level = 1;
+                        // Check if there's a number following
+                        if let Ok(token) = self.peek() {
+                            if let TokenKind::Number(n) = token.kind {
+                                if n >= 1 && n <= 3 {
+                                    level = n as u8;
+                                    self.next()?; // consume the number
+                                }
+                            }
+                        }
+                        strict_level = Some(level);
+                    }
+                    _ => {
+                        // Unknown directive, skip it
+                    }
+                }
+            } else {
+                // Not a directive, break to parse functions
+                break;
+            }
+        }
+
+        // Parse functions
         let mut functions = Vec::new();
         while !self.is_eof()? {
             functions.push(self.parse_function()?);
         }
-        Ok(Script::new(functions))
+
+        Ok(Script::with_directives(functions, includes, appendto, strict_level))
     }
 
     fn parse_function(&mut self) -> Result<Function, ParseError> {
@@ -520,6 +575,22 @@ impl<'a> Parser<'a> {
             Ok(token)
         } else {
             self.lexer.next_token()
+        }
+    }
+
+    fn next(&mut self) -> Result<Token, ParseError> {
+        self.consume()
+    }
+
+    fn try_parse_directive(&mut self) -> Result<Option<String>, ParseError> {
+        let token = self.peek()?;
+        match &token.kind {
+            TokenKind::Directive(directive) => {
+                let directive_str = directive.clone();
+                self.consume()?;
+                Ok(Some(directive_str))
+            }
+            _ => Ok(None),
         }
     }
 }

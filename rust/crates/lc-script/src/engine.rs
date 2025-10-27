@@ -10,9 +10,23 @@ use crate::vm::Vm;
 
 pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync>;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Script {
     functions: HashMap<String, Function>,
+    includes: Vec<String>,
+    appendto: Option<crate::ast::AppendTo>,
+    strict_level: Option<u8>,
+}
+
+impl Default for Script {
+    fn default() -> Self {
+        Self {
+            functions: HashMap::new(),
+            includes: Vec::new(),
+            appendto: None,
+            strict_level: None,
+        }
+    }
 }
 
 impl Script {
@@ -27,11 +41,28 @@ impl Script {
         for function in ast.functions {
             functions.insert(function.name.clone(), function);
         }
-        Self { functions }
+        Self {
+            functions,
+            includes: ast.includes,
+            appendto: ast.appendto,
+            strict_level: ast.strict_level,
+        }
     }
 
     pub fn functions(&self) -> &HashMap<String, Function> {
         &self.functions
+    }
+
+    pub fn includes(&self) -> &[String] {
+        &self.includes
+    }
+
+    pub fn appendto(&self) -> Option<&crate::ast::AppendTo> {
+        self.appendto.as_ref()
+    }
+
+    pub fn strict_level(&self) -> Option<u8> {
+        self.strict_level
     }
 }
 

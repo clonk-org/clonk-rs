@@ -1,13 +1,41 @@
 use crate::value::Literal;
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum AppendTo {
+    Id(String),      // Append to specific definition
+    Wildcard,        // Append to all definitions (*)
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Script {
     pub functions: Vec<Function>,
+    pub includes: Vec<String>,         // List of included definition IDs
+    pub appendto: Option<AppendTo>,    // Optional append target
+    pub strict_level: Option<u8>,      // Strict mode level (1, 2, or 3)
 }
 
 impl Script {
     pub fn new(functions: Vec<Function>) -> Self {
-        Self { functions }
+        Self {
+            functions,
+            includes: Vec::new(),
+            appendto: None,
+            strict_level: None,
+        }
+    }
+
+    pub fn with_directives(
+        functions: Vec<Function>,
+        includes: Vec<String>,
+        appendto: Option<AppendTo>,
+        strict_level: Option<u8>,
+    ) -> Self {
+        Self {
+            functions,
+            includes,
+            appendto,
+            strict_level,
+        }
     }
 }
 

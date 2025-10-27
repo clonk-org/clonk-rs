@@ -7733,6 +7733,7 @@ impl GameApp {
                 scenario = %scenario.title,
                 path = %path.display(),
                 error = %err,
+                error_debug = ?err,
                 "failed to apply scenario"
             );
             return Err(format!("Failed to start {}: {err}", scenario.title));

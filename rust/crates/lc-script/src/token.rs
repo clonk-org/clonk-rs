@@ -12,6 +12,7 @@ pub enum TokenKind {
     String(String),
     Keyword(Keyword),
     Symbol(Symbol),
+    Directive(String), // Directive like "#include", "#appendto", "#strict"
     Eof,
 }
 

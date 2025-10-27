@@ -56,6 +56,9 @@ impl<'a> Lexer<'a> {
                 '"' => {
                     return self.lex_string(idx, line, column);
                 }
+                '#' => {
+                    return Ok(self.lex_directive(ch, idx, line, column));
+                }
                 '(' => return Ok(Token::new(TokenKind::Symbol(Symbol::LParen), line, column)),
                 ')' => return Ok(Token::new(TokenKind::Symbol(Symbol::RParen), line, column)),
                 '{' => return Ok(Token::new(TokenKind::Symbol(Symbol::LBrace), line, column)),
@@ -287,6 +290,28 @@ impl<'a> Lexer<'a> {
             _ => TokenKind::Identifier(lexeme.to_string()),
         };
         Token::new(kind, line, column)
+    }
+
+    fn lex_directive(
+        &mut self,
+        first: char,
+        start_idx: usize,
+        line: usize,
+        column: usize,
+    ) -> Token {
+        // Start with '#', continue reading alphanumeric chars to form directive
+        let mut end_idx = start_idx + first.len_utf8();
+        while let Some(ch) = self.peek_char() {
+            if ch.is_alphanumeric() || ch == '_' {
+                let (idx, consumed, _, _) = self.bump_char().unwrap();
+                end_idx = idx + consumed.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let lexeme = &self.input[start_idx..end_idx];
+        // Return the full directive string including '#'
+        Token::new(TokenKind::Directive(lexeme.to_string()), line, column)
     }
 
     fn lex_number(
