@@ -116,6 +116,9 @@ fn sprite_map_key(definition_id: &str, graphics_name: Option<&str>) -> String {
 #[derive(Debug, Parser)]
 #[command(name = "lc-app", about = "LegacyClonk Rust runtime", version)]
 struct Cli {
+    #[arg(long = "test-load", value_name = "PATH", help = "Test scenario loading without starting the UI")]
+    test_load: Option<std::path::PathBuf>,
+
     #[arg(long = "host", value_name = "ADDR", conflicts_with = "join")]
     host: Option<String>,
 
@@ -559,6 +562,41 @@ fn parse_socket_addr(input: &str, kind: &str) -> Result<SocketAddr> {
         .with_context(|| format!("invalid {kind} address `{input}`"))
 }
 
+fn test_scenario_load(path: &std::path::Path, app_paths: Option<&Arc<AppPaths>>) -> Result<()> {
+    use std::time::Instant;
+
+    println!("Testing scenario load from: {}", path.display());
+    println!("Using InstallDefinitionResolver with app paths: {}",
+        if app_paths.is_some() { "yes" } else { "no" });
+
+    let resolver = InstallDefinitionResolver::new(app_paths.map(|p| p.clone()));
+    let start = Instant::now();
+
+    match Scenario::load_from_path_with(path, &resolver) {
+        Ok(scenario) => {
+            let elapsed = start.elapsed();
+            println!("\n✓ Successfully loaded scenario in {:.2}s", elapsed.as_secs_f32());
+            println!("  Name: {}", scenario.name().unwrap_or("<unnamed>"));
+            println!("  Description: {}", scenario.description().unwrap_or("<no description>"));
+
+            let mut def_count = 0;
+            scenario.visit_definition_groups(|_id, _group| {
+                def_count += 1;
+            });
+            println!("  Definitions: {} loaded", def_count);
+            println!("  Has initial objects: {}", scenario.has_initial_objects());
+
+            Ok(())
+        }
+        Err(err) => {
+            let elapsed = start.elapsed();
+            eprintln!("\n✗ Failed to load scenario after {:.2}s", elapsed.as_secs_f32());
+            eprintln!("  Error: {}", err);
+            Err(anyhow::anyhow!("Scenario load failed: {}", err))
+        }
+    }
+}
+
 fn main() -> Result<()> {
     lc_core::logging::init();
 
@@ -573,6 +611,11 @@ fn main() -> Result<()> {
             );
         }
     }
+    // Handle test-load mode: load scenario and exit without starting UI
+    if let Some(test_path) = &cli.test_load {
+        return test_scenario_load(test_path, app_paths.as_ref());
+    }
+
     let runtime = RuntimeConfig {
         player_owner: cli.player_owner,
         player_name: cli.player_name.clone(),
