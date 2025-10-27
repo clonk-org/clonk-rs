@@ -573,10 +573,8 @@ impl Scenario {
                 base
             } else {
                 let script_bytes = read_group_file_bytes(group, script_path)?;
-                let script_source =
-                    String::from_utf8(script_bytes).map_err(|_| ScenarioError::ScriptEncoding {
-                        path: PathBuf::from(script_path),
-                    })?;
+                // Use lossy UTF-8 conversion to handle legacy ISO-8859-1/Windows-1252 encoded scripts
+                let script_source = String::from_utf8_lossy(&script_bytes).into_owned();
                 ScenarioDefinition {
                     id: id.clone(),
                     name: name_override.clone(),
@@ -631,10 +629,8 @@ impl Scenario {
             );
             let script_path = Path::new(&path);
             let script_bytes = read_group_file_bytes(group, script_path)?;
-            let script_source =
-                String::from_utf8(script_bytes).map_err(|_| ScenarioError::ScriptEncoding {
-                    path: PathBuf::from(script_path),
-                })?;
+            // Use lossy UTF-8 conversion to handle legacy ISO-8859-1/Windows-1252 encoded scripts
+            let script_source = String::from_utf8_lossy(&script_bytes).into_owned();
             Some(ScenarioScriptSource {
                 name: path,
                 source: script_source,
@@ -2208,9 +2204,8 @@ fn load_legacy_scenario_script(
             continue;
         }
         let bytes = group.read_file(candidate)?;
-        let source = String::from_utf8(bytes).map_err(|_| ScenarioError::ScriptEncoding {
-            path: PathBuf::from(candidate),
-        })?;
+        // Use lossy UTF-8 conversion to handle legacy ISO-8859-1/Windows-1252 encoded scripts
+        let source = String::from_utf8_lossy(&bytes).into_owned();
         return Ok(Some(ScenarioScriptSource {
             name: candidate.to_string(),
             source,
