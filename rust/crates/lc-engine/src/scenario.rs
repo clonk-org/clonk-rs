@@ -2967,10 +2967,16 @@ fn parse_legacy_objects(text: &str) -> Result<Vec<LegacyObjectRecord>, ScenarioE
             continue;
         }
         if line.starts_with('[') && line.ends_with(']') {
-            if let Some(record) = current.take() {
-                records.push(record);
+            let section_name = &line[1..line.len() - 1];
+            // Only [Object] sections create new object records
+            // Skip subsections like [Physical], [Commands], etc.
+            if section_name.eq_ignore_ascii_case("Object") {
+                if let Some(record) = current.take() {
+                    records.push(record);
+                }
+                current = Some(LegacyObjectRecord::new(index + 1));
             }
-            current = Some(LegacyObjectRecord::new(index + 1));
+            // Skip subsections - they're optional property overrides we don't use
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
