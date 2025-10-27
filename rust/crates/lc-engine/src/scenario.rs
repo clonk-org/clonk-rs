@@ -2987,6 +2987,13 @@ fn parse_legacy_objects(text: &str) -> Result<Vec<LegacyObjectRecord>, ScenarioE
 
 fn parse_i64(value: &str) -> Result<i64, std::num::ParseIntError> {
     let trimmed = value.trim();
+    // Handle C4Fixed format: 'f' or 'F' prefix indicates a fixed-point number
+    // Strip the prefix and parse the integer value (which may be hex or decimal)
+    let trimmed = trimmed
+        .strip_prefix('f')
+        .or_else(|| trimmed.strip_prefix('F'))
+        .unwrap_or(trimmed);
+
     if let Some(rest) = trimmed
         .strip_prefix("-0x")
         .or_else(|| trimmed.strip_prefix("-0X"))
