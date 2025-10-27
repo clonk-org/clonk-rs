@@ -4713,6 +4713,13 @@ impl GameApp {
                     }
                     self.drop_inventory_selection(&selection)?;
                 }
+                ObjectMenuCommand::Take => {
+                    self.take_from_container(&selection, 1)?;
+                }
+                ObjectMenuCommand::TakeAll => {
+                    let amount = selection.instances.len().max(1);
+                    self.take_from_container(&selection, amount)?;
+                }
             },
             ObjectMenuAction::Context { selection } => {
                 let handled = self
@@ -4858,6 +4865,61 @@ impl GameApp {
         self.refresh_object_menu();
         self.refresh_focus();
         self.status_text = format!("Dropped {} (x{})", selection.label, dropped);
+        Ok(())
+    }
+
+    fn take_from_container(
+        &mut self,
+        selection: &ObjectMenuSelection,
+        amount: usize,
+    ) -> Result<(), EngineError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let Some(container_id) = selection.source_container else {
+            self.status_text = "Container no longer available".to_string();
+            self.refresh_object_menu();
+            return Ok(());
+        };
+
+        let Some(_) = self.snapshot.object(selection.crew_id) else {
+            self.status_text = "Crew no longer available".to_string();
+            self.object_menu = None;
+            return Ok(());
+        };
+
+        if self.snapshot.object(container_id).is_none() {
+            self.status_text = "Container no longer available".to_string();
+            self.object_menu = None;
+            return Ok(());
+        }
+
+        let mut taken = 0usize;
+        for object_id in selection.instances.iter().take(amount) {
+            match self.engine.apply_object_update(
+                *object_id,
+                ObjectUpdate::new().with_container(selection.crew_id),
+            ) {
+                Ok(()) => taken += 1,
+                Err(EngineError::UnknownObject(_)) => {
+                    tracing::warn!(
+                        object = %object_id,
+                        "container item missing while taking"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        if taken == 0 {
+            self.status_text = format!("No {} to take", selection.label);
+            return Ok(());
+        }
+
+        self.snapshot = self.engine.snapshot();
+        self.refresh_object_menu();
+        self.refresh_focus();
+        self.status_text = format!("Took {} (x{})", selection.label, taken);
         Ok(())
     }
 
@@ -6440,6 +6502,23 @@ impl GameApp {
                 continue;
             }
             match &request.kind {
+                MenuRequestKind::Activate => {
+                    if let Some(mut menu) =
+                        ObjectMenuState::new(&mut self.engine, &self.snapshot, request.crew_id)
+                    {
+                        menu.focus_inventory_mode();
+                        self.object_menu = Some(menu);
+                    }
+                }
+                MenuRequestKind::Get { container } => {
+                    if let Some(mut menu) =
+                        ObjectMenuState::new(&mut self.engine, &self.snapshot, request.crew_id)
+                    {
+                        if menu.focus_container_mode(&mut self.engine, &self.snapshot, *container) {
+                            self.object_menu = Some(menu);
+                        }
+                    }
+                }
                 MenuRequestKind::Context { .. } => {
                     if let Some(mut menu) =
                         ObjectMenuState::new(&mut self.engine, &self.snapshot, request.crew_id)

@@ -164,6 +164,7 @@ impl MenuEntry for BuildMenuItem {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MenuMode {
     Inventory,
+    Container,
     Context,
     Build,
 }
@@ -172,6 +173,7 @@ impl MenuMode {
     fn title_suffix(self) -> &'static str {
         match self {
             MenuMode::Inventory => "Inventory",
+            MenuMode::Container => "Contents",
             MenuMode::Context => "Actions",
             MenuMode::Build => "Build",
         }
@@ -182,6 +184,8 @@ impl MenuMode {
 pub enum ObjectMenuCommand {
     Focus,
     DropAll,
+    Take,
+    TakeAll,
 }
 
 #[derive(Clone, Debug)]
@@ -207,6 +211,7 @@ pub struct ObjectMenuSelection {
     pub instances: Vec<ObjectId>,
     pub definition_id: String,
     pub label: String,
+    pub source_container: Option<ObjectId>,
 }
 
 impl ObjectMenuSelection {
@@ -232,15 +237,25 @@ pub struct ContextMenuSelection {
 }
 
 #[derive(Clone, Debug)]
+struct ContainerState {
+    id: ObjectId,
+    label: String,
+    items: Vec<ObjectMenuItem>,
+    known_empty: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct ObjectMenuState {
     crew_id: ObjectId,
     crew_label: String,
     owner: i32,
     mode: MenuMode,
     inventory: Vec<ObjectMenuItem>,
+    container: Option<ContainerState>,
     context: Vec<ContextMenuItem>,
     build: Vec<BuildMenuItem>,
     inventory_selected: Option<usize>,
+    container_selected: Option<usize>,
     context_selected: Option<usize>,
     build_selected: Option<usize>,
     inventory_known_empty: bool,
@@ -287,13 +302,22 @@ impl ObjectMenuState {
             owner,
             mode,
             inventory,
+            container: None,
             context,
             build,
             inventory_selected,
+            container_selected: None,
             context_selected,
             build_selected,
             inventory_known_empty,
         })
+    }
+
+    pub fn focus_inventory_mode(&mut self) {
+        self.mode = MenuMode::Inventory;
+        if self.inventory_selected.is_none() && !self.inventory.is_empty() {
+            self.inventory_selected = Some(0);
+        }
     }
 
     pub fn focus_context_mode(&mut self) {
@@ -304,6 +328,50 @@ impl ObjectMenuState {
         if self.context_selected.is_none() {
             self.context_selected = Some(0);
         }
+    }
+
+    pub fn focus_container_mode(
+        &mut self,
+        engine: &mut Engine,
+        snapshot: &SimulationSnapshot,
+        container_id: ObjectId,
+    ) -> bool {
+        let container = match snapshot.object(container_id) {
+            Some(container) => container,
+            None => {
+                self.container = None;
+                self.container_selected = None;
+                self.ensure_valid_mode();
+                return false;
+            }
+        };
+
+        let label = engine
+            .definition_name(&container.definition_id)
+            .unwrap_or(&container.definition_id)
+            .to_string();
+        let items = collect_container_items(engine, snapshot, container);
+        let known_empty = items.is_empty();
+        self.container = Some(ContainerState {
+            id: container_id,
+            label,
+            items,
+            known_empty,
+        });
+
+        if let Some(state) = self.container.as_ref() {
+            self.container_selected = if state.items.is_empty() {
+                None
+            } else {
+                Some(0)
+            };
+        } else {
+            self.container_selected = None;
+        }
+
+        self.mode = MenuMode::Container;
+        self.ensure_selection_for_mode();
+        true
     }
 
     pub fn refresh(&mut self, engine: &mut Engine, snapshot: &SimulationSnapshot) -> bool {
@@ -321,6 +389,26 @@ impl ObjectMenuState {
         self.build = collect_build_items(engine, crew);
         self.inventory_known_empty = self.inventory.is_empty();
         clamp_selection(&mut self.inventory_selected, self.inventory.len());
+        if let Some(state) = self.container.as_mut() {
+            if let Some(container) = snapshot.object(state.id) {
+                state.label = engine
+                    .definition_name(&container.definition_id)
+                    .unwrap_or(&container.definition_id)
+                    .to_string();
+                state.items = collect_container_items(engine, snapshot, container);
+                state.known_empty = state.items.is_empty();
+                clamp_selection(&mut self.container_selected, state.items.len());
+                if self.container_selected.is_none() && !state.items.is_empty() {
+                    self.container_selected = Some(0);
+                }
+            } else {
+                self.container = None;
+                self.container_selected = None;
+                if self.mode == MenuMode::Container {
+                    self.mode = MenuMode::Inventory;
+                }
+            }
+        }
         clamp_selection(&mut self.context_selected, self.context.len());
         clamp_selection(&mut self.build_selected, self.build.len());
         if self.inventory_selected.is_none() && !self.inventory.is_empty() {
@@ -373,12 +461,14 @@ impl ObjectMenuState {
             }
             ControlCommand::MenuSelect | ControlCommand::MenuEnter => match self.mode {
                 MenuMode::Inventory => self.activation_action(ObjectMenuCommand::Focus),
+                MenuMode::Container => self.container_action(ObjectMenuCommand::Take),
                 MenuMode::Context => self.context_action(),
                 MenuMode::Build => self.build_action(1),
             },
             ControlCommand::MenuEnterAll => match self.mode {
                 MenuMode::Inventory => self.activation_action(ObjectMenuCommand::DropAll),
                 MenuMode::Context => self.context_action(),
+                MenuMode::Container => self.container_action(ObjectMenuCommand::TakeAll),
                 MenuMode::Build => {
                     let amount = self
                         .build_selected
@@ -403,7 +493,6 @@ impl ObjectMenuState {
 
         fill_rect(surface, surface.bounds(), BACKDROP_COLOR);
 
-        let title = format!("{} {}", self.crew_label, self.mode.title_suffix());
         let hint = if self.available_modes().len() >= 2 {
             Some(MODE_HINT)
         } else {
@@ -412,6 +501,7 @@ impl ObjectMenuState {
 
         match self.mode {
             MenuMode::Inventory => {
+                let title = format!("{} {}", self.crew_label, self.mode.title_suffix());
                 let empty_message = if self.inventory_known_empty {
                     "Inventory is empty."
                 } else {
@@ -427,7 +517,30 @@ impl ObjectMenuState {
                     hint,
                 );
             }
+            MenuMode::Container => {
+                let mut title = format!("{} {}", self.crew_label, self.mode.title_suffix());
+                let mut empty_message = "Container unavailable.";
+                if let Some(state) = self.container.as_ref() {
+                    title = format!("{} {}", state.label, self.mode.title_suffix());
+                    if state.known_empty {
+                        empty_message = "Container is empty.";
+                    }
+                    self.render_entries(
+                        surface,
+                        font,
+                        state.items.as_slice(),
+                        self.container_selected,
+                        &title,
+                        empty_message,
+                        hint,
+                    );
+                } else {
+                    let empty: &[ObjectMenuItem] = &[];
+                    self.render_entries(surface, font, empty, None, &title, empty_message, hint);
+                }
+            }
             MenuMode::Context => {
+                let title = format!("{} {}", self.crew_label, self.mode.title_suffix());
                 self.render_entries(
                     surface,
                     font,
@@ -439,6 +552,7 @@ impl ObjectMenuState {
                 );
             }
             MenuMode::Build => {
+                let title = format!("{} {}", self.crew_label, self.mode.title_suffix());
                 self.render_entries(
                     surface,
                     font,
@@ -613,6 +727,32 @@ impl ObjectMenuState {
                 instances: item.instances.clone(),
                 definition_id: item.definition_id.clone(),
                 label: item.label.clone(),
+                source_container: None,
+            },
+        })
+    }
+
+    fn container_action(&self, command: ObjectMenuCommand) -> Option<ObjectMenuAction> {
+        let state = self.container.as_ref()?;
+        let index = self.container_selected?;
+        let item = state.items.get(index)?;
+        let primary_id = item.primary_object()?;
+        let instances = match command {
+            ObjectMenuCommand::TakeAll => item.instances.clone(),
+            _ => vec![primary_id],
+        };
+        if instances.is_empty() {
+            return None;
+        }
+        Some(ObjectMenuAction::Execute {
+            command,
+            selection: ObjectMenuSelection {
+                crew_id: self.crew_id,
+                primary_id,
+                instances,
+                definition_id: item.definition_id.clone(),
+                label: item.label.clone(),
+                source_container: Some(state.id),
             },
         })
     }
@@ -649,6 +789,14 @@ impl ObjectMenuState {
     fn current_selection_mut(&mut self) -> (&mut Option<usize>, usize) {
         match self.mode {
             MenuMode::Inventory => (&mut self.inventory_selected, self.inventory.len()),
+            MenuMode::Container => {
+                let len = self
+                    .container
+                    .as_ref()
+                    .map(|state| state.items.len())
+                    .unwrap_or(0);
+                (&mut self.container_selected, len)
+            }
             MenuMode::Context => (&mut self.context_selected, self.context.len()),
             MenuMode::Build => (&mut self.build_selected, self.build.len()),
         }
@@ -668,6 +816,11 @@ impl ObjectMenuState {
     fn mode_available(&self, mode: MenuMode) -> bool {
         match mode {
             MenuMode::Inventory => !self.inventory.is_empty() || self.inventory_known_empty,
+            MenuMode::Container => self
+                .container
+                .as_ref()
+                .map(|state| !state.items.is_empty() || state.known_empty)
+                .unwrap_or(false),
             MenuMode::Context => !self.context.is_empty(),
             MenuMode::Build => !self.build.is_empty(),
         }
@@ -677,6 +830,9 @@ impl ObjectMenuState {
         let mut modes = Vec::new();
         if self.mode_available(MenuMode::Inventory) {
             modes.push(MenuMode::Inventory);
+        }
+        if self.mode_available(MenuMode::Container) {
+            modes.push(MenuMode::Container);
         }
         if self.mode_available(MenuMode::Context) {
             modes.push(MenuMode::Context);
@@ -695,6 +851,13 @@ impl ObjectMenuState {
             MenuMode::Inventory => {
                 if self.inventory_selected.is_none() && !self.inventory.is_empty() {
                     self.inventory_selected = Some(0);
+                }
+            }
+            MenuMode::Container => {
+                if let Some(state) = self.container.as_ref() {
+                    if self.container_selected.is_none() && !state.items.is_empty() {
+                        self.container_selected = Some(0);
+                    }
                 }
             }
             MenuMode::Context => {
@@ -756,11 +919,29 @@ fn collect_inventory(
     if crew.contents.is_empty() {
         return Vec::new();
     }
+    collect_contents(engine, snapshot, &crew.contents)
+}
 
+fn collect_container_items(
+    engine: &Engine,
+    snapshot: &SimulationSnapshot,
+    container: &lc_engine::ObjectSnapshot,
+) -> Vec<ObjectMenuItem> {
+    if container.contents.is_empty() {
+        return Vec::new();
+    }
+    collect_contents(engine, snapshot, &container.contents)
+}
+
+fn collect_contents(
+    engine: &Engine,
+    snapshot: &SimulationSnapshot,
+    contents: &[ObjectId],
+) -> Vec<ObjectMenuItem> {
     let mut order: Vec<ObjectMenuItem> = Vec::new();
     let mut lookup: HashMap<String, usize> = HashMap::new();
 
-    for child_id in &crew.contents {
+    for child_id in contents {
         let child = match snapshot.object(*child_id) {
             Some(child) => child,
             None => continue,
@@ -1073,8 +1254,62 @@ mod tests {
                 assert_eq!(selection.count(), 2);
                 assert_eq!(selection.instances.len(), 2);
                 assert_eq!(selection.primary_id, ObjectId::new(2));
+                assert!(selection.source_container.is_none());
             }
             _ => panic!("expected execute action"),
+        }
+    }
+
+    #[test]
+    fn container_mode_emits_take_actions() {
+        let mut engine = Engine::new();
+        let crew = make_object(1, "Clonk");
+        let mut container = make_object(2, "Chest");
+        let item_a = make_object(3, "Shovel");
+        let item_b = make_object(4, "Shovel");
+
+        container.contents = vec![item_a.id, item_b.id];
+
+        let mut snapshot = make_snapshot(crew.clone(), Vec::new(), Vec::new());
+        snapshot.objects.push(container.clone());
+        snapshot.objects.push(ObjectSnapshot {
+            container: Some(container.id),
+            ..item_a.clone()
+        });
+        snapshot.objects.push(ObjectSnapshot {
+            container: Some(container.id),
+            ..item_b.clone()
+        });
+
+        let mut menu =
+            ObjectMenuState::new(&mut engine, &snapshot, crew.id).expect("menu should exist");
+        assert!(menu.focus_container_mode(&mut engine, &snapshot, container.id));
+        assert_eq!(menu.mode, MenuMode::Container);
+        assert!(menu.available_modes().contains(&MenuMode::Container));
+
+        let take_action = menu
+            .handle_command(ControlCommand::MenuSelect, CommandKind::Press)
+            .expect("take action");
+        match take_action {
+            ObjectMenuAction::Execute { command, selection } => {
+                assert_eq!(command, ObjectMenuCommand::Take);
+                assert_eq!(selection.source_container, Some(container.id));
+                assert_eq!(selection.instances.len(), 1);
+                assert_eq!(selection.definition_id, "Shovel");
+            }
+            other => panic!("unexpected action: {:?}", other),
+        }
+
+        let take_all = menu
+            .handle_command(ControlCommand::MenuEnterAll, CommandKind::Press)
+            .expect("take all action");
+        match take_all {
+            ObjectMenuAction::Execute { command, selection } => {
+                assert_eq!(command, ObjectMenuCommand::TakeAll);
+                assert_eq!(selection.source_container, Some(container.id));
+                assert_eq!(selection.instances.len(), 2);
+            }
+            other => panic!("unexpected action: {:?}", other),
         }
     }
 

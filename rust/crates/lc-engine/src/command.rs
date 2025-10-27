@@ -2996,6 +2996,7 @@ mod tests {
                         assert_eq!(*target, target_id);
                         assert_eq!(*position, Some(Vector2::new(15, 25)));
                     }
+                    other => panic!("unexpected menu kind: {:?}", other),
                 }
             }
             other => panic!("unexpected event: {:?}", other),
@@ -3046,6 +3047,161 @@ mod tests {
         assert_eq!(result.status, CommandStatus::Completed);
         assert!(result.update.is_some());
         assert!(result.events.is_empty());
+    }
+
+    #[test]
+    fn take_opens_activate_menu() {
+        let crew_id = ObjectId::new(101);
+
+        let mut crew = snapshot_with_id(crew_id.as_u64());
+        crew.owner = 7;
+        crew.command_direction = CommandDirection::Left;
+
+        let mut objects = HashMap::new();
+        objects.insert(crew.id, crew.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: crew.position,
+            object: objects.get(&crew_id).expect("crew present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state =
+            TakeState::from_request(&CommandRequest::new(CommandId::Take)).expect("take state");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result
+            .update
+            .expect("take command should stop the crew immediately");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            CommandEvent::OpenMenu(request) => {
+                assert_eq!(request.crew_id, crew_id);
+                assert_eq!(request.owner, crew.owner);
+                assert!(matches!(request.kind, MenuRequestKind::Activate));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        let second = state.step(&ctx);
+        assert_eq!(second.status, CommandStatus::Completed);
+        assert!(second.events.is_empty());
+        assert!(second.update.is_none());
+    }
+
+    #[test]
+    fn take2_requires_container() {
+        let crew_id = ObjectId::new(201);
+
+        let mut crew = snapshot_with_id(crew_id.as_u64());
+        crew.owner = 5;
+        crew.command_direction = CommandDirection::Right;
+
+        let mut objects = HashMap::new();
+        objects.insert(crew.id, crew.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: crew.position,
+            object: objects.get(&crew_id).expect("crew present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state =
+            Take2State::from_request(&CommandRequest::new(CommandId::Take2)).expect("take2 state");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Failed);
+        let update = result
+            .update
+            .expect("take2 should request crew to stop even on failure");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert!(result.events.is_empty());
+
+        let second = state.step(&ctx);
+        assert_eq!(second.status, CommandStatus::Completed);
+        assert!(second.events.is_empty());
+    }
+
+    #[test]
+    fn take2_opens_get_menu_for_container() {
+        let crew_id = ObjectId::new(301);
+        let container_id = ObjectId::new(302);
+
+        let mut crew = snapshot_with_id(crew_id.as_u64());
+        crew.owner = 9;
+        crew.command_direction = CommandDirection::Right;
+        crew.container = Some(container_id);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.owner = 9;
+
+        let mut objects = HashMap::new();
+        objects.insert(crew.id, crew.clone());
+        objects.insert(container.id, container.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: crew.position,
+            object: objects.get(&crew_id).expect("crew present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state =
+            Take2State::from_request(&CommandRequest::new(CommandId::Take2)).expect("take2 state");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result
+            .update
+            .expect("take2 should stop crew before opening menu");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            CommandEvent::OpenMenu(request) => {
+                assert_eq!(request.crew_id, crew_id);
+                assert_eq!(request.owner, crew.owner);
+                match &request.kind {
+                    MenuRequestKind::Get { container } => assert_eq!(*container, container_id),
+                    other => panic!("unexpected menu kind: {:?}", other),
+                }
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        let second = state.step(&ctx);
+        assert_eq!(second.status, CommandStatus::Completed);
+        assert!(second.events.is_empty());
     }
 
     #[test]
@@ -5299,6 +5455,10 @@ pub enum MenuRequestKind {
         target: ObjectId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<Vector2>,
+    },
+    Activate,
+    Get {
+        container: ObjectId,
     },
 }
 
@@ -8787,6 +8947,94 @@ impl ContextState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct TakeState {
+    executed: bool,
+}
+
+impl TakeState {
+    fn from_request(_request: &CommandRequest) -> Result<Self, CommandError> {
+        Ok(Self { executed: false })
+    }
+
+    fn update_to_stop(ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.executed {
+            return CommandStepResult::completed(None);
+        }
+        self.executed = true;
+
+        let update = Self::update_to_stop(ctx);
+        if ctx.object.owner == OWNER_NONE {
+            return CommandStepResult::completed(update);
+        }
+
+        let event = CommandEvent::OpenMenu(MenuRequest {
+            crew_id: ctx.object.id,
+            owner: ctx.object.owner,
+            kind: MenuRequestKind::Activate,
+        });
+        CommandStepResult::completed(update).with_events(vec![event])
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Take2State {
+    executed: bool,
+}
+
+impl Take2State {
+    fn from_request(_request: &CommandRequest) -> Result<Self, CommandError> {
+        Ok(Self { executed: false })
+    }
+
+    fn update_to_stop(ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.executed {
+            return CommandStepResult::completed(None);
+        }
+        self.executed = true;
+
+        let update = Self::update_to_stop(ctx);
+        let Some(container_id) = ctx.object.container else {
+            return CommandStepResult::failed(update);
+        };
+        let Some(container) = ctx.resolve(container_id) else {
+            return CommandStepResult::failed(update);
+        };
+        if !container.is_active() {
+            return CommandStepResult::failed(update);
+        }
+
+        if ctx.object.owner == OWNER_NONE {
+            return CommandStepResult::completed(update);
+        }
+
+        let event = CommandEvent::OpenMenu(MenuRequest {
+            crew_id: ctx.object.id,
+            owner: ctx.object.owner,
+            kind: MenuRequestKind::Get {
+                container: container_id,
+            },
+        });
+        CommandStepResult::completed(update).with_events(vec![event])
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct AcquireState {
     definition_id: DefinitionId,
     ignore_container: Option<ObjectId>,
@@ -9801,6 +10049,8 @@ enum CommandState {
     Context(ContextState),
     Buy(BuyState),
     Sell(SellState),
+    Take(TakeState),
+    Take2(Take2State),
     Acquire(AcquireState),
     Home(HomeState),
     Energy(EnergyState),
@@ -9835,6 +10085,8 @@ impl CommandState {
             CommandState::Context(_) => Some(CommandId::Context),
             CommandState::Buy(_) => Some(CommandId::Buy),
             CommandState::Sell(_) => Some(CommandId::Sell),
+            CommandState::Take(_) => Some(CommandId::Take),
+            CommandState::Take2(_) => Some(CommandId::Take2),
             CommandState::Acquire(_) => Some(CommandId::Acquire),
             CommandState::Home(_) => Some(CommandId::Home),
             CommandState::Energy(_) => Some(CommandId::Energy),
@@ -9878,6 +10130,8 @@ impl ActiveCommand {
             CommandId::Context => CommandState::Context(ContextState::from_request(&request)?),
             CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
             CommandId::Sell => CommandState::Sell(SellState::from_request(&request)?),
+            CommandId::Take => CommandState::Take(TakeState::from_request(&request)?),
+            CommandId::Take2 => CommandState::Take2(Take2State::from_request(&request)?),
             CommandId::Acquire => CommandState::Acquire(AcquireState::from_request(&request)?),
             CommandId::Home => CommandState::Home(HomeState::from_request(&request)?),
             CommandId::Energy => CommandState::Energy(EnergyState::from_request(&request)?),
@@ -9926,6 +10180,8 @@ impl ActiveCommand {
             CommandState::Context(state) => state.step(ctx),
             CommandState::Buy(state) => state.step(ctx),
             CommandState::Sell(state) => state.step(ctx),
+            CommandState::Take(state) => state.step(ctx),
+            CommandState::Take2(state) => state.step(ctx),
             CommandState::Acquire(state) => state.step(ctx),
             CommandState::Home(state) => state.step(ctx),
             CommandState::Energy(state) => state.step(ctx),
