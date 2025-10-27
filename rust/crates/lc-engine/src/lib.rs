@@ -7662,10 +7662,24 @@ impl Engine {
             .definitions
             .iter()
             .map(|(id, definition)| {
+                let mut chop_action = None;
+                let mut can_chop = false;
+                for (action_name, spec) in definition.action_library().specs() {
+                    if let Some(procedure_name) = spec.procedure.as_deref() {
+                        if ActionProcedure::from_name(procedure_name) == ActionProcedure::Chop {
+                            can_chop = true;
+                            if chop_action.is_none() {
+                                chop_action = Some(action_name.clone());
+                            }
+                        }
+                    }
+                }
                 (
                     id.clone(),
                     CommandDefinitionSnapshot {
                         value: definition.value(),
+                        can_chop,
+                        chop_action,
                     },
                 )
             })

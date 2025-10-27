@@ -63,9 +63,13 @@ impl CommandPlayerSnapshot {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandDefinitionSnapshot {
     pub value: i32,
+    #[serde(default)]
+    pub can_chop: bool,
+    #[serde(default)]
+    pub chop_action: Option<String>,
 }
 
 /// Identifiers that map to the classic C4 command constants.
@@ -1870,7 +1874,14 @@ mod tests {
         );
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
-        definitions.insert("WOOD".to_string(), CommandDefinitionSnapshot { value: 25 });
+        definitions.insert(
+            "WOOD".to_string(),
+            CommandDefinitionSnapshot {
+                value: 25,
+                can_chop: false,
+                chop_action: None,
+            },
+        );
 
         let ctx = CommandRuntimeContext {
             frame: 0,
@@ -1977,7 +1988,14 @@ mod tests {
         );
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
-        definitions.insert("WOOD".to_string(), CommandDefinitionSnapshot { value: 25 });
+        definitions.insert(
+            "WOOD".to_string(),
+            CommandDefinitionSnapshot {
+                value: 25,
+                can_chop: false,
+                chop_action: None,
+            },
+        );
 
         let ctx = CommandRuntimeContext {
             frame: 0,
@@ -2052,7 +2070,14 @@ mod tests {
         );
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
-        definitions.insert("WOOD".to_string(), CommandDefinitionSnapshot { value: 5 });
+        definitions.insert(
+            "WOOD".to_string(),
+            CommandDefinitionSnapshot {
+                value: 5,
+                can_chop: false,
+                chop_action: None,
+            },
+        );
 
         let ctx = CommandRuntimeContext {
             frame: 0,
@@ -2123,7 +2148,14 @@ mod tests {
         );
 
         let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
-        definitions.insert("WOOD".to_string(), CommandDefinitionSnapshot { value: 15 });
+        definitions.insert(
+            "WOOD".to_string(),
+            CommandDefinitionSnapshot {
+                value: 15,
+                can_chop: false,
+                chop_action: None,
+            },
+        );
 
         let ctx = CommandRuntimeContext {
             frame: 10,
@@ -2168,6 +2200,272 @@ mod tests {
             }
             other => panic!("unexpected event: {:?}", other),
         }
+    }
+
+    #[test]
+    fn chop_sets_action_when_in_range() {
+        let builder_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.position = Vector2::new(6, 0);
+        builder.command_direction = CommandDirection::Right;
+        let builder_definition = builder.definition_id.clone();
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(0, 0);
+        target.ocf = ocf::CHOP | ocf::AVAILABLE;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder);
+        objects.insert(target.id, target);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        definitions.insert(
+            builder_definition.clone(),
+            CommandDefinitionSnapshot {
+                value: 0,
+                can_chop: true,
+                chop_action: Some("Chop".into()),
+            },
+        );
+
+        let builder_entry = objects.get(&builder_id).expect("builder present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder_entry.position,
+            object: builder_entry,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ChopState::from_request(
+            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+
+        let update = result.update.expect("expected update");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert_eq!(update.velocity, Some(Vector2::ZERO));
+        let action_update = update.action.expect("action update");
+        assert_eq!(action_update.name, Some("Chop".into()));
+        assert_eq!(action_update.target, Some(Some(target_id)));
+        assert!(action_update.force);
+    }
+
+    #[test]
+    fn chop_requests_move_when_far() {
+        let builder_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.position = Vector2::new(30, 0);
+        let builder_definition = builder.definition_id.clone();
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(0, 0);
+        target.ocf = ocf::CHOP | ocf::AVAILABLE;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder);
+        objects.insert(target.id, target);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        definitions.insert(
+            builder_definition,
+            CommandDefinitionSnapshot {
+                value: 0,
+                can_chop: true,
+                chop_action: Some("Chop".into()),
+            },
+        );
+
+        let builder_entry = objects.get(&builder_id).expect("builder present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder_entry.position,
+            object: builder_entry,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ChopState::from_request(
+            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(!result.operations.is_empty());
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => assert_eq!(request.id, CommandId::MoveTo),
+            other => panic!("unexpected operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn chop_requests_ungrab_when_pushing() {
+        let builder_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.position = Vector2::new(30, 0);
+        builder.action_procedure = ActionProcedure::Push;
+        builder.action_target = Some(ObjectId::new(99));
+        let builder_definition = builder.definition_id.clone();
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(0, 0);
+        target.ocf = ocf::CHOP | ocf::AVAILABLE;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder);
+        objects.insert(target.id, target);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        definitions.insert(
+            builder_definition,
+            CommandDefinitionSnapshot {
+                value: 0,
+                can_chop: true,
+                chop_action: Some("Chop".into()),
+            },
+        );
+
+        let builder_entry = objects.get(&builder_id).expect("builder present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder_entry.position,
+            object: builder_entry,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ChopState::from_request(
+            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => assert_eq!(request.id, CommandId::UnGrab),
+            other => panic!("unexpected operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn chop_completes_when_target_not_choppable() {
+        let builder_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.position = Vector2::new(6, 0);
+        let builder_definition = builder.definition_id.clone();
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(0, 0);
+        target.ocf = ocf::AVAILABLE;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder);
+        objects.insert(target.id, target);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        definitions.insert(
+            builder_definition,
+            CommandDefinitionSnapshot {
+                value: 0,
+                can_chop: true,
+                chop_action: Some("Chop".into()),
+            },
+        );
+
+        let builder_entry = objects.get(&builder_id).expect("builder present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder_entry.position,
+            object: builder_entry,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ChopState::from_request(
+            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+    }
+
+    #[test]
+    fn chop_fails_when_builder_cannot_chop() {
+        let builder_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.position = Vector2::new(10, 0);
+        let builder_definition = builder.definition_id.clone();
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(0, 0);
+        target.ocf = ocf::CHOP | ocf::AVAILABLE;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder);
+        objects.insert(target.id, target);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        definitions.insert(
+            builder_definition,
+            CommandDefinitionSnapshot {
+                value: 0,
+                can_chop: false,
+                chop_action: Some("Chop".into()),
+            },
+        );
+
+        let builder_entry = objects.get(&builder_id).expect("builder present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder_entry.position,
+            object: builder_entry,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ChopState::from_request(
+            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Failed);
     }
 }
 
@@ -2928,6 +3226,177 @@ impl BuildState {
         }
 
         CommandStepResult::running(None).with_operations(operations)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ChopState {
+    target: ObjectId,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    last_move_order: Option<u64>,
+    ungrab_requested: bool,
+}
+
+impl ChopState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let target = request.target.ok_or(CommandError::Unsupported)?;
+        Ok(Self {
+            target,
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            last_move_order: None,
+            ungrab_requested: false,
+        })
+    }
+
+    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn should_issue_move(&mut self, frame: u64) -> bool {
+        const MOVE_COOLDOWN: u64 = 12;
+        match self.last_move_order {
+            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
+            _ => {
+                self.last_move_order = Some(frame);
+                true
+            }
+        }
+    }
+
+    fn chop_action_name(&self, ctx: &CommandRuntimeContext<'_>) -> Option<String> {
+        ctx.definition(&ctx.object.definition_id)
+            .and_then(|definition| definition.chop_action.clone())
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        match ctx.definition(&ctx.object.definition_id) {
+            Some(definition) if definition.can_chop => {}
+            _ => {
+                return CommandStepResult::failed(self.update_to_stop(ctx));
+            }
+        }
+
+        let target_snapshot = match ctx.resolve(self.target) {
+            Some(snapshot) => snapshot,
+            None => {
+                return CommandStepResult::failed(self.update_to_stop(ctx));
+            }
+        };
+
+        if !target_snapshot.is_active() {
+            return CommandStepResult::failed(self.update_to_stop(ctx));
+        }
+
+        if target_snapshot.ocf & ocf::CHOP == 0 {
+            return CommandStepResult::completed(self.update_to_stop(ctx));
+        }
+
+        if ctx.object.action_procedure == ActionProcedure::Chop
+            && ctx.object.action_target == Some(self.target)
+        {
+            return CommandStepResult::running(self.update_to_stop(ctx));
+        }
+
+        if ctx.object.action_procedure == ActionProcedure::Push {
+            if !self.ungrab_requested {
+                self.ungrab_requested = true;
+                let request = CommandRequest::new(CommandId::UnGrab)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::Sub);
+                let mut result = CommandStepResult::running(self.update_to_stop(ctx));
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
+            return CommandStepResult::running(self.update_to_stop(ctx));
+        }
+        self.ungrab_requested = false;
+
+        if matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Chop | ActionProcedure::Build | ActionProcedure::Dig
+        ) {
+            let mut update = self.update_to_stop(ctx).unwrap_or_else(ObjectUpdate::new);
+            let idle_action = ActionUpdate::default().with_name("Idle").with_force(true);
+            update = update.with_action_update(idle_action);
+            return CommandStepResult::running(Some(update));
+        }
+
+        let dx = target_snapshot.position.x - ctx.position.x;
+        let dy = target_snapshot.position.y - ctx.position.y;
+
+        const MIN_HORIZONTAL_RANGE: i32 = 4;
+        const MAX_HORIZONTAL_RANGE: i32 = 9;
+        const MAX_VERTICAL_OFFSET: i32 = 12;
+
+        let at_target = ctx.object.container.is_none()
+            && target_snapshot.container.is_none()
+            && dx.abs() >= MIN_HORIZONTAL_RANGE
+            && dx.abs() <= MAX_HORIZONTAL_RANGE
+            && dy.abs() <= MAX_VERTICAL_OFFSET;
+
+        if at_target {
+            let action_name = self
+                .chop_action_name(ctx)
+                .unwrap_or_else(|| "Chop".to_string());
+            let action_update = ActionUpdate::default()
+                .with_name(action_name)
+                .with_target(Some(self.target))
+                .with_phase(0)
+                .with_ticks(0)
+                .with_force(true);
+            let update = ObjectUpdate::new()
+                .with_action_update(action_update)
+                .with_command_direction(CommandDirection::Stop)
+                .with_velocity(Vector2::ZERO);
+            return CommandStepResult::running(Some(update));
+        }
+
+        let mut result = CommandStepResult::running(self.update_to_stop(ctx));
+
+        if self.should_issue_move(ctx.frame) {
+            let approach_x = if ctx.position.x > target_snapshot.position.x {
+                target_snapshot.position.x + 6
+            } else {
+                target_snapshot.position.x - 6
+            };
+            let mut operations = Vec::new();
+            let approach_request = CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(approach_x))
+                .with_ty(Some(target_snapshot.position.y))
+                .with_update_interval(50);
+            operations.push(CommandOperation::PushFront(approach_request));
+
+            if dx.abs() < MIN_HORIZONTAL_RANGE {
+                let move_away_x = if ctx.position.x > target_snapshot.position.x {
+                    target_snapshot.position.x + 15
+                } else {
+                    target_snapshot.position.x - 15
+                };
+                let move_away_request = CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(move_away_x))
+                    .with_ty(Some(target_snapshot.position.y))
+                    .with_update_interval(50);
+                operations.push(CommandOperation::PushFront(move_away_request));
+            }
+
+            result.operations.extend(operations);
+        }
+
+        result
     }
 }
 
@@ -4227,6 +4696,7 @@ enum CommandState {
     Enter(EnterState),
     Exit(ExitState),
     Build(BuildState),
+    Chop(ChopState),
     Grab(GrabState),
     Throw(ThrowState),
     UnGrab(UnGrabState),
@@ -4252,6 +4722,7 @@ impl ActiveCommand {
             CommandId::Enter => CommandState::Enter(EnterState::from_request(&request)?),
             CommandId::Exit => CommandState::Exit(ExitState::from_request(&request)?),
             CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
+            CommandId::Chop => CommandState::Chop(ChopState::from_request(&request)?),
             CommandId::Grab => CommandState::Grab(GrabState::from_request(&request)?),
             CommandId::Throw => CommandState::Throw(ThrowState::from_request(&request)?),
             CommandId::UnGrab => CommandState::UnGrab(UnGrabState::from_request(&request)),
@@ -4282,6 +4753,7 @@ impl ActiveCommand {
             CommandState::Enter(state) => state.step(ctx),
             CommandState::Exit(state) => state.step(ctx),
             CommandState::Build(state) => state.step(ctx),
+            CommandState::Chop(state) => state.step(ctx),
             CommandState::Grab(state) => state.step(ctx),
             CommandState::Throw(state) => state.step(ctx),
             CommandState::UnGrab(state) => state.step(ctx),
