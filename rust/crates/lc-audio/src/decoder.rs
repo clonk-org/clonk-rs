@@ -72,6 +72,15 @@ fn decode_wav(data: &[u8]) -> Result<DecodedAudio, AudioDecodeError> {
     let channel_count = spec.channels as usize;
 
     let samples = match (spec.sample_format, spec.bits_per_sample) {
+        (SampleFormat::Int, 8) => {
+            // 8-bit PCM WAV is unsigned (0-255), hound converts to i8 (-128 to 127)
+            // Normalize to [-1.0, 1.0): divide by 128.0
+            reader
+                .samples::<i8>()
+                .map(|sample| sample.map(|value| value as f32 / 128.0))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| AudioDecodeError::InvalidData("invalid WAV 8-bit PCM data"))?
+        }
         (SampleFormat::Int, 16) => reader
             .samples::<i16>()
             .map(|sample| sample.map(|value| value as f32 / i16::MAX as f32))
