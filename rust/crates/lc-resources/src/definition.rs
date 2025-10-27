@@ -456,10 +456,9 @@ fn collect_script_files(
         let data = group
             .read_file(&entry.relative_path)
             .map_err(DefinitionError::Resources)?;
-        let contents = String::from_utf8(data).map_err(|err| DefinitionError::ScriptEncoding {
-            path: relative_path.clone(),
-            source: err,
-        })?;
+        // Use lossy UTF-8 conversion to handle legacy ISO-8859-1/Windows-1252 encoded scripts
+        // This matches C++ behavior which doesn't enforce UTF-8
+        let contents = String::from_utf8_lossy(&data).into_owned();
         files.push(DefinitionScriptFile {
             path: relative_path,
             contents,
