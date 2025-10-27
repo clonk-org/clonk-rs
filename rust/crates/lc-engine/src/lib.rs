@@ -11202,6 +11202,26 @@ impl Engine {
                 }
                 let _ = self.spawn_object(config)?;
             }
+            CommandEvent::CallObjectFunction {
+                object_id,
+                function,
+                caller,
+                tx,
+                ty,
+                target2,
+            } => {
+                let Some(index) = self.find_object_index(object_id) else {
+                    return Err(EngineError::UnknownObject(object_id));
+                };
+                let mut args = Vec::new();
+                args.push(object_reference_value(caller));
+                args.push(tx.map(Value::Int).unwrap_or(Value::Nil));
+                let ty_value = Value::Int(ty.unwrap_or(0));
+                args.push(ty_value);
+                let target2_value = target2.map(object_reference_value).unwrap_or(Value::Nil);
+                args.push(target2_value);
+                let _ = self.call_object_function(index, &function, args)?;
+            }
             CommandEvent::AdjustPlayerHomeBaseMaterial {
                 player_id,
                 definition_id,

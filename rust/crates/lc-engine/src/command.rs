@@ -2481,6 +2481,80 @@ mod tests {
     }
 
     #[test]
+    fn call_requires_function_name() {
+        let request = CommandRequest::new(CommandId::Call).with_target(Some(ObjectId::new(99)));
+        assert!(CallState::from_request(&request).is_err());
+    }
+
+    #[test]
+    fn call_emits_event_and_completes() {
+        let builder_id = ObjectId::new(1);
+        let target_id = ObjectId::new(2);
+        let target2_id = ObjectId::new(3);
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.command_direction = CommandDirection::Right;
+
+        let target = snapshot_with_id(target_id.as_u64());
+
+        let mut objects = HashMap::new();
+        objects.insert(builder.id, builder.clone());
+        objects.insert(target.id, target.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: objects.get(&builder_id).expect("builder present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = CallState::from_request(
+            &CommandRequest::new(CommandId::Call)
+                .with_target(Some(target_id))
+                .with_target2(Some(target2_id))
+                .with_tx(Some(42))
+                .with_ty(Some(7))
+                .with_data(CommandData::Text("ControlCall".into())),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.operations.is_empty());
+        let update = result.update.expect("call should stop builder");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            CommandEvent::CallObjectFunction {
+                object_id,
+                function,
+                caller,
+                tx,
+                ty,
+                target2,
+            } => {
+                assert_eq!(*object_id, target_id);
+                assert_eq!(function, "ControlCall");
+                assert_eq!(*caller, builder_id);
+                assert_eq!(*tx, Some(42));
+                assert_eq!(*ty, Some(7));
+                assert_eq!(*target2, Some(target2_id));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        let second = state.step(&ctx);
+        assert_eq!(second.status, CommandStatus::Completed);
+        assert!(second.events.is_empty());
+    }
+
+    #[test]
     fn build_queues_activate_for_internal_vehicle() {
         let builder_id = ObjectId::new(1);
         let target_id = ObjectId::new(2);
@@ -3980,6 +4054,14 @@ pub enum CommandEvent {
         owner: i32,
         position: Vector2,
         container: Option<ObjectId>,
+    },
+    CallObjectFunction {
+        object_id: ObjectId,
+        function: String,
+        caller: ObjectId,
+        tx: Option<i32>,
+        ty: Option<i32>,
+        target2: Option<ObjectId>,
     },
     AdjustPlayerHomeBaseMaterial {
         player_id: i32,
@@ -6913,6 +6995,68 @@ impl AttackState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct CallState {
+    target: ObjectId,
+    function: String,
+    tx: Option<i32>,
+    ty: Option<i32>,
+    target2: Option<ObjectId>,
+    executed: bool,
+}
+
+impl CallState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let target = request.target.ok_or(CommandError::Unsupported)?;
+        let function = match &request.data {
+            CommandData::Text(text) if !text.is_empty() => text.clone(),
+            _ => return Err(CommandError::Unsupported),
+        };
+        Ok(Self {
+            target,
+            function,
+            tx: request.tx,
+            ty: request.ty,
+            target2: request.target2,
+            executed: false,
+        })
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.executed {
+            return CommandStepResult::completed(None);
+        }
+
+        let Some(target_snapshot) = ctx.resolve(self.target) else {
+            self.executed = true;
+            return CommandStepResult::failed(None);
+        };
+
+        if !target_snapshot.is_active() {
+            self.executed = true;
+            return CommandStepResult::failed(None);
+        }
+
+        self.executed = true;
+
+        let mut update = None;
+        if ctx.object.command_direction != CommandDirection::Stop {
+            update = Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop));
+        }
+
+        let event = CommandEvent::CallObjectFunction {
+            object_id: self.target,
+            function: self.function.clone(),
+            caller: ctx.object.id,
+            tx: self.tx,
+            ty: self.ty,
+            target2: self.target2,
+        };
+
+        CommandStepResult::completed(update).with_events(vec![event])
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct AcquireState {
     definition_id: DefinitionId,
     ignore_container: Option<ObjectId>,
@@ -7698,6 +7842,7 @@ enum CommandState {
     PushTo(PushToState),
     Retry(RetryState),
     Attack(AttackState),
+    Call(CallState),
     Buy(BuyState),
     Acquire(AcquireState),
     Home(HomeState),
@@ -7732,6 +7877,7 @@ impl ActiveCommand {
             CommandId::PushTo => CommandState::PushTo(PushToState::from_request(&request)?),
             CommandId::Retry => CommandState::Retry(RetryState::from_request(&request)),
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
+            CommandId::Call => CommandState::Call(CallState::from_request(&request)?),
             CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
             CommandId::Acquire => CommandState::Acquire(AcquireState::from_request(&request)?),
             CommandId::Home => CommandState::Home(HomeState::from_request(&request)?),
@@ -7771,6 +7917,7 @@ impl ActiveCommand {
             CommandState::PushTo(state) => state.step(ctx),
             CommandState::Retry(state) => state.step(ctx),
             CommandState::Attack(state) => state.step(ctx),
+            CommandState::Call(state) => state.step(ctx),
             CommandState::Buy(state) => state.step(ctx),
             CommandState::Acquire(state) => state.step(ctx),
             CommandState::Home(state) => state.step(ctx),
