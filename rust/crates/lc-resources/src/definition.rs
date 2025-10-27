@@ -408,8 +408,14 @@ fn parse_line_connect(value: &str) -> Result<u32, DefinitionError> {
 fn load_scripts(group: &Group) -> Result<DefinitionScript, DefinitionError> {
     let mut files: Vec<DefinitionScriptFile> = Vec::new();
     collect_script_files(group, Path::new(""), &mut files)?;
+
+    // Allow definitions without scripts (graphics-only, data-only, etc.)
+    // This matches C++ behavior which doesn't require scripts
     if files.is_empty() {
-        return Err(DefinitionError::ScriptMissing);
+        return Ok(DefinitionScript {
+            files,
+            combined: String::new(),
+        });
     }
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
