@@ -591,6 +591,363 @@ mod tests {
     }
 
     #[test]
+    fn put_transfers_item_into_target_container() {
+        let actor_id = ObjectId::new(600);
+        let item_id = ObjectId::new(601);
+        let container_id = ObjectId::new(602);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(50, 50);
+        actor.contents = vec![item_id];
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+        item.position = actor.position;
+
+        let mut target_container = snapshot_with_id(container_id.as_u64());
+        target_container.position = Vector2::new(54, 48);
+        target_container.collectible = false;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(item.id, item);
+        objects.insert(target_container.id, target_container.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor_snapshot.position,
+            object: actor_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = PutState::from_request(
+            &CommandRequest::new(CommandId::Put).with_target(Some(container_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.operations.is_empty());
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            CommandEvent::ApplyObjectUpdate { object_id, update } => {
+                assert_eq!(*object_id, item_id);
+                assert_eq!(update.container, Some(Some(container_id)));
+                assert_eq!(update.position, Some(target_container.position));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn put_requests_exit_when_actor_in_other_container() {
+        let actor_id = ObjectId::new(610);
+        let item_id = ObjectId::new(611);
+        let target_container_id = ObjectId::new(612);
+        let current_container_id = ObjectId::new(613);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(current_container_id);
+        actor.contents = vec![item_id];
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+
+        let mut target_container = snapshot_with_id(target_container_id.as_u64());
+        target_container.position = Vector2::new(0, 0);
+
+        let mut current_container = snapshot_with_id(current_container_id.as_u64());
+        current_container.position = Vector2::new(-20, 0);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(item.id, item);
+        objects.insert(target_container.id, target_container);
+        objects.insert(current_container.id, current_container);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor_snapshot.position,
+            object: actor_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = PutState::from_request(
+            &CommandRequest::new(CommandId::Put).with_target(Some(target_container_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Exit);
+            }
+            other => panic!("expected exit request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn put_requests_move_when_far_from_target() {
+        let actor_id = ObjectId::new(620);
+        let item_id = ObjectId::new(621);
+        let container_id = ObjectId::new(622);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(0, 0);
+        actor.contents = vec![item_id];
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.position = Vector2::new(80, 0);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(item.id, item);
+        objects.insert(container.id, container);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor_snapshot.position,
+            object: actor_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = PutState::from_request(
+            &CommandRequest::new(CommandId::Put).with_target(Some(container_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(
+            result.operations.iter().any(|operation| match operation {
+                CommandOperation::PushFront(request) => request.id == CommandId::MoveTo,
+                _ => false,
+            }),
+            "put should request movement when far from container"
+        );
+    }
+
+    #[test]
+    fn drop_transfers_item_to_ground() {
+        let actor_id = ObjectId::new(630);
+        let item_id = ObjectId::new(631);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(10, 10);
+        actor.contents = vec![item_id];
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+        item.position = actor.position;
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(item.id, item);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor_snapshot.position,
+            object: actor_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.operations.is_empty());
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            CommandEvent::ApplyObjectUpdate { object_id, update } => {
+                assert_eq!(*object_id, item_id);
+                assert_eq!(update.container, Some(None));
+                assert_eq!(update.position, Some(actor.position));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn drop_requests_move_to_coordinates() {
+        let actor_id = ObjectId::new(640);
+        let item_id = ObjectId::new(641);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(0, 0);
+        actor.contents = vec![item_id];
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(item.id, item);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor_snapshot.position,
+            object: actor_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = DropState::from_request(
+            &CommandRequest::new(CommandId::Drop)
+                .with_tx(Some(120))
+                .with_ty(Some(0)),
+        );
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(
+            result.operations.iter().any(|operation| match operation {
+                CommandOperation::PushFront(request) => {
+                    request.id == CommandId::MoveTo && request.tx == Some(120) && request.ty == Some(0)
+                }
+                _ => false,
+            }),
+            "drop should request movement towards target coordinates"
+        );
+    }
+
+    #[test]
+    fn drop_delegates_put_when_actor_contained() {
+        let actor_id = ObjectId::new(650);
+        let item_id = ObjectId::new(651);
+        let container_id = ObjectId::new(652);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.container = Some(container_id);
+        actor.contents = vec![item_id];
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.position = Vector2::new(0, 0);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(item.id, item);
+        objects.insert(container.id, container);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor_snapshot.position,
+            object: actor_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Put);
+                assert_eq!(request.target, Some(container_id));
+                assert_eq!(request.target2, Some(item_id));
+            }
+            other => panic!("expected delegated put request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn drop_delegates_put_when_pushing_target() {
+        let actor_id = ObjectId::new(660);
+        let item_id = ObjectId::new(661);
+        let pushed_id = ObjectId::new(662);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Push;
+        actor.action_target = Some(pushed_id);
+        actor.contents = vec![item_id];
+
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+
+        let mut pushed = snapshot_with_id(pushed_id.as_u64());
+        pushed.position = Vector2::new(0, 0);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(item.id, item);
+        objects.insert(pushed.id, pushed);
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let actor_snapshot = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor_snapshot.position,
+            object: actor_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Put);
+                assert_eq!(request.target, Some(pushed_id));
+                assert_eq!(request.target2, Some(item_id));
+            }
+            other => panic!("expected delegated put request, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn dig_requests_ungrab_when_pushing() {
         let actor_id = ObjectId::new(60);
         let mut actor = snapshot_with_id(actor_id.as_u64());
@@ -4448,6 +4805,416 @@ impl WaitState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct PutState {
+    container: ObjectId,
+    requested_item: Option<ObjectId>,
+    definition_id: Option<DefinitionId>,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    last_move_order: Option<u64>,
+    get_requested: bool,
+    exit_requested: bool,
+    ungrab_requested: bool,
+}
+
+impl PutState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let container = request.target.ok_or(CommandError::Unsupported)?;
+        Ok(Self {
+            container,
+            requested_item: request.target2,
+            definition_id: command_data_to_definition_id(&request.data),
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            last_move_order: None,
+            get_requested: false,
+            exit_requested: false,
+            ungrab_requested: false,
+        })
+    }
+
+    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn should_issue_move(&mut self, frame: u64) -> bool {
+        const MOVE_COOLDOWN: u64 = 12;
+        match self.last_move_order {
+            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
+            _ => {
+                self.last_move_order = Some(frame);
+                true
+            }
+        }
+    }
+
+    fn resolve_item<'a>(
+        &mut self,
+        ctx: &'a CommandRuntimeContext<'a>,
+    ) -> Option<(ObjectId, &'a CommandObjectSnapshot)> {
+        if let Some(item_id) = self.requested_item {
+            if let Some(snapshot) = ctx.resolve(item_id) {
+                return Some((item_id, snapshot));
+            }
+            self.requested_item = None;
+        }
+
+        if let Some(definition_id) = &self.definition_id {
+            for object_id in &ctx.object.contents {
+                if let Some(snapshot) = ctx.resolve(*object_id) {
+                    if &snapshot.definition_id == definition_id {
+                        self.requested_item = Some(*object_id);
+                        return Some((*object_id, snapshot));
+                    }
+                }
+            }
+        }
+
+        if let Some(object_id) = ctx.object.contents.first().copied() {
+            if let Some(snapshot) = ctx.resolve(object_id) {
+                self.requested_item = Some(object_id);
+                return Some((object_id, snapshot));
+            }
+        }
+
+        None
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        if ctx.object.container.is_none() {
+            self.exit_requested = false;
+        }
+        if ctx.object.action_procedure != ActionProcedure::Push {
+            self.ungrab_requested = false;
+        }
+
+        let update = self.update_to_stop(ctx);
+
+        let container_snapshot = match ctx.resolve(self.container) {
+            Some(snapshot) if snapshot.is_active() => snapshot,
+            _ => return CommandStepResult::failed(update),
+        };
+
+        let (item_id, item_snapshot) = match self.resolve_item(ctx) {
+            Some(value) => value,
+            None => return CommandStepResult::completed(update),
+        };
+
+        if item_snapshot.container == Some(self.container) {
+            return CommandStepResult::completed(update);
+        }
+
+        if item_snapshot.destroyed {
+            return CommandStepResult::failed(update);
+        }
+
+        if item_snapshot.container != Some(ctx.object.id) {
+            if !self.get_requested {
+                self.get_requested = true;
+                let mut result = CommandStepResult::running(update.clone());
+                let request = CommandRequest::new(CommandId::Get)
+                    .with_target(Some(item_id))
+                    .with_update_interval(40)
+                    .with_mode(CommandMode::Sub);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
+            return CommandStepResult::running(update);
+        }
+        self.get_requested = false;
+
+        if let Some(container_id) = ctx.object.container {
+            if container_id != self.container {
+                if !self.exit_requested {
+                    self.exit_requested = true;
+                    let mut result = CommandStepResult::running(update.clone());
+                    let request = CommandRequest::new(CommandId::Exit)
+                        .with_update_interval(50)
+                        .with_mode(CommandMode::Sub);
+                    result.operations.push(CommandOperation::PushFront(request));
+                    return result;
+                }
+                return CommandStepResult::running(update);
+            }
+        }
+
+        if ctx.object.action_procedure == ActionProcedure::Push
+            && ctx.object.action_target != Some(self.container)
+        {
+            if !self.ungrab_requested {
+                self.ungrab_requested = true;
+                let mut result = CommandStepResult::running(update.clone());
+                let request = CommandRequest::new(CommandId::UnGrab)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::Sub);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
+            return CommandStepResult::running(update);
+        } else if ctx.object.action_procedure != ActionProcedure::Push {
+            self.ungrab_requested = false;
+        }
+
+        const PUT_RANGE_HORIZONTAL: i32 = 12;
+        const PUT_RANGE_VERTICAL: i32 = 18;
+        let dx = container_snapshot.position.x - ctx.position.x;
+        let dy = container_snapshot.position.y - ctx.position.y;
+        if dx.abs() > PUT_RANGE_HORIZONTAL || dy.abs() > PUT_RANGE_VERTICAL {
+            if self.should_issue_move(ctx.frame) {
+                let mut result = CommandStepResult::running(update.clone());
+                let request = CommandRequest::new(CommandId::MoveTo)
+                    .with_target(Some(self.container))
+                    .with_update_interval(15)
+                    .with_mode(CommandMode::Sub);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
+            return CommandStepResult::running(update);
+        }
+
+        let mut item_update = ObjectUpdate::new();
+        item_update.container = Some(Some(self.container));
+        item_update.position = Some(container_snapshot.position);
+        item_update.velocity = Some(Vector2::ZERO);
+
+        CommandStepResult::completed(update).with_events(vec![CommandEvent::ApplyObjectUpdate {
+            object_id: item_id,
+            update: item_update,
+        }])
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct DropState {
+    requested_item: Option<ObjectId>,
+    definition_id: Option<DefinitionId>,
+    target_position: Option<Vector2>,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    last_move_order: Option<u64>,
+    get_requested: bool,
+    ungrab_requested: bool,
+    delegated_put: bool,
+    delegated_container: Option<ObjectId>,
+}
+
+impl DropState {
+    fn from_request(request: &CommandRequest) -> Self {
+        let has_coordinates = request.tx.is_some() || request.ty.is_some();
+        let target_position = if has_coordinates {
+            Some(Vector2::new(request.tx.unwrap_or(0), request.ty.unwrap_or(0)))
+        } else {
+            None
+        };
+        Self {
+            requested_item: request.target,
+            definition_id: command_data_to_definition_id(&request.data),
+            target_position,
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            last_move_order: None,
+            get_requested: false,
+            ungrab_requested: false,
+            delegated_put: false,
+            delegated_container: None,
+        }
+    }
+
+    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn should_issue_move(&mut self, frame: u64) -> bool {
+        const MOVE_COOLDOWN: u64 = 12;
+        match self.last_move_order {
+            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
+            _ => {
+                self.last_move_order = Some(frame);
+                true
+            }
+        }
+    }
+
+    fn resolve_item<'a>(
+        &mut self,
+        ctx: &'a CommandRuntimeContext<'a>,
+    ) -> Option<(ObjectId, &'a CommandObjectSnapshot)> {
+        if let Some(item_id) = self.requested_item {
+            if let Some(snapshot) = ctx.resolve(item_id) {
+                return Some((item_id, snapshot));
+            }
+            self.requested_item = None;
+        }
+
+        if let Some(definition_id) = &self.definition_id {
+            for object_id in &ctx.object.contents {
+                if let Some(snapshot) = ctx.resolve(*object_id) {
+                    if &snapshot.definition_id == definition_id {
+                        self.requested_item = Some(*object_id);
+                        return Some((*object_id, snapshot));
+                    }
+                }
+            }
+        }
+
+        if let Some(object_id) = ctx.object.contents.first().copied() {
+            if let Some(snapshot) = ctx.resolve(object_id) {
+                self.requested_item = Some(object_id);
+                return Some((object_id, snapshot));
+            }
+        }
+
+        None
+    }
+
+    fn delegate_put(
+        &mut self,
+        item_id: ObjectId,
+        container_id: ObjectId,
+        update: Option<ObjectUpdate>,
+    ) -> CommandStepResult {
+        if self.delegated_put && self.delegated_container == Some(container_id) {
+            return CommandStepResult::running(update);
+        }
+        self.delegated_put = true;
+        self.delegated_container = Some(container_id);
+
+        let mut request = CommandRequest::new(CommandId::Put)
+            .with_target(Some(container_id))
+            .with_target2(Some(item_id))
+            .with_mode(CommandMode::Sub)
+            .with_update_interval(15);
+
+        if let Some(position) = self.target_position {
+            request = request.with_tx(Some(position.x)).with_ty(Some(position.y));
+        }
+
+        let mut result = CommandStepResult::running(update);
+        result.operations.push(CommandOperation::PushFront(request));
+        result
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let interval = self.update_interval as u64;
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < interval {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        if ctx.object.action_procedure != ActionProcedure::Push {
+            self.ungrab_requested = false;
+        }
+
+        let update = self.update_to_stop(ctx);
+
+        let (item_id, item_snapshot) = match self.resolve_item(ctx) {
+            Some(value) => value,
+            None => return CommandStepResult::completed(update),
+        };
+
+        if item_snapshot.destroyed {
+            return CommandStepResult::failed(update);
+        }
+
+        if item_snapshot.container != Some(ctx.object.id) {
+            if item_snapshot.container.is_none() {
+                return CommandStepResult::completed(update);
+            }
+            if !self.get_requested {
+                self.get_requested = true;
+                let mut result = CommandStepResult::running(update.clone());
+                let request = CommandRequest::new(CommandId::Get)
+                    .with_target(Some(item_id))
+                    .with_update_interval(40)
+                    .with_mode(CommandMode::Sub);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
+            return CommandStepResult::running(update);
+        }
+        self.get_requested = false;
+
+        if let Some(container_id) = ctx.object.container {
+            return self.delegate_put(item_id, container_id, update);
+        }
+
+        if ctx.object.action_procedure == ActionProcedure::Push {
+            if let Some(container_id) = ctx.object.action_target {
+                return self.delegate_put(item_id, container_id, update);
+            }
+        }
+
+        if let Some(position) = self.target_position {
+            const DROP_RANGE_HORIZONTAL: i32 = 12;
+            const DROP_RANGE_VERTICAL: i32 = 15;
+            let dx = position.x - ctx.position.x;
+            let dy = position.y - ctx.position.y;
+
+            if dx.abs() > DROP_RANGE_HORIZONTAL || dy.abs() > DROP_RANGE_VERTICAL {
+                if ctx.object.action_procedure == ActionProcedure::Push && !self.ungrab_requested {
+                    self.ungrab_requested = true;
+                    let mut result = CommandStepResult::running(update.clone());
+                    let request = CommandRequest::new(CommandId::UnGrab)
+                        .with_update_interval(50)
+                        .with_mode(CommandMode::Sub);
+                    result.operations.push(CommandOperation::PushFront(request));
+                    return result;
+                }
+
+                if self.should_issue_move(ctx.frame) {
+                    let mut result = CommandStepResult::running(update.clone());
+                    let request = CommandRequest::new(CommandId::MoveTo)
+                        .with_tx(Some(position.x))
+                        .with_ty(Some(position.y))
+                        .with_update_interval(20)
+                        .with_mode(CommandMode::Sub);
+                    result.operations.push(CommandOperation::PushFront(request));
+                    return result;
+                }
+                return CommandStepResult::running(update);
+            }
+        } else if ctx.object.action_procedure == ActionProcedure::Push && !self.ungrab_requested {
+            self.ungrab_requested = true;
+            let mut result = CommandStepResult::running(update.clone());
+            let request = CommandRequest::new(CommandId::UnGrab)
+                .with_update_interval(50)
+                .with_mode(CommandMode::Sub);
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
+        }
+
+        let drop_position = self.target_position.unwrap_or(ctx.position);
+        let mut item_update = ObjectUpdate::new();
+        item_update.container = Some(None);
+        item_update.position = Some(drop_position);
+        item_update.velocity = Some(Vector2::ZERO);
+
+        CommandStepResult::completed(update).with_events(vec![CommandEvent::ApplyObjectUpdate {
+            object_id: item_id,
+            update: item_update,
+        }])
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct GetState {
     target: Option<ObjectId>,
     fallback_container: Option<ObjectId>,
@@ -6008,6 +6775,8 @@ enum CommandState {
     UnGrab(UnGrabState),
     Jump(JumpState),
     Wait(WaitState),
+    Put(PutState),
+    Drop(DropState),
     Get(GetState),
     Dig(DigState),
     Retry(RetryState),
@@ -6038,6 +6807,8 @@ impl ActiveCommand {
             CommandId::UnGrab => CommandState::UnGrab(UnGrabState::from_request(&request)),
             CommandId::Jump => CommandState::Jump(JumpState::from_request(&request)),
             CommandId::Wait => CommandState::Wait(WaitState::from_request(&request)),
+            CommandId::Put => CommandState::Put(PutState::from_request(&request)?),
+            CommandId::Drop => CommandState::Drop(DropState::from_request(&request)),
             CommandId::Get => CommandState::Get(GetState::from_request(&request)?),
             CommandId::Dig => CommandState::Dig(DigState::from_request(&request)?),
             CommandId::Retry => CommandState::Retry(RetryState::from_request(&request)),
@@ -6073,6 +6844,8 @@ impl ActiveCommand {
             CommandState::UnGrab(state) => state.step(ctx),
             CommandState::Jump(state) => state.step(ctx),
             CommandState::Wait(state) => state.step(ctx),
+            CommandState::Put(state) => state.step(ctx),
+            CommandState::Drop(state) => state.step(ctx),
             CommandState::Get(state) => state.step(ctx),
             CommandState::Dig(state) => state.step(ctx),
             CommandState::Retry(state) => state.step(ctx),
