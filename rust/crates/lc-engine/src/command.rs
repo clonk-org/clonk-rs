@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 /// Maximum number of commands that may be queued for an object.
 pub const MAX_COMMAND_STACK: usize = 35;
 const LINEKIT_DEFINITION: &str = "LNKT";
+const CONKIT_DEFINITION: &str = "CNKT";
 const ACQUIRE_REQUEST_INTERVAL: u32 = 50;
 const COMMAND_FLAG_ENTER_PUSH_TARGET: i32 = 0b10;
 const COMMAND_FLAG_MOVE_TO_PUSH_TARGET: i32 = 0b10;
@@ -47,12 +48,14 @@ impl CommandObjectSnapshot {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandPlayerSnapshot {
     pub status: PlayerStatus,
     pub surrendered: bool,
     pub wealth: i32,
     pub home_base_material: HashMap<DefinitionId, u32>,
+    #[serde(default)]
+    pub knowledge: Vec<DefinitionId>,
 }
 
 impl CommandPlayerSnapshot {
@@ -66,6 +69,10 @@ impl CommandPlayerSnapshot {
             .copied()
             .unwrap_or(0)
     }
+
+    pub fn knows(&self, definition_id: &DefinitionId) -> bool {
+        self.knowledge.iter().any(|entry| entry == definition_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +82,8 @@ pub struct CommandDefinitionSnapshot {
     pub can_chop: bool,
     #[serde(default)]
     pub chop_action: Option<String>,
+    #[serde(default)]
+    pub constructable: bool,
 }
 
 /// Identifiers that map to the classic C4 command constants.
@@ -1545,6 +1554,206 @@ mod tests {
                 assert_eq!(request.update_interval, 40);
             }
             other => panic!("expected activate request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn construct_spawns_construction_and_queues_build() {
+        let builder_id = ObjectId::new(1);
+        let kit_id = ObjectId::new(2);
+        let construction_definition = "STRT".to_string();
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.position = Vector2::new(10, 0);
+        builder.command_direction = CommandDirection::Right;
+        builder.owner = 42;
+        builder.contents.push(kit_id);
+
+        let mut kit = snapshot_with_id(kit_id.as_u64());
+        kit.definition_id = CONKIT_DEFINITION.into();
+        kit.collectible = true;
+        kit.construction = FULL_CON;
+        kit.container = Some(builder_id);
+        kit.position = builder.position;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder_id, builder.clone());
+        objects.insert(kit_id, kit);
+
+        let mut players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        players.insert(
+            42,
+            CommandPlayerSnapshot {
+                status: PlayerStatus::Active,
+                surrendered: false,
+                wealth: 100,
+                home_base_material: HashMap::new(),
+                knowledge: vec![construction_definition.clone()],
+            },
+        );
+
+        let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        definitions.insert(
+            construction_definition.clone(),
+            CommandDefinitionSnapshot {
+                value: 0,
+                can_chop: false,
+                chop_action: None,
+                constructable: true,
+            },
+        );
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: objects.get(&builder_id).expect("builder present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ConstructState::from_request(
+            &CommandRequest::new(CommandId::Construct)
+                .with_data(CommandData::Text(construction_definition.clone()))
+                .with_tx(Some(10))
+                .with_ty(Some(0)),
+        )
+        .expect("state created");
+
+        let first = state.step(&ctx);
+        assert_eq!(first.status, CommandStatus::Running);
+        assert_eq!(first.events.len(), 2);
+
+        match &first.events[0] {
+            CommandEvent::SpawnObject {
+                definition_id,
+                owner,
+                position,
+                container,
+                construction,
+            } => {
+                assert_eq!(definition_id, &construction_definition);
+                assert_eq!(*owner, 42);
+                assert_eq!(*position, Vector2::new(10, 0));
+                assert_eq!(*container, None);
+                assert_eq!(*construction, Some(1));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        match &first.events[1] {
+            CommandEvent::ApplyObjectUpdate { object_id, update } => {
+                assert_eq!(*object_id, kit_id);
+                assert_eq!(update.container, Some(None));
+                assert_eq!(update.status, Some(ObjectStatus::Deleted));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        let construction_id = ObjectId::new(3);
+        let mut construction = snapshot_with_id(construction_id.as_u64());
+        construction.definition_id = construction_definition.clone();
+        construction.position = Vector2::new(10, 0);
+        construction.owner = 42;
+        construction.construction = 1;
+        objects.insert(construction_id, construction);
+
+        let mut updated_builder = builder.clone();
+        updated_builder.contents.clear();
+        objects.insert(builder_id, updated_builder);
+
+        let ctx_after_spawn = CommandRuntimeContext {
+            frame: 1,
+            position: builder.position,
+            object: objects.get(&builder_id).expect("builder present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let second = state.step(&ctx_after_spawn);
+        assert_eq!(second.status, CommandStatus::Completed);
+        assert_eq!(second.operations.len(), 1);
+        match &second.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Build);
+                assert_eq!(request.target, Some(construction_id));
+                assert_eq!(request.tx, Some(10));
+                assert_eq!(request.ty, Some(0));
+            }
+            other => panic!("unexpected operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn construct_requests_acquire_when_missing_conkit() {
+        let builder_id = ObjectId::new(5);
+        let construction_definition = "STRT".to_string();
+
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.position = Vector2::new(0, 0);
+        builder.command_direction = CommandDirection::Right;
+        builder.owner = 7;
+
+        let mut objects = HashMap::new();
+        objects.insert(builder_id, builder.clone());
+
+        let mut players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        players.insert(
+            7,
+            CommandPlayerSnapshot {
+                status: PlayerStatus::Active,
+                surrendered: false,
+                wealth: 100,
+                home_base_material: HashMap::new(),
+                knowledge: vec![construction_definition.clone()],
+            },
+        );
+
+        let mut definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        definitions.insert(
+            construction_definition.clone(),
+            CommandDefinitionSnapshot {
+                value: 0,
+                can_chop: false,
+                chop_action: None,
+                constructable: true,
+            },
+        );
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: builder.position,
+            object: objects.get(&builder_id).expect("builder present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+        };
+
+        let mut state = ConstructState::from_request(
+            &CommandRequest::new(CommandId::Construct)
+                .with_data(CommandData::Text(construction_definition))
+                .with_tx(Some(8))
+                .with_ty(Some(2)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.events.len(), 0);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Acquire);
+                assert_eq!(request.mode, CommandMode::Sub);
+            }
+            other => panic!("unexpected operation: {:?}", other),
         }
     }
 
@@ -3341,6 +3550,7 @@ mod tests {
                 surrendered: false,
                 wealth: 100,
                 home_base_material: home_base,
+                knowledge: Vec::new(),
             },
         );
 
@@ -3351,6 +3561,7 @@ mod tests {
                 value: 25,
                 can_chop: false,
                 chop_action: None,
+                constructable: false,
             },
         );
 
@@ -3407,11 +3618,13 @@ mod tests {
                 owner,
                 position,
                 container,
+                construction,
             } => {
                 assert_eq!(definition_id, "WOOD");
                 assert_eq!(*owner, 42);
                 assert_eq!(*position, base.position);
                 assert_eq!(*container, Some(base_id));
+                assert_eq!(*construction, None);
             }
             event => panic!("unexpected event: {:?}", event),
         }
@@ -3455,6 +3668,7 @@ mod tests {
                 surrendered: false,
                 wealth: 100,
                 home_base_material: HashMap::new(),
+                knowledge: Vec::new(),
             },
         );
 
@@ -3465,6 +3679,7 @@ mod tests {
                 value: 25,
                 can_chop: false,
                 chop_action: None,
+                constructable: false,
             },
         );
 
@@ -3537,6 +3752,7 @@ mod tests {
                 surrendered: false,
                 wealth: 50,
                 home_base_material: HashMap::new(),
+                knowledge: Vec::new(),
             },
         );
 
@@ -3547,6 +3763,7 @@ mod tests {
                 value: 5,
                 can_chop: false,
                 chop_action: None,
+                constructable: false,
             },
         );
 
@@ -3615,6 +3832,7 @@ mod tests {
                 surrendered: false,
                 wealth: 40,
                 home_base_material: HashMap::new(),
+                knowledge: Vec::new(),
             },
         );
 
@@ -3625,6 +3843,7 @@ mod tests {
                 value: 15,
                 can_chop: false,
                 chop_action: None,
+                constructable: false,
             },
         );
 
@@ -3699,6 +3918,7 @@ mod tests {
                 value: 0,
                 can_chop: true,
                 chop_action: Some("Chop".into()),
+                constructable: false,
             },
         );
 
@@ -3756,6 +3976,7 @@ mod tests {
                 value: 0,
                 can_chop: true,
                 chop_action: Some("Chop".into()),
+                constructable: false,
             },
         );
 
@@ -3812,6 +4033,7 @@ mod tests {
                 value: 0,
                 can_chop: true,
                 chop_action: Some("Chop".into()),
+                constructable: false,
             },
         );
 
@@ -3866,6 +4088,7 @@ mod tests {
                 value: 0,
                 can_chop: true,
                 chop_action: Some("Chop".into()),
+                constructable: false,
             },
         );
 
@@ -3915,6 +4138,7 @@ mod tests {
                 value: 0,
                 can_chop: false,
                 chop_action: Some("Chop".into()),
+                constructable: false,
             },
         );
 
@@ -4054,6 +4278,8 @@ pub enum CommandEvent {
         owner: i32,
         position: Vector2,
         container: Option<ObjectId>,
+        #[serde(default)]
+        construction: Option<i32>,
     },
     CallObjectFunction {
         object_id: ObjectId,
@@ -4705,6 +4931,264 @@ impl BuildState {
         }
 
         CommandStepResult::running(None).with_operations(operations)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ConstructState {
+    target: Option<ObjectId>,
+    definition_id: DefinitionId,
+    site: Option<Vector2>,
+    update_interval: u32,
+    last_evaluated: Option<u64>,
+    last_move_order: Option<u64>,
+    acquire_requested: bool,
+    exit_requested: bool,
+    ungrab_requested: bool,
+    spawn_requested: bool,
+    construction_id: Option<ObjectId>,
+}
+
+impl ConstructState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let definition_id =
+            command_data_to_definition_id(&request.data).ok_or(CommandError::Unsupported)?;
+        let site = match (request.tx, request.ty) {
+            (Some(x), Some(y)) => Some(Vector2::new(x, y)),
+            _ => None,
+        };
+        Ok(Self {
+            target: request.target,
+            definition_id,
+            site,
+            update_interval: request.update_interval.max(1),
+            last_evaluated: None,
+            last_move_order: None,
+            acquire_requested: false,
+            exit_requested: false,
+            ungrab_requested: false,
+            spawn_requested: false,
+            construction_id: None,
+        })
+    }
+
+    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn should_issue_move(&mut self, frame: u64) -> bool {
+        const MOVE_COOLDOWN: u64 = 12;
+        match self.last_move_order {
+            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
+            _ => {
+                self.last_move_order = Some(frame);
+                true
+            }
+        }
+    }
+
+    fn builder_has_conkit(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+        ctx.object.contents.iter().copied().find(|id| {
+            ctx.resolve(*id)
+                .map(|snapshot| snapshot.definition_id == CONKIT_DEFINITION && snapshot.is_active())
+                .unwrap_or(false)
+        })
+    }
+
+    fn at_site(&self, ctx: &CommandRuntimeContext<'_>, site: Vector2) -> bool {
+        const APPROACH_HORIZONTAL: i32 = 9;
+        const APPROACH_VERTICAL: i32 = 20;
+        let dx = site.x - ctx.position.x;
+        let dy = site.y - ctx.position.y;
+        dx.abs() <= APPROACH_HORIZONTAL && dy.abs() <= APPROACH_VERTICAL
+    }
+
+    fn find_spawned_construction(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        site: Vector2,
+    ) -> Option<ObjectId> {
+        ctx.objects
+            .values()
+            .filter(|snapshot| {
+                snapshot.id != ctx.object.id
+                    && snapshot.definition_id == self.definition_id
+                    && snapshot.owner == ctx.object.owner
+                    && snapshot.construction < FULL_CON
+                    && snapshot.container.is_none()
+            })
+            .filter(|snapshot| {
+                let dx = (snapshot.position.x - site.x).abs();
+                let dy = (snapshot.position.y - site.y).abs();
+                dx <= 4 && dy <= 4
+            })
+            .map(|snapshot| snapshot.id)
+            .next()
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if let Some(last) = self.last_evaluated {
+            if ctx.frame.saturating_sub(last) < self.update_interval as u64 {
+                return CommandStepResult::running(None);
+            }
+        }
+        self.last_evaluated = Some(ctx.frame);
+
+        let update_to_stop = self.update_to_stop(ctx);
+
+        if self.target.is_some() {
+            return CommandStepResult::failed(update_to_stop);
+        }
+
+        let owner = ctx.object.owner;
+        if owner == OWNER_NONE {
+            return CommandStepResult::failed(update_to_stop);
+        }
+
+        let definition = match ctx.definition(&self.definition_id) {
+            Some(definition) => definition,
+            None => return CommandStepResult::failed(update_to_stop),
+        };
+
+        if !definition.constructable {
+            return CommandStepResult::failed(update_to_stop);
+        }
+
+        let player = match ctx.player(owner) {
+            Some(player) if player.is_active() => player,
+            _ => return CommandStepResult::failed(update_to_stop),
+        };
+
+        if !player.knows(&self.definition_id) {
+            return CommandStepResult::failed(update_to_stop);
+        }
+
+        if ctx.object.container.is_some() {
+            if !self.exit_requested {
+                self.exit_requested = true;
+                let mut result = CommandStepResult::running(update_to_stop.clone());
+                let request = CommandRequest::new(CommandId::Exit)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::Sub);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
+            return CommandStepResult::running(update_to_stop);
+        }
+        self.exit_requested = false;
+
+        if ctx.object.action_procedure == ActionProcedure::Push {
+            if !self.ungrab_requested {
+                self.ungrab_requested = true;
+                let mut result = CommandStepResult::running(update_to_stop.clone());
+                let request = CommandRequest::new(CommandId::UnGrab)
+                    .with_update_interval(50)
+                    .with_mode(CommandMode::Sub);
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
+            return CommandStepResult::running(update_to_stop);
+        }
+        self.ungrab_requested = false;
+
+        let site = match self.site {
+            Some(site) => site,
+            None => return CommandStepResult::failed(update_to_stop),
+        };
+
+        if matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Build | ActionProcedure::Chop | ActionProcedure::Dig
+        ) {
+            let mut update = update_to_stop.unwrap_or_else(ObjectUpdate::new);
+            let idle_action = ActionUpdate::default().with_name("Idle").with_force(true);
+            update = update.with_action_update(idle_action);
+            return CommandStepResult::running(Some(update));
+        }
+
+        if !self.spawn_requested {
+            let kit_id = match self.builder_has_conkit(ctx) {
+                Some(id) => id,
+                None => {
+                    if !self.acquire_requested {
+                        if let Some(c4id) = definition_id_to_c4id(CONKIT_DEFINITION) {
+                            let request = CommandRequest::new(CommandId::Acquire)
+                                .with_data(CommandData::Integer(c4id))
+                                .with_update_interval(ACQUIRE_REQUEST_INTERVAL)
+                                .with_mode(CommandMode::Sub);
+                            let mut result = CommandStepResult::running(update_to_stop.clone());
+                            result.operations.push(CommandOperation::PushFront(request));
+                            self.acquire_requested = true;
+                            return result;
+                        }
+                        return CommandStepResult::failed(update_to_stop);
+                    }
+                    return CommandStepResult::running(update_to_stop);
+                }
+            };
+            self.acquire_requested = false;
+
+            if !self.at_site(ctx, site) {
+                if self.should_issue_move(ctx.frame) {
+                    let request = CommandRequest::new(CommandId::MoveTo)
+                        .with_tx(Some(site.x))
+                        .with_ty(Some(site.y))
+                        .with_update_interval(10);
+                    let mut result = CommandStepResult::running(update_to_stop.clone());
+                    result.operations.push(CommandOperation::PushFront(request));
+                    return result;
+                }
+                return CommandStepResult::running(update_to_stop);
+            }
+
+            let mut events = Vec::new();
+            events.push(CommandEvent::SpawnObject {
+                definition_id: self.definition_id.clone(),
+                owner,
+                position: site,
+                container: None,
+                construction: Some(1),
+            });
+
+            let mut kit_update = ObjectUpdate::new();
+            kit_update.container = Some(None);
+            kit_update.position = Some(ctx.position);
+            kit_update.velocity = Some(Vector2::ZERO);
+            kit_update.status = Some(ObjectStatus::Deleted);
+            kit_update.alive = Some(false);
+            events.push(CommandEvent::ApplyObjectUpdate {
+                object_id: kit_id,
+                update: kit_update,
+            });
+
+            self.spawn_requested = true;
+            return CommandStepResult::running(update_to_stop).with_events(events);
+        }
+
+        if self.construction_id.is_none() {
+            if let Some(construction_id) = self.find_spawned_construction(ctx, site) {
+                self.construction_id = Some(construction_id);
+            } else {
+                return CommandStepResult::running(update_to_stop);
+            }
+        }
+
+        let construction_id = self.construction_id.expect("construction id present");
+        let mut operations = Vec::new();
+        operations.push(CommandOperation::PushFront(
+            CommandRequest::new(CommandId::Build)
+                .with_target(Some(construction_id))
+                .with_tx(Some(site.x))
+                .with_ty(Some(site.y))
+                .with_update_interval(50)
+                .with_mode(CommandMode::Sub),
+        ));
+
+        CommandStepResult::completed(update_to_stop).with_operations(operations)
     }
 }
 
@@ -7639,6 +8123,7 @@ impl BuyState {
             owner: buyer_owner,
             position: base_snapshot.position,
             container: Some(base_id),
+            construction: None,
         });
 
         CommandStepResult::completed(update).with_events(events)
@@ -7828,6 +8313,7 @@ enum CommandState {
     Enter(EnterState),
     Exit(ExitState),
     Build(BuildState),
+    Construct(ConstructState),
     Chop(ChopState),
     Grab(GrabState),
     Throw(ThrowState),
@@ -7863,6 +8349,9 @@ impl ActiveCommand {
             CommandId::Enter => CommandState::Enter(EnterState::from_request(&request)?),
             CommandId::Exit => CommandState::Exit(ExitState::from_request(&request)?),
             CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
+            CommandId::Construct => {
+                CommandState::Construct(ConstructState::from_request(&request)?)
+            }
             CommandId::Chop => CommandState::Chop(ChopState::from_request(&request)?),
             CommandId::Grab => CommandState::Grab(GrabState::from_request(&request)?),
             CommandId::Throw => CommandState::Throw(ThrowState::from_request(&request)?),
@@ -7903,6 +8392,7 @@ impl ActiveCommand {
             CommandState::Enter(state) => state.step(ctx),
             CommandState::Exit(state) => state.step(ctx),
             CommandState::Build(state) => state.step(ctx),
+            CommandState::Construct(state) => state.step(ctx),
             CommandState::Chop(state) => state.step(ctx),
             CommandState::Grab(state) => state.step(ctx),
             CommandState::Throw(state) => state.step(ctx),

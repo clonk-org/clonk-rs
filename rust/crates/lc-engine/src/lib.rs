@@ -7653,6 +7653,7 @@ impl Engine {
                         surrendered: player.surrendered(),
                         wealth: player.wealth(),
                         home_base_material: player.home_base_material().clone(),
+                        knowledge: player.knowledge().cloned().collect(),
                     },
                 )
             })
@@ -7680,6 +7681,7 @@ impl Engine {
                         value: definition.value(),
                         can_chop,
                         chop_action,
+                        constructable: definition.is_constructable(),
                     },
                 )
             })
@@ -11190,6 +11192,7 @@ impl Engine {
                 owner,
                 position,
                 container,
+                construction,
             } => {
                 if !self.definitions.contains_key(definition_id.as_str()) {
                     return Err(EngineError::UnknownDefinition(definition_id));
@@ -11197,6 +11200,9 @@ impl Engine {
                 let mut config = SpawnConfig::new(definition_id)
                     .with_position(position)
                     .with_owner(owner);
+                if let Some(value) = construction {
+                    config = config.with_construction(value);
+                }
                 if let Some(container_id) = container {
                     config = config.with_container(container_id);
                 }
