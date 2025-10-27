@@ -174,6 +174,20 @@ impl ScenarioLoadingState {
     }
 }
 
+enum BootLoadingEvent {
+    Finished(Option<Arc<MaterialSet>>),
+}
+
+struct BootLoadingState {
+    receiver: Receiver<BootLoadingEvent>,
+}
+
+impl BootLoadingState {
+    fn new(receiver: Receiver<BootLoadingEvent>) -> Self {
+        Self { receiver }
+    }
+}
+
 struct SyncCheckState {
     local: HashMap<i32, SyncCheckPacket>,
     remote: HashMap<i32, SyncCheckPacket>,
@@ -224,6 +238,10 @@ impl SyncCheckState {
 struct FrontendAssets {
     font: Arc<dyn TextFont>,
     menu_background: Option<ImageData>,
+    scenario_browser_background: Option<ImageData>,
+    options_background: Option<ImageData>,
+    about_background: Option<ImageData>,
+    logo: Option<ImageData>,
     button_textures: Option<ButtonTextures>,
     base_sprites: HashMap<String, DefinitionSprite>,
     cursor_atlas: Arc<CursorAtlas>,
@@ -234,6 +252,10 @@ impl FrontendAssets {
     fn load(paths: Option<&AppPaths>) -> Self {
         let font = Self::load_font(paths);
         let mut menu_background = None;
+        let mut scenario_browser_background = None;
+        let mut options_background = None;
+        let mut about_background = None;
+        let mut logo = None;
         let mut button_textures = None;
         let mut sprites = HashMap::new();
         let mut cursor_atlas = CursorAtlas::empty();
@@ -244,7 +266,23 @@ impl FrontendAssets {
             match GraphicsResource::open(&graphics_path) {
                 Ok(graphics) => {
                     menu_background = graphics
+                        .load_image("LoaderGoldmine1.png")
+                        .ok()
+                        .map(Self::image_to_data);
+                    scenario_browser_background = graphics
                         .load_image("StartupScenSelBG.png")
+                        .ok()
+                        .map(Self::image_to_data);
+                    options_background = graphics
+                        .load_image("StartupDlgPaper.png")
+                        .ok()
+                        .map(Self::image_to_data);
+                    about_background = graphics
+                        .load_image("LoaderWatercave1.png")
+                        .ok()
+                        .map(Self::image_to_data);
+                    logo = graphics
+                        .load_image("Logo.png")
                         .ok()
                         .map(Self::image_to_data);
                     button_textures = Self::load_button_textures(&graphics);
@@ -275,6 +313,10 @@ impl FrontendAssets {
         Self {
             font,
             menu_background,
+            scenario_browser_background,
+            options_background,
+            about_background,
+            logo,
             button_textures,
             base_sprites: sprites,
             cursor_atlas: Arc::new(cursor_atlas),
@@ -318,6 +360,22 @@ impl FrontendAssets {
 
     fn menu_background(&self) -> Option<ImageData> {
         self.menu_background.clone()
+    }
+
+    fn scenario_browser_background(&self) -> Option<ImageData> {
+        self.scenario_browser_background.clone()
+    }
+
+    fn options_background(&self) -> Option<ImageData> {
+        self.options_background.clone()
+    }
+
+    fn about_background(&self) -> Option<ImageData> {
+        self.about_background.clone()
+    }
+
+    fn logo(&self) -> Option<ImageData> {
+        self.logo.clone()
     }
 
     fn button_textures(&self) -> Option<ButtonTextures> {
@@ -1855,6 +1913,7 @@ struct GameApp {
     object_sprites: HashMap<String, DefinitionSprite>,
     sprite_cache: Arc<HashMap<String, DefinitionSprite>>,
     loading_state: Option<ScenarioLoadingState>,
+    boot_loading: Option<BootLoadingState>,
     ingame_pointer: Option<ViewportPointer>,
     mouse_state: Option<IngameMouseState>,
     exit_requested: bool,
@@ -4031,14 +4090,21 @@ impl GameApp {
             _ => None,
         };
         let assets = Arc::new(FrontendAssets::load(paths));
-        let material_library = load_install_material_library(paths);
+
+        // Start async material loading
+        let (tx, rx) = std::sync::mpsc::channel();
+        let paths_clone = paths.map(|p| p.clone());
+        std::thread::spawn(move || {
+            let material_library = load_install_material_library(paths_clone.as_ref());
+            let _ = tx.send(BootLoadingEvent::Finished(material_library));
+        });
+        let boot_loading = Some(BootLoadingState::new(rx));
+
         let base_sprites = assets.base_sprite_map().clone();
         let sprite_cache = Arc::new(base_sprites.clone());
 
+        // Engine starts with default materials; will be updated when boot loading finishes
         let mut engine = Engine::new();
-        if let Some(library) = material_library.as_ref() {
-            engine.set_materials((**library).clone());
-        }
         let snapshot = engine.snapshot();
 
         let scenarios = load_frontend_scenarios();
@@ -4098,12 +4164,12 @@ impl GameApp {
             ingame_menu: None,
             save_browser: None,
             save_browser_return_to_menu: false,
-            mode: AppMode::Menu,
+            mode: AppMode::Loading,
             scenario_catalog,
             active_scenario: None,
             audio,
             assets: assets.clone(),
-            material_library: material_library.clone(),
+            material_library: None,
             network,
             network_mode,
             network_lobby,
@@ -4117,6 +4183,7 @@ impl GameApp {
             object_sprites: base_sprites,
             sprite_cache: Arc::clone(&sprite_cache),
             loading_state: None,
+            boot_loading,
             ingame_pointer: None,
             mouse_state: None,
             exit_requested: false,
@@ -4126,8 +4193,8 @@ impl GameApp {
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);
         }
-        app.show_main_menu();
-        app.ensure_menu_music();
+        // Don't show menu yet; we're in Loading mode for boot loading
+        // show_main_menu() and ensure_menu_music() will be called when boot loading finishes
         Ok(app)
     }
 
@@ -6484,6 +6551,7 @@ impl GameApp {
                 self.maybe_emit_sync_check();
             }
             AppMode::Loading => {
+                self.poll_boot_loading();
                 self.poll_loading()?;
             }
             AppMode::Menu => {}
@@ -6701,6 +6769,33 @@ impl GameApp {
         Ok(())
     }
 
+    fn poll_boot_loading(&mut self) {
+        let mut material_library: Option<Option<Arc<MaterialSet>>> = None;
+        if let Some(state) = self.boot_loading.as_mut() {
+            match state.receiver.try_recv() {
+                Ok(BootLoadingEvent::Finished(library)) => {
+                    material_library = Some(library);
+                }
+                Err(TryRecvError::Empty) => {
+                    // Still loading, do nothing
+                }
+                Err(TryRecvError::Disconnected) => {
+                    tracing::warn!("boot loading channel disconnected");
+                    material_library = Some(None);
+                }
+            }
+        }
+
+        if let Some(library) = material_library {
+            self.boot_loading = None;
+            self.material_library = library;
+            self.apply_material_library();
+            self.mode = AppMode::Menu;
+            self.show_main_menu();
+            self.ensure_menu_music();
+        }
+    }
+
     fn refresh_focus(&mut self) {
         if !matches!(self.mode, AppMode::Running) {
             self.focus_snapshot = None;
@@ -6786,72 +6881,108 @@ impl GameApp {
     fn render_loading(&mut self, frame: &mut [u8]) -> Result<()> {
         {
             let surface = self.graphics.surface_mut();
-            surface.fill(Color::opaque(16, 28, 52));
-
-            let font = self.assets.font_arc();
             let width = surface.width() as f32;
             let height = surface.height() as f32;
 
-            let (label, message, progress) = if let Some(state) = self.loading_state.as_ref() {
-                (
-                    state.label.as_str(),
-                    state.message.as_str(),
-                    state.progress.clamp(0.0, 1.0),
-                )
+            // Draw background image (matching C++ LoaderScreen::Draw)
+            if let Some(background) = self.assets.menu_background() {
+                let rect = lc_gui::Rect::from_origin_size(
+                    GuiPoint::new(0.0, 0.0),
+                    lc_gui::Size::new(width, height),
+                );
+                draw_image(surface, &rect, &background);
             } else {
-                (self.scenario_label.as_str(), DEFAULT_LOADING_MESSAGE, 0.0)
+                surface.fill(Color::opaque(16, 28, 52));
+            }
+
+            let font = self.assets.font_arc();
+            let progress = if let Some(state) = self.loading_state.as_ref() {
+                state.progress.clamp(0.0, 1.0)
+            } else {
+                0.0
             };
 
-            let title = format!("Loading {}", label);
-            let title_metrics = font.measure_text(&title, 28.0);
-            let title_x = ((width - title_metrics.width) * 0.5).floor();
-            let title_y = (height * 0.35).floor();
+            // Layout constants matching C++ (lines 130-135 in C4LoaderScreen.cpp)
+            let h_indent = 20.0;
+            let v_indent = 20.0;
+            let v_margin = 5.0;
+            let progress_bar_height = 15.0;
+
+            // Draw "Loading..." text at bottom right (matching C++ line 141)
+            let loading_text = "Loading...";
+            let loading_metrics = font.measure_text(loading_text, 18.0);
+            let loading_x = width - h_indent - loading_metrics.width;
+            let loading_y = height - v_indent - loading_metrics.height;
             font.draw_text(
                 surface,
-                title_x,
-                title_y,
-                &title,
-                28.0,
-                Color::opaque(232, 240, 255),
+                loading_x,
+                loading_y,
+                loading_text,
+                18.0,
+                Color::new(221, 221, 221, 221), // 0xdddddddd
             );
 
-            let message_metrics = font.measure_text(message, 20.0);
-            let message_x = ((width - message_metrics.width) * 0.5).floor();
-            let message_y = title_y + 36.0;
-            font.draw_text(
-                surface,
-                message_x,
-                message_y,
-                message,
-                20.0,
-                Color::opaque(196, 206, 228),
+            // Draw progress bar frame at bottom (matching C++ line 143)
+            let bar_y = height - v_indent - v_margin - progress_bar_height;
+            let frame_rect = Rect::new(
+                h_indent as i32,
+                bar_y as i32,
+                (width - h_indent * 2.0) as u32,
+                progress_bar_height as u32,
             );
-
-            let bar_width = (width * 0.5).max(260.0).round().max(4.0) as u32;
-            let bar_height = 24u32;
-            let bar_x = ((width - bar_width as f32) * 0.5).round() as i32;
-            let bar_y = (height * 0.62).round() as i32;
-            let frame_rect = Rect::new(bar_x, bar_y, bar_width, bar_height);
-            let frame_fill = Color::new(18, 28, 48, 220);
+            // Semi-transparent black frame (0x4f000000)
+            let frame_fill = Color::new(0, 0, 0, 79); // 0x4f alpha
             Self::fill_rect(surface, frame_rect, frame_fill);
-            let frame_border = Color::opaque(92, 136, 192);
-            Self::draw_border(surface, frame_rect, frame_border);
 
-            if bar_width > 6 && bar_height > 4 {
-                let inner_margin = 3i32;
-                let available_width = bar_width.saturating_sub((inner_margin * 2) as u32);
-                let progress_width = ((available_width as f32) * progress).round() as u32;
-                if progress_width > 0 {
-                    let fill_rect = Rect::new(
-                        bar_x + inner_margin,
-                        bar_y + inner_margin,
-                        progress_width,
-                        bar_height.saturating_sub((inner_margin * 2) as u32).max(1),
-                    );
-                    let progress_fill = Color::opaque(124, 198, 255);
-                    Self::fill_rect(surface, fill_rect, progress_fill);
-                }
+            // Draw progress bar fill (matching C++ line 151)
+            let bar_width = (width - h_indent * 2.0 - 2.0).max(0.0);
+            let progress_width = (bar_width * progress) as u32;
+            if progress_width > 0 {
+                let fill_rect = Rect::new(
+                    (h_indent + 1.0) as i32,
+                    (bar_y + 1.0) as i32,
+                    progress_width,
+                    (progress_bar_height - 2.0) as u32,
+                );
+                // Semi-transparent red (0x4fff0000)
+                let progress_fill = Color::new(255, 0, 0, 79); // 0x4f alpha, red
+                Self::fill_rect(surface, fill_rect, progress_fill);
             }
+
+            // Draw progress percentage centered in bar (matching C++ line 153)
+            let progress_text = format!("{}%", (progress * 100.0) as i32);
+            let progress_metrics = font.measure_text(&progress_text, 18.0);
+            let progress_x = (width - progress_metrics.width) * 0.5;
+            let progress_y = bar_y + (progress_bar_height - progress_metrics.height) * 0.5;
+            font.draw_text(
+                surface,
+                progress_x,
+                progress_y,
+                &progress_text,
+                18.0,
+                Color::opaque(255, 255, 255), // White
+            );
+
+            // Draw copyright/trademark text at bottom left
+            let copyright_text = "LegacyClonk is a fan project based on Clonk Rage.";
+            let trademark_text = "'Clonk' is a registered trademark of Matthes Bender.";
+            let copyright_y = bar_y - v_margin - 40.0;
+            font.draw_text(
+                surface,
+                h_indent,
+                copyright_y,
+                copyright_text,
+                14.0,
+                Color::new(200, 200, 200, 255),
+            );
+            font.draw_text(
+                surface,
+                h_indent,
+                copyright_y + 18.0,
+                trademark_text,
+                14.0,
+                Color::new(200, 200, 200, 255),
+            );
         }
 
         let surface = self.graphics.surface();
@@ -7898,7 +8029,15 @@ fn render_startup_frame(
 ) {
     {
         let surface = graphics.surface_mut();
-        if let Some(background) = assets.menu_background() {
+        let background = match view {
+            StartupView::ScenarioBrowser | StartupView::NetworkLobby => {
+                assets.scenario_browser_background()
+            }
+            StartupView::Options => assets.options_background(),
+            StartupView::About => assets.about_background(),
+            _ => assets.menu_background(),
+        };
+        if let Some(background) = background {
             let rect = lc_gui::Rect::from_origin_size(
                 GuiPoint::new(0.0, 0.0),
                 lc_gui::Size::new(surface.width() as f32, surface.height() as f32),
@@ -7908,7 +8047,35 @@ fn render_startup_frame(
             surface.fill(Color::opaque(16, 28, 52));
         }
         match view {
-            StartupView::MainMenu => main_menu.render(surface),
+            StartupView::MainMenu => {
+                main_menu.render(surface);
+                // Draw logo and version info (matching C++ implementation)
+                if let Some(logo) = assets.logo() {
+                    let width = surface.width() as f32;
+                    let height = surface.height() as f32;
+                    let logo_zoom = 0.4;
+                    let logo_width = logo.width() as f32 * logo_zoom;
+                    let logo_height = logo.height() as f32 * logo_zoom;
+                    let logo_x = width * 30.0 / 31.0 - logo_width;
+                    let logo_y = height / 21.0 - 5.0;
+                    let logo_rect = lc_gui::Rect::new(logo_x, logo_y, logo_width, logo_height);
+                    draw_image(surface, &logo_rect, &logo);
+
+                    // Draw version text
+                    let version_text = "Version 4.9.11.0";
+                    let version_x = width * 39.0 / 40.0 - 150.0;
+                    let version_y = height / 18.0 + logo_height;
+                    let version_color = Color::new(255, 255, 255, 255);
+                    assets.font_arc().draw_text(
+                        surface,
+                        version_x,
+                        version_y,
+                        version_text,
+                        18.0,
+                        version_color,
+                    );
+                }
+            }
             StartupView::ScenarioBrowser => scenario_menu.menu().render(surface),
             StartupView::NetworkLobby => scenario_menu.menu().render(surface),
             StartupView::Options => {
