@@ -2937,6 +2937,118 @@ mod tests {
     }
 
     #[test]
+    fn context_requires_target_object() {
+        let request = CommandRequest::new(CommandId::Context);
+        assert!(ContextState::from_request(&request).is_err());
+    }
+
+    #[test]
+    fn context_emits_menu_request() {
+        let crew_id = ObjectId::new(77);
+        let target_id = ObjectId::new(88);
+
+        let mut crew = snapshot_with_id(crew_id.as_u64());
+        crew.owner = 42;
+        crew.command_direction = CommandDirection::Left;
+
+        let target = snapshot_with_id(target_id.as_u64());
+
+        let mut objects = HashMap::new();
+        objects.insert(crew.id, crew.clone());
+        objects.insert(target.id, target.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: crew.position,
+            object: objects.get(&crew_id).expect("crew present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state = ContextState::from_request(
+            &CommandRequest::new(CommandId::Context)
+                .with_target2(Some(target_id))
+                .with_tx(Some(15))
+                .with_ty(Some(25)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result.update.expect("context should stop crew");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert!(result.operations.is_empty());
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            CommandEvent::OpenMenu(request) => {
+                assert_eq!(request.crew_id, crew_id);
+                assert_eq!(request.owner, 42);
+                match &request.kind {
+                    MenuRequestKind::Context { target, position } => {
+                        assert_eq!(*target, target_id);
+                        assert_eq!(*position, Some(Vector2::new(15, 25)));
+                    }
+                }
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        let second = state.step(&ctx);
+        assert_eq!(second.status, CommandStatus::Completed);
+        assert!(second.events.is_empty());
+    }
+
+    #[test]
+    fn context_skips_menu_when_owner_none() {
+        let crew_id = ObjectId::new(101);
+        let target_id = ObjectId::new(202);
+
+        let mut crew = snapshot_with_id(crew_id.as_u64());
+        crew.owner = OWNER_NONE;
+        crew.command_direction = CommandDirection::Right;
+
+        let target = snapshot_with_id(target_id.as_u64());
+
+        let mut objects = HashMap::new();
+        objects.insert(crew.id, crew.clone());
+        objects.insert(target.id, target.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: crew.position,
+            object: objects.get(&crew_id).expect("crew present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state = ContextState::from_request(
+            &CommandRequest::new(CommandId::Context).with_target2(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.update.is_some());
+        assert!(result.events.is_empty());
+    }
+
+    #[test]
     fn transfer_requires_target() {
         let request = CommandRequest::new(CommandId::Transfer);
         assert!(TransferState::from_request(&request).is_err());
@@ -5182,6 +5294,22 @@ pub enum CommandOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MenuRequestKind {
+    Context {
+        target: ObjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        position: Option<Vector2>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MenuRequest {
+    pub crew_id: ObjectId,
+    pub owner: i32,
+    pub kind: MenuRequestKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CommandEvent {
     ApplyObjectUpdate {
         object_id: ObjectId,
@@ -5214,6 +5342,7 @@ pub enum CommandEvent {
         player_id: i32,
         delta: i32,
     },
+    OpenMenu(MenuRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -8602,6 +8731,62 @@ impl CallState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ContextState {
+    target: ObjectId,
+    position: Option<Vector2>,
+    executed: bool,
+}
+
+impl ContextState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let target = request.target2.ok_or(CommandError::Unsupported)?;
+        let position = match (request.tx, request.ty) {
+            (Some(x), Some(y)) if x != 0 && y != 0 => Some(Vector2::new(x, y)),
+            _ => None,
+        };
+        Ok(Self {
+            target,
+            position,
+            executed: false,
+        })
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.executed {
+            return CommandStepResult::completed(None);
+        }
+        self.executed = true;
+
+        let Some(target_snapshot) = ctx.resolve(self.target) else {
+            return CommandStepResult::failed(None);
+        };
+
+        if !target_snapshot.is_active() {
+            return CommandStepResult::failed(None);
+        }
+
+        let mut update = None;
+        if ctx.object.command_direction != CommandDirection::Stop {
+            update = Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop));
+        }
+
+        let mut events = Vec::new();
+        if ctx.object.owner != OWNER_NONE {
+            events.push(CommandEvent::OpenMenu(MenuRequest {
+                crew_id: ctx.object.id,
+                owner: ctx.object.owner,
+                kind: MenuRequestKind::Context {
+                    target: self.target,
+                    position: self.position,
+                },
+            }));
+        }
+
+        CommandStepResult::completed(update).with_events(events)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct AcquireState {
     definition_id: DefinitionId,
     ignore_container: Option<ObjectId>,
@@ -9613,6 +9798,7 @@ enum CommandState {
     Retry(RetryState),
     Attack(AttackState),
     Call(CallState),
+    Context(ContextState),
     Buy(BuyState),
     Sell(SellState),
     Acquire(AcquireState),
@@ -9646,6 +9832,7 @@ impl CommandState {
             CommandState::Retry(_) => Some(CommandId::Retry),
             CommandState::Attack(_) => Some(CommandId::Attack),
             CommandState::Call(_) => Some(CommandId::Call),
+            CommandState::Context(_) => Some(CommandId::Context),
             CommandState::Buy(_) => Some(CommandId::Buy),
             CommandState::Sell(_) => Some(CommandId::Sell),
             CommandState::Acquire(_) => Some(CommandId::Acquire),
@@ -9688,6 +9875,7 @@ impl ActiveCommand {
             CommandId::Retry => CommandState::Retry(RetryState::from_request(&request)),
             CommandId::Attack => CommandState::Attack(AttackState::from_request(&request)?),
             CommandId::Call => CommandState::Call(CallState::from_request(&request)?),
+            CommandId::Context => CommandState::Context(ContextState::from_request(&request)?),
             CommandId::Buy => CommandState::Buy(BuyState::from_request(&request)?),
             CommandId::Sell => CommandState::Sell(SellState::from_request(&request)?),
             CommandId::Acquire => CommandState::Acquire(AcquireState::from_request(&request)?),
@@ -9735,6 +9923,7 @@ impl ActiveCommand {
             CommandState::Retry(state) => state.step(ctx),
             CommandState::Attack(state) => state.step(ctx),
             CommandState::Call(state) => state.step(ctx),
+            CommandState::Context(state) => state.step(ctx),
             CommandState::Buy(state) => state.step(ctx),
             CommandState::Sell(state) => state.step(ctx),
             CommandState::Acquire(state) => state.step(ctx),

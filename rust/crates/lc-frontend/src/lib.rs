@@ -3441,6 +3441,7 @@ mod tests {
             network_packets: Vec::new(),
             definition_categories: Default::default(),
             transfer_zones: Vec::new(),
+            menu_requests: Vec::new(),
             audio: Vec::new(),
         }
     }

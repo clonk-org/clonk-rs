@@ -46,11 +46,12 @@ use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, CommandStackSnapshot, ControlButton,
     ControlCommand, ControlEvent, Definition, Engine, EngineError, EngineState,
     EnvironmentSettings, FloatVector2, Landscape, MaterialSet, MenuCommandKind,
-    MenuCommandSelection, MessageKind, MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate,
-    PlayerConfig, PlayerStatus, Recorder, Recording, RgbColor, Scenario, ScenarioError,
-    SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER,
-    FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK,
-    FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
+    MenuCommandSelection, MenuRequestKind, MessageKind, MovementProfile, ObjectId, ObjectSnapshot,
+    ObjectUpdate, PlayerConfig, PlayerStatus, Recorder, Recording, RgbColor, Scenario,
+    ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2,
+    FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT,
+    FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL,
+    OWNER_NONE,
 };
 use lc_frontend::{
     default_owner_color, draw_image, AboutAction, ColorByOwnerMask, CrewOverlay, CursorAtlas,
@@ -6411,6 +6412,7 @@ impl GameApp {
                     network.finalize_tick(tick);
                 }
                 self.snapshot = self.engine.tick()?;
+                self.handle_menu_requests();
                 if self.snapshot.game_over && !self.game_over_handled {
                     self.handle_game_over();
                 }
@@ -6426,6 +6428,28 @@ impl GameApp {
             AppMode::Menu => {}
         }
         Ok(())
+    }
+
+    fn handle_menu_requests(&mut self) {
+        if !matches!(self.mode, AppMode::Running) {
+            return;
+        }
+        let local_owner = self.local_owner;
+        for request in &self.snapshot.menu_requests {
+            if request.owner != local_owner {
+                continue;
+            }
+            match &request.kind {
+                MenuRequestKind::Context { .. } => {
+                    if let Some(mut menu) =
+                        ObjectMenuState::new(&mut self.engine, &self.snapshot, request.crew_id)
+                    {
+                        menu.focus_context_mode();
+                        self.object_menu = Some(menu);
+                    }
+                }
+            }
+        }
     }
 
     fn update_audio(&mut self) {
@@ -8941,6 +8965,7 @@ mod tests {
             network_packets: Vec::new(),
             definition_categories: HashMap::new(),
             transfer_zones: Vec::new(),
+            menu_requests: Vec::new(),
             audio: Vec::new(),
         }
     }
@@ -9288,6 +9313,7 @@ mod tests {
             network_packets: Vec::new(),
             definition_categories: HashMap::new(),
             transfer_zones: Vec::new(),
+            menu_requests: Vec::new(),
             audio: Vec::new(),
         };
 

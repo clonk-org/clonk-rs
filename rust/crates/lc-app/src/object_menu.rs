@@ -296,6 +296,16 @@ impl ObjectMenuState {
         })
     }
 
+    pub fn focus_context_mode(&mut self) {
+        if self.context.is_empty() {
+            return;
+        }
+        self.mode = MenuMode::Context;
+        if self.context_selected.is_none() {
+            self.context_selected = Some(0);
+        }
+    }
+
     pub fn refresh(&mut self, engine: &mut Engine, snapshot: &SimulationSnapshot) -> bool {
         let crew = match snapshot.object(self.crew_id) {
             Some(crew) => crew,
@@ -1006,6 +1016,7 @@ mod tests {
             network_packets: Vec::new(),
             definition_categories: HashMap::new(),
             transfer_zones: Vec::new(),
+            menu_requests: Vec::new(),
             audio: Vec::new(),
         }
     }

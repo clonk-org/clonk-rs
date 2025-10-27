@@ -23,7 +23,7 @@ mod transfer;
 pub use action::{
     ActionLibrary, ActionProcedure, ActionSpec, ActionState, ActionUpdate, ActionUpdateResult,
 };
-pub use command::CommandStackSnapshot;
+pub use command::{CommandStackSnapshot, MenuRequest, MenuRequestKind};
 pub use control::{
     interpret_player_control_command, CommandKind, ControlButton, ControlCommand, ControlEvent,
     ControlPacket, PlayerControlData, SyncCheckPacket, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT,
@@ -3099,6 +3099,8 @@ pub struct SimulationSnapshot {
     #[serde(default)]
     pub transfer_zones: Vec<TransferZoneState>,
     #[serde(default)]
+    pub menu_requests: Vec<MenuRequest>,
+    #[serde(default)]
     pub audio: Vec<AudioCommand>,
 }
 
@@ -3145,6 +3147,8 @@ pub struct EngineState {
     pub transfer_zones: Vec<TransferZoneState>,
     #[serde(default)]
     pub messages: Vec<PersistedMessage>,
+    #[serde(default)]
+    pub pending_menu_requests: Vec<MenuRequest>,
     #[serde(default)]
     pub game_over: bool,
     pub rng: ChaCha8Rng,
@@ -3228,6 +3232,7 @@ impl EngineState {
             known_crew_owners,
             eliminated_crew_owners,
             transfer_zones: snapshot.transfer_zones.clone(),
+            pending_menu_requests: snapshot.menu_requests.clone(),
             messages: Vec::new(),
             game_over: snapshot.game_over,
             rng: snapshot.rng.clone(),
@@ -5447,6 +5452,7 @@ pub struct Engine {
     transfer_zones: TransferZoneTable,
     audio_registry: AudioRegistry,
     pending_audio: Vec<AudioCommand>,
+    pending_menu_requests: Vec<MenuRequest>,
     messages: MessageManager,
 }
 
@@ -5857,6 +5863,7 @@ impl Engine {
             transfer_zones: TransferZoneTable::default(),
             audio_registry: AudioRegistry::new(),
             pending_audio: Vec::new(),
+            pending_menu_requests: Vec::new(),
             messages: MessageManager::new(),
         };
         engine.environment.refresh_runtime_fields();
@@ -8226,6 +8233,7 @@ impl Engine {
         self.refresh_elimination_state();
         self.check_game_over()?;
         let mut snapshot = self.snapshot();
+        snapshot.menu_requests = self.pending_menu_requests.drain(..).collect();
         snapshot.audio = self.pending_audio.drain(..).collect();
         Ok(snapshot)
     }
@@ -8900,6 +8908,7 @@ impl Engine {
             network_packets: Vec::new(),
             definition_categories,
             transfer_zones: self.transfer_zones.states(),
+            menu_requests: Vec::new(),
             audio: Vec::new(),
         }
     }
@@ -9009,6 +9018,7 @@ impl Engine {
             eliminated_crew_owners,
             transfer_zones: self.transfer_zones.states(),
             messages: self.messages.persisted(),
+            pending_menu_requests: self.pending_menu_requests.clone(),
             game_over: self.game_over_triggered,
             rng: self.rng.clone(),
         }
@@ -9061,6 +9071,7 @@ impl Engine {
         }
         self.transfer_zones = TransferZoneTable::from_states(&state.transfer_zones);
         self.messages.restore(state.messages.clone());
+        self.pending_menu_requests = state.pending_menu_requests.clone();
         self.crew_selection = state
             .crew_selection
             .iter()
@@ -11239,6 +11250,11 @@ impl Engine {
                 let value = self.call_object_function(index, &function, args)?;
                 if let Some(action) = on_result {
                     self.apply_call_result(action, caller, value.as_bool())?;
+                }
+            }
+            CommandEvent::OpenMenu(request) => {
+                if self.find_object_index(request.crew_id).is_some() {
+                    self.pending_menu_requests.push(request);
                 }
             }
             CommandEvent::AdjustPlayerHomeBaseMaterial {
