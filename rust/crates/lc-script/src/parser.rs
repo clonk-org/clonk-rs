@@ -152,6 +152,16 @@ impl<'a> Parser<'a> {
         Ok(statements)
     }
 
+    fn parse_stmt_or_block_vec(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        // Parse a single statement. If it was a braced block, unwrap it to Vec<Stmt>,
+        // otherwise wrap the single statement into a one-element Vec.
+        let stmt = self.parse_statement()?;
+        match stmt {
+            Stmt::Block(body) => Ok(body),
+            other => Ok(vec![other]),
+        }
+    }
+
     fn parse_statement(&mut self) -> Result<Stmt, ParseError> {
         if self.consume_if_keyword(Keyword::Var)?.is_some() {
             return self.parse_var_decl();
@@ -222,17 +232,18 @@ impl<'a> Parser<'a> {
         self.expect_symbol(Symbol::LParen, "expected '(' after 'if'")?;
         let condition = self.parse_expression()?;
         self.expect_symbol(Symbol::RParen, "expected ')' after condition")?;
-        self.expect_symbol(Symbol::LBrace, "expected '{' to start if-body")?;
-        let then_branch = self.parse_block_statements()?;
-        self.expect_symbol(Symbol::RBrace, "expected '}' after if-body")?;
+
+        // Parse either a single statement or a braced block for the 'then' part.
+        let then_branch = self.parse_stmt_or_block_vec()?;
+
+        // Else binds to nearest if: if the 'then' was itself an if with an else,
+        // that else would already be consumed by parse_statement().
         let else_branch = if self.consume_if_keyword(Keyword::Else)?.is_some() {
-            self.expect_symbol(Symbol::LBrace, "expected '{' to start else-body")?;
-            let branch = self.parse_block_statements()?;
-            self.expect_symbol(Symbol::RBrace, "expected '}' after else-body")?;
-            Some(branch)
+            Some(self.parse_stmt_or_block_vec()?)
         } else {
             None
         };
+
         Ok(Stmt::If {
             condition,
             then_branch,
@@ -244,9 +255,10 @@ impl<'a> Parser<'a> {
         self.expect_symbol(Symbol::LParen, "expected '(' after 'while'")?;
         let condition = self.parse_expression()?;
         self.expect_symbol(Symbol::RParen, "expected ')' after condition")?;
-        self.expect_symbol(Symbol::LBrace, "expected '{' to start while-body")?;
-        let body = self.parse_block_statements()?;
-        self.expect_symbol(Symbol::RBrace, "expected '}' after while-body")?;
+
+        // Parse either a single statement or a braced block for the loop body.
+        let body = self.parse_stmt_or_block_vec()?;
+
         Ok(Stmt::While { condition, body })
     }
 
