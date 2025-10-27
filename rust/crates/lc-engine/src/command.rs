@@ -3726,7 +3726,7 @@ mod tests {
     }
 
     #[test]
-    fn acquire_requests_move_for_nearby_item() {
+    fn acquire_requests_get_for_candidate() {
         let builder_id = ObjectId::new(10);
         let item_id = ObjectId::new(20);
 
@@ -3772,10 +3772,11 @@ mod tests {
         assert_eq!(result.operations.len(), 1);
         match &result.operations[0] {
             CommandOperation::PushFront(request) => {
-                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.id, CommandId::Get);
                 assert_eq!(request.target, Some(item_id));
+                assert_eq!(request.mode, CommandMode::SilentSub);
             }
-            other => panic!("expected move request, got {:?}", other),
+            other => panic!("expected get request, got {:?}", other),
         }
     }
 
@@ -3829,17 +3830,19 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
-        assert!(result.operations.is_empty());
-        assert_eq!(result.events.len(), 1);
-
-        match &result.events[0] {
-            CommandEvent::ApplyObjectUpdate { object_id, update } => {
-                assert_eq!(*object_id, item_id);
-                assert_eq!(update.container, Some(Some(builder_id)));
-                assert_eq!(update.position, Some(builder_snapshot.position));
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Get);
+                assert_eq!(request.target, Some(item_id));
+                assert_eq!(request.mode, CommandMode::SilentSub);
             }
-            other => panic!("unexpected event: {:?}", other),
+            other => panic!("expected get request, got {:?}", other),
         }
+        assert!(
+            result.events.is_empty(),
+            "acquire should delegate transfer to Get command"
+        );
     }
 
     #[test]
@@ -3895,9 +3898,14 @@ mod tests {
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
         assert!(result.events.is_empty());
-        let update = result.update.expect("builder update");
-        assert_eq!(update.container, Some(Some(container_id)));
-        assert_eq!(update.position, Some(Vector2::new(4, 0)));
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Get);
+                assert_eq!(request.target, Some(item_id));
+            }
+            other => panic!("expected get request, got {:?}", other),
+        }
     }
 
     #[test]
@@ -4054,7 +4062,7 @@ mod tests {
     }
 
     #[test]
-    fn acquire_exits_other_container_before_access() {
+    fn acquire_requests_get_when_in_other_container() {
         let builder_id = ObjectId::new(1);
         let current_container_id = ObjectId::new(2);
         let target_container_id = ObjectId::new(3);
@@ -4109,10 +4117,15 @@ mod tests {
         .expect("state created");
 
         let result = state.step(&ctx);
-        let update = result.update.expect("builder update");
-        assert_eq!(update.container, Some(None));
-        assert_eq!(update.position, Some(current_container.position));
-        assert_eq!(update.velocity, Some(Vector2::ZERO));
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Get);
+                assert_eq!(request.target, Some(item_id));
+            }
+            other => panic!("expected get request, got {:?}", other),
+        }
     }
 
     #[test]
@@ -4164,10 +4177,15 @@ mod tests {
         .expect("state created");
 
         let result = state.step(&ctx);
-        let update = result.update.expect("builder update");
-        assert_eq!(update.container, Some(None));
-        assert_eq!(update.position, Some(current_container.position));
-        assert_eq!(update.velocity, Some(Vector2::ZERO));
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Get);
+                assert_eq!(request.target, Some(item_id));
+            }
+            other => panic!("expected get request, got {:?}", other),
+        }
     }
 
     #[test]
@@ -4220,9 +4238,15 @@ mod tests {
         .expect("state created");
 
         let result = state.step(&ctx);
-        let update = result.update.expect("builder update");
-        assert_eq!(update.container, Some(Some(container_id)));
-        assert_eq!(update.position, Some(container.position));
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Get);
+                assert_eq!(request.target, Some(item_id));
+            }
+            other => panic!("expected get request, got {:?}", other),
+        }
     }
 
     #[test]
@@ -4277,29 +4301,38 @@ mod tests {
 
         let snapshot = stack.snapshot();
         assert_eq!(snapshot.commands.len(), 2);
-        match &snapshot.commands[0] {
-            CommandState::MoveTo(state) => {
+        match &snapshot.commands[0].state {
+            CommandState::Get(state) => {
                 assert_eq!(
                     state.target,
                     Some(item_id),
-                    "move command should target the acquire candidate"
+                    "get command should target the acquire candidate"
                 );
             }
-            other => panic!("expected move command at front, got {:?}", other),
+            other => panic!("expected get command at front, got {:?}", other),
         }
-        match &snapshot.commands[1] {
+        assert_eq!(snapshot.commands[0].mode, CommandMode::SilentSub);
+        match &snapshot.commands[1].state {
             CommandState::Acquire(_) => {}
             other => panic!("expected acquire command second, got {:?}", other),
         }
+        assert_eq!(snapshot.commands[1].mode, CommandMode::Base);
+
         let encoded = serde_json::to_value(&snapshot).expect("serialize snapshot");
-        let acquire_state = encoded["commands"]
+        let acquire_entry = encoded["commands"]
             .as_array()
-            .and_then(|commands| commands.iter().find_map(|entry| entry.get("Acquire")))
+            .and_then(|commands| {
+                commands
+                    .iter()
+                    .find(|entry| entry["state"].get("Acquire").is_some())
+            })
             .expect("acquire state present");
+        let acquire_state = &acquire_entry["state"]["Acquire"];
         let candidate = acquire_state["candidate"]
             .as_u64()
             .expect("candidate recorded");
         assert_eq!(candidate, item_id.as_u64());
+        assert_eq!(snapshot.commands[0].failures, 0);
 
         let ctx_followup = CommandRuntimeContext {
             frame: 25,
@@ -4324,6 +4357,111 @@ mod tests {
             .expect("restored step evaluates");
 
         assert_eq!(original_second, restored_second);
+    }
+
+    #[test]
+    fn command_stack_snapshot_preserves_buy_state() {
+        let base_id = ObjectId::new(200);
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::Buy)
+                    .with_target(Some(base_id))
+                    .with_data(CommandData::Text("WOOD".into()))
+                    .with_update_interval(25),
+            )
+            .expect("buy command queued");
+
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 1);
+        match &snapshot.commands[0].state {
+            CommandState::Buy(state) => {
+                assert_eq!(state.target, Some(base_id));
+                assert_eq!(state.update_interval, 25);
+            }
+            other => panic!("expected buy state, got {:?}", other),
+        }
+        let mut restored = CommandStack::new();
+        restored.restore_from_snapshot(&snapshot);
+        assert_eq!(restored.snapshot(), snapshot);
+    }
+
+    #[test]
+    fn failing_subcommand_increments_base_failures_and_schedules_retry() {
+        let actor_id = ObjectId::new(1);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.ocf = ocf::AVAILABLE | ocf::ALIVE;
+        actor.collectible = false;
+        actor.position = Vector2::new(0, 0);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut stack = CommandStack::new();
+        let wait_request = CommandRequest::new(CommandId::Wait)
+            .with_update_interval(1)
+            .with_retries(1);
+        stack.push_back(wait_request).expect("wait command queued");
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Enter)
+                    .with_target(Some(ObjectId::new(999)))
+                    .with_mode(CommandMode::SilentSub),
+            )
+            .expect("enter command queued");
+
+        let initial_snapshot = stack.snapshot();
+        assert_eq!(initial_snapshot.commands.len(), 2);
+        match &initial_snapshot.commands[1].state {
+            CommandState::Wait(_) => {
+                assert_eq!(initial_snapshot.commands[1].retries, 1);
+            }
+            other => panic!("expected wait command as base, got {:?}", other),
+        }
+
+        let first = stack.step(&ctx).expect("enter should evaluate");
+        assert_eq!(first.status, CommandStatus::Failed);
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 1);
+        assert_eq!(snapshot.commands[0].failures, 1);
+        assert_eq!(snapshot.commands[0].retries, 1);
+
+        let second = stack.step(&ctx).expect("wait should evaluate");
+        assert_eq!(second.status, CommandStatus::Running);
+
+        let post_snapshot = stack.snapshot();
+        assert_eq!(post_snapshot.commands.len(), 2);
+        match &post_snapshot.commands[1].state {
+            CommandState::Wait(_) => {
+                assert_eq!(post_snapshot.commands[1].failures, 0);
+                assert_eq!(post_snapshot.commands[1].retries, 0);
+            }
+            other => panic!(
+                "expected wait command after retry scheduling, got {:?}",
+                other
+            ),
+        }
+        match &post_snapshot.commands[0].state {
+            CommandState::Retry(_) => {}
+            other => panic!("expected retry command at front, got {:?}", other),
+        }
     }
 
     #[test]
@@ -5650,9 +5788,28 @@ pub enum CommandError {
     Unsupported,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandSnapshot {
+    state: CommandState,
+    mode: CommandMode,
+    retries: i32,
+    failures: i32,
+}
+
+impl CommandSnapshot {
+    fn new(entry: &ActiveCommand) -> Self {
+        Self {
+            state: entry.state.clone(),
+            mode: entry.mode,
+            retries: entry.retries,
+            failures: entry.failures,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct CommandStackSnapshot {
-    commands: Vec<CommandState>,
+    commands: Vec<CommandSnapshot>,
 }
 
 impl CommandStackSnapshot {
@@ -5688,11 +5845,7 @@ impl CommandStack {
 
     pub fn snapshot(&self) -> CommandStackSnapshot {
         CommandStackSnapshot {
-            commands: self
-                .entries
-                .iter()
-                .map(|entry| entry.state.clone())
-                .collect(),
+            commands: self.entries.iter().map(CommandSnapshot::new).collect(),
         }
     }
 
@@ -5701,7 +5854,7 @@ impl CommandStack {
             .commands
             .iter()
             .cloned()
-            .map(ActiveCommand::from_state)
+            .map(ActiveCommand::from_snapshot)
             .collect();
     }
 
@@ -5734,16 +5887,25 @@ impl CommandStack {
     }
 
     pub fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<CommandStepResult> {
-        let mut result = {
+        let (mode, mut result) = {
             let front = self.entries.front_mut()?;
-            front.step(ctx)
+            let mode = front.mode;
+            let result = front.step(ctx);
+            (mode, result)
         };
-        match result.status {
-            CommandStatus::Completed | CommandStatus::Failed => {
-                self.entries.pop_front();
+
+        if matches!(
+            result.status,
+            CommandStatus::Completed | CommandStatus::Failed
+        ) {
+            // Remove the completed/failed command before handling failure propagation so that the
+            // base command (if any) becomes the new front entry, mirroring the C++ stack layout.
+            let _ = self.entries.pop_front();
+            if result.status == CommandStatus::Failed {
+                self.record_failure(mode);
             }
-            CommandStatus::Running => {}
         }
+
         for operation in std::mem::take(&mut result.operations) {
             match operation {
                 CommandOperation::Clear => self.entries.clear(),
@@ -5756,6 +5918,22 @@ impl CommandStack {
             }
         }
         Some(result)
+    }
+
+    fn record_failure(&mut self, mode: CommandMode) {
+        match mode {
+            CommandMode::SilentSub | CommandMode::Sub => {
+                if let Some(base) = self
+                    .entries
+                    .iter_mut()
+                    .find(|entry| matches!(entry.mode, CommandMode::Base | CommandMode::SilentBase))
+                {
+                    base.failures = base.failures.saturating_add(1);
+                }
+            }
+            CommandMode::SilentBase => {}
+            CommandMode::Base => {}
+        }
     }
 }
 
@@ -9042,10 +9220,10 @@ struct AcquireState {
     range_y: i32,
     update_interval: u32,
     last_evaluated: Option<u64>,
-    last_move_order: Option<u64>,
     candidate: Option<ObjectId>,
     buy_requested: bool,
     last_buy_request: Option<u64>,
+    get_requested: bool,
 }
 
 impl AcquireState {
@@ -9071,10 +9249,10 @@ impl AcquireState {
             range_y,
             update_interval: request.update_interval.max(1),
             last_evaluated: None,
-            last_move_order: None,
             candidate: None,
             buy_requested: false,
             last_buy_request: None,
+            get_requested: false,
         })
     }
 
@@ -9114,17 +9292,6 @@ impl AcquireState {
             .with_update_interval(100)
             .with_mode(CommandMode::Sub);
         Some(CommandOperation::PushFront(request))
-    }
-
-    fn should_issue_move(&mut self, frame: u64) -> bool {
-        const MOVE_COOLDOWN: u64 = 12;
-        match self.last_move_order {
-            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
-            _ => {
-                self.last_move_order = Some(frame);
-                true
-            }
-        }
     }
 
     fn candidate_is_valid(
@@ -9181,68 +9348,6 @@ impl AcquireState {
         best.map(|(id, _)| id)
     }
 
-    fn handle_container_candidate(
-        &mut self,
-        ctx: &CommandRuntimeContext<'_>,
-        candidate_id: ObjectId,
-        container_id: ObjectId,
-    ) -> CommandStepResult {
-        let base_update = self.update_to_stop(ctx);
-        let builder_container = ctx.object.container;
-
-        if builder_container == Some(container_id) {
-            let mut result = CommandStepResult::running(base_update.clone());
-            let mut transfer_update = ObjectUpdate::new();
-            transfer_update.container = Some(Some(ctx.object.id));
-            transfer_update.position = Some(ctx.position);
-            transfer_update.velocity = Some(Vector2::ZERO);
-            result.events.push(CommandEvent::ApplyObjectUpdate {
-                object_id: candidate_id,
-                update: transfer_update,
-            });
-            return result;
-        }
-
-        let Some(container_snapshot) = ctx.resolve(container_id) else {
-            return CommandStepResult::running(base_update);
-        };
-
-        let can_enter = (container_snapshot.ocf & ocf::ENTRANCE) != 0;
-        let can_grab = (container_snapshot.ocf & ocf::GRAB) != 0;
-
-        if builder_container.is_none() {
-            let dx = container_snapshot.position.x - ctx.position.x;
-            let dy = container_snapshot.position.y - ctx.position.y;
-            const CONTAINER_APPROACH_RANGE: i32 = 12;
-            if dx.abs() <= CONTAINER_APPROACH_RANGE && dy.abs() <= CONTAINER_APPROACH_RANGE {
-                let mut update = base_update.clone().unwrap_or_default();
-                if can_enter || can_grab {
-                    update.container = Some(Some(container_id));
-                }
-                update.position = Some(container_snapshot.position);
-                update.velocity = Some(Vector2::ZERO);
-                if update.command_direction.is_none() {
-                    update.command_direction = Some(CommandDirection::Stop);
-                }
-                return CommandStepResult::running(Some(update));
-            }
-        }
-
-        if !can_enter && !can_grab {
-            return CommandStepResult::running(base_update);
-        }
-
-        if self.should_issue_move(ctx.frame) {
-            let request = CommandRequest::new(CommandId::MoveTo)
-                .with_target(Some(container_id))
-                .with_update_interval(10);
-            return CommandStepResult::running(base_update)
-                .with_operations(vec![CommandOperation::PushFront(request)]);
-        }
-
-        CommandStepResult::running(base_update)
-    }
-
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         let has_item = ctx
             .object
@@ -9264,12 +9369,13 @@ impl AcquireState {
         self.last_evaluated = Some(ctx.frame);
 
         if let Some(candidate_id) = self.candidate {
-            let candidate = ctx.resolve(candidate_id);
-            if candidate
+            let valid = ctx
+                .resolve(candidate_id)
                 .filter(|snapshot| self.candidate_is_valid(snapshot, ctx))
-                .is_none()
-            {
+                .is_some();
+            if !valid {
                 self.candidate = None;
+                self.get_requested = false;
             }
         }
 
@@ -9278,6 +9384,7 @@ impl AcquireState {
         }
 
         if self.candidate.is_none() {
+            self.get_requested = false;
             self.maybe_reset_buy(ctx.frame);
             let mut result = CommandStepResult::running(self.update_to_stop(ctx));
             if let Some(operation) = self.request_buy(ctx.frame) {
@@ -9287,63 +9394,24 @@ impl AcquireState {
         }
 
         let candidate_id = self.candidate.expect("candidate present");
-        let Some(candidate) = ctx.resolve(candidate_id) else {
+        if ctx.resolve(candidate_id).is_none() {
             self.candidate = None;
+            self.get_requested = false;
             return CommandStepResult::running(self.update_to_stop(ctx));
-        };
+        }
 
         self.buy_requested = false;
         self.last_buy_request = None;
 
-        if let Some(container_id) = candidate.container {
-            if let Some(builder_container) = ctx.object.container {
-                if builder_container != container_id {
-                    let mut update = self.update_to_stop(ctx).unwrap_or_else(ObjectUpdate::new);
-                    if let Some(snapshot) = ctx.resolve(builder_container) {
-                        update.position = Some(snapshot.position);
-                    } else {
-                        update.position = Some(ctx.position);
-                    }
-                    update.velocity = Some(Vector2::ZERO);
-                    update.container = Some(None);
-                    return CommandStepResult::running(Some(update));
-                }
-            }
-        }
-
-        if candidate.container.is_none() {
-            if let Some(builder_container) = ctx.object.container {
-                let mut update = self.update_to_stop(ctx).unwrap_or_else(ObjectUpdate::new);
-                if let Some(snapshot) = ctx.resolve(builder_container) {
-                    update.position = Some(snapshot.position);
-                } else {
-                    update.position = Some(ctx.position);
-                }
-                update.velocity = Some(Vector2::ZERO);
-                update.container = Some(None);
-                return CommandStepResult::running(Some(update));
-            }
-        }
-
-        let dx = candidate.position.x - ctx.position.x;
-        let dy = candidate.position.y - ctx.position.y;
-        const PICKUP_RANGE: i32 = 12;
-        if dx.abs() <= PICKUP_RANGE && dy.abs() <= PICKUP_RANGE {
-            if let Some(container_id) = candidate.container {
-                if container_id != ctx.object.id {
-                    return self.handle_container_candidate(ctx, candidate_id, container_id);
-                }
-            }
-            return CommandStepResult::running(self.update_to_stop(ctx));
-        }
-
-        if self.should_issue_move(ctx.frame) {
-            let request = CommandRequest::new(CommandId::MoveTo)
+        if !self.get_requested {
+            self.get_requested = true;
+            let mut result = CommandStepResult::running(self.update_to_stop(ctx));
+            let request = CommandRequest::new(CommandId::Get)
                 .with_target(Some(candidate_id))
-                .with_update_interval(10);
-            let operations = vec![CommandOperation::PushFront(request)];
-            return CommandStepResult::running(self.update_to_stop(ctx))
-                .with_operations(operations);
+                .with_update_interval(40)
+                .with_mode(CommandMode::SilentSub);
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
         }
 
         CommandStepResult::running(self.update_to_stop(ctx))
@@ -10095,9 +10163,20 @@ impl CommandState {
     }
 }
 
+fn stop_update(ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+    if ctx.object.command_direction != CommandDirection::Stop {
+        Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ActiveCommand {
     state: CommandState,
+    mode: CommandMode,
+    retries: i32,
+    failures: i32,
 }
 
 impl ActiveCommand {
@@ -10142,11 +10221,21 @@ impl ActiveCommand {
             return Err(CommandError::Unsupported);
         }
 
-        Ok(Self { state })
+        Ok(Self {
+            state,
+            mode: request.mode,
+            retries: request.retries.max(0),
+            failures: 0,
+        })
     }
 
-    fn from_state(state: CommandState) -> Self {
-        Self { state }
+    fn from_snapshot(snapshot: CommandSnapshot) -> Self {
+        Self {
+            state: snapshot.state,
+            mode: snapshot.mode,
+            retries: snapshot.retries,
+            failures: snapshot.failures,
+        }
     }
 
     fn id(&self) -> Option<CommandId> {
@@ -10154,6 +10243,22 @@ impl ActiveCommand {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if self.failures > 0 {
+            if self.retries > 0 {
+                self.failures = 0;
+                self.retries -= 1;
+                let request = CommandRequest::new(CommandId::Retry)
+                    .with_update_interval(10)
+                    .with_mode(CommandMode::SilentSub);
+                let mut result = CommandStepResult::running(stop_update(ctx));
+                result.operations.push(CommandOperation::PushFront(request));
+                return result;
+            }
+            let update = stop_update(ctx);
+            self.failures = 0;
+            return CommandStepResult::failed(update);
+        }
+
         match &mut self.state {
             CommandState::Follow(state) => state.step(ctx),
             CommandState::MoveTo(state) => state.step(ctx),
