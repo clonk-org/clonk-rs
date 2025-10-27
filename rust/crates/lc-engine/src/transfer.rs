@@ -57,6 +57,10 @@ pub struct TransferZoneTable {
 }
 
 impl TransferZoneTable {
+    pub fn get(&self, owner: ObjectId) -> Option<&TransferZone> {
+        self.zones.get(&owner)
+    }
+
     pub fn set(&mut self, owner: ObjectId, rect: TransferZoneRect) {
         if rect.width <= 0 || rect.height <= 0 {
             self.zones.remove(&owner);

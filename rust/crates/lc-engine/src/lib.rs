@@ -81,8 +81,9 @@ pub struct ContextMenuEntry {
 }
 
 use command::{
-    CommandDefinitionSnapshot, CommandEvent, CommandObjectSnapshot, CommandOperation,
-    CommandPlayerSnapshot, CommandRuntimeContext, CommandStack, CommandStepResult,
+    CallResultAction, CommandDefinitionSnapshot, CommandEvent, CommandId, CommandObjectSnapshot,
+    CommandOperation, CommandPlayerSnapshot, CommandRuntimeContext, CommandStack,
+    CommandStepResult,
 };
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
@@ -7722,6 +7723,7 @@ impl Engine {
                     definitions: &definition_snapshots,
                     structures_need_energy: self.structures_need_energy,
                     base_buy_enabled: self.base_buy_enabled,
+                    transfer_zones: &self.transfer_zones,
                 };
                 if let Some(result) = object.step_command_stack(command_context) {
                     if result.update.is_some() || !result.events.is_empty() {
@@ -11215,6 +11217,7 @@ impl Engine {
                 tx,
                 ty,
                 target2,
+                on_result,
             } => {
                 let Some(index) = self.find_object_index(object_id) else {
                     return Err(EngineError::UnknownObject(object_id));
@@ -11226,7 +11229,10 @@ impl Engine {
                 args.push(ty_value);
                 let target2_value = target2.map(object_reference_value).unwrap_or(Value::Nil);
                 args.push(target2_value);
-                let _ = self.call_object_function(index, &function, args)?;
+                let value = self.call_object_function(index, &function, args)?;
+                if let Some(action) = on_result {
+                    self.apply_call_result(action, caller, value.as_bool())?;
+                }
             }
             CommandEvent::AdjustPlayerHomeBaseMaterial {
                 player_id,
@@ -11239,6 +11245,43 @@ impl Engine {
                 let _ = self.adjust_player_wealth(player_id, delta)?;
             }
         }
+        Ok(())
+    }
+
+    fn apply_call_result(
+        &mut self,
+        action: CallResultAction,
+        caller: ObjectId,
+        result: bool,
+    ) -> Result<(), EngineError> {
+        match action {
+            CallResultAction::CompleteCommandOnFalse { command } => {
+                if !result {
+                    self.complete_command(caller, command)?;
+                }
+            }
+            CallResultAction::CompleteCommandOnTrue { command } => {
+                if result {
+                    self.complete_command(caller, command)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn complete_command(
+        &mut self,
+        object_id: ObjectId,
+        command: CommandId,
+    ) -> Result<(), EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Err(EngineError::UnknownObject(object_id));
+        };
+        let object = self
+            .objects
+            .get_mut(index)
+            .ok_or_else(|| EngineError::UnknownObject(object_id))?;
+        object.commands.complete_front_if(command);
         Ok(())
     }
 

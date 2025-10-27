@@ -5,6 +5,7 @@ use crate::{
     ObjectStatus, ObjectUpdate, PlayerStatus, Vector2, CATEGORY_OBJECT, CATEGORY_STATIC_BACK,
     CATEGORY_STRUCTURE, CATEGORY_VEHICLE, FULL_CON, LINE_CONNECT_POWER_INPUT, OWNER_NONE,
 };
+use crate::transfer::{TransferZone, TransferZoneTable};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of commands that may be queued for an object.
@@ -201,6 +202,12 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    use crate::transfer::TransferZoneRect;
+    use once_cell::sync::Lazy;
+
+    static EMPTY_TRANSFER_ZONES: Lazy<TransferZoneTable> =
+        Lazy::new(TransferZoneTable::default);
+
     use crate::ocf;
 
     fn snapshot_with_id(id: u64) -> CommandObjectSnapshot {
@@ -256,6 +263,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = FollowState::from_request(
@@ -297,6 +305,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = FollowState::from_request(
@@ -345,6 +354,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let result0 = state.step(&ctx0);
@@ -365,6 +375,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let result1 = state.step(&ctx1);
@@ -379,6 +390,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let result2 = state.step(&ctx2);
@@ -418,6 +430,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = GetState::from_request(
@@ -477,6 +490,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = GetState::from_request(
@@ -540,6 +554,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = GetState::from_request(
@@ -589,6 +604,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = GetState::from_request(
@@ -637,6 +653,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = PutState::from_request(
@@ -696,6 +713,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = PutState::from_request(
@@ -747,6 +765,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = PutState::from_request(
@@ -794,6 +813,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
@@ -839,6 +859,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = DropState::from_request(
@@ -895,6 +916,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
@@ -945,6 +967,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
@@ -988,6 +1011,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let result = state.step(&ctx);
@@ -1027,6 +1051,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let result = state.step(&ctx);
@@ -1068,6 +1093,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let result = state.step(&ctx);
@@ -1110,6 +1136,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let result = state.step(&ctx);
@@ -1146,6 +1173,7 @@ mod tests {
                 definitions: &definitions,
                 structures_need_energy: false,
                 base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
             };
             let result = stack.step(&ctx).expect("running result");
             assert_eq!(result.status, CommandStatus::Running);
@@ -1161,6 +1189,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
         let result = stack.step(&ctx).expect("completion result");
         assert_eq!(result.status, CommandStatus::Completed);
@@ -1196,6 +1225,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = EnterState::from_request(
@@ -1242,6 +1272,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = EnterState::from_request(
@@ -1296,6 +1327,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = GrabState::from_request(
@@ -1351,6 +1383,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = GrabState::from_request(
@@ -1395,6 +1428,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = GrabState::from_request(
@@ -1441,6 +1475,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = GrabState::from_request(
@@ -1493,6 +1528,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = PushToState::from_request(
@@ -1537,6 +1573,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = PushToState::from_request(
@@ -1612,6 +1649,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ConstructState::from_request(
@@ -1673,6 +1711,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let second = state.step(&ctx_after_spawn);
@@ -1734,6 +1773,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ConstructState::from_request(
@@ -1784,6 +1824,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = PushToState::from_request(
@@ -1836,6 +1877,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = PushToState::from_request(
@@ -1886,6 +1928,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = PushToState::from_request(
@@ -1939,6 +1982,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = PushToState::from_request(
@@ -1992,6 +2036,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = UnGrabState::from_request(&CommandRequest::new(CommandId::UnGrab));
@@ -2027,6 +2072,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = UnGrabState::from_request(&CommandRequest::new(CommandId::UnGrab));
@@ -2058,6 +2104,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = JumpState::from_request(
@@ -2093,6 +2140,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = JumpState::from_request(
@@ -2137,6 +2185,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ThrowState::from_request(
@@ -2192,6 +2241,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ThrowState::from_request(
@@ -2246,6 +2296,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ThrowState::from_request(
@@ -2303,6 +2354,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ThrowState::from_request(
@@ -2353,6 +2405,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state =
@@ -2395,6 +2448,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state =
@@ -2436,6 +2490,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state =
@@ -2464,6 +2519,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state =
@@ -2508,6 +2564,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state =
@@ -2549,6 +2606,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state =
@@ -2590,6 +2648,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state =
@@ -2628,6 +2687,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = AttackState::from_request(
@@ -2666,6 +2726,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = AttackState::from_request(
@@ -2721,6 +2782,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = CallState::from_request(
@@ -2747,6 +2809,7 @@ mod tests {
                 tx,
                 ty,
                 target2,
+                on_result,
             } => {
                 assert_eq!(*object_id, target_id);
                 assert_eq!(function, "ControlCall");
@@ -2754,6 +2817,7 @@ mod tests {
                 assert_eq!(*tx, Some(42));
                 assert_eq!(*ty, Some(7));
                 assert_eq!(*target2, Some(target2_id));
+                assert!(on_result.is_none());
             }
             other => panic!("unexpected event: {:?}", other),
         }
@@ -2761,6 +2825,210 @@ mod tests {
         let second = state.step(&ctx);
         assert_eq!(second.status, CommandStatus::Completed);
         assert!(second.events.is_empty());
+    }
+
+    #[test]
+    fn transfer_requires_target() {
+        let request = CommandRequest::new(CommandId::Transfer);
+        assert!(TransferState::from_request(&request).is_err());
+    }
+
+    #[test]
+    fn transfer_requests_move_when_outside_zone() {
+        let actor_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(0, 0);
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(100, 0);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(target.id, target.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let mut transfer_zones = TransferZoneTable::default();
+        transfer_zones.set(
+            target_id,
+            TransferZoneRect {
+                x: 90,
+                y: -10,
+                width: 20,
+                height: 40,
+            },
+        );
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            transfer_zones: &transfer_zones,
+        };
+
+        let mut state = TransferState::from_request(
+            &CommandRequest::new(CommandId::Transfer).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.events.len(), 0);
+        assert_eq!(result.operations.len(), 1);
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::MoveTo);
+                assert_eq!(request.tx, Some(89));
+                assert_eq!(request.ty, Some(0));
+            }
+            other => panic!("unexpected operation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn transfer_emits_control_transfer_event() {
+        let actor_id = ObjectId::new(100);
+        let target_id = ObjectId::new(200);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(95, 0);
+        actor.command_direction = CommandDirection::Right;
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(100, 0);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(target.id, target.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let mut transfer_zones = TransferZoneTable::default();
+        transfer_zones.set(
+            target_id,
+            TransferZoneRect {
+                x: 90,
+                y: -10,
+                width: 20,
+                height: 40,
+            },
+        );
+
+        let mut state = TransferState::from_request(
+            &CommandRequest::new(CommandId::Transfer)
+                .with_target(Some(target_id))
+                .with_tx(Some(42))
+                .with_ty(Some(-5)),
+        )
+        .expect("state created");
+
+        let ctx = CommandRuntimeContext {
+            frame: 5,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            transfer_zones: &transfer_zones,
+        };
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        let update = result.update.expect("transfer should stop actor");
+        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert_eq!(result.operations.len(), 0);
+        assert_eq!(result.events.len(), 1);
+        match &result.events[0] {
+            CommandEvent::CallObjectFunction {
+                object_id,
+                function,
+                caller,
+                tx,
+                ty,
+                target2,
+                on_result,
+            } => {
+                assert_eq!(*object_id, target_id);
+                assert_eq!(function, "ControlTransfer");
+                assert_eq!(*caller, actor_id);
+                assert_eq!(*tx, Some(42));
+                assert_eq!(*ty, Some(-5));
+                assert!(target2.is_none());
+                match on_result {
+                    Some(CallResultAction::CompleteCommandOnFalse { command }) => {
+                        assert_eq!(*command, CommandId::Transfer);
+                    }
+                    other => panic!("unexpected result action: {:?}", other),
+                }
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        let ctx_next = CommandRuntimeContext {
+            frame: 6,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            transfer_zones: &transfer_zones,
+        };
+
+        let follow_up = state.step(&ctx_next);
+        assert_eq!(follow_up.status, CommandStatus::Running);
+        assert!(follow_up.events.is_empty());
+    }
+
+    #[test]
+    fn transfer_fails_without_zone() {
+        let actor_id = ObjectId::new(123);
+        let target_id = ObjectId::new(456);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.position = Vector2::new(0, 0);
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.position = Vector2::new(10, 0);
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+        objects.insert(target.id, target.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+
+        let ctx = CommandRuntimeContext {
+            frame: 0,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state = TransferState::from_request(
+            &CommandRequest::new(CommandId::Transfer).with_target(Some(target_id)),
+        )
+        .expect("state created");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Failed);
     }
 
     #[test]
@@ -2791,6 +3059,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = BuildState::from_request(
@@ -2835,6 +3104,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ActivateState::from_request(
@@ -2884,6 +3154,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ActivateState::from_request(
@@ -2942,6 +3213,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ActivateState::from_request(
@@ -2990,6 +3262,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: true,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = BuildState::from_request(
@@ -3042,6 +3315,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = AcquireState::from_request(
@@ -3086,6 +3360,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = AcquireState::from_request(
@@ -3143,6 +3418,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = AcquireState::from_request(
@@ -3205,6 +3481,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = AcquireState::from_request(
@@ -3242,6 +3519,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = AcquireState::from_request(
@@ -3269,6 +3547,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let second = state.step(&later_ctx);
@@ -3302,6 +3581,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let initial = state.step(&initial_ctx);
@@ -3321,6 +3601,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mid = state.step(&mid_ctx);
@@ -3339,6 +3620,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let retry = state.step(&retry_ctx);
@@ -3403,6 +3685,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = AcquireState::from_request(
@@ -3455,6 +3738,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = AcquireState::from_request(
@@ -3508,6 +3792,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = AcquireState::from_request(
@@ -3562,6 +3847,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let first_step = stack.step(&ctx_initial).expect("first step evaluates");
@@ -3603,6 +3889,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let original_second = stack.step(&ctx_followup).expect("second step evaluates");
@@ -3669,6 +3956,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let result = stack.step(&ctx).expect("put evaluates");
@@ -3747,6 +4035,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = BuyState::from_request(
@@ -3865,6 +4154,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = BuyState::from_request(
@@ -3949,6 +4239,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = BuyState::from_request(
@@ -4029,6 +4320,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = BuyState::from_request(
@@ -4105,6 +4397,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ChopState::from_request(
@@ -4163,6 +4456,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ChopState::from_request(
@@ -4220,6 +4514,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ChopState::from_request(
@@ -4275,6 +4570,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ChopState::from_request(
@@ -4325,6 +4621,7 @@ mod tests {
             definitions: &definitions,
             structures_need_energy: false,
             base_buy_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
         };
 
         let mut state = ChopState::from_request(
@@ -4461,6 +4758,8 @@ pub enum CommandEvent {
         tx: Option<i32>,
         ty: Option<i32>,
         target2: Option<ObjectId>,
+        #[serde(default)]
+        on_result: Option<CallResultAction>,
     },
     AdjustPlayerHomeBaseMaterial {
         player_id: i32,
@@ -4471,6 +4770,12 @@ pub enum CommandEvent {
         player_id: i32,
         delta: i32,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallResultAction {
+    CompleteCommandOnFalse { command: CommandId },
+    CompleteCommandOnTrue { command: CommandId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4577,6 +4882,7 @@ pub struct CommandRuntimeContext<'a> {
     pub definitions: &'a HashMap<DefinitionId, CommandDefinitionSnapshot>,
     pub structures_need_energy: bool,
     pub base_buy_enabled: bool,
+    pub transfer_zones: &'a TransferZoneTable,
 }
 
 impl<'a> CommandRuntimeContext<'a> {
@@ -4597,6 +4903,10 @@ impl<'a> CommandRuntimeContext<'a> {
 
     pub fn definition(&self, id: &str) -> Option<&CommandDefinitionSnapshot> {
         self.definitions.get(id)
+    }
+
+    pub fn transfer_zone(&self, owner: ObjectId) -> Option<&TransferZone> {
+        self.transfer_zones.get(owner)
     }
 }
 
@@ -4677,6 +4987,16 @@ impl CommandStack {
         let command = ActiveCommand::from_request(request)?;
         self.entries.push_back(command);
         Ok(())
+    }
+
+    pub fn complete_front_if(&mut self, id: CommandId) -> bool {
+        if let Some(front) = self.entries.front() {
+            if front.id() == Some(id) {
+                self.entries.pop_front();
+                return true;
+            }
+        }
+        false
     }
 
     pub fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<CommandStepResult> {
@@ -5362,6 +5682,129 @@ impl ConstructState {
         ));
 
         CommandStepResult::completed(update_to_stop).with_operations(operations)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct TransferState {
+    target: ObjectId,
+    tx: Option<i32>,
+    ty: Option<i32>,
+    last_move_order: Option<u64>,
+    last_script_call: Option<u64>,
+}
+
+impl TransferState {
+    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
+        let target = request.target.ok_or(CommandError::Unsupported)?;
+        Ok(Self {
+            target,
+            tx: request.tx,
+            ty: request.ty,
+            last_move_order: None,
+            last_script_call: None,
+        })
+    }
+
+    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+        if ctx.object.command_direction != CommandDirection::Stop {
+            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
+        } else {
+            None
+        }
+    }
+
+    fn within_zone(&self, ctx: &CommandRuntimeContext<'_>, zone: &TransferZone) -> bool {
+        let left = zone.x - 5;
+        let right = zone.x + zone.width - 1 + 5;
+        let x = ctx.position.x;
+        x >= left && x <= right
+    }
+
+    fn entry_point(&self, zone: &TransferZone, actor_pos: Vector2) -> Vector2 {
+        let inside_x = actor_pos.x >= zone.x && actor_pos.x < zone.x + zone.width;
+        let inside_y = actor_pos.y >= zone.y && actor_pos.y < zone.y + zone.height;
+        let mut target_x = actor_pos.x;
+        let mut target_y = actor_pos.y;
+
+        if inside_x && inside_y {
+            if actor_pos.x < zone.x + zone.width / 2 {
+                target_x = zone.x - 1;
+            } else {
+                target_x = zone.x + zone.width;
+            }
+        }
+
+        target_x = target_x.clamp(zone.x - 1, zone.x + zone.width);
+        target_y = target_y.clamp(zone.y - 1, zone.y + zone.height);
+        Vector2::new(target_x, target_y)
+    }
+
+    fn should_issue_move(&mut self, frame: u64) -> bool {
+        const MOVE_COOLDOWN: u64 = 12;
+        match self.last_move_order {
+            Some(last) if frame.saturating_sub(last) < MOVE_COOLDOWN => false,
+            _ => {
+                self.last_move_order = Some(frame);
+                true
+            }
+        }
+    }
+
+    fn should_call_script(&mut self, frame: u64) -> bool {
+        if frame % 5 != 0 {
+            return false;
+        }
+        if self.last_script_call == Some(frame) {
+            return false;
+        }
+        self.last_script_call = Some(frame);
+        true
+    }
+
+    fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let Some(target_snapshot) = ctx.resolve(self.target) else {
+            return CommandStepResult::failed(self.update_to_stop(ctx));
+        };
+        if !target_snapshot.is_active() {
+            return CommandStepResult::failed(self.update_to_stop(ctx));
+        }
+        let Some(zone) = ctx.transfer_zone(self.target) else {
+            return CommandStepResult::failed(self.update_to_stop(ctx));
+        };
+
+        let update = self.update_to_stop(ctx);
+
+        if !self.within_zone(ctx, zone) {
+            if self.should_issue_move(ctx.frame) {
+                let entry = self.entry_point(zone, ctx.position);
+                let request = CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(entry.x))
+                    .with_ty(Some(entry.y))
+                    .with_update_interval(10);
+                return CommandStepResult::running(update).with_operations(vec![
+                    CommandOperation::PushFront(request),
+                ]);
+            }
+            return CommandStepResult::running(update);
+        }
+
+        if self.should_call_script(ctx.frame) {
+            let event = CommandEvent::CallObjectFunction {
+                object_id: self.target,
+                function: "ControlTransfer".into(),
+                caller: ctx.object.id,
+                tx: self.tx,
+                ty: self.ty,
+                target2: None,
+                on_result: Some(CallResultAction::CompleteCommandOnFalse {
+                    command: CommandId::Transfer,
+                }),
+            };
+            return CommandStepResult::running(update).with_events(vec![event]);
+        }
+
+        CommandStepResult::running(update)
     }
 }
 
@@ -7707,6 +8150,7 @@ impl CallState {
             tx: self.tx,
             ty: self.ty,
             target2: self.target2,
+            on_result: None,
         };
 
         CommandStepResult::completed(update).with_events(vec![event])
@@ -8487,6 +8931,7 @@ enum CommandState {
     Exit(ExitState),
     Build(BuildState),
     Construct(ConstructState),
+    Transfer(TransferState),
     Chop(ChopState),
     Grab(GrabState),
     Throw(ThrowState),
@@ -8509,6 +8954,40 @@ enum CommandState {
     Unsupported,
 }
 
+impl CommandState {
+    fn id(&self) -> Option<CommandId> {
+        match self {
+            CommandState::Follow(_) => Some(CommandId::Follow),
+            CommandState::MoveTo(_) => Some(CommandId::MoveTo),
+            CommandState::Enter(_) => Some(CommandId::Enter),
+            CommandState::Exit(_) => Some(CommandId::Exit),
+            CommandState::Build(_) => Some(CommandId::Build),
+            CommandState::Construct(_) => Some(CommandId::Construct),
+            CommandState::Transfer(_) => Some(CommandId::Transfer),
+            CommandState::Chop(_) => Some(CommandId::Chop),
+            CommandState::Grab(_) => Some(CommandId::Grab),
+            CommandState::Throw(_) => Some(CommandId::Throw),
+            CommandState::UnGrab(_) => Some(CommandId::UnGrab),
+            CommandState::Jump(_) => Some(CommandId::Jump),
+            CommandState::Wait(_) => Some(CommandId::Wait),
+            CommandState::Put(_) => Some(CommandId::Put),
+            CommandState::Drop(_) => Some(CommandId::Drop),
+            CommandState::Get(_) => Some(CommandId::Get),
+            CommandState::Dig(_) => Some(CommandId::Dig),
+            CommandState::Activate(_) => Some(CommandId::Activate),
+            CommandState::PushTo(_) => Some(CommandId::PushTo),
+            CommandState::Retry(_) => Some(CommandId::Retry),
+            CommandState::Attack(_) => Some(CommandId::Attack),
+            CommandState::Call(_) => Some(CommandId::Call),
+            CommandState::Buy(_) => Some(CommandId::Buy),
+            CommandState::Acquire(_) => Some(CommandId::Acquire),
+            CommandState::Home(_) => Some(CommandId::Home),
+            CommandState::Energy(_) => Some(CommandId::Energy),
+            CommandState::Unsupported => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ActiveCommand {
     state: CommandState,
@@ -8524,6 +9003,9 @@ impl ActiveCommand {
             CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
             CommandId::Construct => {
                 CommandState::Construct(ConstructState::from_request(&request)?)
+            }
+            CommandId::Transfer => {
+                CommandState::Transfer(TransferState::from_request(&request)?)
             }
             CommandId::Chop => CommandState::Chop(ChopState::from_request(&request)?),
             CommandId::Grab => CommandState::Grab(GrabState::from_request(&request)?),
@@ -8558,6 +9040,10 @@ impl ActiveCommand {
         Self { state }
     }
 
+    fn id(&self) -> Option<CommandId> {
+        self.state.id()
+    }
+
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         match &mut self.state {
             CommandState::Follow(state) => state.step(ctx),
@@ -8566,6 +9052,7 @@ impl ActiveCommand {
             CommandState::Exit(state) => state.step(ctx),
             CommandState::Build(state) => state.step(ctx),
             CommandState::Construct(state) => state.step(ctx),
+            CommandState::Transfer(state) => state.step(ctx),
             CommandState::Chop(state) => state.step(ctx),
             CommandState::Grab(state) => state.step(ctx),
             CommandState::Throw(state) => state.step(ctx),
