@@ -1120,36 +1120,46 @@ impl<'a> Parser<'a> {
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         // Check for ! or "not" keyword
         if self.consume_if_symbol(Symbol::Bang)?.is_some() || self.consume_if_identifier("not")?.is_some() {
-            // Speculative parse: try parsing assignment expression as operand
-            // This allows patterns like: !x = y  →  !(x = y)
-            // While preserving precedence for: !a + b  →  (!a) + b
+            // Only use speculative parsing if we're not already in speculative mode
+            // This avoids nested speculative parsing (e.g., !!x or nested expressions)
+            let already_speculative = self.speculative_tokens.is_some();
 
-            // NOTE: ! token already consumed, speculative mode tracks only the operand tokens
-            self.begin_speculative();
+            if !already_speculative {
+                // Speculative parse: try parsing assignment expression as operand
+                // This allows patterns like: !x = y  →  !(x = y)
+                // While preserving precedence for: !a + b  →  (!a) + b
 
-            // Try parsing an assignment expression
-            let result = self.parse_assignment();
+                // NOTE: ! token already consumed, speculative mode tracks only the operand tokens
+                self.begin_speculative();
 
-            // Ensure we always clean up speculative mode
-            let final_result = match result {
-                Ok(expr) => {
-                    // Always commit and use the expression
-                    // If it's an assignment: !(x = y) works correctly
-                    // If not: !x also works correctly (parse_assignment parsed just the operand)
-                    self.commit_speculative();
-                    Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)))
-                }
-                Err(e) => {
-                    // Parse failed, reset and try normal precedence (skip ! handling since already consumed)
-                    self.reset_speculative();
-                    match self.parse_unary() {
-                        Ok(operand) => Ok(Expr::Unary(UnaryOp::Not, Box::new(operand))),
-                        Err(_) => Err(e), // Return original error
+                // Try parsing an assignment expression
+                let result = self.parse_assignment();
+
+                // Ensure we always clean up speculative mode
+                let final_result = match result {
+                    Ok(expr) => {
+                        // Always commit and use the expression
+                        // If it's an assignment: !(x = y) works correctly
+                        // If not: !x also works correctly (parse_assignment parsed just the operand)
+                        self.commit_speculative();
+                        Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)))
                     }
-                }
-            };
+                    Err(e) => {
+                        // Parse failed, reset and try normal precedence (skip ! handling since already consumed)
+                        self.reset_speculative();
+                        match self.parse_unary() {
+                            Ok(operand) => Ok(Expr::Unary(UnaryOp::Not, Box::new(operand))),
+                            Err(_) => Err(e), // Return original error
+                        }
+                    }
+                };
 
-            return final_result;
+                return final_result;
+            } else {
+                // Already in speculative mode, use normal precedence
+                let expr = self.parse_unary()?;
+                return Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)));
+            }
         }
         if self.consume_if_symbol(Symbol::Minus)?.is_some() {
             let expr = self.parse_unary()?;
