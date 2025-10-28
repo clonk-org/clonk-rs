@@ -387,7 +387,22 @@ impl<'a> Parser<'a> {
         if self.consume_if_symbol(Symbol::Semicolon)?.is_some() {
             return Ok(Stmt::Return(None));
         }
-        // Handle: return expr; (including return(expr); where parens are part of the expression)
+        // Handle: return(); (empty parentheses - legacy form equivalent to return;)
+        // We need to peek ahead two tokens to see if we have ()
+        if self.check_symbol(Symbol::LParen)? {
+            let lparen = self.consume()?; // consume '('
+            if self.check_symbol(Symbol::RParen)? {
+                self.consume()?; // consume ')'
+                self.expect_symbol(Symbol::Semicolon, "expected ';' after return statement")?;
+                return Ok(Stmt::Return(None));
+            }
+            // Not return(), put both tokens back: '(' first, then the peeked token
+            if let Some(peeked) = self.peeked.take() {
+                self.lookahead_buffer.insert(0, peeked);
+            }
+            self.lookahead_buffer.insert(0, lparen);
+        }
+        // Handle: return expr; (including return (expr) op expr; where parens are part of the expression)
         let expr = self.parse_expression()?;
         self.expect_symbol(Symbol::Semicolon, "expected ';' after return value")?;
         Ok(Stmt::Return(Some(expr)))
@@ -1435,6 +1450,18 @@ mod tests {
     #[test]
     fn parse_return_without_value() {
         let result = parse_script("func Test() { return; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_return_with_empty_parentheses() {
+        let result = parse_script("func Test() { return(); }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_return_with_empty_parens_in_if() {
+        let result = parse_script("func Test() { if (1) return(); }");
         assert!(result.is_ok());
     }
 
