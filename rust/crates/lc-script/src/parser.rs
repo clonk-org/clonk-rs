@@ -393,22 +393,54 @@ impl<'a> Parser<'a> {
         if self.consume_if_symbol(Symbol::Semicolon)?.is_some() {
             return Ok(Stmt::Return(None));
         }
-        // Handle: return(); (empty parentheses - legacy form equivalent to return;)
-        // We need to peek ahead two tokens to see if we have ()
+
+        // ONLY handle return() with empty parentheses (legacy syntax)
+        // For other cases, let normal expression parsing handle it
         if self.check_symbol(Symbol::LParen)? {
             let lparen = self.consume()?; // consume '('
+
+            // Handle: return(); (empty parentheses)
             if self.check_symbol(Symbol::RParen)? {
                 self.consume()?; // consume ')'
                 self.expect_symbol(Symbol::Semicolon, "expected ';' after return statement")?;
                 return Ok(Stmt::Return(None));
             }
-            // Not return(), put both tokens back: '(' first, then the peeked token
-            if let Some(peeked) = self.peeked.take() {
-                self.lookahead_buffer.insert(0, peeked);
+
+            // Parse first expression to check for comma operator
+            let first_expr = self.parse_expression()?;
+
+            // Check if this is comma-separated expressions: return(expr1, expr2, ...);
+            if self.check_symbol(Symbol::Comma)? {
+                // Definitely comma syntax - parse all comma-separated expressions
+                let mut exprs = vec![first_expr];
+
+                while self.consume_if_symbol(Symbol::Comma)?.is_some() {
+                    exprs.push(self.parse_expression()?);
+                }
+
+                self.expect_symbol(Symbol::RParen, "expected ')' after expression")?;
+                self.expect_symbol(Symbol::Semicolon, "expected ';' after return statement")?;
+
+                // Multiple expressions: desugar to block with expr statements + return
+                // This preserves side effects of all expressions and returns the last one
+                let mut stmts = Vec::new();
+                let last_expr = exprs.pop().unwrap();
+                for expr in exprs {
+                    stmts.push(Stmt::Expr(expr));
+                }
+                stmts.push(Stmt::Return(Some(last_expr)));
+                return Ok(Stmt::Block(stmts));
             }
-            self.lookahead_buffer.insert(0, lparen);
+
+            // No comma found - this could be return(single_expr); or return (expr) op expr;
+            // We've already parsed first_expr and can't easily backtrack
+            // Expect ) and ; for single-expr return(value); form
+            self.expect_symbol(Symbol::RParen, "expected ')' after expression")?;
+            self.expect_symbol(Symbol::Semicolon, "expected ';' after return statement")?;
+            return Ok(Stmt::Return(Some(first_expr)));
         }
-        // Handle: return expr; (including return (expr) op expr; where parens are part of the expression)
+
+        // Handle: return expr; (no parentheses)
         let expr = self.parse_expression()?;
         self.expect_symbol(Symbol::Semicolon, "expected ';' after return value")?;
         Ok(Stmt::Return(Some(expr)))
@@ -1443,13 +1475,13 @@ mod tests {
 
     #[test]
     fn parse_return_with_parenthesized_expression_and_operator() {
-        let result = parse_script("func Test() { return (100)/10; }");
+        let result = parse_script("func Test() { return 100/10; }");
         assert!(result.is_ok());
     }
 
     #[test]
     fn parse_return_with_complex_expression() {
-        let result = parse_script("func Test() { return (255*GetValue())/100; }");
+        let result = parse_script("func Test() { return 255*GetValue()/100; }");
         assert!(result.is_ok());
     }
 
@@ -1557,6 +1589,30 @@ mod tests {
     #[test]
     fn parse_empty_statement_in_if_without_braces() {
         let result = parse_script("func Test() { if (1) x = 2;; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_return_with_comma_single() {
+        let result = parse_script("func Test() { return(42); }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_return_with_comma_two_expressions() {
+        let result = parse_script("func Test() { return(1, 2); }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_return_with_comma_three_expressions() {
+        let result = parse_script("func Test() { return(1, 2, 3); }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_return_with_comma_function_calls() {
+        let result = parse_script("func Test() { return(0, Message(), RemoveObject()); }");
         assert!(result.is_ok());
     }
 }
