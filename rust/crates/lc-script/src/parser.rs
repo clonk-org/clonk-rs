@@ -158,37 +158,43 @@ impl<'a> Parser<'a> {
     fn parse_type_annotation(&mut self) -> Result<Option<TypeAnnotation>, ParseError> {
         let token = self.peek()?;
         let base_type = match &token.kind {
-            TokenKind::Keyword(Keyword::Int) => {
-                self.consume()?;
-                TypeAnnotation::Int
-            }
-            TokenKind::Keyword(Keyword::Bool) => {
-                self.consume()?;
-                TypeAnnotation::Bool
-            }
-            TokenKind::Keyword(Keyword::String) => {
-                self.consume()?;
-                TypeAnnotation::String
-            }
-            TokenKind::Keyword(Keyword::Object) => {
-                self.consume()?;
-                TypeAnnotation::Object
-            }
-            TokenKind::Keyword(Keyword::Id) => {
-                self.consume()?;
-                TypeAnnotation::Id
-            }
-            TokenKind::Keyword(Keyword::Array) => {
-                self.consume()?;
-                TypeAnnotation::Array
-            }
-            TokenKind::Keyword(Keyword::Proplist) => {
-                self.consume()?;
-                TypeAnnotation::Proplist
-            }
-            TokenKind::Keyword(Keyword::Effect) => {
-                self.consume()?;
-                TypeAnnotation::Effect
+            // Type keywords are contextual - check identifier names
+            TokenKind::Identifier(name) => {
+                match name.as_str() {
+                    "int" => {
+                        self.consume()?;
+                        TypeAnnotation::Int
+                    }
+                    "bool" => {
+                        self.consume()?;
+                        TypeAnnotation::Bool
+                    }
+                    "string" => {
+                        self.consume()?;
+                        TypeAnnotation::String
+                    }
+                    "object" => {
+                        self.consume()?;
+                        TypeAnnotation::Object
+                    }
+                    "id" => {
+                        self.consume()?;
+                        TypeAnnotation::Id
+                    }
+                    "array" => {
+                        self.consume()?;
+                        TypeAnnotation::Array
+                    }
+                    "proplist" => {
+                        self.consume()?;
+                        TypeAnnotation::Proplist
+                    }
+                    "effect" => {
+                        self.consume()?;
+                        TypeAnnotation::Effect
+                    }
+                    _ => return Ok(None),
+                }
             }
             TokenKind::Keyword(Keyword::Nil) => {
                 self.consume()?;
@@ -203,37 +209,49 @@ impl<'a> Parser<'a> {
             while self.consume_if_symbol(Symbol::Pipe)?.is_some() {
                 let next_token = self.peek()?;
                 let next_type = match &next_token.kind {
-                    TokenKind::Keyword(Keyword::Int) => {
-                        self.consume()?;
-                        TypeAnnotation::Int
-                    }
-                    TokenKind::Keyword(Keyword::Bool) => {
-                        self.consume()?;
-                        TypeAnnotation::Bool
-                    }
-                    TokenKind::Keyword(Keyword::String) => {
-                        self.consume()?;
-                        TypeAnnotation::String
-                    }
-                    TokenKind::Keyword(Keyword::Object) => {
-                        self.consume()?;
-                        TypeAnnotation::Object
-                    }
-                    TokenKind::Keyword(Keyword::Id) => {
-                        self.consume()?;
-                        TypeAnnotation::Id
-                    }
-                    TokenKind::Keyword(Keyword::Array) => {
-                        self.consume()?;
-                        TypeAnnotation::Array
-                    }
-                    TokenKind::Keyword(Keyword::Proplist) => {
-                        self.consume()?;
-                        TypeAnnotation::Proplist
-                    }
-                    TokenKind::Keyword(Keyword::Effect) => {
-                        self.consume()?;
-                        TypeAnnotation::Effect
+                    // Type keywords are contextual - check identifier names
+                    TokenKind::Identifier(name) => {
+                        match name.as_str() {
+                            "int" => {
+                                self.consume()?;
+                                TypeAnnotation::Int
+                            }
+                            "bool" => {
+                                self.consume()?;
+                                TypeAnnotation::Bool
+                            }
+                            "string" => {
+                                self.consume()?;
+                                TypeAnnotation::String
+                            }
+                            "object" => {
+                                self.consume()?;
+                                TypeAnnotation::Object
+                            }
+                            "id" => {
+                                self.consume()?;
+                                TypeAnnotation::Id
+                            }
+                            "array" => {
+                                self.consume()?;
+                                TypeAnnotation::Array
+                            }
+                            "proplist" => {
+                                self.consume()?;
+                                TypeAnnotation::Proplist
+                            }
+                            "effect" => {
+                                self.consume()?;
+                                TypeAnnotation::Effect
+                            }
+                            _ => {
+                                return Err(ParseError::new(
+                                    "expected type name after '|' in union type".to_string(),
+                                    next_token.line,
+                                    next_token.column,
+                                ))
+                            }
+                        }
                     }
                     TokenKind::Keyword(Keyword::Nil) => {
                         self.consume()?;
