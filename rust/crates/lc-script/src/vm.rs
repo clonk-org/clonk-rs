@@ -421,6 +421,14 @@ impl<'a> Vm<'a> {
                 // Return the assigned value (assignment is an expression)
                 Ok(value)
             }
+            Expr::Comma(exprs) => {
+                // Comma operator: evaluate all expressions left-to-right, return the last value
+                let mut result = Value::Nil;
+                for expr in exprs {
+                    result = self.evaluate(expr, env, depth)?;
+                }
+                Ok(result)
+            }
             Expr::PreIncrement(expr) => {
                 let target = self.expr_to_assignment_target(expr)?;
                 let old_value = self.get_target_value(env, &target)?;

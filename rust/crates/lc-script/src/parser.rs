@@ -848,7 +848,21 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-        self.parse_assignment()
+        self.parse_comma()
+    }
+
+    fn parse_comma(&mut self) -> Result<Expr, ParseError> {
+        let mut exprs = vec![self.parse_assignment()?];
+
+        while self.consume_if_symbol(Symbol::Comma)?.is_some() {
+            exprs.push(self.parse_assignment()?);
+        }
+
+        if exprs.len() == 1 {
+            Ok(exprs.into_iter().next().unwrap())
+        } else {
+            Ok(Expr::Comma(exprs))
+        }
     }
 
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
@@ -1207,7 +1221,9 @@ impl<'a> Parser<'a> {
             }
 
             // Parse regular expression argument
-            args.push(self.parse_expression()?);
+            // Use parse_assignment() instead of parse_expression() to avoid comma operator
+            // In argument lists, commas separate arguments, not comma expressions
+            args.push(self.parse_assignment()?);
 
             if self.consume_if_symbol(Symbol::Comma)?.is_some() {
                 continue;
@@ -1264,7 +1280,9 @@ impl<'a> Parser<'a> {
         }
         let mut elements = Vec::new();
         loop {
-            elements.push(self.parse_expression()?);
+            // Use parse_assignment() instead of parse_expression() to avoid comma operator
+            // In arrays, commas separate elements, not comma expressions
+            elements.push(self.parse_assignment()?);
             if self.consume_if_symbol(Symbol::Comma)?.is_some() {
                 if self.consume_if_symbol(Symbol::RBracket)?.is_some() {
                     break;
@@ -1285,7 +1303,9 @@ impl<'a> Parser<'a> {
         loop {
             let key = self.parse_proplist_key()?;
             self.expect_symbol(Symbol::Equal, "expected '=' after proplist key")?;
-            let value = self.parse_expression()?;
+            // Use parse_assignment() instead of parse_expression() to avoid comma operator
+            // In proplists, commas separate entries, not comma expressions
+            let value = self.parse_assignment()?;
             entries.push((key, value));
 
             if self.consume_if_symbol(Symbol::Comma)?.is_some() {
