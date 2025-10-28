@@ -54,7 +54,9 @@ impl<'a> Vm<'a> {
         args: &[Value],
         depth: usize,
     ) -> Result<Value, RuntimeError> {
-        if args.len() != function.params.len() {
+        // Allow calling with MORE arguments than declared (extras ignored)
+        // This matches C++ OpenClonk behavior for action callbacks
+        if args.len() < function.params.len() {
             return Err(RuntimeError::new(format!(
                 "function '{name}' expects {} arguments but received {}",
                 function.params.len(),
