@@ -646,13 +646,24 @@ impl<'a> Parser<'a> {
                 Ok(AssignmentTarget::Property(Box::new(base_target), name))
             }
             // Special case: Local(expr) and Var(expr) are assignable lvalues
+            // Local() and Var() without arguments default to slot 0
             Expr::Call { callee, args, is_optional, .. } => {
                 if let Expr::Variable(ref name) = *callee {
-                    if !is_optional && args.len() == 1 {
+                    if !is_optional && (args.len() == 0 || args.len() == 1) {
                         if name == "Local" {
-                            return Ok(AssignmentTarget::LocalSlot(Box::new(args.into_iter().next().unwrap())));
+                            let index = if args.is_empty() {
+                                Box::new(Expr::Literal(Literal::Int(0)))
+                            } else {
+                                Box::new(args.into_iter().next().unwrap())
+                            };
+                            return Ok(AssignmentTarget::LocalSlot(index));
                         } else if name == "Var" {
-                            return Ok(AssignmentTarget::VarSlot(Box::new(args.into_iter().next().unwrap())));
+                            let index = if args.is_empty() {
+                                Box::new(Expr::Literal(Literal::Int(0)))
+                            } else {
+                                Box::new(args.into_iter().next().unwrap())
+                            };
+                            return Ok(AssignmentTarget::VarSlot(index));
                         }
                     }
                 }
