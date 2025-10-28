@@ -7,6 +7,8 @@ use crate::value::Literal;
 pub struct Parser<'a> {
     lexer: Lexer<'a>,
     peeked: Option<Token>,
+    // Additional buffer for multi-token lookahead (used in for-loop disambiguation)
+    lookahead_buffer: Vec<Token>,
 }
 
 impl<'a> Parser<'a> {
@@ -14,6 +16,7 @@ impl<'a> Parser<'a> {
         Self {
             lexer: Lexer::new(source),
             peeked: None,
+            lookahead_buffer: Vec::new(),
         }
     }
 
@@ -521,31 +524,43 @@ impl<'a> Parser<'a> {
         }
 
         // No 'var' - could be for-in with pre-declared variable or C-style for
-        // Check for identifier followed by 'in'
+        // Need 2-token lookahead: identifier + 'in' means for-in, otherwise C-style
         if self.check_identifier()? {
-            let saved_peeked = self.peeked.clone();
+            // Get first token (identifier) without consuming
+            let token1 = self.peek()?.clone();
 
-            // Try to parse as for-in: for(obj in expr)
-            if let Ok(name_token) = self.consume() {
-                if let TokenKind::Identifier(variable) = name_token.kind {
-                    if self.consume_if_keyword(Keyword::In)?.is_some() {
-                        // For-in loop: for(variable in iterable)
-                        let iterable = self.parse_expression()?;
-                        self.expect_symbol(Symbol::RParen, "expected ')' after for-in header")?;
-                        let body = self.parse_stmt_or_block_vec()?;
+            // Get second token by advancing lexer
+            self.peeked.take(); // Clear peeked
+            let token2 = self.lexer.next_token()?; // Get second token directly
 
-                        return Ok(Stmt::ForIn {
-                            variable,
-                            declare_var: false,
-                            iterable,
-                            body,
-                        });
-                    }
-                }
+            // Check if it's for-in pattern
+            let is_for_in = matches!(token2.kind, TokenKind::Keyword(Keyword::In));
+
+            if is_for_in {
+                // For-in: for(variable in iterable)
+                let variable = if let TokenKind::Identifier(name) = token1.kind {
+                    name
+                } else {
+                    unreachable!()
+                };
+
+                // Both tokens are already consumed, just continue parsing
+                let iterable = self.parse_expression()?;
+                self.expect_symbol(Symbol::RParen, "expected ')' after for-in header")?;
+                let body = self.parse_stmt_or_block_vec()?;
+
+                return Ok(Stmt::ForIn {
+                    variable,
+                    declare_var: false,
+                    iterable,
+                    body,
+                });
+            } else {
+                // C-style for: restore both tokens using the lookahead buffer
+                // Put them back in order: token1, token2
+                self.lookahead_buffer.push(token1);
+                self.lookahead_buffer.push(token2);
             }
-
-            // Not for-in, restore and parse as C-style for
-            self.peeked = saved_peeked;
         }
 
         // C-style for loop: for(init; cond; incr) or for(; cond; incr)
@@ -1184,17 +1199,21 @@ impl<'a> Parser<'a> {
 
     fn peek(&mut self) -> Result<&Token, ParseError> {
         if self.peeked.is_none() {
-            self.peeked = Some(self.lexer.next_token()?);
+            // Check lookahead buffer first, then lexer
+            if !self.lookahead_buffer.is_empty() {
+                self.peeked = Some(self.lookahead_buffer.remove(0));
+            } else {
+                self.peeked = Some(self.lexer.next_token()?);
+            }
         }
         Ok(self.peeked.as_ref().unwrap())
     }
 
     fn consume(&mut self) -> Result<Token, ParseError> {
-        if let Some(token) = self.peeked.take() {
-            Ok(token)
-        } else {
-            self.lexer.next_token()
-        }
+        // peek() ensures peeked is populated and honors lookahead buffer
+        self.peek()?;
+        // Now take the peeked token
+        Ok(self.peeked.take().unwrap())
     }
 
     fn next(&mut self) -> Result<Token, ParseError> {
