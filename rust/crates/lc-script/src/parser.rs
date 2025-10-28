@@ -139,10 +139,13 @@ impl<'a> Parser<'a> {
             // Check for optional type annotation
             let type_annotation = self.parse_type_annotation()?;
 
+            // Check for optional reference parameter (&)
+            let is_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
+
             let token = self.expect_identifier("expected parameter name")?;
             if let TokenKind::Identifier(name) = token.kind {
-                if let Some(ty) = type_annotation {
-                    params.push(Parameter::with_type(name, ty));
+                if is_reference || type_annotation.is_some() {
+                    params.push(Parameter::with_reference(name, type_annotation, is_reference));
                 } else {
                     params.push(Parameter::new(name));
                 }

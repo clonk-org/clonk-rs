@@ -89,6 +89,7 @@ pub enum TypeAnnotation {
 pub struct Parameter {
     pub name: String,
     pub type_annotation: Option<TypeAnnotation>,
+    pub is_reference: bool,
 }
 
 impl Parameter {
@@ -96,6 +97,7 @@ impl Parameter {
         Self {
             name,
             type_annotation: None,
+            is_reference: false,
         }
     }
 
@@ -103,6 +105,15 @@ impl Parameter {
         Self {
             name,
             type_annotation: Some(type_annotation),
+            is_reference: false,
+        }
+    }
+
+    pub fn with_reference(name: String, type_annotation: Option<TypeAnnotation>, is_reference: bool) -> Self {
+        Self {
+            name,
+            type_annotation,
+            is_reference,
         }
     }
 }
