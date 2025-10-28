@@ -341,7 +341,7 @@ impl<'a> Parser<'a> {
 
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_and()?;
-        while self.consume_if_symbol(Symbol::OrOr)?.is_some() {
+        while self.consume_if_symbol(Symbol::OrOr)?.is_some() || self.consume_if_keyword(Keyword::Or)?.is_some() {
             let right = self.parse_and()?;
             expr = Expr::Binary(Box::new(expr), BinaryOp::Or, Box::new(right));
         }
@@ -350,7 +350,7 @@ impl<'a> Parser<'a> {
 
     fn parse_and(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_equality()?;
-        while self.consume_if_symbol(Symbol::AndAnd)?.is_some() {
+        while self.consume_if_symbol(Symbol::AndAnd)?.is_some() || self.consume_if_keyword(Keyword::And)?.is_some() {
             let right = self.parse_equality()?;
             expr = Expr::Binary(Box::new(expr), BinaryOp::And, Box::new(right));
         }
@@ -360,10 +360,10 @@ impl<'a> Parser<'a> {
     fn parse_equality(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_comparison()?;
         loop {
-            if self.consume_if_symbol(Symbol::EqualEqual)?.is_some() {
+            if self.consume_if_symbol(Symbol::EqualEqual)?.is_some() || self.consume_if_keyword(Keyword::Eq)?.is_some() {
                 let right = self.parse_comparison()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Equal, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::BangEqual)?.is_some() {
+            } else if self.consume_if_symbol(Symbol::BangEqual)?.is_some() || self.consume_if_keyword(Keyword::Ne)?.is_some() {
                 let right = self.parse_comparison()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::NotEqual, Box::new(right));
             } else {
@@ -376,16 +376,16 @@ impl<'a> Parser<'a> {
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_term()?;
         loop {
-            if self.consume_if_symbol(Symbol::Less)?.is_some() {
+            if self.consume_if_symbol(Symbol::Less)?.is_some() || self.consume_if_keyword(Keyword::Lt)?.is_some() {
                 let right = self.parse_term()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Less, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::LessEqual)?.is_some() {
+            } else if self.consume_if_symbol(Symbol::LessEqual)?.is_some() || self.consume_if_keyword(Keyword::Le)?.is_some() {
                 let right = self.parse_term()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::LessEqual, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::Greater)?.is_some() {
+            } else if self.consume_if_symbol(Symbol::Greater)?.is_some() || self.consume_if_keyword(Keyword::Gt)?.is_some() {
                 let right = self.parse_term()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Greater, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::GreaterEqual)?.is_some() {
+            } else if self.consume_if_symbol(Symbol::GreaterEqual)?.is_some() || self.consume_if_keyword(Keyword::Ge)?.is_some() {
                 let right = self.parse_term()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::GreaterEqual, Box::new(right));
             } else {
@@ -431,7 +431,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
-        if self.consume_if_symbol(Symbol::Bang)?.is_some() {
+        if self.consume_if_symbol(Symbol::Bang)?.is_some() || self.consume_if_keyword(Keyword::Not)?.is_some() {
             let expr = self.parse_unary()?;
             return Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)));
         }

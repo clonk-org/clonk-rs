@@ -33,6 +33,16 @@ pub enum Keyword {
     True,
     False,
     Nil,
+    // Keyword operators (synonyms for symbolic operators)
+    Eq,   // ==
+    Ne,   // !=
+    Lt,   // <
+    Le,   // <=
+    Gt,   // >
+    Ge,   // >=
+    And,  // &&
+    Or,   // ||
+    Not,  // !
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

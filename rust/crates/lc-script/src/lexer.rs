@@ -296,6 +296,16 @@ impl<'a> Lexer<'a> {
             "true" => TokenKind::Keyword(Keyword::True),
             "false" => TokenKind::Keyword(Keyword::False),
             "nil" => TokenKind::Keyword(Keyword::Nil),
+            // Keyword operators (word-based synonyms for symbolic operators)
+            "eq" => TokenKind::Keyword(Keyword::Eq),
+            "ne" => TokenKind::Keyword(Keyword::Ne),
+            "lt" => TokenKind::Keyword(Keyword::Lt),
+            "le" => TokenKind::Keyword(Keyword::Le),
+            "gt" => TokenKind::Keyword(Keyword::Gt),
+            "ge" => TokenKind::Keyword(Keyword::Ge),
+            "and" => TokenKind::Keyword(Keyword::And),
+            "or" => TokenKind::Keyword(Keyword::Or),
+            "not" => TokenKind::Keyword(Keyword::Not),
             _ => TokenKind::Identifier(lexeme.to_string()),
         };
         Token::new(kind, line, column)
