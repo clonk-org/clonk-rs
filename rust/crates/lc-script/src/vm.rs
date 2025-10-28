@@ -725,6 +725,35 @@ impl<'a> Vm<'a> {
                 entries.insert(property.clone(), value);
                 self.assign_target(env, base, Value::Proplist(entries))
             }
+            AssignmentTarget::Index(base, index_expr) => {
+                let base_value = self.assignment_target_value(env, base)?;
+                let index_value = self.evaluate(index_expr, env, 0)?;
+                let index_int = match index_value {
+                    Value::Int(n) => n,
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "array index must be an integer, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let mut elements = match base_value {
+                    Value::Array(elements) => elements,
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "cannot index into value of type {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                // Grow array if necessary
+                let index = index_int as usize;
+                if index >= elements.len() {
+                    elements.resize(index + 1, Value::Nil);
+                }
+                elements[index] = value;
+                self.assign_target(env, base, Value::Array(elements))
+            }
             AssignmentTarget::LocalSlot(index_expr) => {
                 // Evaluate the index expression
                 let index_value = self.evaluate(index_expr, env, 0)?;
@@ -782,6 +811,29 @@ impl<'a> Vm<'a> {
                     }
                     other => Err(RuntimeError::new(format!(
                         "cannot access property '{property}' on value of type {}",
+                        other.type_name()
+                    ))),
+                }
+            }
+            AssignmentTarget::Index(base, index_expr) => {
+                let container = self.assignment_target_value(env, base)?;
+                let index_value = self.evaluate(index_expr, env, 0)?;
+                let index_int = match index_value {
+                    Value::Int(n) => n,
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "array index must be an integer, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                match container {
+                    Value::Array(elements) => {
+                        let index = index_int as usize;
+                        Ok(elements.get(index).cloned().unwrap_or(Value::Nil))
+                    }
+                    other => Err(RuntimeError::new(format!(
+                        "cannot index into value of type {}",
                         other.type_name()
                     ))),
                 }

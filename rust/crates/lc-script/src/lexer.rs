@@ -4,7 +4,7 @@ use crate::token::{Keyword, Symbol, Token, TokenKind};
 pub struct Lexer<'a> {
     input: &'a str,
     chars: std::str::CharIndices<'a>,
-    peeked: Option<(usize, char)>,
+    peeked: Option<(usize, char, usize, usize)>, // (byte_idx, char, line, column)
     line: usize,
     column: usize,
     just_saw_cr: bool,
@@ -306,11 +306,12 @@ impl<'a> Lexer<'a> {
     }
 
     fn bump_char(&mut self) -> Option<(usize, char, usize, usize)> {
-        let (idx, ch) = if let Some(next) = self.peeked.take() {
-            next
-        } else {
-            self.chars.next()?
-        };
+        if let Some((idx, ch, line, column)) = self.peeked.take() {
+            // Return cached character with its original position
+            return Some((idx, ch, line, column));
+        }
+        // Read fresh character
+        let (idx, ch) = self.chars.next()?;
         let line = self.line;
         let column = self.column;
         self.advance_position(ch);
@@ -319,9 +320,14 @@ impl<'a> Lexer<'a> {
 
     fn peek_char(&mut self) -> Option<char> {
         if self.peeked.is_none() {
-            self.peeked = self.chars.next();
+            // Read and cache character with position
+            let (idx, ch) = self.chars.next()?;
+            let line = self.line;
+            let column = self.column;
+            self.advance_position(ch);
+            self.peeked = Some((idx, ch, line, column));
         }
-        self.peeked.map(|(_, ch)| ch)
+        self.peeked.map(|(_, ch, _, _)| ch)
     }
 
     fn advance_position(&mut self, ch: char) {

@@ -646,6 +646,11 @@ impl<'a> Parser<'a> {
                 let base_target = self.expression_to_assignment_target(*base, eq_token)?;
                 Ok(AssignmentTarget::Property(Box::new(base_target), name))
             }
+            // Array/proplist indexing is assignable: arr[i] = value
+            Expr::Index(base, index) => {
+                let base_target = self.expression_to_assignment_target(*base, eq_token)?;
+                Ok(AssignmentTarget::Index(Box::new(base_target), index))
+            }
             // Special case: Local(expr) and Var(expr) are assignable lvalues
             // Local() and Var() without arguments default to slot 0
             Expr::Call { callee, args, is_optional, .. } => {

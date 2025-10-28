@@ -462,12 +462,12 @@ fn collect_script_files(
         let data = group
             .read_file(&entry.relative_path)
             .map_err(DefinitionError::Resources)?;
-        // Use lossy UTF-8 conversion to handle legacy ISO-8859-1/Windows-1252 encoded scripts
-        // This matches C++ behavior which doesn't enforce UTF-8
-        let contents = String::from_utf8_lossy(&data).into_owned();
+        // Legacy C4Script files use Windows-1252 encoding (superset of ISO-8859-1)
+        // Convert to UTF-8 to ensure correct byte indices for position tracking
+        let (contents, _, _) = encoding_rs::WINDOWS_1252.decode(&data);
         files.push(DefinitionScriptFile {
             path: relative_path,
-            contents,
+            contents: contents.into_owned(),
         });
     }
     Ok(())
