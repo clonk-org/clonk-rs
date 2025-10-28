@@ -344,6 +344,12 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // Handle empty statement (;)
+        // Must check before parse_assignment_or_expr() because ; is not a valid expression start
+        if self.consume_if_symbol(Symbol::Semicolon)?.is_some() {
+            return Ok(Stmt::Block(Vec::new())); // Empty block represents empty statement
+        }
+
         self.parse_assignment_or_expr()
     }
 
@@ -1527,6 +1533,30 @@ mod tests {
     #[test]
     fn parse_nested_proplist_assignment() {
         let result = parse_script("func Test() { var obj = {n={}}; obj.n.prop = 1; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_empty_statement() {
+        let result = parse_script("func Test() { ; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_double_semicolon() {
+        let result = parse_script("func Test() { var x = 1;; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_triple_semicolon() {
+        let result = parse_script("func Test() { var x = 1;;; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_empty_statement_in_if_without_braces() {
+        let result = parse_script("func Test() { if (1) x = 2;; }");
         assert!(result.is_ok());
     }
 }
