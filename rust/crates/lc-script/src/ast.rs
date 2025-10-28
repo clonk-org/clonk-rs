@@ -191,4 +191,11 @@ pub enum BinaryOp {
     BitXor,
     LeftShift,
     RightShift,
+    // String comparison operators
+    StringEqual,
+    StringNotEqual,
+    StringLess,
+    StringLessEqual,
+    StringGreater,
+    StringGreaterEqual,
 }

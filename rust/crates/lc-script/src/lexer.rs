@@ -50,6 +50,47 @@ impl<'a> Lexer<'a> {
                         return Ok(Token::new(TokenKind::Symbol(Symbol::Slash), line, column));
                     }
                 }
+                'S' => {
+                    // String comparison operators: S=, S!=, S<, S<=, S>, S>=
+                    match self.peek_char() {
+                        Some('=') => {
+                            self.bump_char();
+                            return Ok(Token::new(TokenKind::Symbol(Symbol::StringEqual), line, column));
+                        }
+                        Some('!') => {
+                            self.bump_char();
+                            if self.peek_char() == Some('=') {
+                                self.bump_char();
+                                return Ok(Token::new(TokenKind::Symbol(Symbol::StringNotEqual), line, column));
+                            }
+                            return Err(ParseError::new(
+                                "expected '=' after 'S!' in string comparison operator".to_string(),
+                                line,
+                                column,
+                            ));
+                        }
+                        Some('<') => {
+                            self.bump_char();
+                            if self.peek_char() == Some('=') {
+                                self.bump_char();
+                                return Ok(Token::new(TokenKind::Symbol(Symbol::StringLessEqual), line, column));
+                            }
+                            return Ok(Token::new(TokenKind::Symbol(Symbol::StringLess), line, column));
+                        }
+                        Some('>') => {
+                            self.bump_char();
+                            if self.peek_char() == Some('=') {
+                                self.bump_char();
+                                return Ok(Token::new(TokenKind::Symbol(Symbol::StringGreaterEqual), line, column));
+                            }
+                            return Ok(Token::new(TokenKind::Symbol(Symbol::StringGreater), line, column));
+                        }
+                        _ => {
+                            // 'S' alone is an identifier, let it fall through to identifier lexing
+                            return Ok(self.lex_identifier('S', idx, line, column));
+                        }
+                    }
+                }
                 'a'..='z' | 'A'..='Z' | '_' => {
                     return Ok(self.lex_identifier(ch, idx, line, column));
                 }

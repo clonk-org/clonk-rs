@@ -670,6 +670,12 @@ impl<'a> Parser<'a> {
             } else if self.consume_if_symbol(Symbol::BangEqual)?.is_some() || self.consume_if_keyword(Keyword::Ne)?.is_some() {
                 let right = self.parse_comparison()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::NotEqual, Box::new(right));
+            } else if self.consume_if_symbol(Symbol::StringEqual)?.is_some() {
+                let right = self.parse_comparison()?;
+                expr = Expr::Binary(Box::new(expr), BinaryOp::StringEqual, Box::new(right));
+            } else if self.consume_if_symbol(Symbol::StringNotEqual)?.is_some() {
+                let right = self.parse_comparison()?;
+                expr = Expr::Binary(Box::new(expr), BinaryOp::StringNotEqual, Box::new(right));
             } else {
                 break;
             }
@@ -692,6 +698,18 @@ impl<'a> Parser<'a> {
             } else if self.consume_if_symbol(Symbol::GreaterEqual)?.is_some() || self.consume_if_keyword(Keyword::Ge)?.is_some() {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::GreaterEqual, Box::new(right));
+            } else if self.consume_if_symbol(Symbol::StringLess)?.is_some() {
+                let right = self.parse_shift()?;
+                expr = Expr::Binary(Box::new(expr), BinaryOp::StringLess, Box::new(right));
+            } else if self.consume_if_symbol(Symbol::StringLessEqual)?.is_some() {
+                let right = self.parse_shift()?;
+                expr = Expr::Binary(Box::new(expr), BinaryOp::StringLessEqual, Box::new(right));
+            } else if self.consume_if_symbol(Symbol::StringGreater)?.is_some() {
+                let right = self.parse_shift()?;
+                expr = Expr::Binary(Box::new(expr), BinaryOp::StringGreater, Box::new(right));
+            } else if self.consume_if_symbol(Symbol::StringGreaterEqual)?.is_some() {
+                let right = self.parse_shift()?;
+                expr = Expr::Binary(Box::new(expr), BinaryOp::StringGreaterEqual, Box::new(right));
             } else {
                 break;
             }

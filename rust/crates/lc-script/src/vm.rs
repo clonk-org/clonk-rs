@@ -512,6 +512,13 @@ impl<'a> Vm<'a> {
             BitXor => self.eval_int_op(left, right, |a, b| a ^ b, "^"),
             LeftShift => self.eval_int_op(left, right, |a, b| a << b, "<<"),
             RightShift => self.eval_int_op(left, right, |a, b| a >> b, ">>"),
+            // String comparison operators
+            StringEqual => self.eval_string_cmp(left, right, |a, b| a == b, "S="),
+            StringNotEqual => self.eval_string_cmp(left, right, |a, b| a != b, "S!="),
+            StringLess => self.eval_string_cmp(left, right, |a, b| a < b, "S<"),
+            StringLessEqual => self.eval_string_cmp(left, right, |a, b| a <= b, "S<="),
+            StringGreater => self.eval_string_cmp(left, right, |a, b| a > b, "S>"),
+            StringGreaterEqual => self.eval_string_cmp(left, right, |a, b| a >= b, "S>="),
         }
     }
 
@@ -577,6 +584,22 @@ impl<'a> Vm<'a> {
                 b.type_name()
             ))),
         }
+    }
+
+    fn eval_string_cmp<F>(
+        &self,
+        left: Value,
+        right: Value,
+        cmp: F,
+        _symbol: &str,
+    ) -> Result<Value, RuntimeError>
+    where
+        F: Fn(&str, &str) -> bool,
+    {
+        // Convert both operands to strings for comparison
+        let left_str = left.to_string();
+        let right_str = right.to_string();
+        Ok(Value::Bool(cmp(&left_str, &right_str)))
     }
 
     fn values_equal(&self, left: &Value, right: &Value) -> bool {

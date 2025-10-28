@@ -95,6 +95,13 @@ pub enum Symbol {
     RightShift,
     LBracket,
     RBracket,
+    // String comparison operators
+    StringEqual,       // S=
+    StringNotEqual,    // S!=
+    StringLess,        // S<
+    StringLessEqual,   // S<=
+    StringGreater,     // S>
+    StringGreaterEqual, // S>=
     // Compound assignment operators
     PlusEqual,
     MinusEqual,
