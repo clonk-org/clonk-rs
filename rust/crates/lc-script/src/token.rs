@@ -32,6 +32,7 @@ pub enum Keyword {
     Else,
     While,
     For,
+    In,
     Return,
     Break,
     Continue,

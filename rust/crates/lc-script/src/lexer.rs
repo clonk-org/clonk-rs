@@ -416,6 +416,7 @@ impl<'a> Lexer<'a> {
             "else" => TokenKind::Keyword(Keyword::Else),
             "while" => TokenKind::Keyword(Keyword::While),
             "for" => TokenKind::Keyword(Keyword::For),
+            "in" => TokenKind::Keyword(Keyword::In),
             "return" => TokenKind::Keyword(Keyword::Return),
             "break" => TokenKind::Keyword(Keyword::Break),
             "continue" => TokenKind::Keyword(Keyword::Continue),

@@ -427,34 +427,132 @@ impl<'a> Parser<'a> {
 
         self.expect_symbol(Symbol::LParen, "expected '(' after 'for'")?;
 
-        // Parse init clause: var decls, expression, or empty
-        let init = if self.check_symbol(Symbol::Semicolon)? {
-            None
-        } else if self.consume_if_keyword(Keyword::Var)?.is_some() {
-            // Parse var decl list: var i = 0, j = 1
-            let mut decls = Vec::new();
-            loop {
-                let name_token = self.expect_identifier("expected variable name")?;
-                let name = if let TokenKind::Identifier(name) = name_token.kind {
-                    name
-                } else {
-                    unreachable!()
-                };
-                let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
+        // Distinguish for-in from C-style for
+        // for-in: for(var obj in expr) or for(obj in expr)
+        // C-style: for(init; cond; incr)
+
+        // Check if this starts with 'var'
+        if self.check_keyword(Keyword::Var)? {
+            self.consume()?; // consume 'var'
+
+            // Parse the identifier
+            let name_token = self.expect_identifier("expected variable name")?;
+            let variable = if let TokenKind::Identifier(name) = name_token.kind {
+                name
+            } else {
+                unreachable!()
+            };
+
+            // Check next token to distinguish for-in from C-style
+            if self.consume_if_keyword(Keyword::In)?.is_some() {
+                // For-in loop: for(var variable in iterable)
+                let iterable = self.parse_expression()?;
+                self.expect_symbol(Symbol::RParen, "expected ')' after for-in header")?;
+                let body = self.parse_stmt_or_block_vec()?;
+
+                return Ok(Stmt::ForIn {
+                    variable,
+                    declare_var: true,
+                    iterable,
+                    body,
+                });
+            } else {
+                // C-style for loop: for(var i = 0, j = 1; ...)
+                // We've already consumed 'var' and the first identifier
+                // Continue parsing as var decl list
+                let mut decls = Vec::new();
+
+                // Check for initializer on first variable
+                let first_init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
                     Some(self.parse_expression()?)
                 } else {
                     None
                 };
-                decls.push((name, init));
+                decls.push((variable, first_init));
 
-                if self.consume_if_symbol(Symbol::Comma)?.is_some() {
-                    continue;
+                // Parse additional comma-separated variables
+                while self.consume_if_symbol(Symbol::Comma)?.is_some() {
+                    let name_token = self.expect_identifier("expected variable name")?;
+                    let name = if let TokenKind::Identifier(name) = name_token.kind {
+                        name
+                    } else {
+                        unreachable!()
+                    };
+                    let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
+                        Some(self.parse_expression()?)
+                    } else {
+                        None
+                    };
+                    decls.push((name, init));
                 }
-                break;
+
+                let init = Some(ForInit::VarDecls(decls));
+
+                self.expect_symbol(Symbol::Semicolon, "expected ';' after for-init")?;
+
+                // Parse condition clause (optional)
+                let condition = if self.check_symbol(Symbol::Semicolon)? {
+                    None
+                } else {
+                    Some(self.parse_expression()?)
+                };
+
+                self.expect_symbol(Symbol::Semicolon, "expected ';' after for-condition")?;
+
+                // Parse increment clause (optional)
+                let increment = if self.check_symbol(Symbol::RParen)? {
+                    None
+                } else {
+                    Some(self.parse_expression()?)
+                };
+
+                self.expect_symbol(Symbol::RParen, "expected ')' after for-clauses")?;
+
+                // Parse body
+                let body = self.parse_stmt_or_block_vec()?;
+
+                return Ok(Stmt::For {
+                    init,
+                    condition,
+                    increment,
+                    body,
+                });
             }
-            Some(ForInit::VarDecls(decls))
+        }
+
+        // No 'var' - could be for-in with pre-declared variable or C-style for
+        // Check for identifier followed by 'in'
+        if self.check_identifier()? {
+            let saved_peeked = self.peeked.clone();
+
+            // Try to parse as for-in: for(obj in expr)
+            if let Ok(name_token) = self.consume() {
+                if let TokenKind::Identifier(variable) = name_token.kind {
+                    if self.consume_if_keyword(Keyword::In)?.is_some() {
+                        // For-in loop: for(variable in iterable)
+                        let iterable = self.parse_expression()?;
+                        self.expect_symbol(Symbol::RParen, "expected ')' after for-in header")?;
+                        let body = self.parse_stmt_or_block_vec()?;
+
+                        return Ok(Stmt::ForIn {
+                            variable,
+                            declare_var: false,
+                            iterable,
+                            body,
+                        });
+                    }
+                }
+            }
+
+            // Not for-in, restore and parse as C-style for
+            self.peeked = saved_peeked;
+        }
+
+        // C-style for loop: for(init; cond; incr) or for(; cond; incr)
+        let init = if self.check_symbol(Symbol::Semicolon)? {
+            None
         } else {
-            // Parse expression
+            // Parse expression as init
             Some(ForInit::Expr(self.parse_expression()?))
         };
 
@@ -1072,6 +1170,11 @@ impl<'a> Parser<'a> {
             TokenKind::Symbol(sym) if *sym == symbol => Ok(true),
             _ => Ok(false),
         }
+    }
+
+    fn check_identifier(&mut self) -> Result<bool, ParseError> {
+        let token = self.peek()?;
+        Ok(matches!(token.kind, TokenKind::Identifier(_)))
     }
 
     fn is_eof(&mut self) -> Result<bool, ParseError> {

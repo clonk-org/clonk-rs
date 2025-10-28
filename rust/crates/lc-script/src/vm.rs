@@ -238,6 +238,44 @@ impl<'a> Vm<'a> {
                 }
                 Ok(ControlFlow::Normal)
             }
+            Stmt::ForIn {
+                variable,
+                declare_var,
+                iterable,
+                body,
+            } => {
+                // Evaluate the iterable expression
+                let iterable_value = self.evaluate(iterable, env, depth)?;
+
+                // Extract the collection to iterate over
+                let items = match &iterable_value {
+                    Value::Array(arr) => arr.clone(),
+                    // For non-arrays, treat as empty iteration (matches C++ behavior)
+                    _ => Vec::new(),
+                };
+
+                // Iterate over each item
+                for item in items {
+                    // Assign the item to the iteration variable
+                    if *declare_var {
+                        // Define new variable (or redefine if in same scope)
+                        env.define(variable, item);
+                    } else {
+                        // Assign to existing variable
+                        env.assign(variable, item)?;
+                    }
+
+                    // Execute body
+                    match self.execute_block(body, env, depth)? {
+                        ControlFlow::Normal => {},
+                        ControlFlow::LoopContinue => continue,
+                        ControlFlow::Break => break,
+                        ControlFlow::Return(value) => return Ok(ControlFlow::Return(value)),
+                    }
+                }
+
+                Ok(ControlFlow::Normal)
+            }
             Stmt::Block(statements) => self.execute_block(statements, env, depth),
         }
     }

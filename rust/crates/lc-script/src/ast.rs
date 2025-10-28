@@ -144,6 +144,12 @@ pub enum Stmt {
         increment: Option<Expr>,
         body: Vec<Stmt>,
     },
+    ForIn {
+        variable: String,      // The iteration variable
+        declare_var: bool,     // true if using "var variable", false if pre-declared
+        iterable: Expr,        // Expression to iterate over
+        body: Vec<Stmt>,
+    },
     Block(Vec<Stmt>),
 }
 
