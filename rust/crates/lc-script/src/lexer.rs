@@ -130,7 +130,24 @@ impl<'a> Lexer<'a> {
                     ))
                 }
                 ':' => return Ok(Token::new(TokenKind::Symbol(Symbol::Colon), line, column)),
-                '.' => return Ok(Token::new(TokenKind::Symbol(Symbol::Dot), line, column)),
+                '.' => {
+                    // Check for ... (ellipsis)
+                    if self.peek_char() == Some('.') {
+                        self.bump_char();
+                        if self.peek_char() == Some('.') {
+                            self.bump_char();
+                            return Ok(Token::new(TokenKind::Symbol(Symbol::Ellipsis), line, column));
+                        } else {
+                            // Two dots is an error - not valid in C4Script
+                            return Err(ParseError::new(
+                                "unexpected '..' - use '...' for varargs forwarding or '.' for property access".to_string(),
+                                line,
+                                column,
+                            ));
+                        }
+                    }
+                    return Ok(Token::new(TokenKind::Symbol(Symbol::Dot), line, column));
+                }
                 '+' => {
                     if self.peek_char() == Some('+') {
                         self.bump_char();

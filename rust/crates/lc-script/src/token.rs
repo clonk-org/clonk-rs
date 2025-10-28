@@ -77,6 +77,7 @@ pub enum Symbol {
     Slash,
     Percent,
     Dot,
+    Ellipsis,  // ... (varargs forwarder)
     Equal,
     EqualEqual,
     Bang,

@@ -294,7 +294,7 @@ impl<'a> Vm<'a> {
                 let right = self.evaluate(rhs, env, depth)?;
                 self.eval_binary(left, op, right)
             }
-            Expr::Call { callee, args, is_optional } => {
+            Expr::Call { callee, args, is_optional, forward_rest } => {
                 // For optional calls (->~Method()), return nil if method doesn't exist
                 // instead of throwing an error
                 if *is_optional {
@@ -309,6 +309,10 @@ impl<'a> Vm<'a> {
                             let mut evaluated_args = Vec::with_capacity(args.len());
                             for arg in args {
                                 evaluated_args.push(self.evaluate(arg, env, depth + 1)?);
+                            }
+                            // TODO: Handle forward_rest - append remaining args from current function
+                            if *forward_rest {
+                                // For now, just ignore - proper implementation needs access to current call args
                             }
                             // If the call fails for other reasons (arity, runtime error), propagate
                             self.invoke(name, &evaluated_args, depth + 1)
@@ -325,6 +329,10 @@ impl<'a> Vm<'a> {
                     let mut evaluated_args = Vec::with_capacity(args.len());
                     for arg in args {
                         evaluated_args.push(self.evaluate(arg, env, depth + 1)?);
+                    }
+                    // TODO: Handle forward_rest - append remaining args from current function
+                    if *forward_rest {
+                        // For now, just ignore - proper implementation needs access to current call args
                     }
                     // Extract function name from callee expression
                     match callee.as_ref() {
@@ -785,7 +793,7 @@ impl<'a> Vm<'a> {
                 ))
             }
             // Special case: Local(expr) and Var(expr) are valid for increment/decrement
-            Expr::Call { callee, args, is_optional } => {
+            Expr::Call { callee, args, is_optional, .. } => {
                 if let Expr::Variable(ref name) = **callee {
                     if !is_optional && args.len() == 1 {
                         if name == "Local" {

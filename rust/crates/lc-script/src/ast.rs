@@ -168,7 +168,7 @@ pub enum Expr {
     This,
     Unary(UnaryOp, Box<Expr>),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
-    Call { callee: Box<Expr>, args: Vec<Expr>, is_optional: bool },
+    Call { callee: Box<Expr>, args: Vec<Expr>, is_optional: bool, forward_rest: bool },
     Array(Vec<Expr>),
     Proplist(Vec<(String, Expr)>),
     Index(Box<Expr>, Box<Expr>),

@@ -515,7 +515,7 @@ impl<'a> Parser<'a> {
                 Ok(AssignmentTarget::Property(Box::new(base_target), name))
             }
             // Special case: Local(expr) and Var(expr) are assignable lvalues
-            Expr::Call { callee, args, is_optional } => {
+            Expr::Call { callee, args, is_optional, .. } => {
                 if let Expr::Variable(ref name) = *callee {
                     if !is_optional && args.len() == 1 {
                         if name == "Local" {
@@ -543,7 +543,7 @@ impl<'a> Parser<'a> {
         match expr {
             Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) => Ok(()),
             // Special case: Local(expr) and Var(expr) are valid for increment/decrement
-            Expr::Call { callee, args, is_optional } => {
+            Expr::Call { callee, args, is_optional, .. } => {
                 if let Expr::Variable(ref name) = **callee {
                     if !is_optional && args.len() == 1 && (name == "Local" || name == "Var") {
                         return Ok(());
@@ -801,12 +801,13 @@ impl<'a> Parser<'a> {
         let mut expr = self.parse_primary()?;
         loop {
             if self.consume_if_symbol(Symbol::LParen)?.is_some() {
-                let args = self.parse_argument_list()?;
+                let (args, forward_rest) = self.parse_argument_list()?;
                 self.expect_symbol(Symbol::RParen, "expected ')' after arguments")?;
                 expr = Expr::Call {
                     callee: Box::new(expr),
                     args,
                     is_optional: false,
+                    forward_rest,
                 };
             } else if self.consume_if_symbol(Symbol::LBracket)?.is_some() {
                 let index = self.parse_expression()?;
@@ -834,12 +835,13 @@ impl<'a> Parser<'a> {
                 // If optional call or next token is '(', parse call immediately
                 if self.check_symbol(Symbol::LParen)? {
                     self.consume()?; // consume '('
-                    let args = self.parse_argument_list()?;
+                    let (args, forward_rest) = self.parse_argument_list()?;
                     self.expect_symbol(Symbol::RParen, "expected ')' after arguments")?;
                     expr = Expr::Call {
                         callee: Box::new(prop),
                         args,
                         is_optional,
+                        forward_rest,
                     };
                 } else {
                     if is_optional {
@@ -864,19 +866,39 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
-    fn parse_argument_list(&mut self) -> Result<Vec<Expr>, ParseError> {
+    fn parse_argument_list(&mut self) -> Result<(Vec<Expr>, bool), ParseError> {
         let mut args = Vec::new();
+        let mut forward_rest = false;
+
         if self.check_symbol(Symbol::RParen)? {
-            return Ok(args);
+            return Ok((args, forward_rest));
         }
+
         loop {
+            // Check for ... (ellipsis) to forward remaining arguments
+            if let Some(ellipsis_token) = self.consume_if_symbol(Symbol::Ellipsis)? {
+                forward_rest = true;
+                // Ellipsis must be the last argument
+                if self.consume_if_symbol(Symbol::Comma)?.is_some() {
+                    return Err(ParseError::new(
+                        "ellipsis (...) must be the last argument in a function call",
+                        ellipsis_token.line,
+                        ellipsis_token.column,
+                    ));
+                }
+                break;
+            }
+
+            // Parse regular expression argument
             args.push(self.parse_expression()?);
+
             if self.consume_if_symbol(Symbol::Comma)?.is_some() {
                 continue;
             }
             break;
         }
-        Ok(args)
+
+        Ok((args, forward_rest))
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
