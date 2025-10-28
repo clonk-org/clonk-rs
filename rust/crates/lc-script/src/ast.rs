@@ -167,6 +167,11 @@ pub enum AssignmentTarget {
     LocalSlot(Box<Expr>), // Local(expr) as lvalue - object-local slot
     VarSlot(Box<Expr>),   // Var(expr) as lvalue - function-local slot
     EffectSlot(Vec<Expr>), // EffectVar(index, target, effect_num) as lvalue - effect variable slot
+    MethodSlot {           // obj->LocalN("key") as lvalue - method-accessed slot
+        object: Box<Expr>,
+        method: String,
+        args: Vec<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

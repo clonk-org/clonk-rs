@@ -724,6 +724,19 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
+                // NEW: Handle obj->LocalN("key"), obj->Local(index), obj->Var(index)
+                // These are method calls that can be used as assignment targets
+                else if let Expr::Property(ref object, ref method) = *callee {
+                    if !is_optional {
+                        if method == "LocalN" || method == "Local" || method == "Var" || method == "EffectVar" {
+                            return Ok(AssignmentTarget::MethodSlot {
+                                object: object.clone(),
+                                method: method.clone(),
+                                args,
+                            });
+                        }
+                    }
+                }
                 Err(ParseError::new(
                     "invalid assignment target",
                     eq_token.line,

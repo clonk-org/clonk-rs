@@ -814,6 +814,35 @@ impl<'a> Vm<'a> {
                 env.define(&slot_name, value);
                 Ok(())
             }
+            AssignmentTarget::MethodSlot { object, method, args } => {
+                // Evaluate the object to get its identity
+                let object_value = self.evaluate(object, env, 0)?;
+                let object_id = match object_value {
+                    Value::Int(n) => n.to_string(),
+                    Value::String(s) => s.clone(),
+                    _ => format!("{:?}", object_value),
+                };
+
+                // Evaluate arguments to create the key
+                let mut arg_values = Vec::new();
+                for arg in args {
+                    arg_values.push(self.evaluate(arg, env, 0)?);
+                }
+                let key = arg_values
+                    .iter()
+                    .map(|v| match v {
+                        Value::Int(n) => n.to_string(),
+                        Value::String(s) => s.clone(),
+                        _ => format!("{:?}", v),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("_");
+
+                // Store in environment with naming scheme: __method_{object_id}_{method}_{key}
+                let slot_name = format!("__method_{}_{}_{}", object_id, method, key);
+                env.define(&slot_name, value);
+                Ok(())
+            }
         }
     }
 
@@ -917,6 +946,34 @@ impl<'a> Vm<'a> {
                 );
                 Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
             }
+            AssignmentTarget::MethodSlot { object, method, args } => {
+                // Evaluate the object to get its identity
+                let object_value = self.evaluate(object, env, 0)?;
+                let object_id = match object_value {
+                    Value::Int(n) => n.to_string(),
+                    Value::String(s) => s.clone(),
+                    _ => format!("{:?}", object_value),
+                };
+
+                // Evaluate arguments to create the key
+                let mut arg_values = Vec::new();
+                for arg in args {
+                    arg_values.push(self.evaluate(arg, env, 0)?);
+                }
+                let key = arg_values
+                    .iter()
+                    .map(|v| match v {
+                        Value::Int(n) => n.to_string(),
+                        Value::String(s) => s.clone(),
+                        _ => format!("{:?}", v),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("_");
+
+                // Retrieve from environment with naming scheme: __method_{object_id}_{method}_{key}
+                let slot_name = format!("__method_{}_{}_{}", object_id, method, key);
+                Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
+            }
         }
     }
 
@@ -944,6 +1001,18 @@ impl<'a> Vm<'a> {
                             return Ok(AssignmentTarget::VarSlot(Box::new(args[0].clone())));
                         } else if name == "EffectVar" {
                             return Ok(AssignmentTarget::EffectSlot(args.clone()));
+                        }
+                    }
+                }
+                // Handle obj->LocalN("key"), obj->Local(index), etc.
+                else if let Expr::Property(ref object, ref method) = **callee {
+                    if !is_optional {
+                        if method == "LocalN" || method == "Local" || method == "Var" || method == "EffectVar" {
+                            return Ok(AssignmentTarget::MethodSlot {
+                                object: object.clone(),
+                                method: method.clone(),
+                                args: args.clone(),
+                            });
                         }
                     }
                 }
