@@ -454,6 +454,26 @@ impl<'a> Parser<'a> {
             return Ok(Stmt::Return(Some(first_expr)));
         }
 
+        // Handle: return (); (with space between return and ())
+        if self.check_symbol(Symbol::LParen)? {
+            let lparen_token = self.consume()?; // consume '('
+
+            if self.check_symbol(Symbol::RParen)? {
+                // Empty parens - consume ')' and ';', return None
+                self.consume()?; // consume ')'
+                self.expect_symbol(Symbol::Semicolon, "expected ';' after return statement")?;
+                return Ok(Stmt::Return(None));
+            }
+
+            // Not empty parens - put back both the peeked token and the '('
+            // We need to restore both because we consumed '(' and peeked at the next token
+            if let Some(peeked_token) = self.peeked.take() {
+                self.lookahead_buffer.insert(0, peeked_token);
+            }
+            self.lookahead_buffer.insert(0, lparen_token);
+            self.peeked = None;
+        }
+
         // Handle: return expr; (normal expression parsing, includes "return (expr) op expr;")
         let expr = self.parse_expression()?;
         self.expect_symbol(Symbol::Semicolon, "expected ';' after return value")?;
