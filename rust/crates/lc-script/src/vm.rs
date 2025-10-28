@@ -495,6 +495,13 @@ impl<'a> Vm<'a> {
                 ))),
             },
             UnaryOp::Not => Ok(Value::Bool(!value.as_bool())),
+            UnaryOp::BitwiseNot => match value {
+                Value::Int(i) => Ok(Value::Int(!i)),
+                other => Err(RuntimeError::new(format!(
+                    "cannot apply unary '~' to {}",
+                    other.type_name()
+                ))),
+            },
         }
     }
 

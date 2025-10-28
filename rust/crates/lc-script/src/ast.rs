@@ -190,8 +190,9 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UnaryOp {
-    Negate,
-    Not,
+    Negate,     // - (arithmetic negation)
+    Not,        // ! (logical NOT)
+    BitwiseNot, // ~ (bitwise NOT)
 }
 
 #[derive(Debug, Clone, PartialEq)]

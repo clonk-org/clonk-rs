@@ -896,6 +896,11 @@ impl<'a> Parser<'a> {
         if self.consume_if_symbol(Symbol::Plus)?.is_some() {
             return self.parse_unary();
         }
+        // Bitwise NOT
+        if self.consume_if_symbol(Symbol::Tilde)?.is_some() {
+            let expr = self.parse_unary()?;
+            return Ok(Expr::Unary(UnaryOp::BitwiseNot, Box::new(expr)));
+        }
         // Prefix increment/decrement
         if let Some(token) = self.consume_if_symbol(Symbol::PlusPlus)? {
             let expr = self.parse_unary()?;
