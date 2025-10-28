@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::{AssignmentTarget, BinaryOp, Expr, ForInit, Function, Stmt, UnaryOp};
+use crate::ast::{AssignmentTarget, BinaryOp, Expr, ForInit, Function, Parameter, Stmt, UnaryOp};
 use crate::debugger::DebuggerHooks;
 use crate::engine::HostFunction;
 use crate::error::RuntimeError;
@@ -262,6 +262,11 @@ impl<'a> Vm<'a> {
     ) -> Result<Value, RuntimeError> {
         match expr {
             Expr::Literal(literal) => Ok(self.literal_value(literal)),
+            Expr::This => {
+                // TODO: Return the actual current object context
+                // For now, return nil as a placeholder
+                Ok(Value::Nil)
+            }
             Expr::Variable(name) => env
                 .get(name)
                 .cloned()
@@ -644,6 +649,24 @@ impl<'a> Vm<'a> {
                 entries.insert(property.clone(), value);
                 self.assign_target(env, base, Value::Proplist(entries))
             }
+            AssignmentTarget::LocalSlot(index_expr) => {
+                // Evaluate the index expression
+                let index_value = self.evaluate(index_expr, env, 0)?;
+                let index = match index_value {
+                    Value::Int(n) => n,
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "Local() index must be an integer, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                // Store in environment with special naming scheme
+                // TODO: Replace with proper local slot storage
+                let slot_name = format!("__local_{}", index);
+                env.define(&slot_name, value);
+                Ok(())
+            }
         }
     }
 
@@ -669,6 +692,23 @@ impl<'a> Vm<'a> {
                     ))),
                 }
             }
+            AssignmentTarget::LocalSlot(index_expr) => {
+                // Evaluate the index expression
+                let index_value = self.evaluate(index_expr, env, 0)?;
+                let index = match index_value {
+                    Value::Int(n) => n,
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "Local() index must be an integer, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                // Retrieve from environment with special naming scheme
+                // TODO: Replace with proper local slot storage
+                let slot_name = format!("__local_{}", index);
+                Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
+            }
         }
     }
 
@@ -685,6 +725,18 @@ impl<'a> Vm<'a> {
                 Err(RuntimeError::new(
                     "index expressions as increment/decrement targets not yet supported".to_string(),
                 ))
+            }
+            // Special case: Local(expr) is valid for increment/decrement
+            Expr::Call { callee, args, is_optional } => {
+                if let Expr::Variable(ref name) = **callee {
+                    if name == "Local" && !is_optional && args.len() == 1 {
+                        return Ok(AssignmentTarget::LocalSlot(Box::new(args[0].clone())));
+                    }
+                }
+                Err(RuntimeError::new(format!(
+                    "invalid increment/decrement target: {:?}",
+                    expr
+                )))
             }
             _ => Err(RuntimeError::new(format!(
                 "invalid increment/decrement target: {:?}",
@@ -714,11 +766,11 @@ struct Environment {
 }
 
 impl Environment {
-    fn new_with_params(params: &[String], args: &[Value]) -> Self {
+    fn new_with_params(params: &[Parameter], args: &[Value]) -> Self {
         let mut scopes = vec![HashMap::new()];
         let base = scopes.last_mut().unwrap();
         for (param, value) in params.iter().zip(args.iter()) {
-            base.insert(param.clone(), value.clone());
+            base.insert(param.name.clone(), value.clone());
         }
         Self { scopes }
     }

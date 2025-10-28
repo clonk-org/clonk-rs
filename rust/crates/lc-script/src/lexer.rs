@@ -362,6 +362,16 @@ impl<'a> Lexer<'a> {
             "true" => TokenKind::Keyword(Keyword::True),
             "false" => TokenKind::Keyword(Keyword::False),
             "nil" => TokenKind::Keyword(Keyword::Nil),
+            "this" => TokenKind::Keyword(Keyword::This),
+            // Type keywords
+            "int" => TokenKind::Keyword(Keyword::Int),
+            "bool" => TokenKind::Keyword(Keyword::Bool),
+            "string" => TokenKind::Keyword(Keyword::String),
+            "object" => TokenKind::Keyword(Keyword::Object),
+            "id" => TokenKind::Keyword(Keyword::Id),
+            "array" => TokenKind::Keyword(Keyword::Array),
+            "proplist" => TokenKind::Keyword(Keyword::Proplist),
+            "effect" => TokenKind::Keyword(Keyword::Effect),
             // Keyword operators (word-based synonyms for symbolic operators)
             "eq" => TokenKind::Keyword(Keyword::Eq),
             "ne" => TokenKind::Keyword(Keyword::Ne),

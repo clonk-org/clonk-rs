@@ -1,4 +1,4 @@
-use crate::ast::{AccessLevel, AppendTo, AssignmentTarget, BinaryOp, Expr, Function, Script, Stmt, UnaryOp};
+use crate::ast::{AccessLevel, AppendTo, AssignmentTarget, BinaryOp, Expr, Function, Parameter, Script, Stmt, TypeAnnotation, UnaryOp};
 use crate::error::ParseError;
 use crate::lexer::Lexer;
 use crate::token::{Keyword, Symbol, Token, TokenKind};
@@ -126,15 +126,22 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_parameter_list(&mut self) -> Result<Vec<String>, ParseError> {
+    fn parse_parameter_list(&mut self) -> Result<Vec<Parameter>, ParseError> {
         let mut params = Vec::new();
         if self.check_symbol(Symbol::RParen)? {
             return Ok(params);
         }
         loop {
+            // Check for optional type annotation
+            let type_annotation = self.parse_type_annotation()?;
+
             let token = self.expect_identifier("expected parameter name")?;
             if let TokenKind::Identifier(name) = token.kind {
-                params.push(name);
+                if let Some(ty) = type_annotation {
+                    params.push(Parameter::with_type(name, ty));
+                } else {
+                    params.push(Parameter::new(name));
+                }
             }
             if self.consume_if_symbol(Symbol::Comma)?.is_some() {
                 continue;
@@ -142,6 +149,106 @@ impl<'a> Parser<'a> {
             break;
         }
         Ok(params)
+    }
+
+    fn parse_type_annotation(&mut self) -> Result<Option<TypeAnnotation>, ParseError> {
+        let token = self.peek()?;
+        let base_type = match &token.kind {
+            TokenKind::Keyword(Keyword::Int) => {
+                self.consume()?;
+                TypeAnnotation::Int
+            }
+            TokenKind::Keyword(Keyword::Bool) => {
+                self.consume()?;
+                TypeAnnotation::Bool
+            }
+            TokenKind::Keyword(Keyword::String) => {
+                self.consume()?;
+                TypeAnnotation::String
+            }
+            TokenKind::Keyword(Keyword::Object) => {
+                self.consume()?;
+                TypeAnnotation::Object
+            }
+            TokenKind::Keyword(Keyword::Id) => {
+                self.consume()?;
+                TypeAnnotation::Id
+            }
+            TokenKind::Keyword(Keyword::Array) => {
+                self.consume()?;
+                TypeAnnotation::Array
+            }
+            TokenKind::Keyword(Keyword::Proplist) => {
+                self.consume()?;
+                TypeAnnotation::Proplist
+            }
+            TokenKind::Keyword(Keyword::Effect) => {
+                self.consume()?;
+                TypeAnnotation::Effect
+            }
+            TokenKind::Keyword(Keyword::Nil) => {
+                self.consume()?;
+                TypeAnnotation::Nil
+            }
+            _ => return Ok(None), // No type annotation
+        };
+
+        // Check for union types (e.g., object|nil)
+        if self.check_symbol(Symbol::Pipe)? {
+            let mut types = vec![base_type];
+            while self.consume_if_symbol(Symbol::Pipe)?.is_some() {
+                let next_token = self.peek()?;
+                let next_type = match &next_token.kind {
+                    TokenKind::Keyword(Keyword::Int) => {
+                        self.consume()?;
+                        TypeAnnotation::Int
+                    }
+                    TokenKind::Keyword(Keyword::Bool) => {
+                        self.consume()?;
+                        TypeAnnotation::Bool
+                    }
+                    TokenKind::Keyword(Keyword::String) => {
+                        self.consume()?;
+                        TypeAnnotation::String
+                    }
+                    TokenKind::Keyword(Keyword::Object) => {
+                        self.consume()?;
+                        TypeAnnotation::Object
+                    }
+                    TokenKind::Keyword(Keyword::Id) => {
+                        self.consume()?;
+                        TypeAnnotation::Id
+                    }
+                    TokenKind::Keyword(Keyword::Array) => {
+                        self.consume()?;
+                        TypeAnnotation::Array
+                    }
+                    TokenKind::Keyword(Keyword::Proplist) => {
+                        self.consume()?;
+                        TypeAnnotation::Proplist
+                    }
+                    TokenKind::Keyword(Keyword::Effect) => {
+                        self.consume()?;
+                        TypeAnnotation::Effect
+                    }
+                    TokenKind::Keyword(Keyword::Nil) => {
+                        self.consume()?;
+                        TypeAnnotation::Nil
+                    }
+                    _ => {
+                        return Err(ParseError::new(
+                            "expected type name after '|' in union type".to_string(),
+                            next_token.line,
+                            next_token.column,
+                        ))
+                    }
+                };
+                types.push(next_type);
+            }
+            Ok(Some(TypeAnnotation::Union(types)))
+        } else {
+            Ok(Some(base_type))
+        }
     }
 
     fn parse_block_statements(&mut self) -> Result<Vec<Stmt>, ParseError> {
@@ -253,9 +360,27 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_return(&mut self) -> Result<Stmt, ParseError> {
+        // Handle: return;
         if self.consume_if_symbol(Symbol::Semicolon)?.is_some() {
             return Ok(Stmt::Return(None));
         }
+        // Handle: return(); or return(expr);
+        if self.check_symbol(Symbol::LParen)? {
+            self.consume()?; // consume '('
+            if self.check_symbol(Symbol::RParen)? {
+                // return();
+                self.consume()?; // consume ')'
+                self.expect_symbol(Symbol::Semicolon, "expected ';' after return statement")?;
+                return Ok(Stmt::Return(None));
+            } else {
+                // return(expr);
+                let expr = self.parse_expression()?;
+                self.expect_symbol(Symbol::RParen, "expected ')' after return expression")?;
+                self.expect_symbol(Symbol::Semicolon, "expected ';' after return statement")?;
+                return Ok(Stmt::Return(Some(expr)));
+            }
+        }
+        // Handle: return expr;
         let expr = self.parse_expression()?;
         self.expect_symbol(Symbol::Semicolon, "expected ';' after return value")?;
         Ok(Stmt::Return(Some(expr)))
@@ -387,6 +512,19 @@ impl<'a> Parser<'a> {
                 let base_target = self.expression_to_assignment_target(*base, eq_token)?;
                 Ok(AssignmentTarget::Property(Box::new(base_target), name))
             }
+            // Special case: Local(expr) is an assignable lvalue
+            Expr::Call { callee, args, is_optional } => {
+                if let Expr::Variable(ref name) = *callee {
+                    if name == "Local" && !is_optional && args.len() == 1 {
+                        return Ok(AssignmentTarget::LocalSlot(Box::new(args.into_iter().next().unwrap())));
+                    }
+                }
+                Err(ParseError::new(
+                    "invalid assignment target",
+                    eq_token.line,
+                    eq_token.column,
+                ))
+            }
             _ => Err(ParseError::new(
                 "invalid assignment target",
                 eq_token.line,
@@ -398,8 +536,21 @@ impl<'a> Parser<'a> {
     fn validate_lvalue(&self, expr: &Expr, token: &Token) -> Result<(), ParseError> {
         match expr {
             Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) => Ok(()),
+            // Special case: Local(expr) is valid for increment/decrement
+            Expr::Call { callee, args, is_optional } => {
+                if let Expr::Variable(ref name) = **callee {
+                    if name == "Local" && !is_optional && args.len() == 1 {
+                        return Ok(());
+                    }
+                }
+                Err(ParseError::new(
+                    "increment/decrement requires an lvalue (variable, property, index, or Local(n))",
+                    token.line,
+                    token.column,
+                ))
+            }
             _ => Err(ParseError::new(
-                "increment/decrement requires an lvalue (variable, property, or index)",
+                "increment/decrement requires an lvalue (variable, property, index, or Local(n))",
                 token.line,
                 token.column,
             )),
@@ -712,6 +863,22 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::True) => Ok(Expr::Literal(Literal::Bool(true))),
             TokenKind::Keyword(Keyword::False) => Ok(Expr::Literal(Literal::Bool(false))),
             TokenKind::Keyword(Keyword::Nil) => Ok(Expr::Literal(Literal::Nil)),
+            TokenKind::Keyword(Keyword::This) => {
+                // Handle both `this` and `this()` (legacy form)
+                if self.check_symbol(Symbol::LParen)? {
+                    self.consume()?; // consume '('
+                    // Must be empty argument list
+                    if !self.check_symbol(Symbol::RParen)? {
+                        return Err(ParseError::new(
+                            "this does not accept arguments".to_string(),
+                            token.line,
+                            token.column,
+                        ));
+                    }
+                    self.consume()?; // consume ')'
+                }
+                Ok(Expr::This)
+            }
             TokenKind::Identifier(name) => Ok(Expr::Variable(name)),
             TokenKind::Symbol(Symbol::LParen) => {
                 let expr = self.parse_expression()?;

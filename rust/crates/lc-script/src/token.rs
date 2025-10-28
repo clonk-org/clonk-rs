@@ -36,6 +36,16 @@ pub enum Keyword {
     True,
     False,
     Nil,
+    This,
+    // Type keywords
+    Int,
+    Bool,
+    String,
+    Object,
+    Id,
+    Array,
+    Proplist,
+    Effect,
     // Keyword operators (synonyms for symbolic operators)
     Eq,   // ==
     Ne,   // !=

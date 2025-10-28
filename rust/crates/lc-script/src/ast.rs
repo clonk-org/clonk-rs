@@ -54,9 +54,45 @@ impl Script {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum TypeAnnotation {
+    Int,
+    Bool,
+    String,
+    Object,
+    Id,
+    Array,
+    Proplist,
+    Effect,
+    Nil,
+    Union(Vec<TypeAnnotation>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Parameter {
+    pub name: String,
+    pub type_annotation: Option<TypeAnnotation>,
+}
+
+impl Parameter {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            type_annotation: None,
+        }
+    }
+
+    pub fn with_type(name: String, type_annotation: TypeAnnotation) -> Self {
+        Self {
+            name,
+            type_annotation: Some(type_annotation),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Function {
     pub name: String,
-    pub params: Vec<String>,
+    pub params: Vec<Parameter>,
     pub body: Vec<Stmt>,
     pub access: AccessLevel,
 }
@@ -103,12 +139,14 @@ pub enum ForInit {
 pub enum AssignmentTarget {
     Variable(String),
     Property(Box<AssignmentTarget>, String),
+    LocalSlot(Box<Expr>), // Local(expr) as lvalue
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal(Literal),
     Variable(String),
+    This,
     Unary(UnaryOp, Box<Expr>),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     Call { callee: Box<Expr>, args: Vec<Expr>, is_optional: bool },
