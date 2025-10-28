@@ -300,20 +300,21 @@ impl<'a> Parser<'a> {
             return Ok(Stmt::Block(body));
         }
 
-        // Check for context annotation: [ followed by $LocaleKey$
-        // We need to look ahead to distinguish from array literals
+        // Check for context annotation vs array literal
+        // Context annotations: [$LocaleKey$|...] or [Key=Value|...] or [Key|...]
+        // Arrays: [expr, expr, ...]
         if self.check_symbol(Symbol::LBracket)? {
             // Consume the '['
             self.consume()?;
-            // Now check if next token is a LocaleKey
-            let next_token = self.peek()?;
-            if matches!(next_token.kind, TokenKind::LocaleKey(_)) {
+            // Use lookahead to distinguish context annotation from array
+            if self.is_context_annotation()? {
                 // This is a context annotation, parse it
                 return self.parse_context_annotation_body();
             } else {
                 // This is an array literal, we need to handle it as an expression
                 // But we already consumed the '[', so we need to parse it differently
                 // For now, return an error - we'll fix array literal parsing separately
+                let next_token = self.peek()?;
                 return Err(ParseError::new(
                     "array literals in statement position not yet supported",
                     next_token.line,
@@ -1085,6 +1086,45 @@ impl<'a> Parser<'a> {
             }
             _ => Ok(None),
         }
+    }
+
+    // Check if we're looking at a context annotation after '['
+    // Context annotations have the pattern:
+    // - [$LocaleKey$ | ...] OR
+    // - [Identifier=Value | ...] OR
+    // - [Identifier | ...]
+    // Distinguished from arrays by lack of commas and presence of = or | or $
+    fn is_context_annotation(&mut self) -> Result<bool, ParseError> {
+        // Save current position
+        let saved_peeked = self.peeked.clone();
+
+        // Check first token after '['
+        let first_token = self.peek()?;
+        let is_annotation = match &first_token.kind {
+            // LocaleKey definitely means context annotation
+            TokenKind::LocaleKey(_) => true,
+            // Identifier might be context annotation if followed by = or |
+            TokenKind::Identifier(_) => {
+                // Consume the identifier to look at next token
+                self.consume()?;
+                let second_token = self.peek()?;
+                // Check the second token kind and determine result
+                let result = matches!(
+                    &second_token.kind,
+                    TokenKind::Symbol(Symbol::Equal)     // Key=Value
+                    | TokenKind::Symbol(Symbol::Pipe)    // Key|...
+                    | TokenKind::Symbol(Symbol::RBracket) // [Key] alone
+                );
+                // Note: Comma means array: [Key, ...]
+                result
+            }
+            // Anything else is not a context annotation
+            _ => false,
+        };
+
+        // Restore state
+        self.peeked = saved_peeked;
+        Ok(is_annotation)
     }
 
     fn parse_var_decl_list(&mut self, kind: VarDeclKind) -> Result<Vec<VarDecl>, ParseError> {
