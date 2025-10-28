@@ -77,6 +77,7 @@ pub enum Symbol {
     OrOr,
     Pipe,
     Arrow,
+    Tilde,
     // Bitwise operators
     Ampersand,
     Caret,

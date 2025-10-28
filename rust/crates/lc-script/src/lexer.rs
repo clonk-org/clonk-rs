@@ -219,6 +219,9 @@ impl<'a> Lexer<'a> {
                     }
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Caret), line, column));
                 }
+                '~' => {
+                    return Ok(Token::new(TokenKind::Symbol(Symbol::Tilde), line, column));
+                }
                 '\r' | '\n' => {
                     // newline already processed in bump_char
                     continue;

@@ -631,6 +631,7 @@ impl<'a> Parser<'a> {
                 expr = Expr::Call {
                     callee: Box::new(expr),
                     args,
+                    is_optional: false,
                 };
             } else if self.consume_if_symbol(Symbol::LBracket)?.is_some() {
                 let index = self.parse_expression()?;
@@ -645,13 +646,36 @@ impl<'a> Parser<'a> {
                 };
                 expr = Expr::Property(Box::new(expr), name);
             } else if self.consume_if_symbol(Symbol::Arrow)?.is_some() {
+                // Check for optional method call: ->~MethodName()
+                let is_optional = self.consume_if_symbol(Symbol::Tilde)?.is_some();
                 let token = self.expect_identifier("expected property/method name after '->'")? ;
                 let name = if let TokenKind::Identifier(name) = token.kind {
                     name
                 } else {
                     unreachable!()
                 };
-                expr = Expr::Property(Box::new(expr), name);
+                let prop = Expr::Property(Box::new(expr), name);
+
+                // If optional call or next token is '(', parse call immediately
+                if self.check_symbol(Symbol::LParen)? {
+                    self.consume()?; // consume '('
+                    let args = self.parse_argument_list()?;
+                    self.expect_symbol(Symbol::RParen, "expected ')' after arguments")?;
+                    expr = Expr::Call {
+                        callee: Box::new(prop),
+                        args,
+                        is_optional,
+                    };
+                } else {
+                    if is_optional {
+                        return Err(ParseError::new(
+                            "'~' requires a method call: expected '(' after method name".to_string(),
+                            token.line,
+                            token.column,
+                        ));
+                    }
+                    expr = prop;
+                }
             } else if let Some(token) = self.consume_if_symbol(Symbol::PlusPlus)? {
                 self.validate_lvalue(&expr, &token)?;
                 expr = Expr::PostIncrement(Box::new(expr));

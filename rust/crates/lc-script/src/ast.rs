@@ -111,7 +111,7 @@ pub enum Expr {
     Variable(String),
     Unary(UnaryOp, Box<Expr>),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
-    Call { callee: Box<Expr>, args: Vec<Expr> },
+    Call { callee: Box<Expr>, args: Vec<Expr>, is_optional: bool },
     Array(Vec<Expr>),
     Proplist(Vec<(String, Expr)>),
     Index(Box<Expr>, Box<Expr>),

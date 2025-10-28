@@ -289,26 +289,53 @@ impl<'a> Vm<'a> {
                 let right = self.evaluate(rhs, env, depth)?;
                 self.eval_binary(left, op, right)
             }
-            Expr::Call { callee, args } => {
-                let mut evaluated_args = Vec::with_capacity(args.len());
-                for arg in args {
-                    evaluated_args.push(self.evaluate(arg, env, depth + 1)?);
-                }
-                // Extract function name from callee expression
-                // For now, we support Variable and Property expressions
-                match callee.as_ref() {
-                    Expr::Variable(name) => {
-                        self.invoke(name, &evaluated_args, depth + 1)
+            Expr::Call { callee, args, is_optional } => {
+                // For optional calls (->~Method()), return nil if method doesn't exist
+                // instead of throwing an error
+                if *is_optional {
+                    match callee.as_ref() {
+                        Expr::Property(_base, name) => {
+                            // Try to find the function
+                            if !self.functions.contains_key(name) && !self.host_functions.contains_key(name) {
+                                // Method doesn't exist - return nil without evaluating args
+                                return Ok(Value::Nil);
+                            }
+                            // Method exists, evaluate args and call it
+                            let mut evaluated_args = Vec::with_capacity(args.len());
+                            for arg in args {
+                                evaluated_args.push(self.evaluate(arg, env, depth + 1)?);
+                            }
+                            // If the call fails for other reasons (arity, runtime error), propagate
+                            self.invoke(name, &evaluated_args, depth + 1)
+                        }
+                        _ => {
+                            // Optional calls only make sense for property access
+                            return Err(RuntimeError::new(
+                                "optional call (~) can only be used with property access (->~Method())".to_string(),
+                            ));
+                        }
                     }
-                    Expr::Property(_base, name) => {
-                        // For now, just call the method name directly
-                        // TODO: Implement proper object method dispatch when we have object support
-                        self.invoke(name, &evaluated_args, depth + 1)
+                } else {
+                    // Normal call - evaluate args first, then invoke
+                    let mut evaluated_args = Vec::with_capacity(args.len());
+                    for arg in args {
+                        evaluated_args.push(self.evaluate(arg, env, depth + 1)?);
                     }
-                    _ => Err(RuntimeError::new(format!(
-                        "cannot call non-function expression: {:?}",
-                        callee
-                    ))),
+                    // Extract function name from callee expression
+                    match callee.as_ref() {
+                        Expr::Variable(name) => {
+                            self.invoke(name, &evaluated_args, depth + 1)
+                        }
+                        Expr::Property(_base, name) => {
+                            // For now, just call the method name directly
+                            // TODO: Implement proper object method dispatch when we have object support
+                            self.invoke(name, &evaluated_args, depth + 1)
+                        }
+                        _ => Err(RuntimeError::new(format!(
+                            "cannot call non-function expression: {:?}",
+                            callee
+                        ))),
+                    }
                 }
             }
             Expr::Array(elements) => {
