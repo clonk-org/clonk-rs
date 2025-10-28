@@ -82,6 +82,7 @@ pub enum TypeAnnotation {
     Proplist,
     Effect,
     Nil,
+    Any,
     Union(Vec<TypeAnnotation>),
 }
 
@@ -97,6 +98,7 @@ impl TypeAnnotation {
             TypeAnnotation::Proplist => "proplist".to_string(),
             TypeAnnotation::Effect => "effect".to_string(),
             TypeAnnotation::Nil => "nil".to_string(),
+            TypeAnnotation::Any => "any".to_string(),
             TypeAnnotation::Union(types) => {
                 types
                     .iter()

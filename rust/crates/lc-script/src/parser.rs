@@ -224,6 +224,10 @@ impl<'a> Parser<'a> {
                         self.consume()?;
                         TypeAnnotation::Effect
                     }
+                    "any" => {
+                        self.consume()?;
+                        TypeAnnotation::Any
+                    }
                     _ => return Ok(None),
                 }
             }
@@ -274,6 +278,10 @@ impl<'a> Parser<'a> {
                             "effect" => {
                                 self.consume()?;
                                 TypeAnnotation::Effect
+                            }
+                            "any" => {
+                                self.consume()?;
+                                TypeAnnotation::Any
                             }
                             _ => {
                                 return Err(ParseError::new(
