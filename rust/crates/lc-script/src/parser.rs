@@ -9,6 +9,8 @@ pub struct Parser<'a> {
     peeked: Option<Token>,
     // Additional buffer for multi-token lookahead (used in for-loop disambiguation)
     lookahead_buffer: Vec<Token>,
+    // Track consumed tokens during speculative parsing
+    speculative_tokens: Option<Vec<Token>>,
 }
 
 impl<'a> Parser<'a> {
@@ -17,6 +19,7 @@ impl<'a> Parser<'a> {
             lexer: Lexer::new(source),
             peeked: None,
             lookahead_buffer: Vec::new(),
+            speculative_tokens: None,
         }
     }
 
@@ -1091,10 +1094,62 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
+    // Speculative parsing helpers
+    fn begin_speculative(&mut self) {
+        // Safety check: ensure we're not already in speculative mode
+        assert!(self.speculative_tokens.is_none(), "Nested speculative parsing not supported");
+        self.speculative_tokens = Some(Vec::new());
+    }
+
+    fn commit_speculative(&mut self) {
+        // Clear speculative tokens without restoring
+        self.speculative_tokens = None;
+    }
+
+    fn reset_speculative(&mut self) {
+        if let Some(tokens) = self.speculative_tokens.take() {
+            // Restore tokens in reverse order so they come out in the correct order
+            for token in tokens.into_iter().rev() {
+                self.lookahead_buffer.insert(0, token);
+            }
+            // Clear peeked to ensure restored tokens are seen first
+            self.peeked = None;
+        }
+    }
+
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        // Check for ! or "not" keyword
         if self.consume_if_symbol(Symbol::Bang)?.is_some() || self.consume_if_identifier("not")?.is_some() {
-            let expr = self.parse_unary()?;
-            return Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)));
+            // Speculative parse: try parsing assignment expression as operand
+            // This allows patterns like: !x = y  →  !(x = y)
+            // While preserving precedence for: !a + b  →  (!a) + b
+
+            // NOTE: ! token already consumed, speculative mode tracks only the operand tokens
+            self.begin_speculative();
+
+            // Try parsing an assignment expression
+            let result = self.parse_assignment();
+
+            // Ensure we always clean up speculative mode
+            let final_result = match result {
+                Ok(expr) => {
+                    // Always commit and use the expression
+                    // If it's an assignment: !(x = y) works correctly
+                    // If not: !x also works correctly (parse_assignment parsed just the operand)
+                    self.commit_speculative();
+                    Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)))
+                }
+                Err(e) => {
+                    // Parse failed, reset and try normal precedence (skip ! handling since already consumed)
+                    self.reset_speculative();
+                    match self.parse_unary() {
+                        Ok(operand) => Ok(Expr::Unary(UnaryOp::Not, Box::new(operand))),
+                        Err(_) => Err(e), // Return original error
+                    }
+                }
+            };
+
+            return final_result;
         }
         if self.consume_if_symbol(Symbol::Minus)?.is_some() {
             let expr = self.parse_unary()?;
@@ -1460,7 +1515,12 @@ impl<'a> Parser<'a> {
         // peek() ensures peeked is populated and honors lookahead buffer
         self.peek()?;
         // Now take the peeked token
-        Ok(self.peeked.take().unwrap())
+        let token = self.peeked.take().unwrap();
+        // Track tokens if in speculative mode
+        if let Some(ref mut tokens) = self.speculative_tokens {
+            tokens.push(token.clone());
+        }
+        Ok(token)
     }
 
     fn next(&mut self) -> Result<Token, ParseError> {
