@@ -1399,3 +1399,107 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Block(Vec::new()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_script(source: &str) -> Result<Script, ParseError> {
+        Parser::new(source).parse_script()
+    }
+
+    #[test]
+    fn parse_return_with_simple_expression() {
+        let result = parse_script("func Test() { return 42; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_return_with_parenthesized_expression() {
+        let result = parse_script("func Test() { return (42); }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_return_with_parenthesized_expression_and_operator() {
+        let result = parse_script("func Test() { return (100)/10; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_return_with_complex_expression() {
+        let result = parse_script("func Test() { return (255*GetValue())/100; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_return_without_value() {
+        let result = parse_script("func Test() { return; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_private_function() {
+        let result = parse_script("private func Helper() { return 1; }");
+        assert!(result.is_ok());
+        let script = result.unwrap();
+        assert_eq!(script.functions.len(), 1);
+        assert_eq!(script.functions[0].access, AccessLevel::Private);
+    }
+
+    #[test]
+    fn parse_protected_function() {
+        let result = parse_script("protected func Helper() { return 1; }");
+        assert!(result.is_ok());
+        let script = result.unwrap();
+        assert_eq!(script.functions[0].access, AccessLevel::Protected);
+    }
+
+    #[test]
+    fn parse_public_function() {
+        let result = parse_script("public func Helper() { return 1; }");
+        assert!(result.is_ok());
+        let script = result.unwrap();
+        assert_eq!(script.functions[0].access, AccessLevel::Public);
+    }
+
+    #[test]
+    fn parse_global_function() {
+        let result = parse_script("global func Helper() { return 1; }");
+        assert!(result.is_ok());
+        let script = result.unwrap();
+        assert_eq!(script.functions[0].access, AccessLevel::Global);
+    }
+
+    #[test]
+    fn parse_function_defaults_to_public() {
+        let result = parse_script("func Helper() { return 1; }");
+        assert!(result.is_ok());
+        let script = result.unwrap();
+        assert_eq!(script.functions[0].access, AccessLevel::Public);
+    }
+
+    #[test]
+    fn parse_array_index_assignment() {
+        let result = parse_script("func Test() { var arr = [1, 2]; arr[0] = 3; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_nested_array_index_assignment() {
+        let result = parse_script("func Test() { var m = [[1]]; m[0][0] = 2; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_proplist_property_assignment() {
+        let result = parse_script("func Test() { var obj = {}; obj.prop = 1; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_nested_proplist_assignment() {
+        let result = parse_script("func Test() { var obj = {n={}}; obj.n.prop = 1; }");
+        assert!(result.is_ok());
+    }
+}

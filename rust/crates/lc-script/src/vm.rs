@@ -975,3 +975,171 @@ impl Environment {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::Parser;
+
+    fn execute_script(source: &str, entry_point: &str, args: &[Value]) -> Result<Value, RuntimeError> {
+        let script = Parser::new(source).parse_script().expect("parse should succeed");
+        let functions: HashMap<String, Function> = script
+            .functions
+            .into_iter()
+            .map(|f| (f.name.clone(), f))
+            .collect();
+        let host_functions = HashMap::new();
+        let vm = Vm::new(&functions, &host_functions, None);
+        vm.call(entry_point, args)
+    }
+
+    #[test]
+    fn vm_executes_basic_arithmetic() {
+        let source = "func Test() { return 5 + 3; }";
+        let result = execute_script(source, "Test", &[]).unwrap();
+        assert_eq!(result, Value::Int(8));
+    }
+
+    #[test]
+    fn vm_handles_local_variables() {
+        let source = r#"
+            func Test() {
+                var x = 10;
+                var y = 20;
+                return x + y;
+            }
+        "#;
+        let result = execute_script(source, "Test", &[]).unwrap();
+        assert_eq!(result, Value::Int(30));
+    }
+
+    #[test]
+    fn vm_handles_function_parameters() {
+        let source = "func Add(a, b) { return a + b; }";
+        let result = execute_script(source, "Add", &[Value::Int(7), Value::Int(3)]).unwrap();
+        assert_eq!(result, Value::Int(10));
+    }
+
+    #[test]
+    fn vm_reports_undefined_variable() {
+        let source = "func Test() { return undefined_var; }";
+        let error = execute_script(source, "Test", &[]).unwrap_err();
+        assert!(error.message().contains("undefined variable"));
+    }
+
+    #[test]
+    fn vm_reports_unknown_function() {
+        let source = "func Test() { return 1; }";
+        let error = execute_script(source, "Missing", &[]).unwrap_err();
+        assert!(error.message().contains("unknown function"));
+    }
+
+    #[test]
+    fn vm_handles_nested_function_calls() {
+        let source = r#"
+            func Inner() { return 42; }
+            func Outer() { return Inner(); }
+        "#;
+        let result = execute_script(source, "Outer", &[]).unwrap();
+        assert_eq!(result, Value::Int(42));
+    }
+
+    #[test]
+    fn vm_enforces_call_depth_limit() {
+        let source = r#"
+            func Recursive(n) {
+                if (n <= 0) return 0;
+                return Recursive(n - 1);
+            }
+        "#;
+        // Should fail with MAX_CALL_DEPTH (64) exceeded
+        let error = execute_script(source, "Recursive", &[Value::Int(100)]).unwrap_err();
+        assert!(error.message().contains("maximum call depth exceeded"));
+    }
+
+    #[test]
+    fn vm_handles_array_creation() {
+        let source = "func Test() { var arr = [1, 2, 3]; return arr[1]; }";
+        let result = execute_script(source, "Test", &[]).unwrap();
+        assert_eq!(result, Value::Int(2));
+    }
+
+    #[test]
+    fn vm_handles_array_index_assignment() {
+        let source = r#"
+            func Test() {
+                var arr = [0, 0, 0];
+                arr[1] = 42;
+                return arr[1];
+            }
+        "#;
+        let result = execute_script(source, "Test", &[]).unwrap();
+        assert_eq!(result, Value::Int(42));
+    }
+
+    #[test]
+    fn vm_auto_resizes_array_on_assignment() {
+        let source = r#"
+            func Test() {
+                var arr = [1];
+                arr[5] = 99;
+                return arr[5];
+            }
+        "#;
+        let result = execute_script(source, "Test", &[]).unwrap();
+        assert_eq!(result, Value::Int(99));
+    }
+
+    #[test]
+    fn vm_handles_proplist_creation() {
+        let source = "func Test() { var obj = { x = 10 }; return obj.x; }";
+        let result = execute_script(source, "Test", &[]).unwrap();
+        assert_eq!(result, Value::Int(10));
+    }
+
+    #[test]
+    fn vm_handles_proplist_property_assignment() {
+        let source = r#"
+            func Test() {
+                var obj = { x = 1 };
+                obj.x = 42;
+                return obj.x;
+            }
+        "#;
+        let result = execute_script(source, "Test", &[]).unwrap();
+        assert_eq!(result, Value::Int(42));
+    }
+
+    #[test]
+    fn vm_handles_while_loop() {
+        let source = r#"
+            func Test() {
+                var sum = 0;
+                var i = 1;
+                while (i <= 5) {
+                    sum = sum + i;
+                    i = i + 1;
+                }
+                return sum;
+            }
+        "#;
+        let result = execute_script(source, "Test", &[]).unwrap();
+        assert_eq!(result, Value::Int(15));
+    }
+
+    #[test]
+    fn vm_handles_if_statement() {
+        let source = r#"
+            func Test(x) {
+                if (x > 10) {
+                    return 1;
+                }
+                return 0;
+            }
+        "#;
+        let result1 = execute_script(source, "Test", &[Value::Int(15)]).unwrap();
+        assert_eq!(result1, Value::Int(1));
+        let result2 = execute_script(source, "Test", &[Value::Int(5)]).unwrap();
+        assert_eq!(result2, Value::Int(0));
+    }
+}

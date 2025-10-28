@@ -571,3 +571,150 @@ impl<'a> Lexer<'a> {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lex_all(source: &str) -> Result<Vec<Token>, ParseError> {
+        let mut lexer = Lexer::new(source);
+        let mut tokens = Vec::new();
+        loop {
+            let token = lexer.next_token()?;
+            if matches!(token.kind, TokenKind::Eof) {
+                break;
+            }
+            tokens.push(token);
+        }
+        Ok(tokens)
+    }
+
+    #[test]
+    fn tokenizes_private_keyword() {
+        let tokens = lex_all("private").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0].kind, TokenKind::Keyword(Keyword::Private)));
+    }
+
+    #[test]
+    fn tokenizes_protected_keyword() {
+        let tokens = lex_all("protected").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0].kind, TokenKind::Keyword(Keyword::Protected)));
+    }
+
+    #[test]
+    fn tokenizes_public_keyword() {
+        let tokens = lex_all("public").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0].kind, TokenKind::Keyword(Keyword::Public)));
+    }
+
+    #[test]
+    fn tokenizes_global_keyword() {
+        let tokens = lex_all("global").unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0].kind, TokenKind::Keyword(Keyword::Global)));
+    }
+
+    #[test]
+    fn handles_windows_line_endings() {
+        let source = "var x = 1;\r\nvar y = 2;\r\n";
+        let tokens = lex_all(source).unwrap();
+        // Should tokenize successfully despite \r\n endings
+        assert!(tokens.len() > 0);
+        // Check that the second var is on line 2
+        let var_positions: Vec<_> = tokens.iter()
+            .filter(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Var)))
+            .collect();
+        assert_eq!(var_positions.len(), 2);
+        assert_eq!(var_positions[0].line, 1);
+        assert_eq!(var_positions[1].line, 2);
+    }
+
+    #[test]
+    fn tracks_line_numbers_correctly() {
+        let source = "var a = 1;\nvar b = 2;\nvar c = 3;";
+        let tokens = lex_all(source).unwrap();
+        let var_positions: Vec<_> = tokens.iter()
+            .filter(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Var)))
+            .collect();
+        assert_eq!(var_positions.len(), 3);
+        assert_eq!(var_positions[0].line, 1);
+        assert_eq!(var_positions[1].line, 2);
+        assert_eq!(var_positions[2].line, 3);
+    }
+
+    #[test]
+    fn tracks_column_numbers_correctly() {
+        let source = "var a = 1;";
+        let tokens = lex_all(source).unwrap();
+        // var starts at column 1
+        assert_eq!(tokens[0].column, 1);
+        // 'a' starts at column 5
+        assert_eq!(tokens[1].column, 5);
+    }
+
+    #[test]
+    fn tokenizes_operators() {
+        let source = "+ - * / % == != < <= > >= && || !";
+        let tokens = lex_all(source).unwrap();
+        assert_eq!(tokens.len(), 14);
+    }
+
+    #[test]
+    fn tokenizes_string_literals() {
+        let source = r#""hello world""#;
+        let tokens = lex_all(source).unwrap();
+        assert_eq!(tokens.len(), 1);
+        if let TokenKind::String(s) = &tokens[0].kind {
+            assert_eq!(s, "hello world");
+        } else {
+            panic!("Expected string literal");
+        }
+    }
+
+    #[test]
+    fn tokenizes_integer_literals() {
+        let source = "42";
+        let tokens = lex_all(source).unwrap();
+        assert_eq!(tokens.len(), 1);
+        if let TokenKind::Number(n) = tokens[0].kind {
+            assert_eq!(n, 42);
+        } else {
+            panic!("Expected integer literal");
+        }
+    }
+
+    #[test]
+    fn tokenizes_identifiers() {
+        let source = "myVar myFunc";
+        let tokens = lex_all(source).unwrap();
+        assert_eq!(tokens.len(), 2);
+        if let TokenKind::Identifier(id) = &tokens[0].kind {
+            assert_eq!(id, "myVar");
+        } else {
+            panic!("Expected identifier");
+        }
+    }
+
+    #[test]
+    fn skips_line_comments() {
+        let source = "var x = 1; // this is a comment\nvar y = 2;";
+        let tokens = lex_all(source).unwrap();
+        let var_count = tokens.iter()
+            .filter(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Var)))
+            .count();
+        assert_eq!(var_count, 2);
+    }
+
+    #[test]
+    fn skips_block_comments() {
+        let source = "var x = 1; /* this is\na block comment */ var y = 2;";
+        let tokens = lex_all(source).unwrap();
+        let var_count = tokens.iter()
+            .filter(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Var)))
+            .count();
+        assert_eq!(var_count, 2);
+    }
+}
