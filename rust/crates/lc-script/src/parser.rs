@@ -374,15 +374,11 @@ impl<'a> Parser<'a> {
                 // This is a context annotation, parse it
                 return self.parse_context_annotation_body();
             } else {
-                // This is an array literal, we need to handle it as an expression
-                // But we already consumed the '[', so we need to parse it differently
-                // For now, return an error - we'll fix array literal parsing separately
-                let next_token = self.peek()?;
-                return Err(ParseError::new(
-                    "array literals in statement position not yet supported",
-                    next_token.line,
-                    next_token.column,
-                ));
+                // This is an array literal in statement position
+                // '[' was already consumed at line 371, so parse_array_literal() will handle the rest
+                // Note: Bracket annotations in C4Script don't require semicolons
+                let array_expr = self.parse_array_literal()?;
+                return Ok(Stmt::Expr(array_expr));
             }
         }
 
@@ -1567,7 +1563,7 @@ impl<'a> Parser<'a> {
         let is_annotation = match &first_token.kind {
             // LocaleKey definitely means context annotation
             TokenKind::LocaleKey(_) => true,
-            // Identifier might be context annotation if followed by = or |
+            // Identifier might be context annotation if followed by = or | or ] or another identifier
             TokenKind::Identifier(_) => {
                 // Consume the identifier to look at next token
                 self.consume()?;
@@ -1578,6 +1574,7 @@ impl<'a> Parser<'a> {
                     TokenKind::Symbol(Symbol::Equal)     // Key=Value
                     | TokenKind::Symbol(Symbol::Pipe)    // Key|...
                     | TokenKind::Symbol(Symbol::RBracket) // [Key] alone
+                    | TokenKind::Identifier(_)           // [Key text...] freeform annotation
                 );
                 // Note: Comma means array: [Key, ...]
                 result
