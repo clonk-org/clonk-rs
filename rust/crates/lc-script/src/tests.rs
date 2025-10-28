@@ -339,3 +339,116 @@ fn canonical_scenario_parity_harness() {
         .expect("effect callback dispatches");
     assert_eq!(effect, Some(Value::Int(7)));
 }
+
+#[test]
+fn supports_access_modifiers_on_functions() {
+    let mut engine = Engine::new();
+    load_script(
+        &mut engine,
+        r#"
+        private func PrivateHelper() {
+            return 10;
+        }
+
+        protected func ProtectedHelper() {
+            return 20;
+        }
+
+        public func PublicHelper() {
+            return 30;
+        }
+
+        global func GlobalHelper() {
+            return 40;
+        }
+
+        global func CallAll() {
+            return PrivateHelper() + ProtectedHelper() + PublicHelper() + GlobalHelper();
+        }
+        "#,
+    );
+
+    let result = engine.call("CallAll", &[]).expect("call succeeds");
+    assert_eq!(result, Value::Int(100));
+}
+
+#[test]
+fn return_statement_handles_parenthesized_expressions_with_operators() {
+    let mut engine = Engine::new();
+    load_script(
+        &mut engine,
+        r#"
+        global func ReturnParenDivide() {
+            return (255*100)/100;
+        }
+
+        global func ReturnParenAdd() {
+            return (100)+50;
+        }
+
+        global func ReturnParenMultiply() {
+            return (10)*5;
+        }
+
+        global func ReturnComplexExpr() {
+            return (255*GetIntensity())/100;
+        }
+
+        private func GetIntensity() {
+            return 80;
+        }
+        "#,
+    );
+
+    assert_eq!(
+        engine.call("ReturnParenDivide", &[]).expect("call succeeds"),
+        Value::Int(255)
+    );
+    assert_eq!(
+        engine.call("ReturnParenAdd", &[]).expect("call succeeds"),
+        Value::Int(150)
+    );
+    assert_eq!(
+        engine.call("ReturnParenMultiply", &[]).expect("call succeeds"),
+        Value::Int(50)
+    );
+    assert_eq!(
+        engine.call("ReturnComplexExpr", &[]).expect("call succeeds"),
+        Value::Int(204)
+    );
+}
+
+#[test]
+fn array_index_assignment_works() {
+    let mut engine = Engine::new();
+    load_script(
+        &mut engine,
+        r#"
+        global func TestArrayIndexAssignment() {
+            var arr = [0, 0, 0];
+            arr[0] = 10;
+            arr[1] = 20;
+            arr[2] = 30;
+            return arr[0] + arr[1] + arr[2];
+        }
+
+        global func TestNestedArrayAssignment() {
+            var matrix = [[0, 0], [0, 0]];
+            matrix[0][0] = 1;
+            matrix[0][1] = 2;
+            matrix[1][0] = 3;
+            matrix[1][1] = 4;
+            return matrix[0][0] + matrix[0][1] + matrix[1][0] + matrix[1][1];
+        }
+        "#,
+    );
+
+    assert_eq!(
+        engine.call("TestArrayIndexAssignment", &[]).expect("call succeeds"),
+        Value::Int(60)
+    );
+    assert_eq!(
+        engine.call("TestNestedArrayAssignment", &[]).expect("call succeeds"),
+        Value::Int(10)
+    );
+}
