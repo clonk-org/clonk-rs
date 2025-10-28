@@ -544,12 +544,11 @@ impl<'a> Parser<'a> {
         // No 'var' - could be for-in with pre-declared variable or C-style for
         // Need 2-token lookahead: identifier + 'in' means for-in, otherwise C-style
         if self.check_identifier()? {
-            // Get first token (identifier) without consuming
-            let token1 = self.peek()?.clone();
+            // Get first token (identifier) by consuming
+            let token1 = self.consume()?;
 
-            // Get second token by advancing lexer
-            self.peeked.take(); // Clear peeked
-            let token2 = self.lexer.next_token()?; // Get second token directly
+            // Get second token by consuming
+            let token2 = self.consume()?;
 
             // Check if it's for-in pattern
             let is_for_in = matches!(token2.kind, TokenKind::Keyword(Keyword::In));
@@ -574,10 +573,10 @@ impl<'a> Parser<'a> {
                     body,
                 });
             } else {
-                // C-style for: restore both tokens using the lookahead buffer
-                // Put them back in order: token1, token2
-                self.lookahead_buffer.push(token1);
-                self.lookahead_buffer.push(token2);
+                // C-style for: restore both tokens
+                // Push in reverse order so token1 comes out first
+                self.lookahead_buffer.insert(0, token2);
+                self.lookahead_buffer.insert(0, token1);
             }
         }
 
@@ -762,7 +761,7 @@ impl<'a> Parser<'a> {
 
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_and()?;
-        while self.consume_if_symbol(Symbol::OrOr)?.is_some() || self.consume_if_keyword(Keyword::Or)?.is_some() {
+        while self.consume_if_symbol(Symbol::OrOr)?.is_some() || self.consume_if_identifier("or")?.is_some() {
             let right = self.parse_and()?;
             expr = Expr::Binary(Box::new(expr), BinaryOp::Or, Box::new(right));
         }
@@ -771,7 +770,7 @@ impl<'a> Parser<'a> {
 
     fn parse_and(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_bit_or()?;
-        while self.consume_if_symbol(Symbol::AndAnd)?.is_some() || self.consume_if_keyword(Keyword::And)?.is_some() {
+        while self.consume_if_symbol(Symbol::AndAnd)?.is_some() || self.consume_if_identifier("and")?.is_some() {
             let right = self.parse_bit_or()?;
             expr = Expr::Binary(Box::new(expr), BinaryOp::And, Box::new(right));
         }
@@ -808,10 +807,10 @@ impl<'a> Parser<'a> {
     fn parse_equality(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_comparison()?;
         loop {
-            if self.consume_if_symbol(Symbol::EqualEqual)?.is_some() || self.consume_if_keyword(Keyword::Eq)?.is_some() {
+            if self.consume_if_symbol(Symbol::EqualEqual)?.is_some() || self.consume_if_identifier("eq")?.is_some() {
                 let right = self.parse_comparison()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Equal, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::BangEqual)?.is_some() || self.consume_if_keyword(Keyword::Ne)?.is_some() {
+            } else if self.consume_if_symbol(Symbol::BangEqual)?.is_some() || self.consume_if_identifier("ne")?.is_some() {
                 let right = self.parse_comparison()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::NotEqual, Box::new(right));
             } else if self.consume_if_symbol(Symbol::StringEqual)?.is_some() {
@@ -830,16 +829,16 @@ impl<'a> Parser<'a> {
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_shift()?;
         loop {
-            if self.consume_if_symbol(Symbol::Less)?.is_some() || self.consume_if_keyword(Keyword::Lt)?.is_some() {
+            if self.consume_if_symbol(Symbol::Less)?.is_some() || self.consume_if_identifier("lt")?.is_some() {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Less, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::LessEqual)?.is_some() || self.consume_if_keyword(Keyword::Le)?.is_some() {
+            } else if self.consume_if_symbol(Symbol::LessEqual)?.is_some() || self.consume_if_identifier("le")?.is_some() {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::LessEqual, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::Greater)?.is_some() || self.consume_if_keyword(Keyword::Gt)?.is_some() {
+            } else if self.consume_if_symbol(Symbol::Greater)?.is_some() || self.consume_if_identifier("gt")?.is_some() {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Greater, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::GreaterEqual)?.is_some() || self.consume_if_keyword(Keyword::Ge)?.is_some() {
+            } else if self.consume_if_symbol(Symbol::GreaterEqual)?.is_some() || self.consume_if_identifier("ge")?.is_some() {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::GreaterEqual, Box::new(right));
             } else if self.consume_if_symbol(Symbol::StringLess)?.is_some() {
@@ -913,7 +912,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
-        if self.consume_if_symbol(Symbol::Bang)?.is_some() || self.consume_if_keyword(Keyword::Not)?.is_some() {
+        if self.consume_if_symbol(Symbol::Bang)?.is_some() || self.consume_if_identifier("not")?.is_some() {
             let expr = self.parse_unary()?;
             return Ok(Expr::Unary(UnaryOp::Not, Box::new(expr)));
         }
@@ -1170,6 +1169,15 @@ impl<'a> Parser<'a> {
             Ok(Some(self.consume()?))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Check if next token is an identifier matching the given name (case-insensitive for operator keywords)
+    fn consume_if_identifier(&mut self, name: &str) -> Result<Option<Token>, ParseError> {
+        let token = self.peek()?;
+        match &token.kind {
+            TokenKind::Identifier(id) if id == name => Ok(Some(self.consume()?)),
+            _ => Ok(None),
         }
     }
 

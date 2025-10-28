@@ -434,16 +434,9 @@ impl<'a> Lexer<'a> {
             // Type keywords are contextual - treated as identifiers here,
             // recognized as keywords only in type annotation contexts by parser
             // "int", "bool", "string", "object", "id", "array", "proplist", "effect"
-            // Keyword operators (word-based synonyms for symbolic operators)
-            "eq" => TokenKind::Keyword(Keyword::Eq),
-            "ne" => TokenKind::Keyword(Keyword::Ne),
-            "lt" => TokenKind::Keyword(Keyword::Lt),
-            "le" => TokenKind::Keyword(Keyword::Le),
-            "gt" => TokenKind::Keyword(Keyword::Gt),
-            "ge" => TokenKind::Keyword(Keyword::Ge),
-            "and" => TokenKind::Keyword(Keyword::And),
-            "or" => TokenKind::Keyword(Keyword::Or),
-            "not" => TokenKind::Keyword(Keyword::Not),
+            // Keyword operators are also contextual - treated as identifiers here,
+            // recognized as operators in expression contexts by parser
+            // "eq", "ne", "lt", "le", "gt", "ge", "and", "or", "not"
             _ => TokenKind::Identifier(lexeme.to_string()),
         };
         Token::new(kind, line, column)
