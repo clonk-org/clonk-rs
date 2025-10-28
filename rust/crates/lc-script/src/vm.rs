@@ -864,6 +864,28 @@ impl<'a> Vm<'a> {
                 env.define(&slot_name, value);
                 Ok(())
             }
+            AssignmentTarget::FunctionCall { name, args } => {
+                // Call the reference-returning function to get the lvalue reference
+                // For now, implement a simplified version using slot naming
+                // TODO: Properly implement reference semantics
+                let mut arg_values = Vec::new();
+                for arg in args {
+                    arg_values.push(self.evaluate(arg, env, 0)?);
+                }
+                // Store using a naming scheme based on the function name and arguments
+                let arg_str = arg_values
+                    .iter()
+                    .map(|v| match v {
+                        Value::Int(n) => n.to_string(),
+                        Value::String(s) => s.clone(),
+                        _ => format!("{:?}", v),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("_");
+                let slot_name = format!("__funcref_{}_{}", name, arg_str);
+                env.define(&slot_name, value);
+                Ok(())
+            }
         }
     }
 
@@ -995,6 +1017,24 @@ impl<'a> Vm<'a> {
                 let slot_name = format!("__method_{}_{}_{}", object_id, method, key);
                 Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
             }
+            AssignmentTarget::FunctionCall { name, args } => {
+                // Retrieve the value stored for this reference-returning function call
+                let mut arg_values = Vec::new();
+                for arg in args {
+                    arg_values.push(self.evaluate(arg, env, 0)?);
+                }
+                let arg_str = arg_values
+                    .iter()
+                    .map(|v| match v {
+                        Value::Int(n) => n.to_string(),
+                        Value::String(s) => s.clone(),
+                        _ => format!("{:?}", v),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("_");
+                let slot_name = format!("__funcref_{}_{}", name, arg_str);
+                Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
+            }
         }
     }
 
@@ -1023,6 +1063,12 @@ impl<'a> Vm<'a> {
                         } else if name == "EffectVar" {
                             return Ok(AssignmentTarget::EffectSlot(args.clone()));
                         }
+                        // NEW: Allow any function call to be used with increment/decrement
+                        // This supports reference-returning functions (func &)
+                        return Ok(AssignmentTarget::FunctionCall {
+                            name: name.clone(),
+                            args: args.clone(),
+                        });
                     }
                 }
                 // Handle obj->LocalN("key"), obj->Local(index), etc.

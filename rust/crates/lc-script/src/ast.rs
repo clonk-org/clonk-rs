@@ -85,6 +85,29 @@ pub enum TypeAnnotation {
     Union(Vec<TypeAnnotation>),
 }
 
+impl TypeAnnotation {
+    pub fn to_string(&self) -> String {
+        match self {
+            TypeAnnotation::Int => "int".to_string(),
+            TypeAnnotation::Bool => "bool".to_string(),
+            TypeAnnotation::String => "string".to_string(),
+            TypeAnnotation::Object => "object".to_string(),
+            TypeAnnotation::Id => "id".to_string(),
+            TypeAnnotation::Array => "array".to_string(),
+            TypeAnnotation::Proplist => "proplist".to_string(),
+            TypeAnnotation::Effect => "effect".to_string(),
+            TypeAnnotation::Nil => "nil".to_string(),
+            TypeAnnotation::Union(types) => {
+                types
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join("|")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Parameter {
     pub name: String,
@@ -124,6 +147,7 @@ pub struct Function {
     pub params: Vec<Parameter>,
     pub body: Vec<Stmt>,
     pub access: AccessLevel,
+    pub returns_reference: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -181,6 +205,10 @@ pub enum AssignmentTarget {
     MethodSlot {           // obj->LocalN("key") as lvalue - method-accessed slot
         object: Box<Expr>,
         method: String,
+        args: Vec<Expr>,
+    },
+    FunctionCall {         // func(&...) as lvalue - reference-returning function call
+        name: String,
         args: Vec<Expr>,
     },
 }

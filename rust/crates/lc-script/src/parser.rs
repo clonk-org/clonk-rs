@@ -109,6 +109,8 @@ impl<'a> Parser<'a> {
         };
 
         self.expect_keyword(Keyword::Func, "expected 'func' declaration")?;
+        // Check for optional & indicating reference return type
+        let returns_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
         let name_token = self.expect_identifier("expected function name")?;
         let name = if let TokenKind::Identifier(name) = name_token.kind.clone() {
             name
@@ -127,6 +129,7 @@ impl<'a> Parser<'a> {
             params,
             body,
             access,
+            returns_reference,
         })
     }
 
@@ -142,14 +145,39 @@ impl<'a> Parser<'a> {
             // Check for optional reference parameter (&)
             let is_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
 
-            let token = self.expect_identifier("expected parameter name")?;
-            if let TokenKind::Identifier(name) = token.kind {
-                if is_reference || type_annotation.is_some() {
-                    params.push(Parameter::with_reference(name, type_annotation, is_reference));
-                } else {
-                    params.push(Parameter::new(name));
+            // Try to get parameter name
+            // If we have a type annotation but the next token is not an identifier (nor &),
+            // then the "type" was actually the parameter name itself
+            let next_token = self.peek()?;
+            let (name, actual_type) = match &next_token.kind {
+                TokenKind::Identifier(param_name) => {
+                    let name = param_name.clone();
+                    self.consume()?;
+                    (name, type_annotation)
                 }
+                _ if type_annotation.is_some() => {
+                    // The type annotation token was actually the parameter name
+                    // (e.g., "effect" in "func Foo(effect, target)")
+                    let param_name = type_annotation.as_ref().unwrap().to_string();
+                    (param_name, None)
+                }
+                _ => {
+                    let line = next_token.line;
+                    let column = next_token.column;
+                    return Err(ParseError::new(
+                        "expected parameter name",
+                        line,
+                        column,
+                    ))
+                }
+            };
+
+            if is_reference || actual_type.is_some() {
+                params.push(Parameter::with_reference(name, actual_type, is_reference));
+            } else {
+                params.push(Parameter::new(name));
             }
+
             if self.consume_if_symbol(Symbol::Comma)?.is_some() {
                 continue;
             }
@@ -756,6 +784,12 @@ impl<'a> Parser<'a> {
                                 args: vec![first_arg],
                             });
                         }
+                        // NEW: Allow any function call as a potential lvalue
+                        // This supports user-defined reference-returning functions (func &)
+                        return Ok(AssignmentTarget::FunctionCall {
+                            name: name.clone(),
+                            args,
+                        });
                     }
                 }
                 // NEW: Handle obj->LocalN("key"), obj->Local(index), obj->Var(index)
@@ -789,25 +823,14 @@ impl<'a> Parser<'a> {
         match expr {
             Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) => Ok(()),
             // Special cases: Local/LocalN/Var/EffectVar are valid for increment/decrement
-            Expr::Call { callee, args, is_optional, .. } => {
-                if let Expr::Variable(ref name) = **callee {
+            // Also allow any function call (for reference-returning functions)
+            Expr::Call { callee, is_optional, .. } => {
+                if let Expr::Variable(_) = **callee {
                     if !is_optional {
-                        // EffectVar with 3 arguments
-                        if name == "EffectVar" && args.len() == 3 {
-                            return Ok(());
-                        }
-                        // LocalN with 1 or 2 arguments
-                        if name == "LocalN" && (args.len() == 1 || args.len() == 2) {
-                            return Ok(());
-                        }
-                        // Local with 0, 1, or 2 arguments
-                        if name == "Local" && args.len() <= 2 {
-                            return Ok(());
-                        }
-                        // Var with 0, 1, or 2 arguments
-                        if name == "Var" && args.len() <= 2 {
-                            return Ok(());
-                        }
+                        // Allow any non-optional function call to be used with increment/decrement
+                        // This supports both built-in functions (Local, Var, etc.) and
+                        // user-defined reference-returning functions (func &)
+                        return Ok(());
                     }
                 }
                 Err(ParseError::new(
