@@ -169,11 +169,22 @@ impl<'a> Parser<'a> {
         if self.consume_if_keyword(Keyword::Return)?.is_some() {
             return self.parse_return();
         }
+        if self.consume_if_keyword(Keyword::Break)?.is_some() {
+            self.expect_symbol(Symbol::Semicolon, "expected ';' after break")?;
+            return Ok(Stmt::Break);
+        }
+        if self.consume_if_keyword(Keyword::Continue)?.is_some() {
+            self.expect_symbol(Symbol::Semicolon, "expected ';' after continue")?;
+            return Ok(Stmt::Continue);
+        }
         if self.consume_if_keyword(Keyword::If)?.is_some() {
             return self.parse_if();
         }
         if self.consume_if_keyword(Keyword::While)?.is_some() {
             return self.parse_while();
+        }
+        if self.consume_if_keyword(Keyword::For)?.is_some() {
+            return self.parse_for();
         }
         if self.consume_if_symbol(Symbol::LBrace)?.is_some() {
             let body = self.parse_block_statements()?;
@@ -284,6 +295,73 @@ impl<'a> Parser<'a> {
         Ok(Stmt::While { condition, body })
     }
 
+    fn parse_for(&mut self) -> Result<Stmt, ParseError> {
+        use crate::ast::ForInit;
+
+        self.expect_symbol(Symbol::LParen, "expected '(' after 'for'")?;
+
+        // Parse init clause: var decls, expression, or empty
+        let init = if self.check_symbol(Symbol::Semicolon)? {
+            None
+        } else if self.consume_if_keyword(Keyword::Var)?.is_some() {
+            // Parse var decl list: var i = 0, j = 1
+            let mut decls = Vec::new();
+            loop {
+                let name_token = self.expect_identifier("expected variable name")?;
+                let name = if let TokenKind::Identifier(name) = name_token.kind {
+                    name
+                } else {
+                    unreachable!()
+                };
+                let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
+                    Some(self.parse_expression()?)
+                } else {
+                    None
+                };
+                decls.push((name, init));
+
+                if self.consume_if_symbol(Symbol::Comma)?.is_some() {
+                    continue;
+                }
+                break;
+            }
+            Some(ForInit::VarDecls(decls))
+        } else {
+            // Parse expression
+            Some(ForInit::Expr(self.parse_expression()?))
+        };
+
+        self.expect_symbol(Symbol::Semicolon, "expected ';' after for-init")?;
+
+        // Parse condition clause (optional)
+        let condition = if self.check_symbol(Symbol::Semicolon)? {
+            None
+        } else {
+            Some(self.parse_expression()?)
+        };
+
+        self.expect_symbol(Symbol::Semicolon, "expected ';' after for-condition")?;
+
+        // Parse increment clause (optional)
+        let increment = if self.check_symbol(Symbol::RParen)? {
+            None
+        } else {
+            Some(self.parse_expression()?)
+        };
+
+        self.expect_symbol(Symbol::RParen, "expected ')' after for-clauses")?;
+
+        // Parse body
+        let body = self.parse_stmt_or_block_vec()?;
+
+        Ok(Stmt::For {
+            init,
+            condition,
+            increment,
+            body,
+        })
+    }
+
     fn parse_assignment_or_expr(&mut self) -> Result<Stmt, ParseError> {
         let expr = self.parse_expression()?;
         // At statement level, we always expect a trailing semicolon
@@ -313,6 +391,17 @@ impl<'a> Parser<'a> {
                 "invalid assignment target",
                 eq_token.line,
                 eq_token.column,
+            )),
+        }
+    }
+
+    fn validate_lvalue(&self, expr: &Expr, token: &Token) -> Result<(), ParseError> {
+        match expr {
+            Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) => Ok(()),
+            _ => Err(ParseError::new(
+                "increment/decrement requires an lvalue (variable, property, or index)",
+                token.line,
+                token.column,
             )),
         }
     }
@@ -382,10 +471,37 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_and(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_equality()?;
+        let mut expr = self.parse_bit_or()?;
         while self.consume_if_symbol(Symbol::AndAnd)?.is_some() || self.consume_if_keyword(Keyword::And)?.is_some() {
-            let right = self.parse_equality()?;
+            let right = self.parse_bit_or()?;
             expr = Expr::Binary(Box::new(expr), BinaryOp::And, Box::new(right));
+        }
+        Ok(expr)
+    }
+
+    fn parse_bit_or(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_bit_xor()?;
+        while self.consume_if_symbol(Symbol::Pipe)?.is_some() {
+            let right = self.parse_bit_xor()?;
+            expr = Expr::Binary(Box::new(expr), BinaryOp::BitOr, Box::new(right));
+        }
+        Ok(expr)
+    }
+
+    fn parse_bit_xor(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_bit_and()?;
+        while self.consume_if_symbol(Symbol::Caret)?.is_some() {
+            let right = self.parse_bit_and()?;
+            expr = Expr::Binary(Box::new(expr), BinaryOp::BitXor, Box::new(right));
+        }
+        Ok(expr)
+    }
+
+    fn parse_bit_and(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_equality()?;
+        while self.consume_if_symbol(Symbol::Ampersand)?.is_some() {
+            let right = self.parse_equality()?;
+            expr = Expr::Binary(Box::new(expr), BinaryOp::BitAnd, Box::new(right));
         }
         Ok(expr)
     }
@@ -407,20 +523,36 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_term()?;
+        let mut expr = self.parse_shift()?;
         loop {
             if self.consume_if_symbol(Symbol::Less)?.is_some() || self.consume_if_keyword(Keyword::Lt)?.is_some() {
-                let right = self.parse_term()?;
+                let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Less, Box::new(right));
             } else if self.consume_if_symbol(Symbol::LessEqual)?.is_some() || self.consume_if_keyword(Keyword::Le)?.is_some() {
-                let right = self.parse_term()?;
+                let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::LessEqual, Box::new(right));
             } else if self.consume_if_symbol(Symbol::Greater)?.is_some() || self.consume_if_keyword(Keyword::Gt)?.is_some() {
-                let right = self.parse_term()?;
+                let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Greater, Box::new(right));
             } else if self.consume_if_symbol(Symbol::GreaterEqual)?.is_some() || self.consume_if_keyword(Keyword::Ge)?.is_some() {
-                let right = self.parse_term()?;
+                let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::GreaterEqual, Box::new(right));
+            } else {
+                break;
+            }
+        }
+        Ok(expr)
+    }
+
+    fn parse_shift(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_term()?;
+        loop {
+            if self.consume_if_symbol(Symbol::LeftShift)?.is_some() {
+                let right = self.parse_term()?;
+                expr = Expr::Binary(Box::new(expr), BinaryOp::LeftShift, Box::new(right));
+            } else if self.consume_if_symbol(Symbol::RightShift)?.is_some() {
+                let right = self.parse_term()?;
+                expr = Expr::Binary(Box::new(expr), BinaryOp::RightShift, Box::new(right));
             } else {
                 break;
             }
@@ -476,6 +608,17 @@ impl<'a> Parser<'a> {
         if self.consume_if_symbol(Symbol::Plus)?.is_some() {
             return self.parse_unary();
         }
+        // Prefix increment/decrement
+        if let Some(token) = self.consume_if_symbol(Symbol::PlusPlus)? {
+            let expr = self.parse_unary()?;
+            self.validate_lvalue(&expr, &token)?;
+            return Ok(Expr::PreIncrement(Box::new(expr)));
+        }
+        if let Some(token) = self.consume_if_symbol(Symbol::MinusMinus)? {
+            let expr = self.parse_unary()?;
+            self.validate_lvalue(&expr, &token)?;
+            return Ok(Expr::PreDecrement(Box::new(expr)));
+        }
         self.parse_postfix()
     }
 
@@ -509,6 +652,12 @@ impl<'a> Parser<'a> {
                     unreachable!()
                 };
                 expr = Expr::Property(Box::new(expr), name);
+            } else if let Some(token) = self.consume_if_symbol(Symbol::PlusPlus)? {
+                self.validate_lvalue(&expr, &token)?;
+                expr = Expr::PostIncrement(Box::new(expr));
+            } else if let Some(token) = self.consume_if_symbol(Symbol::MinusMinus)? {
+                self.validate_lvalue(&expr, &token)?;
+                expr = Expr::PostDecrement(Box::new(expr));
             } else {
                 break;
             }

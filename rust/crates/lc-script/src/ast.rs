@@ -72,6 +72,8 @@ pub enum Stmt {
         value: Expr,
     },
     Return(Option<Expr>),
+    Break,
+    Continue,
     Expr(Expr),
     If {
         condition: Expr,
@@ -82,7 +84,19 @@ pub enum Stmt {
         condition: Expr,
         body: Vec<Stmt>,
     },
+    For {
+        init: Option<ForInit>,
+        condition: Option<Expr>,
+        increment: Option<Expr>,
+        body: Vec<Stmt>,
+    },
     Block(Vec<Stmt>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ForInit {
+    VarDecls(Vec<(String, Option<Expr>)>), // var i = 0, j = 1
+    Expr(Expr),                             // i = 0
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -102,6 +116,11 @@ pub enum Expr {
     Proplist(Vec<(String, Expr)>),
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
+    // Increment/Decrement (require lvalue)
+    PreIncrement(Box<Expr>),
+    PreDecrement(Box<Expr>),
+    PostIncrement(Box<Expr>),
+    PostDecrement(Box<Expr>),
     // Assignment as an expression (lowest precedence, right-associative)
     Assignment(AssignmentTarget, Box<Expr>),
 }
@@ -127,4 +146,10 @@ pub enum BinaryOp {
     GreaterEqual,
     And,
     Or,
+    // Bitwise operators
+    BitAnd,
+    BitOr,
+    BitXor,
+    LeftShift,
+    RightShift,
 }

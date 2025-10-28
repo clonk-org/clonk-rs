@@ -91,6 +91,10 @@ impl<'a> Lexer<'a> {
                 ':' => return Ok(Token::new(TokenKind::Symbol(Symbol::Colon), line, column)),
                 '.' => return Ok(Token::new(TokenKind::Symbol(Symbol::Dot), line, column)),
                 '+' => {
+                    if self.peek_char() == Some('+') {
+                        self.bump_char();
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::PlusPlus), line, column));
+                    }
                     if self.peek_char() == Some('=') {
                         self.bump_char();
                         return Ok(Token::new(TokenKind::Symbol(Symbol::PlusEqual), line, column));
@@ -101,6 +105,10 @@ impl<'a> Lexer<'a> {
                     if self.peek_char() == Some('>') {
                         self.bump_char();
                         return Ok(Token::new(TokenKind::Symbol(Symbol::Arrow), line, column));
+                    }
+                    if self.peek_char() == Some('-') {
+                        self.bump_char();
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::MinusMinus), line, column));
                     }
                     if self.peek_char() == Some('=') {
                         self.bump_char();
@@ -344,7 +352,10 @@ impl<'a> Lexer<'a> {
             "if" => TokenKind::Keyword(Keyword::If),
             "else" => TokenKind::Keyword(Keyword::Else),
             "while" => TokenKind::Keyword(Keyword::While),
+            "for" => TokenKind::Keyword(Keyword::For),
             "return" => TokenKind::Keyword(Keyword::Return),
+            "break" => TokenKind::Keyword(Keyword::Break),
+            "continue" => TokenKind::Keyword(Keyword::Continue),
             "true" => TokenKind::Keyword(Keyword::True),
             "false" => TokenKind::Keyword(Keyword::False),
             "nil" => TokenKind::Keyword(Keyword::Nil),

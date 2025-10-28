@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::{AssignmentTarget, BinaryOp, Expr, Function, Stmt, UnaryOp};
+use crate::ast::{AssignmentTarget, BinaryOp, Expr, ForInit, Function, Stmt, UnaryOp};
 use crate::debugger::DebuggerHooks;
 use crate::engine::HostFunction;
 use crate::error::RuntimeError;
@@ -70,7 +70,15 @@ impl<'a> Vm<'a> {
 
         let mut env = Environment::new_with_params(&function.params, args);
         let result = self.execute_statements(&function.body, &mut env, depth)?;
-        let value = result.unwrap_or(Value::Nil);
+        let value = match result {
+            ControlFlow::Return(v) => v,
+            ControlFlow::Normal => Value::Nil,
+            ControlFlow::Break | ControlFlow::LoopContinue => {
+                return Err(RuntimeError::new(
+                    format!("{} statement outside of loop", if matches!(result, ControlFlow::Break) { "break" } else { "continue" })
+                ));
+            }
+        };
 
         if let Some(debugger) = &self.debugger {
             if let Some(callback) = debugger.on_return() {
@@ -110,14 +118,14 @@ impl<'a> Vm<'a> {
         statements: &[Stmt],
         env: &mut Environment,
         depth: usize,
-    ) -> Result<Option<Value>, RuntimeError> {
+    ) -> Result<ControlFlow, RuntimeError> {
         for statement in statements {
             match self.execute_statement(statement, env, depth)? {
-                ControlFlow::Continue => continue,
-                ControlFlow::Return(value) => return Ok(Some(value)),
+                ControlFlow::Normal => continue,
+                other => return Ok(other),
             }
         }
-        Ok(None)
+        Ok(ControlFlow::Normal)
     }
 
     fn execute_statement(
@@ -133,12 +141,12 @@ impl<'a> Vm<'a> {
                     None => Value::Nil,
                 };
                 env.define(name, value);
-                Ok(ControlFlow::Continue)
+                Ok(ControlFlow::Normal)
             }
             Stmt::Assignment { target, value } => {
                 let evaluated = self.evaluate(value, env, depth)?;
                 self.assign_target(env, target, evaluated)?;
-                Ok(ControlFlow::Continue)
+                Ok(ControlFlow::Normal)
             }
             Stmt::Return(expr) => {
                 let value = match expr {
@@ -147,9 +155,11 @@ impl<'a> Vm<'a> {
                 };
                 Ok(ControlFlow::Return(value))
             }
+            Stmt::Break => Ok(ControlFlow::Break),
+            Stmt::Continue => Ok(ControlFlow::LoopContinue),
             Stmt::Expr(expr) => {
                 self.evaluate(expr, env, depth)?;
-                Ok(ControlFlow::Continue)
+                Ok(ControlFlow::Normal)
             }
             Stmt::If {
                 condition,
@@ -157,37 +167,78 @@ impl<'a> Vm<'a> {
                 else_branch,
             } => {
                 if self.evaluate(condition, env, depth)?.as_bool() {
-                    if let Some(value) = self
-                        .execute_block(then_branch, env, depth)?
-                        .map(ControlFlow::Return)
-                    {
-                        return Ok(value);
-                    }
+                    return self.execute_block(then_branch, env, depth);
                 } else if let Some(branch) = else_branch {
-                    if let Some(value) = self
-                        .execute_block(branch, env, depth)?
-                        .map(ControlFlow::Return)
-                    {
-                        return Ok(value);
-                    }
+                    return self.execute_block(branch, env, depth);
                 }
-                Ok(ControlFlow::Continue)
+                Ok(ControlFlow::Normal)
             }
             Stmt::While { condition, body } => {
                 while self.evaluate(condition, env, depth)?.as_bool() {
-                    if let Some(value) = self
-                        .execute_block(body, env, depth)?
-                        .map(ControlFlow::Return)
-                    {
-                        return Ok(value);
+                    match self.execute_block(body, env, depth)? {
+                        ControlFlow::Normal => {},
+                        ControlFlow::LoopContinue => continue,
+                        ControlFlow::Break => break,
+                        ControlFlow::Return(value) => return Ok(ControlFlow::Return(value)),
                     }
                 }
-                Ok(ControlFlow::Continue)
+                Ok(ControlFlow::Normal)
             }
-            Stmt::Block(statements) => self.execute_block(statements, env, depth).map(|opt| {
-                opt.map(ControlFlow::Return)
-                    .unwrap_or(ControlFlow::Continue)
-            }),
+            Stmt::For {
+                init,
+                condition,
+                increment,
+                body,
+            } => {
+                // Execute init clause (variables are function-scoped, so no new scope)
+                if let Some(init_clause) = init {
+                    match init_clause {
+                        ForInit::VarDecls(decls) => {
+                            for (name, init_expr) in decls {
+                                let value = match init_expr {
+                                    Some(expr) => self.evaluate(expr, env, depth)?,
+                                    None => Value::Nil,
+                                };
+                                env.define(name, value);
+                            }
+                        }
+                        ForInit::Expr(expr) => {
+                            self.evaluate(expr, env, depth)?;
+                        }
+                    }
+                }
+
+                // Loop while condition is true (or forever if no condition)
+                loop {
+                    // Check condition (defaults to true if not specified)
+                    if let Some(cond) = condition {
+                        if !self.evaluate(cond, env, depth)?.as_bool() {
+                            break;
+                        }
+                    }
+
+                    // Execute body
+                    match self.execute_block(body, env, depth)? {
+                        ControlFlow::Normal => {},
+                        ControlFlow::LoopContinue => {
+                            // Execute increment before continuing
+                            if let Some(incr) = increment {
+                                self.evaluate(incr, env, depth)?;
+                            }
+                            continue;
+                        },
+                        ControlFlow::Break => break,
+                        ControlFlow::Return(value) => return Ok(ControlFlow::Return(value)),
+                    }
+
+                    // Execute increment
+                    if let Some(incr) = increment {
+                        self.evaluate(incr, env, depth)?;
+                    }
+                }
+                Ok(ControlFlow::Normal)
+            }
+            Stmt::Block(statements) => self.execute_block(statements, env, depth),
         }
     }
 
@@ -196,7 +247,7 @@ impl<'a> Vm<'a> {
         statements: &[Stmt],
         env: &mut Environment,
         depth: usize,
-    ) -> Result<Option<Value>, RuntimeError> {
+    ) -> Result<ControlFlow, RuntimeError> {
         env.push_scope();
         let result = self.execute_statements(statements, env, depth);
         env.pop_scope();
@@ -292,6 +343,58 @@ impl<'a> Vm<'a> {
                 // Return the assigned value (assignment is an expression)
                 Ok(value)
             }
+            Expr::PreIncrement(expr) => {
+                let target = self.expr_to_assignment_target(expr)?;
+                let old_value = self.get_target_value(env, &target)?;
+                let new_value = match old_value {
+                    Value::Int(i) => Value::Int(i + 1),
+                    other => return Err(RuntimeError::new(format!(
+                        "cannot increment non-integer value: {:?}",
+                        other
+                    ))),
+                };
+                self.assign_target(env, &target, new_value.clone())?;
+                Ok(new_value)
+            }
+            Expr::PreDecrement(expr) => {
+                let target = self.expr_to_assignment_target(expr)?;
+                let old_value = self.get_target_value(env, &target)?;
+                let new_value = match old_value {
+                    Value::Int(i) => Value::Int(i - 1),
+                    other => return Err(RuntimeError::new(format!(
+                        "cannot decrement non-integer value: {:?}",
+                        other
+                    ))),
+                };
+                self.assign_target(env, &target, new_value.clone())?;
+                Ok(new_value)
+            }
+            Expr::PostIncrement(expr) => {
+                let target = self.expr_to_assignment_target(expr)?;
+                let old_value = self.get_target_value(env, &target)?;
+                let new_value = match &old_value {
+                    Value::Int(i) => Value::Int(i + 1),
+                    other => return Err(RuntimeError::new(format!(
+                        "cannot increment non-integer value: {:?}",
+                        other
+                    ))),
+                };
+                self.assign_target(env, &target, new_value)?;
+                Ok(old_value)
+            }
+            Expr::PostDecrement(expr) => {
+                let target = self.expr_to_assignment_target(expr)?;
+                let old_value = self.get_target_value(env, &target)?;
+                let new_value = match &old_value {
+                    Value::Int(i) => Value::Int(i - 1),
+                    other => return Err(RuntimeError::new(format!(
+                        "cannot decrement non-integer value: {:?}",
+                        other
+                    ))),
+                };
+                self.assign_target(env, &target, new_value)?;
+                Ok(old_value)
+            }
         }
     }
 
@@ -372,6 +475,11 @@ impl<'a> Vm<'a> {
             Greater => self.eval_int_cmp(left, right, |a, b| a > b, ">"),
             GreaterEqual => self.eval_int_cmp(left, right, |a, b| a >= b, ">="),
             And | Or => unreachable!(),
+            BitAnd => self.eval_int_op(left, right, |a, b| a & b, "&"),
+            BitOr => self.eval_int_op(left, right, |a, b| a | b, "|"),
+            BitXor => self.eval_int_op(left, right, |a, b| a ^ b, "^"),
+            LeftShift => self.eval_int_op(left, right, |a, b| a << b, "<<"),
+            RightShift => self.eval_int_op(left, right, |a, b| a >> b, ">>"),
         }
     }
 
@@ -536,10 +644,41 @@ impl<'a> Vm<'a> {
             }
         }
     }
+
+    fn expr_to_assignment_target(&self, expr: &Expr) -> Result<AssignmentTarget, RuntimeError> {
+        match expr {
+            Expr::Variable(name) => Ok(AssignmentTarget::Variable(name.clone())),
+            Expr::Property(base, name) => {
+                let base_target = self.expr_to_assignment_target(base)?;
+                Ok(AssignmentTarget::Property(Box::new(base_target), name.clone()))
+            }
+            Expr::Index(_, _) => {
+                // Index expressions are not yet supported as assignment targets
+                // This would require extending AssignmentTarget to include Index variant
+                Err(RuntimeError::new(
+                    "index expressions as increment/decrement targets not yet supported".to_string(),
+                ))
+            }
+            _ => Err(RuntimeError::new(format!(
+                "invalid increment/decrement target: {:?}",
+                expr
+            ))),
+        }
+    }
+
+    fn get_target_value(
+        &self,
+        env: &mut Environment,
+        target: &AssignmentTarget,
+    ) -> Result<Value, RuntimeError> {
+        self.assignment_target_value(env, target)
+    }
 }
 
 enum ControlFlow {
-    Continue,
+    Normal,
+    Break,
+    LoopContinue,
     Return(Value),
 }
 
