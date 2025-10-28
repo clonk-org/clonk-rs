@@ -1,4 +1,4 @@
-use crate::{DebuggerHooks, Engine, RuntimeError, Value};
+use lc_script::{DebuggerHooks, Engine, RuntimeError, Value};
 use std::sync::{Arc, Mutex};
 
 fn load_script(engine: &mut Engine, source: &str) {
@@ -315,7 +315,7 @@ fn debugger_hooks_capture_call_and_return() {
     assert_eq!(return_entries, vec!["AddOne -> 42".to_string()]);
 }
 
-const CANONICAL_SCENARIO: &str = include_str!("fixtures/canonical/basic.aul");
+const CANONICAL_SCENARIO: &str = include_str!("../src/fixtures/canonical/basic.aul");
 
 #[test]
 fn canonical_scenario_parity_harness() {

@@ -15,6 +15,3 @@ pub use crate::error::{ParseError, RuntimeError, ScriptError};
 pub use crate::value::Value;
 
 mod value;
-
-#[cfg(test)]
-mod tests;
