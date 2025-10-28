@@ -833,6 +833,9 @@ impl<'a> Parser<'a> {
     fn validate_lvalue(&self, expr: &Expr, token: &Token) -> Result<(), ParseError> {
         match expr {
             Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) => Ok(()),
+            // Prefix increment/decrement return lvalues (like in C++)
+            // This allows patterns like ++++i or --(--i)
+            Expr::PreIncrement(_) | Expr::PreDecrement(_) => Ok(()),
             // Special cases: Local/LocalN/Var/EffectVar are valid for increment/decrement
             // Also allow any function call (for reference-returning functions)
             Expr::Call { callee, is_optional, .. } => {
