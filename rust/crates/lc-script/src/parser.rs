@@ -387,23 +387,7 @@ impl<'a> Parser<'a> {
         if self.consume_if_symbol(Symbol::Semicolon)?.is_some() {
             return Ok(Stmt::Return(None));
         }
-        // Handle: return(); or return(expr);
-        if self.check_symbol(Symbol::LParen)? {
-            self.consume()?; // consume '('
-            if self.check_symbol(Symbol::RParen)? {
-                // return();
-                self.consume()?; // consume ')'
-                self.expect_symbol(Symbol::Semicolon, "expected ';' after return statement")?;
-                return Ok(Stmt::Return(None));
-            } else {
-                // return(expr);
-                let expr = self.parse_expression()?;
-                self.expect_symbol(Symbol::RParen, "expected ')' after return expression")?;
-                self.expect_symbol(Symbol::Semicolon, "expected ';' after return statement")?;
-                return Ok(Stmt::Return(Some(expr)));
-            }
-        }
-        // Handle: return expr;
+        // Handle: return expr; (including return(expr); where parens are part of the expression)
         let expr = self.parse_expression()?;
         self.expect_symbol(Symbol::Semicolon, "expected ';' after return value")?;
         Ok(Stmt::Return(Some(expr)))
