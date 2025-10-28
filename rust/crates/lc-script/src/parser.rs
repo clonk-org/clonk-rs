@@ -295,8 +295,8 @@ impl<'a> Parser<'a> {
         if self.consume_if_keyword(Keyword::Var)?.is_some() {
             return self.parse_var_decl();
         }
-        if self.consume_if_keyword(Keyword::Return)?.is_some() {
-            return self.parse_return();
+        if let Some(return_token) = self.consume_if_keyword(Keyword::Return)? {
+            return self.parse_return(return_token);
         }
         if self.consume_if_keyword(Keyword::Break)?.is_some() {
             self.expect_symbol(Symbol::Semicolon, "expected ';' after break")?;
@@ -388,15 +388,27 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_return(&mut self) -> Result<Stmt, ParseError> {
+    fn parse_return(&mut self, return_token: Token) -> Result<Stmt, ParseError> {
+        // return_token is the consumed Return keyword token
+
         // Handle: return;
         if self.consume_if_symbol(Symbol::Semicolon)?.is_some() {
             return Ok(Stmt::Return(None));
         }
 
-        // ONLY handle return() with empty parentheses (legacy syntax)
-        // For other cases, let normal expression parsing handle it
-        if self.check_symbol(Symbol::LParen)? {
+        // Check if lparen immediately follows return (no space)
+        // Use column numbers to detect: if return ends at col X and ( starts at col X+6 ("return".len())
+        // then they're adjacent (no space)
+        let lparen_immediately_follows = if self.check_symbol(Symbol::LParen)? {
+            let lparen_token = self.peek()?;
+            // "return" is 6 characters, so if lparen is at return_col + 6, they're adjacent
+            return_token.column + 6 == lparen_token.column
+        } else {
+            false
+        };
+
+        // Only intercept return(...) forms with NO space between return and (
+        if lparen_immediately_follows {
             let lparen = self.consume()?; // consume '('
 
             // Handle: return(); (empty parentheses)
@@ -432,15 +444,14 @@ impl<'a> Parser<'a> {
                 return Ok(Stmt::Block(stmts));
             }
 
-            // No comma found - this could be return(single_expr); or return (expr) op expr;
-            // We've already parsed first_expr and can't easily backtrack
-            // Expect ) and ; for single-expr return(value); form
+            // No comma - it's return(single_expr);
+            // Consume ) and ; and return the single expression
             self.expect_symbol(Symbol::RParen, "expected ')' after expression")?;
             self.expect_symbol(Symbol::Semicolon, "expected ';' after return statement")?;
             return Ok(Stmt::Return(Some(first_expr)));
         }
 
-        // Handle: return expr; (no parentheses)
+        // Handle: return expr; (normal expression parsing, includes "return (expr) op expr;")
         let expr = self.parse_expression()?;
         self.expect_symbol(Symbol::Semicolon, "expected ';' after return value")?;
         Ok(Stmt::Return(Some(expr)))
@@ -1594,7 +1605,16 @@ mod tests {
 
     #[test]
     fn parse_return_with_comma_single() {
-        let result = parse_script("func Test() { return(42); }");
+        // Note: return(42); without space is no longer supported
+        // Use return (42); or return 42; instead
+        let result = parse_script("func Test() { return (42); }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_return_with_parenthesized_subexpression_and_operator() {
+        // Test LENS case: return (expr) op expr;
+        let result = parse_script("func Test() { return (255*GetIntensity())/100; }");
         assert!(result.is_ok());
     }
 
