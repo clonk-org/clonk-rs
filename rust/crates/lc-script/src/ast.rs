@@ -139,7 +139,8 @@ pub enum ForInit {
 pub enum AssignmentTarget {
     Variable(String),
     Property(Box<AssignmentTarget>, String),
-    LocalSlot(Box<Expr>), // Local(expr) as lvalue
+    LocalSlot(Box<Expr>), // Local(expr) as lvalue - object-local slot
+    VarSlot(Box<Expr>),   // Var(expr) as lvalue - function-local slot
 }
 
 #[derive(Debug, Clone, PartialEq)]

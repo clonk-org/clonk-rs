@@ -512,11 +512,15 @@ impl<'a> Parser<'a> {
                 let base_target = self.expression_to_assignment_target(*base, eq_token)?;
                 Ok(AssignmentTarget::Property(Box::new(base_target), name))
             }
-            // Special case: Local(expr) is an assignable lvalue
+            // Special case: Local(expr) and Var(expr) are assignable lvalues
             Expr::Call { callee, args, is_optional } => {
                 if let Expr::Variable(ref name) = *callee {
-                    if name == "Local" && !is_optional && args.len() == 1 {
-                        return Ok(AssignmentTarget::LocalSlot(Box::new(args.into_iter().next().unwrap())));
+                    if !is_optional && args.len() == 1 {
+                        if name == "Local" {
+                            return Ok(AssignmentTarget::LocalSlot(Box::new(args.into_iter().next().unwrap())));
+                        } else if name == "Var" {
+                            return Ok(AssignmentTarget::VarSlot(Box::new(args.into_iter().next().unwrap())));
+                        }
                     }
                 }
                 Err(ParseError::new(
@@ -536,21 +540,21 @@ impl<'a> Parser<'a> {
     fn validate_lvalue(&self, expr: &Expr, token: &Token) -> Result<(), ParseError> {
         match expr {
             Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) => Ok(()),
-            // Special case: Local(expr) is valid for increment/decrement
+            // Special case: Local(expr) and Var(expr) are valid for increment/decrement
             Expr::Call { callee, args, is_optional } => {
                 if let Expr::Variable(ref name) = **callee {
-                    if name == "Local" && !is_optional && args.len() == 1 {
+                    if !is_optional && args.len() == 1 && (name == "Local" || name == "Var") {
                         return Ok(());
                     }
                 }
                 Err(ParseError::new(
-                    "increment/decrement requires an lvalue (variable, property, index, or Local(n))",
+                    "increment/decrement requires an lvalue (variable, property, index, Local(n), or Var(n))",
                     token.line,
                     token.column,
                 ))
             }
             _ => Err(ParseError::new(
-                "increment/decrement requires an lvalue (variable, property, index, or Local(n))",
+                "increment/decrement requires an lvalue (variable, property, index, Local(n), or Var(n))",
                 token.line,
                 token.column,
             )),

@@ -667,6 +667,24 @@ impl<'a> Vm<'a> {
                 env.define(&slot_name, value);
                 Ok(())
             }
+            AssignmentTarget::VarSlot(index_expr) => {
+                // Evaluate the index expression
+                let index_value = self.evaluate(index_expr, env, 0)?;
+                let index = match index_value {
+                    Value::Int(n) => n,
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "Var() index must be an integer, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                // Store in environment with special naming scheme
+                // TODO: Replace with proper function-local slot storage
+                let slot_name = format!("__var_{}", index);
+                env.define(&slot_name, value);
+                Ok(())
+            }
         }
     }
 
@@ -709,6 +727,23 @@ impl<'a> Vm<'a> {
                 let slot_name = format!("__local_{}", index);
                 Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
             }
+            AssignmentTarget::VarSlot(index_expr) => {
+                // Evaluate the index expression
+                let index_value = self.evaluate(index_expr, env, 0)?;
+                let index = match index_value {
+                    Value::Int(n) => n,
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "Var() index must be an integer, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                // Retrieve from environment with special naming scheme
+                // TODO: Replace with proper function-local slot storage
+                let slot_name = format!("__var_{}", index);
+                Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
+            }
         }
     }
 
@@ -726,11 +761,15 @@ impl<'a> Vm<'a> {
                     "index expressions as increment/decrement targets not yet supported".to_string(),
                 ))
             }
-            // Special case: Local(expr) is valid for increment/decrement
+            // Special case: Local(expr) and Var(expr) are valid for increment/decrement
             Expr::Call { callee, args, is_optional } => {
                 if let Expr::Variable(ref name) = **callee {
-                    if name == "Local" && !is_optional && args.len() == 1 {
-                        return Ok(AssignmentTarget::LocalSlot(Box::new(args[0].clone())));
+                    if !is_optional && args.len() == 1 {
+                        if name == "Local" {
+                            return Ok(AssignmentTarget::LocalSlot(Box::new(args[0].clone())));
+                        } else if name == "Var" {
+                            return Ok(AssignmentTarget::VarSlot(Box::new(args[0].clone())));
+                        }
                     }
                 }
                 Err(RuntimeError::new(format!(
