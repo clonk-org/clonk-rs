@@ -577,6 +577,8 @@ impl<'a> Parser<'a> {
                 // Push in reverse order so token1 comes out first
                 self.lookahead_buffer.insert(0, token2);
                 self.lookahead_buffer.insert(0, token1);
+                // Clear peeked to ensure restored tokens are seen first
+                self.peeked = None;
             }
         }
 
@@ -745,9 +747,14 @@ impl<'a> Parser<'a> {
                 Symbol::StarEqual => Expr::Binary(Box::new(left), BinaryOp::Mul, Box::new(value)),
                 Symbol::SlashEqual => Expr::Binary(Box::new(left), BinaryOp::Div, Box::new(value)),
                 Symbol::PercentEqual => Expr::Binary(Box::new(left), BinaryOp::Mod, Box::new(value)),
-                // Bitwise operators (not yet in BinaryOp, but we'll add them)
+                // Bitwise compound assignments
+                Symbol::AndEqual => Expr::Binary(Box::new(left), BinaryOp::BitAnd, Box::new(value)),
+                Symbol::OrEqual => Expr::Binary(Box::new(left), BinaryOp::BitOr, Box::new(value)),
+                Symbol::XorEqual => Expr::Binary(Box::new(left), BinaryOp::BitXor, Box::new(value)),
+                Symbol::LeftShiftEqual => Expr::Binary(Box::new(left), BinaryOp::LeftShift, Box::new(value)),
+                Symbol::RightShiftEqual => Expr::Binary(Box::new(left), BinaryOp::RightShift, Box::new(value)),
                 _ => return Err(ParseError::new(
-                    format!("compound assignment operator {:?} not yet fully implemented", op_symbol.unwrap()),
+                    format!("unknown assignment operator {:?}", op_symbol.unwrap()),
                     op_token.line,
                     op_token.column,
                 )),
