@@ -1220,10 +1220,16 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            // Parse regular expression argument
-            // Use parse_assignment() instead of parse_expression() to avoid comma operator
-            // In argument lists, commas separate arguments, not comma expressions
-            args.push(self.parse_assignment()?);
+            // Check for empty argument (comma or rparen immediately following)
+            // Empty arguments are represented as nil literals
+            if self.check_symbol(Symbol::Comma)? || self.check_symbol(Symbol::RParen)? {
+                args.push(Expr::Literal(Literal::Nil));
+            } else {
+                // Parse regular expression argument
+                // Use parse_assignment() instead of parse_expression() to avoid comma operator
+                // In argument lists, commas separate arguments, not comma expressions
+                args.push(self.parse_assignment()?);
+            }
 
             if self.consume_if_symbol(Symbol::Comma)?.is_some() {
                 continue;
