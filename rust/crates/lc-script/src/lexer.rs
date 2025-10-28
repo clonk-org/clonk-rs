@@ -478,6 +478,50 @@ impl<'a> Lexer<'a> {
         column: usize,
     ) -> Result<Token, ParseError> {
         let mut end_idx = start_idx + first.len_utf8();
+
+        // Check for hexadecimal literal: 0x or 0X
+        if first == '0' {
+            if let Some(ch) = self.peek_char() {
+                if ch == 'x' || ch == 'X' {
+                    // Consume the 'x' or 'X'
+                    let (idx, consumed, _, _) = self.bump_char().unwrap();
+                    end_idx = idx + consumed.len_utf8();
+
+                    // Collect hex digits [0-9a-fA-F]
+                    let hex_start = end_idx;
+                    while let Some(ch) = self.peek_char() {
+                        if ch.is_ascii_hexdigit() {
+                            let (idx, consumed, _, _) = self.bump_char().unwrap();
+                            end_idx = idx + consumed.len_utf8();
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Check if we actually got any hex digits
+                    if end_idx == hex_start {
+                        return Err(ParseError::new(
+                            "hexadecimal literal has no digits".to_string(),
+                            line,
+                            column,
+                        ));
+                    }
+
+                    // Parse hex digits (skip "0x" prefix)
+                    let hex_slice = &self.input[hex_start..end_idx];
+                    match i32::from_str_radix(hex_slice, 16) {
+                        Ok(value) => return Ok(Token::new(TokenKind::Number(value), line, column)),
+                        Err(_) => return Err(ParseError::new(
+                            format!("hexadecimal literal out of range: 0x{hex_slice}"),
+                            line,
+                            column,
+                        )),
+                    }
+                }
+            }
+        }
+
+        // Regular decimal number parsing
         while let Some(ch) = self.peek_char() {
             if ch.is_ascii_digit() {
                 let (idx, consumed, _, _) = self.bump_char().unwrap();
@@ -716,5 +760,81 @@ mod tests {
             .filter(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Var)))
             .count();
         assert_eq!(var_count, 2);
+    }
+
+    #[test]
+    fn tokenizes_hex_literal_lowercase() {
+        let source = "0xa0c0ff";
+        let tokens = lex_all(source).unwrap();
+        assert_eq!(tokens.len(), 1);
+        if let TokenKind::Number(n) = tokens[0].kind {
+            assert_eq!(n, 0xa0c0ff);
+        } else {
+            panic!("Expected hex literal to be tokenized as Number, got {:?}", tokens[0].kind);
+        }
+    }
+
+    #[test]
+    fn tokenizes_hex_literal_uppercase_x() {
+        let source = "0XFF";
+        let tokens = lex_all(source).unwrap();
+        assert_eq!(tokens.len(), 1);
+        if let TokenKind::Number(n) = tokens[0].kind {
+            assert_eq!(n, 0xFF);
+        } else {
+            panic!("Expected hex literal to be tokenized as Number");
+        }
+    }
+
+    #[test]
+    fn tokenizes_hex_literal_mixed_case() {
+        let source = "0xAbCd12";
+        let tokens = lex_all(source).unwrap();
+        assert_eq!(tokens.len(), 1);
+        if let TokenKind::Number(n) = tokens[0].kind {
+            assert_eq!(n, 0xAbCd12);
+        } else {
+            panic!("Expected hex literal to be tokenized as Number");
+        }
+    }
+
+    #[test]
+    fn tokenizes_hex_in_function_call() {
+        let source = r#"CreateParticle("Test", 0, 0, 0, 0, 30, 0xa0c0ff)"#;
+        let result = lex_all(source);
+        assert!(result.is_ok());
+        let tokens = result.unwrap();
+        // Should have: identifier, lparen, string, comma, number, comma, number, comma, number, comma, number, comma, number, comma, hex, rparen
+        // Find the last number token (should be the hex literal)
+        let number_tokens: Vec<_> = tokens.iter()
+            .filter(|t| matches!(t.kind, TokenKind::Number(_)))
+            .collect();
+        // Should have 5 number tokens: 0, 0, 0, 0, 30, 0xa0c0ff
+        assert_eq!(number_tokens.len(), 6);
+        if let TokenKind::Number(n) = number_tokens[5].kind {
+            assert_eq!(n, 0xa0c0ff);
+        }
+    }
+
+    #[test]
+    fn hex_literal_zero() {
+        let source = "0x0";
+        let tokens = lex_all(source).unwrap();
+        assert_eq!(tokens.len(), 1);
+        if let TokenKind::Number(n) = tokens[0].kind {
+            assert_eq!(n, 0);
+        } else {
+            panic!("Expected hex literal to be tokenized as Number");
+        }
+    }
+
+    #[test]
+    fn hex_literal_no_digits_error() {
+        let source = "0x";
+        let result = lex_all(source);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(e.message().contains("no digits"));
+        }
     }
 }
