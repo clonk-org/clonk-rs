@@ -325,15 +325,48 @@ impl<'a> Parser<'a> {
         // Parse the next higher-precedence level first
         let left = self.parse_or()?;
 
-        // If there is an '=', treat this as an assignment expression
-        if let Some(eq_token) = self.consume_if_symbol(Symbol::Equal)? {
-            // Validate the left side is a legal assignment target now (parser-level error)
-            let target = self.expression_to_assignment_target(left, &eq_token)?;
+        // Check for assignment operators (=, +=, -=, etc.)
+        let maybe_op = self.peek()?;
+        let (is_assign, op_symbol) = match &maybe_op.kind {
+            TokenKind::Symbol(Symbol::Equal) => (true, Some(Symbol::Equal)),
+            TokenKind::Symbol(Symbol::PlusEqual) => (true, Some(Symbol::PlusEqual)),
+            TokenKind::Symbol(Symbol::MinusEqual) => (true, Some(Symbol::MinusEqual)),
+            TokenKind::Symbol(Symbol::StarEqual) => (true, Some(Symbol::StarEqual)),
+            TokenKind::Symbol(Symbol::SlashEqual) => (true, Some(Symbol::SlashEqual)),
+            TokenKind::Symbol(Symbol::PercentEqual) => (true, Some(Symbol::PercentEqual)),
+            TokenKind::Symbol(Symbol::AndEqual) => (true, Some(Symbol::AndEqual)),
+            TokenKind::Symbol(Symbol::OrEqual) => (true, Some(Symbol::OrEqual)),
+            TokenKind::Symbol(Symbol::XorEqual) => (true, Some(Symbol::XorEqual)),
+            TokenKind::Symbol(Symbol::LeftShiftEqual) => (true, Some(Symbol::LeftShiftEqual)),
+            TokenKind::Symbol(Symbol::RightShiftEqual) => (true, Some(Symbol::RightShiftEqual)),
+            _ => (false, None),
+        };
+
+        if is_assign {
+            let op_token = self.consume()?;
+            // Validate the left side is a legal assignment target
+            let target = self.expression_to_assignment_target(left.clone(), &op_token)?;
 
             // Right-associative: a = b = c parses as a = (b = c)
             let value = self.parse_assignment()?;
 
-            Ok(Expr::Assignment(target, Box::new(value)))
+            // Desugar compound assignments: a += b becomes a = a + b
+            let final_value = match op_symbol.unwrap() {
+                Symbol::Equal => value,
+                Symbol::PlusEqual => Expr::Binary(Box::new(left), BinaryOp::Add, Box::new(value)),
+                Symbol::MinusEqual => Expr::Binary(Box::new(left), BinaryOp::Sub, Box::new(value)),
+                Symbol::StarEqual => Expr::Binary(Box::new(left), BinaryOp::Mul, Box::new(value)),
+                Symbol::SlashEqual => Expr::Binary(Box::new(left), BinaryOp::Div, Box::new(value)),
+                Symbol::PercentEqual => Expr::Binary(Box::new(left), BinaryOp::Mod, Box::new(value)),
+                // Bitwise operators (not yet in BinaryOp, but we'll add them)
+                _ => return Err(ParseError::new(
+                    format!("compound assignment operator {:?} not yet fully implemented", op_symbol.unwrap()),
+                    op_token.line,
+                    op_token.column,
+                )),
+            };
+
+            Ok(Expr::Assignment(target, Box::new(final_value)))
         } else {
             Ok(left)
         }

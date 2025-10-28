@@ -72,8 +72,24 @@ pub enum Symbol {
     OrOr,
     Pipe,
     Arrow,
+    // Bitwise operators
+    Ampersand,
+    Caret,
+    LeftShift,
+    RightShift,
     LBracket,
     RBracket,
+    // Compound assignment operators
+    PlusEqual,
+    MinusEqual,
+    StarEqual,
+    SlashEqual,
+    PercentEqual,
+    AndEqual,
+    OrEqual,
+    XorEqual,
+    LeftShiftEqual,
+    RightShiftEqual,
 }
 
 impl Token {

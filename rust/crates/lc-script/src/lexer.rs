@@ -43,6 +43,9 @@ impl<'a> Lexer<'a> {
                     } else if self.peek_char() == Some('*') {
                         self.consume_block_comment()?;
                         continue;
+                    } else if self.peek_char() == Some('=') {
+                        self.bump_char();
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::SlashEqual), line, column));
                     } else {
                         return Ok(Token::new(TokenKind::Symbol(Symbol::Slash), line, column));
                     }
@@ -87,16 +90,38 @@ impl<'a> Lexer<'a> {
                 }
                 ':' => return Ok(Token::new(TokenKind::Symbol(Symbol::Colon), line, column)),
                 '.' => return Ok(Token::new(TokenKind::Symbol(Symbol::Dot), line, column)),
-                '+' => return Ok(Token::new(TokenKind::Symbol(Symbol::Plus), line, column)),
+                '+' => {
+                    if self.peek_char() == Some('=') {
+                        self.bump_char();
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::PlusEqual), line, column));
+                    }
+                    return Ok(Token::new(TokenKind::Symbol(Symbol::Plus), line, column));
+                }
                 '-' => {
                     if self.peek_char() == Some('>') {
                         self.bump_char();
                         return Ok(Token::new(TokenKind::Symbol(Symbol::Arrow), line, column));
                     }
+                    if self.peek_char() == Some('=') {
+                        self.bump_char();
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::MinusEqual), line, column));
+                    }
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Minus), line, column));
                 }
-                '*' => return Ok(Token::new(TokenKind::Symbol(Symbol::Star), line, column)),
-                '%' => return Ok(Token::new(TokenKind::Symbol(Symbol::Percent), line, column)),
+                '*' => {
+                    if self.peek_char() == Some('=') {
+                        self.bump_char();
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::StarEqual), line, column));
+                    }
+                    return Ok(Token::new(TokenKind::Symbol(Symbol::Star), line, column));
+                }
+                '%' => {
+                    if self.peek_char() == Some('=') {
+                        self.bump_char();
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::PercentEqual), line, column));
+                    }
+                    return Ok(Token::new(TokenKind::Symbol(Symbol::Percent), line, column));
+                }
                 '=' => {
                     if self.peek_char() == Some('=') {
                         self.bump_char();
@@ -120,6 +145,14 @@ impl<'a> Lexer<'a> {
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Bang), line, column));
                 }
                 '<' => {
+                    if self.peek_char() == Some('<') {
+                        self.bump_char();
+                        if self.peek_char() == Some('=') {
+                            self.bump_char();
+                            return Ok(Token::new(TokenKind::Symbol(Symbol::LeftShiftEqual), line, column));
+                        }
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::LeftShift), line, column));
+                    }
                     if self.peek_char() == Some('=') {
                         self.bump_char();
                         return Ok(Token::new(
@@ -131,6 +164,14 @@ impl<'a> Lexer<'a> {
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Less), line, column));
                 }
                 '>' => {
+                    if self.peek_char() == Some('>') {
+                        self.bump_char();
+                        if self.peek_char() == Some('=') {
+                            self.bump_char();
+                            return Ok(Token::new(TokenKind::Symbol(Symbol::RightShiftEqual), line, column));
+                        }
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::RightShift), line, column));
+                    }
                     if self.peek_char() == Some('=') {
                         self.bump_char();
                         return Ok(Token::new(
@@ -146,18 +187,29 @@ impl<'a> Lexer<'a> {
                         self.bump_char();
                         return Ok(Token::new(TokenKind::Symbol(Symbol::AndAnd), line, column));
                     }
-                    return Err(ParseError::new(
-                        "unexpected '&'; did you mean '&&'?",
-                        line,
-                        column,
-                    ));
+                    if self.peek_char() == Some('=') {
+                        self.bump_char();
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::AndEqual), line, column));
+                    }
+                    return Ok(Token::new(TokenKind::Symbol(Symbol::Ampersand), line, column));
                 }
                 '|' => {
                     if self.peek_char() == Some('|') {
                         self.bump_char();
                         return Ok(Token::new(TokenKind::Symbol(Symbol::OrOr), line, column));
                     }
+                    if self.peek_char() == Some('=') {
+                        self.bump_char();
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::OrEqual), line, column));
+                    }
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Pipe), line, column));
+                }
+                '^' => {
+                    if self.peek_char() == Some('=') {
+                        self.bump_char();
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::XorEqual), line, column));
+                    }
+                    return Ok(Token::new(TokenKind::Symbol(Symbol::Caret), line, column));
                 }
                 '\r' | '\n' => {
                     // newline already processed in bump_char
