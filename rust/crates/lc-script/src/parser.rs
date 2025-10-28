@@ -768,11 +768,26 @@ impl<'a> Parser<'a> {
     fn validate_lvalue(&self, expr: &Expr, token: &Token) -> Result<(), ParseError> {
         match expr {
             Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) => Ok(()),
-            // Special case: Local(expr) and Var(expr) are valid for increment/decrement
+            // Special cases: Local/LocalN/Var/EffectVar are valid for increment/decrement
             Expr::Call { callee, args, is_optional, .. } => {
                 if let Expr::Variable(ref name) = **callee {
-                    if !is_optional && args.len() == 1 && (name == "Local" || name == "Var") {
-                        return Ok(());
+                    if !is_optional {
+                        // EffectVar with 3 arguments
+                        if name == "EffectVar" && args.len() == 3 {
+                            return Ok(());
+                        }
+                        // LocalN with 1 or 2 arguments
+                        if name == "LocalN" && (args.len() == 1 || args.len() == 2) {
+                            return Ok(());
+                        }
+                        // Local with 0, 1, or 2 arguments
+                        if name == "Local" && args.len() <= 2 {
+                            return Ok(());
+                        }
+                        // Var with 0, 1, or 2 arguments
+                        if name == "Var" && args.len() <= 2 {
+                            return Ok(());
+                        }
                     }
                 }
                 Err(ParseError::new(
