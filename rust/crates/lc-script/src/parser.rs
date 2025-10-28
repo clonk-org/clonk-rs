@@ -938,11 +938,24 @@ impl<'a> Parser<'a> {
                 // Check for optional method call: ->~MethodName()
                 let is_optional = self.consume_if_symbol(Symbol::Tilde)?.is_some();
                 let token = self.expect_identifier("expected property/method name after '->'")? ;
-                let name = if let TokenKind::Identifier(name) = token.kind {
+                let mut name = if let TokenKind::Identifier(name) = token.kind {
                     name
                 } else {
                     unreachable!()
                 };
+
+                // Check for scope resolution: ->DefID::Method
+                if self.consume_if_symbol(Symbol::ColonColon)?.is_some() {
+                    let method_token = self.expect_identifier("expected method name after '::'")?;
+                    let method_name = if let TokenKind::Identifier(method) = method_token.kind {
+                        method
+                    } else {
+                        unreachable!()
+                    };
+                    // Combine as "DefID::Method"
+                    name = format!("{}::{}", name, method_name);
+                }
+
                 let prop = Expr::Property(Box::new(expr), name);
 
                 // If optional call or next token is '(', parse call immediately

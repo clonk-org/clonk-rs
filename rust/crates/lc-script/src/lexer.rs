@@ -129,7 +129,14 @@ impl<'a> Lexer<'a> {
                         column,
                     ))
                 }
-                ':' => return Ok(Token::new(TokenKind::Symbol(Symbol::Colon), line, column)),
+                ':' => {
+                    // Check for :: (scope resolution)
+                    if self.peek_char() == Some(':') {
+                        self.bump_char();
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::ColonColon), line, column));
+                    }
+                    return Ok(Token::new(TokenKind::Symbol(Symbol::Colon), line, column));
+                }
                 '.' => {
                     // Check for ... (ellipsis)
                     if self.peek_char() == Some('.') {

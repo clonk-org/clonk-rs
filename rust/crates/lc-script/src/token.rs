@@ -70,6 +70,7 @@ pub enum Symbol {
     Comma,
     Semicolon,
     Colon,
+    ColonColon,  // :: (scope resolution)
     Plus,
     PlusPlus,
     Minus,
