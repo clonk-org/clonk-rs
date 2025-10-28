@@ -790,6 +790,30 @@ impl<'a> Vm<'a> {
                 env.define(&slot_name, value);
                 Ok(())
             }
+            AssignmentTarget::EffectSlot(args) => {
+                // Evaluate all arguments to create the slot identifier
+                let mut arg_values = Vec::new();
+                for arg in args {
+                    arg_values.push(self.evaluate(arg, env, 0)?);
+                }
+                // Store in environment with special naming scheme
+                // Format: __effect_{index}_{target_id}_{effect_num}
+                // For simplicity, join all args with underscores
+                let slot_name = format!(
+                    "__effect_{}",
+                    arg_values
+                        .iter()
+                        .map(|v| match v {
+                            Value::Int(n) => n.to_string(),
+                            Value::String(s) => s.clone(),
+                            _ => format!("{:?}", v),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("_")
+                );
+                env.define(&slot_name, value);
+                Ok(())
+            }
         }
     }
 
@@ -872,6 +896,27 @@ impl<'a> Vm<'a> {
                 let slot_name = format!("__var_{}", index);
                 Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
             }
+            AssignmentTarget::EffectSlot(args) => {
+                // Evaluate all arguments to create the slot identifier
+                let mut arg_values = Vec::new();
+                for arg in args {
+                    arg_values.push(self.evaluate(arg, env, 0)?);
+                }
+                // Retrieve from environment with special naming scheme
+                let slot_name = format!(
+                    "__effect_{}",
+                    arg_values
+                        .iter()
+                        .map(|v| match v {
+                            Value::Int(n) => n.to_string(),
+                            Value::String(s) => s.clone(),
+                            _ => format!("{:?}", v),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("_")
+                );
+                Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
+            }
         }
     }
 
@@ -889,14 +934,16 @@ impl<'a> Vm<'a> {
                     "index expressions as increment/decrement targets not yet supported".to_string(),
                 ))
             }
-            // Special case: Local(expr) and Var(expr) are valid for increment/decrement
+            // Special case: Local(expr), Var(expr), and EffectVar(args...) are valid for increment/decrement
             Expr::Call { callee, args, is_optional, .. } => {
                 if let Expr::Variable(ref name) = **callee {
-                    if !is_optional && args.len() == 1 {
-                        if name == "Local" {
+                    if !is_optional {
+                        if name == "Local" && args.len() == 1 {
                             return Ok(AssignmentTarget::LocalSlot(Box::new(args[0].clone())));
-                        } else if name == "Var" {
+                        } else if name == "Var" && args.len() == 1 {
                             return Ok(AssignmentTarget::VarSlot(Box::new(args[0].clone())));
+                        } else if name == "EffectVar" {
+                            return Ok(AssignmentTarget::EffectSlot(args.clone()));
                         }
                     }
                 }

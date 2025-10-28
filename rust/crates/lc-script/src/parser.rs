@@ -699,25 +699,28 @@ impl<'a> Parser<'a> {
                 let base_target = self.expression_to_assignment_target(*base, eq_token)?;
                 Ok(AssignmentTarget::Index(Box::new(base_target), index))
             }
-            // Special case: Local(expr) and Var(expr) are assignable lvalues
+            // Special case: Local(expr), Var(expr), and EffectVar(args...) are assignable lvalues
             // Local() and Var() without arguments default to slot 0
             Expr::Call { callee, args, is_optional, .. } => {
                 if let Expr::Variable(ref name) = *callee {
-                    if !is_optional && (args.len() == 0 || args.len() == 1) {
-                        if name == "Local" {
+                    if !is_optional {
+                        if name == "Local" && (args.len() == 0 || args.len() == 1) {
                             let index = if args.is_empty() {
                                 Box::new(Expr::Literal(Literal::Int(0)))
                             } else {
                                 Box::new(args.into_iter().next().unwrap())
                             };
                             return Ok(AssignmentTarget::LocalSlot(index));
-                        } else if name == "Var" {
+                        } else if name == "Var" && (args.len() == 0 || args.len() == 1) {
                             let index = if args.is_empty() {
                                 Box::new(Expr::Literal(Literal::Int(0)))
                             } else {
                                 Box::new(args.into_iter().next().unwrap())
                             };
                             return Ok(AssignmentTarget::VarSlot(index));
+                        } else if name == "EffectVar" {
+                            // EffectVar can take any number of arguments
+                            return Ok(AssignmentTarget::EffectSlot(args));
                         }
                     }
                 }
@@ -1633,6 +1636,31 @@ mod tests {
     #[test]
     fn parse_return_with_comma_function_calls() {
         let result = parse_script("func Test() { return(0, Message(), RemoveObject()); }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_chained_assignment_simple() {
+        let result = parse_script("func Test() { var a = b = 5; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_chained_assignment_triple() {
+        let result = parse_script("func Test() { var a = b = c = 10; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_chained_assignment_with_call() {
+        // MGDW case: var x = EffectVar(...) = GetValue();
+        let result = parse_script("func Test() { var x = EffectVar(0, target) = GetValue(); }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_assignment_in_expression_context() {
+        let result = parse_script("func Test() { SetValue(x = 42); }");
         assert!(result.is_ok());
     }
 }

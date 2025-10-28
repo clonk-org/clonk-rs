@@ -166,6 +166,7 @@ pub enum AssignmentTarget {
     Index(Box<AssignmentTarget>, Box<Expr>), // arr[index] as lvalue
     LocalSlot(Box<Expr>), // Local(expr) as lvalue - object-local slot
     VarSlot(Box<Expr>),   // Var(expr) as lvalue - function-local slot
+    EffectSlot(Vec<Expr>), // EffectVar(index, target, effect_num) as lvalue - effect variable slot
 }
 
 #[derive(Debug, Clone, PartialEq)]
