@@ -724,6 +724,17 @@ impl<'a> Parser<'a> {
                         } else if name == "EffectVar" {
                             // EffectVar can take any number of arguments
                             return Ok(AssignmentTarget::EffectSlot(args));
+                        } else if (name == "Local" || name == "LocalN" || name == "Var") && args.len() == 2 {
+                            // Handle two-argument form: LocalN("key", obj), Local(index, obj), Var(index, obj)
+                            // Convert to MethodSlot: obj->LocalN("key")
+                            let mut args_iter = args.into_iter();
+                            let first_arg = args_iter.next().unwrap();
+                            let object = args_iter.next().unwrap();
+                            return Ok(AssignmentTarget::MethodSlot {
+                                object: Box::new(object),
+                                method: name.clone(),
+                                args: vec![first_arg],
+                            });
                         }
                     }
                 }
