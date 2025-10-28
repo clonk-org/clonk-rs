@@ -182,6 +182,10 @@ impl<'a> Lexer<'a> {
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Minus), line, column));
                 }
                 '*' => {
+                    if self.peek_char() == Some('*') {
+                        self.bump_char();
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::StarStar), line, column));
+                    }
                     if self.peek_char() == Some('=') {
                         self.bump_char();
                         return Ok(Token::new(TokenKind::Symbol(Symbol::StarEqual), line, column));

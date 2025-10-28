@@ -553,6 +553,27 @@ impl<'a> Vm<'a> {
                     ))),
                 }
             }
+            Pow => {
+                let rhs = match right {
+                    Value::Int(i) => i,
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "cannot apply '**' to operands of type int and {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                if rhs < 0 {
+                    return Err(RuntimeError::new("negative exponent not supported"));
+                }
+                match left {
+                    Value::Int(lhs) => Ok(Value::Int(lhs.pow(rhs as u32))),
+                    other => Err(RuntimeError::new(format!(
+                        "cannot apply '**' to operands of type {} and int",
+                        other.type_name()
+                    ))),
+                }
+            }
             Equal => Ok(Value::Bool(self.values_equal(&left, &right))),
             NotEqual => Ok(Value::Bool(!self.values_equal(&left, &right))),
             Less => self.eval_int_cmp(left, right, |a, b| a < b, "<"),

@@ -76,6 +76,7 @@ pub enum Symbol {
     Minus,
     MinusMinus,
     Star,
+    StarStar,
     Slash,
     Percent,
     Dot,
