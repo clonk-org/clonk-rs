@@ -13,6 +13,7 @@ pub enum TokenKind {
     Keyword(Keyword),
     Symbol(Symbol),
     Directive(String), // Directive like "#include", "#appendto", "#strict"
+    LocaleKey(String), // Localization key like $TxtPermanentModeTurnOn$
     Eof,
 }
 
@@ -59,6 +60,8 @@ pub enum Symbol {
     GreaterEqual,
     AndAnd,
     OrOr,
+    Pipe,
+    Arrow,
     LBracket,
     RBracket,
 }

@@ -181,6 +181,28 @@ impl<'a> Parser<'a> {
             return Ok(Stmt::Block(body));
         }
 
+        // Check for context annotation: [ followed by $LocaleKey$
+        // We need to look ahead to distinguish from array literals
+        if self.check_symbol(Symbol::LBracket)? {
+            // Consume the '['
+            self.consume()?;
+            // Now check if next token is a LocaleKey
+            let next_token = self.peek()?;
+            if matches!(next_token.kind, TokenKind::LocaleKey(_)) {
+                // This is a context annotation, parse it
+                return self.parse_context_annotation_body();
+            } else {
+                // This is an array literal, we need to handle it as an expression
+                // But we already consumed the '[', so we need to parse it differently
+                // For now, return an error - we'll fix array literal parsing separately
+                return Err(ParseError::new(
+                    "array literals in statement position not yet supported",
+                    next_token.line,
+                    next_token.column,
+                ));
+            }
+        }
+
         self.parse_assignment_or_expr()
     }
 
@@ -430,25 +452,24 @@ impl<'a> Parser<'a> {
             if self.consume_if_symbol(Symbol::LParen)?.is_some() {
                 let args = self.parse_argument_list()?;
                 self.expect_symbol(Symbol::RParen, "expected ')' after arguments")?;
-                match expr {
-                    Expr::Variable(name) => {
-                        expr = Expr::Call { callee: name, args };
-                    }
-                    _ => {
-                        let token = self.peek()?.clone();
-                        return Err(ParseError::new(
-                            "only identifiers can be called",
-                            token.line,
-                            token.column,
-                        ));
-                    }
-                }
+                expr = Expr::Call {
+                    callee: Box::new(expr),
+                    args,
+                };
             } else if self.consume_if_symbol(Symbol::LBracket)?.is_some() {
                 let index = self.parse_expression()?;
                 self.expect_symbol(Symbol::RBracket, "expected ']' after index expression")?;
                 expr = Expr::Index(Box::new(expr), Box::new(index));
             } else if self.consume_if_symbol(Symbol::Dot)?.is_some() {
                 let token = self.expect_identifier("expected property name after '.'")?;
+                let name = if let TokenKind::Identifier(name) = token.kind {
+                    name
+                } else {
+                    unreachable!()
+                };
+                expr = Expr::Property(Box::new(expr), name);
+            } else if self.consume_if_symbol(Symbol::Arrow)?.is_some() {
+                let token = self.expect_identifier("expected property/method name after '->'")? ;
                 let name = if let TokenKind::Identifier(name) = token.kind {
                     name
                 } else {
@@ -684,5 +705,37 @@ impl<'a> Parser<'a> {
         self.expect_symbol(Symbol::Semicolon, "expected ';' after local declaration")?;
 
         Ok(())
+    }
+
+    fn parse_context_annotation_body(&mut self) -> Result<Stmt, ParseError> {
+        // Context annotations are metadata for the UI system
+        // Syntax: [$LocaleKey$|Property=Value|...]
+        // We parse and discard these as they're not executable code
+        // Note: The opening '[' has already been consumed
+
+        // Consume all tokens until we hit the closing bracket
+        loop {
+            let token = self.peek()?.clone();
+            match &token.kind {
+                TokenKind::Symbol(Symbol::RBracket) => {
+                    self.consume()?;
+                    break;
+                }
+                TokenKind::Eof => {
+                    return Err(ParseError::new(
+                        "unterminated context annotation (missing ']')",
+                        token.line,
+                        token.column,
+                    ));
+                }
+                _ => {
+                    // Consume any token (LocaleKey, Identifier, Symbol, etc.)
+                    self.consume()?;
+                }
+            }
+        }
+
+        // Return an empty block as context annotations have no runtime effect
+        Ok(Stmt::Block(Vec::new()))
     }
 }

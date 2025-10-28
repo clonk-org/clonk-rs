@@ -88,7 +88,13 @@ impl<'a> Lexer<'a> {
                 ':' => return Ok(Token::new(TokenKind::Symbol(Symbol::Colon), line, column)),
                 '.' => return Ok(Token::new(TokenKind::Symbol(Symbol::Dot), line, column)),
                 '+' => return Ok(Token::new(TokenKind::Symbol(Symbol::Plus), line, column)),
-                '-' => return Ok(Token::new(TokenKind::Symbol(Symbol::Minus), line, column)),
+                '-' => {
+                    if self.peek_char() == Some('>') {
+                        self.bump_char();
+                        return Ok(Token::new(TokenKind::Symbol(Symbol::Arrow), line, column));
+                    }
+                    return Ok(Token::new(TokenKind::Symbol(Symbol::Minus), line, column));
+                }
                 '*' => return Ok(Token::new(TokenKind::Symbol(Symbol::Star), line, column)),
                 '%' => return Ok(Token::new(TokenKind::Symbol(Symbol::Percent), line, column)),
                 '=' => {
@@ -151,15 +157,14 @@ impl<'a> Lexer<'a> {
                         self.bump_char();
                         return Ok(Token::new(TokenKind::Symbol(Symbol::OrOr), line, column));
                     }
-                    return Err(ParseError::new(
-                        "unexpected '|' ; did you mean '||'?",
-                        line,
-                        column,
-                    ));
+                    return Ok(Token::new(TokenKind::Symbol(Symbol::Pipe), line, column));
                 }
                 '\r' | '\n' => {
                     // newline already processed in bump_char
                     continue;
+                }
+                '$' => {
+                    return self.lex_locale_key(idx, line, column);
                 }
                 _ => {
                     return Err(ParseError::new(
@@ -381,5 +386,41 @@ impl<'a> Lexer<'a> {
             }
         }
         Err(ParseError::new("unterminated string literal", line, column))
+    }
+
+    fn lex_locale_key(
+        &mut self,
+        start_idx: usize,
+        line: usize,
+        column: usize,
+    ) -> Result<Token, ParseError> {
+        // We've already consumed the opening '$'
+        let mut end_idx = start_idx + 1; // skip the opening '$'
+
+        while let Some((idx, ch, _, _)) = self.bump_char() {
+            match ch {
+                '$' => {
+                    // Found closing '$', extract the key without the $ delimiters
+                    let key = &self.input[start_idx + 1..idx];
+                    return Ok(Token::new(TokenKind::LocaleKey(key.to_string()), line, column));
+                }
+                '\n' | '\r' => {
+                    return Err(ParseError::new(
+                        "unterminated localization key (missing closing '$')",
+                        line,
+                        column,
+                    ));
+                }
+                _ => {
+                    end_idx = idx + ch.len_utf8();
+                }
+            }
+        }
+
+        Err(ParseError::new(
+            "unterminated localization key (missing closing '$')",
+            line,
+            column,
+        ))
     }
 }

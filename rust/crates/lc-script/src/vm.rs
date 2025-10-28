@@ -243,7 +243,22 @@ impl<'a> Vm<'a> {
                 for arg in args {
                     evaluated_args.push(self.evaluate(arg, env, depth + 1)?);
                 }
-                self.invoke(callee, &evaluated_args, depth + 1)
+                // Extract function name from callee expression
+                // For now, we support Variable and Property expressions
+                match callee.as_ref() {
+                    Expr::Variable(name) => {
+                        self.invoke(name, &evaluated_args, depth + 1)
+                    }
+                    Expr::Property(_base, name) => {
+                        // For now, just call the method name directly
+                        // TODO: Implement proper object method dispatch when we have object support
+                        self.invoke(name, &evaluated_args, depth + 1)
+                    }
+                    _ => Err(RuntimeError::new(format!(
+                        "cannot call non-function expression: {:?}",
+                        callee
+                    ))),
+                }
             }
             Expr::Array(elements) => {
                 let mut values = Vec::with_capacity(elements.len());
