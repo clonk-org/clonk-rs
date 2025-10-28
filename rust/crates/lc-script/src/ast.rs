@@ -20,9 +20,24 @@ pub enum AppendTo {
     Wildcard,        // Append to all definitions (*)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarDeclKind {
+    Local,       // local x; - per-instance field
+    Static,      // static x; - definition-shared storage
+    StaticConst, // static const x = ...; - immutable constant
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VarDecl {
+    pub kind: VarDeclKind,
+    pub name: String,
+    pub init: Option<Expr>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Script {
     pub functions: Vec<Function>,
+    pub var_decls: Vec<VarDecl>,       // Top-level variable declarations
     pub includes: Vec<String>,         // List of included definition IDs
     pub appendto: Option<AppendTo>,    // Optional append target
     pub strict_level: Option<u8>,      // Strict mode level (1, 2, or 3)
@@ -32,6 +47,7 @@ impl Script {
     pub fn new(functions: Vec<Function>) -> Self {
         Self {
             functions,
+            var_decls: Vec::new(),
             includes: Vec::new(),
             appendto: None,
             strict_level: None,
@@ -40,12 +56,14 @@ impl Script {
 
     pub fn with_directives(
         functions: Vec<Function>,
+        var_decls: Vec<VarDecl>,
         includes: Vec<String>,
         appendto: Option<AppendTo>,
         strict_level: Option<u8>,
     ) -> Self {
         Self {
             functions,
+            var_decls,
             includes,
             appendto,
             strict_level,

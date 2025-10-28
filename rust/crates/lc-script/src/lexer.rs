@@ -393,6 +393,8 @@ impl<'a> Lexer<'a> {
             "public" => TokenKind::Keyword(Keyword::Public),
             "local" => TokenKind::Keyword(Keyword::Local),
             "var" => TokenKind::Keyword(Keyword::Var),
+            "static" => TokenKind::Keyword(Keyword::Static),
+            "const" => TokenKind::Keyword(Keyword::Const),
             "if" => TokenKind::Keyword(Keyword::If),
             "else" => TokenKind::Keyword(Keyword::Else),
             "while" => TokenKind::Keyword(Keyword::While),

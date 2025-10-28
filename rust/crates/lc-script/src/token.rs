@@ -26,6 +26,8 @@ pub enum Keyword {
     Public,
     Local,
     Var,
+    Static,
+    Const,
     If,
     Else,
     While,

@@ -1,4 +1,4 @@
-use crate::ast::{AccessLevel, AppendTo, AssignmentTarget, BinaryOp, Expr, Function, Parameter, Script, Stmt, TypeAnnotation, UnaryOp};
+use crate::ast::{AccessLevel, AppendTo, AssignmentTarget, BinaryOp, Expr, Function, Parameter, Script, Stmt, TypeAnnotation, UnaryOp, VarDecl, VarDeclKind};
 use crate::error::ParseError;
 use crate::lexer::Lexer;
 use crate::token::{Keyword, Symbol, Token, TokenKind};
@@ -18,13 +18,16 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_script(&mut self) -> Result<Script, ParseError> {
-        // Parse directives first (before functions)
+        // Parse directives, variable declarations, and functions
+        // Directives and variable declarations can be interspersed
         let mut includes = Vec::new();
         let mut appendto = None;
         let mut strict_level = None;
+        let mut var_decls = Vec::new();
+        let mut functions = Vec::new();
 
         while !self.is_eof()? {
-            // Check if next token is a directive
+            // Check for directives
             if let Some(directive) = self.try_parse_directive()? {
                 match directive.as_str() {
                     "#include" => {
@@ -65,28 +68,26 @@ impl<'a> Parser<'a> {
                         // Unknown directive, skip it
                     }
                 }
+            } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Local) {
+                // Parse local variable declarations
+                self.consume()?; // consume 'local'
+                var_decls.extend(self.parse_var_decl_list(VarDeclKind::Local)?);
+            } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Static) {
+                // Parse static variable declarations
+                self.consume()?; // consume 'static'
+                // Check for 'const' after 'static'
+                if self.consume_if_keyword(Keyword::Const)?.is_some() {
+                    var_decls.extend(self.parse_var_decl_list(VarDeclKind::StaticConst)?);
+                } else {
+                    var_decls.extend(self.parse_var_decl_list(VarDeclKind::Static)?);
+                }
             } else {
-                // Not a directive, break to parse functions
-                break;
+                // Must be a function
+                functions.push(self.parse_function()?);
             }
         }
 
-        // Parse top-level local variable declarations
-        while !self.is_eof()? {
-            if self.consume_if_keyword(Keyword::Local)?.is_some() {
-                self.parse_top_level_local_decl()?;
-            } else {
-                break;
-            }
-        }
-
-        // Parse functions
-        let mut functions = Vec::new();
-        while !self.is_eof()? {
-            functions.push(self.parse_function()?);
-        }
-
-        Ok(Script::with_directives(functions, includes, appendto, strict_level))
+        Ok(Script::with_directives(functions, var_decls, includes, appendto, strict_level))
     }
 
     fn parse_function(&mut self) -> Result<Function, ParseError> {
@@ -1086,20 +1087,49 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_top_level_local_decl(&mut self) -> Result<(), ParseError> {
-        // local name (, name)* ;
-        // Parse first variable name
-        self.expect_identifier("expected variable name after 'local'")?;
+    fn parse_var_decl_list(&mut self, kind: VarDeclKind) -> Result<Vec<VarDecl>, ParseError> {
+        // Parse: name [= expr] (, name [= expr])* ;
+        let mut decls = Vec::new();
 
-        // Parse additional comma-separated names
-        while self.consume_if_symbol(Symbol::Comma)?.is_some() {
-            self.expect_identifier("expected variable name after ','")?;
+        loop {
+            // Parse variable name
+            let name_token = self.expect_identifier("expected variable name in declaration")?;
+            let name = if let TokenKind::Identifier(name) = name_token.kind {
+                name
+            } else {
+                unreachable!()
+            };
+
+            // Check for initializer
+            let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
+                Some(self.parse_expression()?)
+            } else {
+                None
+            };
+
+            // static const requires an initializer
+            if kind == VarDeclKind::StaticConst && init.is_none() {
+                return Err(ParseError::new(
+                    "static const declaration requires an initializer",
+                    name_token.line,
+                    name_token.column,
+                ));
+            }
+
+            decls.push(VarDecl { kind, name, init });
+
+            // Check for comma (more declarations) or semicolon (end)
+            if self.consume_if_symbol(Symbol::Comma)?.is_some() {
+                continue; // Parse next declaration
+            } else {
+                break;
+            }
         }
 
         // Expect semicolon
-        self.expect_symbol(Symbol::Semicolon, "expected ';' after local declaration")?;
+        self.expect_symbol(Symbol::Semicolon, "expected ';' after variable declaration")?;
 
-        Ok(())
+        Ok(decls)
     }
 
     fn parse_context_annotation_body(&mut self) -> Result<Stmt, ParseError> {
