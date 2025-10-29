@@ -1231,19 +1231,17 @@ impl<'a> Parser<'a> {
                 // Check for optional method call: ->~MethodName()
                 let is_optional = self.consume_if_symbol(Symbol::Tilde)?.is_some();
                 let token = self.expect_identifier("expected property/method name after '->'")? ;
-                let mut name = if let TokenKind::Identifier(name) = token.kind {
-                    name
-                } else {
-                    unreachable!()
+                let mut name = match token.kind {
+                    TokenKind::Identifier(name) | TokenKind::C4Id(name) => name,
+                    _ => unreachable!(),
                 };
 
                 // Check for scope resolution: ->DefID::Method
                 if self.consume_if_symbol(Symbol::ColonColon)?.is_some() {
                     let method_token = self.expect_identifier("expected method name after '::'")?;
-                    let method_name = if let TokenKind::Identifier(method) = method_token.kind {
-                        method
-                    } else {
-                        unreachable!()
+                    let method_name = match method_token.kind {
+                        TokenKind::Identifier(method) | TokenKind::C4Id(method) => method,
+                        _ => unreachable!(),
                     };
                     // Combine as "DefID::Method"
                     name = format!("{}::{}", name, method_name);
@@ -1487,7 +1485,7 @@ impl<'a> Parser<'a> {
     fn expect_identifier(&mut self, message: &str) -> Result<Token, ParseError> {
         let token = self.peek()?.clone();
         match token.kind {
-            TokenKind::Identifier(_) => {
+            TokenKind::Identifier(_) | TokenKind::C4Id(_) => {
                 self.consume()?;
                 Ok(token)
             }

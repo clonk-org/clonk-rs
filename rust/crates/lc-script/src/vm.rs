@@ -1294,7 +1294,8 @@ mod tests {
             .map(|f| (f.name.clone(), f))
             .collect();
         let host_functions = HashMap::new();
-        let vm = Vm::new(&functions, &host_functions, None);
+        let var_decls: Vec<VarDecl> = Vec::new();
+        let vm = Vm::new(&functions, &host_functions, &var_decls, None);
         vm.call(entry_point, args)
     }
 
