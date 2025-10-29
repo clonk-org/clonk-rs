@@ -188,6 +188,9 @@ pub enum Stmt {
         body: Vec<Stmt>,
     },
     Block(Vec<Stmt>),
+    // Sequence executes statements sequentially WITHOUT creating a new scope
+    // Used for multi-variable declarations: var a, b, c;
+    Sequence(Vec<Stmt>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

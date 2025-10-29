@@ -279,6 +279,11 @@ impl<'a> Vm<'a> {
                 Ok(ControlFlow::Normal)
             }
             Stmt::Block(statements) => self.execute_block(statements, env, depth),
+            Stmt::Sequence(statements) => {
+                // Execute statements sequentially WITHOUT creating a new scope
+                // Used for multi-variable declarations
+                self.execute_statements(statements, env, depth)
+            }
         }
     }
 

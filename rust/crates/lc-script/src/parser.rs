@@ -403,7 +403,9 @@ impl<'a> Parser<'a> {
                 unreachable!()
             };
             let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
-                Some(self.parse_expression()?)
+                // Use parse_assignment() instead of parse_expression() to avoid comma operator
+                // In variable declarations, commas separate variables, not comma expressions
+                Some(self.parse_assignment()?)
             } else {
                 None
             };
@@ -418,11 +420,12 @@ impl<'a> Parser<'a> {
 
         self.expect_symbol(Symbol::Semicolon, "expected ';' after variable declaration")?;
 
-        // Return single declaration if only one, otherwise return block
+        // Return single declaration if only one, otherwise return sequence
+        // Sequence executes statements without creating a new scope (unlike Block)
         if decls.len() == 1 {
             Ok(decls.into_iter().next().unwrap())
         } else {
-            Ok(Stmt::Block(decls))
+            Ok(Stmt::Sequence(decls))
         }
     }
 
@@ -591,7 +594,9 @@ impl<'a> Parser<'a> {
 
                 // Check for initializer on first variable
                 let first_init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
-                    Some(self.parse_expression()?)
+                    // Use parse_assignment() instead of parse_expression() to avoid comma operator
+                    // In variable declarations, commas separate variables, not comma expressions
+                    Some(self.parse_assignment()?)
                 } else {
                     None
                 };
@@ -606,7 +611,9 @@ impl<'a> Parser<'a> {
                         unreachable!()
                     };
                     let init = if self.consume_if_symbol(Symbol::Equal)?.is_some() {
-                        Some(self.parse_expression()?)
+                        // Use parse_assignment() instead of parse_expression() to avoid comma operator
+                        // In variable declarations, commas separate variables, not comma expressions
+                        Some(self.parse_assignment()?)
                     } else {
                         None
                     };
