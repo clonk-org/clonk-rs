@@ -66,6 +66,7 @@ impl Script {
     }
 }
 
+#[derive(Clone)]
 pub struct Engine {
     functions: HashMap<String, Function>,
     host_functions: HashMap<String, HostFunction>,
@@ -91,6 +92,21 @@ impl Engine {
         for (name, function) in script.functions.into_iter() {
             self.functions.insert(name, function);
         }
+    }
+
+    pub fn merge_from(&mut self, other: &Engine) {
+        for (name, function) in other.functions.iter() {
+            // Only add if not already defined (child overrides parent)
+            self.functions.entry(name.clone()).or_insert_with(|| function.clone());
+        }
+    }
+
+    pub fn includes(&self) -> Vec<String> {
+        // Extract includes from the loaded script
+        // Note: This is a simplified version that returns empty since we don't
+        // store the original Script object. The actual includes are tracked
+        // at a higher level.
+        Vec::new()
     }
 
     pub fn register_host_function<F>(&mut self, name: impl Into<String>, func: F)

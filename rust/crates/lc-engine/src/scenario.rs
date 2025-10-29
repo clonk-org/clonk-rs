@@ -455,6 +455,10 @@ impl Scenario {
             engine.register_definition(compiled)?;
         }
 
+        // CRITICAL: Resolve #include directives now that all definitions are registered
+        // This allows child definitions to inherit functions from parent definitions
+        engine.resolve_includes()?;
+
         let mut pending = self.initial_spawns.clone();
         let mut handles: HashMap<String, ObjectId> = HashMap::new();
         let mut created = Vec::with_capacity(pending.len() + 4);

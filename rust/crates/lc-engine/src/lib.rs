@@ -3412,10 +3412,12 @@ pub struct DefinitionComponent {
     pub count: u32,
 }
 
+#[derive(Clone)]
 pub struct Definition {
     id: DefinitionId,
     name: String,
     script: ScriptEngine,
+    includes: Vec<String>,
     has_initialize: bool,
     has_step: bool,
     action_library: ActionLibrary,
@@ -3468,14 +3470,19 @@ impl Definition {
     ) -> Result<Self, EngineError> {
         let id = id.into();
         let name = name.into();
-        let mut script = ScriptEngine::new();
-        script
-            .load_script(source)
-            .map_err(|source| EngineError::Script {
+
+        // Compile the script to extract includes before adding to engine
+        let compiled_script = lc_script::Script::compile(source)
+            .map_err(|parse_error| EngineError::Script {
                 definition: id.clone(),
                 function: "load",
-                source,
+                source: parse_error.into(),
             })?;
+
+        let includes = compiled_script.includes().to_vec();
+
+        let mut script = ScriptEngine::new();
+        script.add_script(compiled_script);
         compat::register_host_functions(&mut script);
         let has_initialize = script.has_function("Initialize");
         let has_step = script.has_function("Step");
@@ -3483,6 +3490,7 @@ impl Definition {
             id,
             name,
             script,
+            includes,
             has_initialize,
             has_step,
             action_library: ActionLibrary::default(),
@@ -3519,6 +3527,14 @@ impl Definition {
 
     pub fn has_function(&self, name: &str) -> bool {
         self.script.has_function(name)
+    }
+
+    pub fn includes(&self) -> &[String] {
+        &self.includes
+    }
+
+    pub fn merge_from(&mut self, parent: &Definition) {
+        self.script.merge_from(&parent.script);
     }
 
     pub fn from_resource(resource: &ResourceDefinitionData) -> Result<Self, EngineError> {
@@ -7310,6 +7326,38 @@ impl Engine {
             return Err(EngineError::DefinitionAlreadyExists(id));
         }
         self.definitions.insert(id, definition);
+        Ok(())
+    }
+
+    pub fn resolve_includes(&mut self) -> Result<(), EngineError> {
+        // Collect all definitions that have includes
+        let ids_with_includes: Vec<String> = self.definitions.iter()
+            .filter(|(_, def)| !def.includes().is_empty())
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        // For each definition with includes, merge parent functions
+        for child_id in ids_with_includes {
+            let includes = self.definitions.get(&child_id)
+                .map(|def| def.includes().to_vec())
+                .unwrap_or_default();
+
+            for parent_id in &includes {
+                // Check if parent exists
+                if !self.definitions.contains_key(parent_id) {
+                    return Err(EngineError::UnknownDefinition(parent_id.clone()));
+                }
+
+                // Clone the parent to avoid borrow checker issues
+                let parent = self.definitions.get(parent_id).unwrap().clone();
+
+                // Merge parent into child
+                if let Some(child) = self.definitions.get_mut(&child_id) {
+                    child.merge_from(&parent);
+                }
+            }
+        }
+
         Ok(())
     }
 
