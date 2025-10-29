@@ -552,22 +552,22 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
                 current_definition.step = parse_u32(value);
             }
             "phasecall" => {
-                if !value.is_empty() {
+                if !value.is_empty() && !value.eq_ignore_ascii_case("None") {
                     current_definition.phase_call = Some(value.to_string());
                 }
             }
             "startcall" => {
-                if !value.is_empty() {
+                if !value.is_empty() && !value.eq_ignore_ascii_case("None") {
                     current_definition.start_call = Some(value.to_string());
                 }
             }
             "endcall" => {
-                if !value.is_empty() {
+                if !value.is_empty() && !value.eq_ignore_ascii_case("None") {
                     current_definition.end_call = Some(value.to_string());
                 }
             }
             "abortcall" => {
-                if !value.is_empty() {
+                if !value.is_empty() && !value.eq_ignore_ascii_case("None") {
                     current_definition.abort_call = Some(value.to_string());
                 }
             }

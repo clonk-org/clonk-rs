@@ -4206,13 +4206,10 @@ impl Definition {
         game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(compat::EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
-        if !self.script.has_function(function) {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: self.id.clone(),
-                function: kind.context(),
-                detail: format!("callback `{}` is not defined", function),
-            });
-        }
+        // Note: We don't validate function existence here because has_function() only
+        // checks the current script's functions and doesn't traverse #include inheritance.
+        // Scripts can inherit callbacks from parent scripts (e.g., TRPR inherits Throwing
+        // from COWB). The VM will naturally handle truly missing functions when called.
 
         let args = [
             build_state_value(&self.id, object_id, state, &self.action_library),
