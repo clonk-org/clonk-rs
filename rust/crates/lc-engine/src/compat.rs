@@ -83,6 +83,7 @@ pub(crate) struct HostWorldObject {
     #[allow(dead_code)]
     pub action_data: i32,
     pub action_ticks: u32,
+    pub action_phase: i32,
     container: Option<ObjectId>,
     contents: Vec<ObjectId>,
     #[allow(dead_code)]
@@ -166,6 +167,7 @@ impl HostWorldObject {
             vertices,
             action_data,
             action_ticks,
+            0,
             container,
             None,
         )
@@ -190,6 +192,7 @@ impl HostWorldObject {
         vertices: Vec<ObjectVertex>,
         action_data: i32,
         action_ticks: u32,
+        action_phase: i32,
         container: Option<ObjectId>,
         draw_transform: Option<DrawTransform>,
     ) -> Self {
@@ -214,6 +217,7 @@ impl HostWorldObject {
             vertices,
             action_data,
             action_ticks,
+            action_phase,
             container,
             contents: Vec::new(),
             draw_transform,
@@ -319,6 +323,14 @@ impl HostWorldObject {
     #[allow(dead_code)]
     pub fn action_data(&self) -> i32 {
         self.action_data
+    }
+
+    pub fn action_phase(&self) -> i32 {
+        self.action_phase
+    }
+
+    pub fn set_action_phase(&mut self, phase: i32) {
+        self.action_phase = phase;
     }
 }
 
@@ -1970,6 +1982,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetActionData", get_action_data);
     script.register_host_function("GetAction", get_action);
     script.register_host_function("GetActTime", get_act_time);
+    script.register_host_function("GetPhase", get_phase);
+    script.register_host_function("SetPhase", set_phase);
     script.register_host_function("GetProcedure", get_procedure);
     script.register_host_function("SetActionTargets", set_action_targets);
     script.register_host_function("GetActionTarget", get_action_target);
@@ -3092,6 +3106,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub action_name: String,
     pub action_ticks: u32,
     pub action_data: i32,
+    pub action_phase: i32,
     pub action_library: ActionLibrary,
     pub direction: Direction,
     pub command_direction: CommandDirection,
@@ -3143,6 +3158,7 @@ impl<'a> HostObjectContext<'a> {
             action_name,
             action_ticks,
             action_data,
+            0,
             action_library,
             direction,
             command_direction,
@@ -3173,6 +3189,7 @@ impl<'a> HostObjectContext<'a> {
         action_name: impl Into<String>,
         action_ticks: u32,
         action_data: i32,
+        action_phase: i32,
         action_library: ActionLibrary,
         direction: Direction,
         command_direction: CommandDirection,
@@ -3206,6 +3223,7 @@ impl<'a> HostObjectContext<'a> {
             action_name: action_name.into(),
             action_ticks,
             action_data,
+            action_phase,
             action_library,
             direction,
             command_direction,
@@ -5737,6 +5755,130 @@ fn get_act_time(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn get_phase(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "GetPhase: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let object = if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    object
+                } else if let Some(other) = context.get_world_object(target) {
+                    return Ok(Value::Int(other.action_phase()));
+                } else {
+                    return Ok(Value::Nil);
+                }
+            } else if let Some(other) = context.get_world_object(target) {
+                return Ok(Value::Int(other.action_phase()));
+            } else {
+                return Ok(Value::Nil);
+            }
+        } else {
+            match context.object_context() {
+                Some(obj) => obj,
+                None => return Ok(Value::Nil),
+            }
+        };
+
+        Ok(Value::Int(object.action_phase()))
+    })
+}
+
+fn set_phase(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetPhase expects at least 1 argument: phase",
+        ));
+    }
+
+    let phase = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => return Ok(Value::Bool(false)),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "SetPhase: expected int or nil for phase, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+
+    if let Some(arg) = args.get(index) {
+        match arg {
+            Value::Proplist(map) => {
+                if let Some(Value::Int(id)) = map.get("id") {
+                    if *id >= 0 {
+                        target_id = Some(ObjectId::new(*id as u64));
+                    }
+                }
+                index += 1;
+            }
+            Value::Nil => {
+                index += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetPhase: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetPhase requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        object.set_action_phase(phase);
+        Ok(Value::Bool(true))
+    })
+}
+
 fn get_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let mut target_id: Option<ObjectId> = None;
@@ -7782,6 +7924,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             Vec::new(),
             0,
             0,
+            0,
             None,
             None,
         )
@@ -7959,6 +8102,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             Vector2::ZERO,
             0,
             Vec::new(),
+            0,
             0,
             0,
             None,
@@ -9894,6 +10038,7 @@ impl EffectHostContext {
                 action_name,
                 action_ticks,
                 action_data,
+                action_phase,
                 action_library,
                 direction,
                 command_direction,
@@ -9927,6 +10072,7 @@ impl EffectHostContext {
                 action_name,
                 action_ticks,
                 action_data,
+                action_phase,
                 direction,
                 command_direction,
                 command_count,
@@ -10290,6 +10436,7 @@ struct ObjectScopeContext {
     current_action_target2: Option<ObjectId>,
     current_action_data: i32,
     current_action_ticks: u32,
+    current_action_phase: i32,
     current_energy: i32,
     current_damage: i32,
     current_construction: i32,
@@ -10329,6 +10476,7 @@ impl ObjectScopeContext {
         action_name: String,
         action_ticks: u32,
         action_data: i32,
+        action_phase: i32,
         direction: Direction,
         command_direction: CommandDirection,
         command_count: usize,
@@ -10362,6 +10510,7 @@ impl ObjectScopeContext {
             current_action_target2: action_target2,
             current_action_data: action_data,
             current_action_ticks: action_ticks,
+            current_action_phase: action_phase,
             current_energy: energy,
             current_damage: clamped_damage,
             current_construction: clamped_construction,
@@ -10590,6 +10739,38 @@ impl ObjectScopeContext {
 
     fn reset_action_data(&mut self) {
         self.set_action_data(0);
+    }
+
+    fn action_phase(&self) -> i32 {
+        if let Some(update) = self.pending_update.action.as_ref() {
+            if let Some(phase) = update.phase {
+                return phase;
+            }
+        }
+        self.current_action_phase
+    }
+
+    fn set_action_phase(&mut self, phase: i32) {
+        if self.current_action_phase == phase {
+            if let Some(existing) = self
+                .pending_update
+                .action
+                .as_ref()
+                .and_then(|update| update.phase)
+            {
+                if existing == phase {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+        self.current_action_phase = phase;
+        let update = self
+            .pending_update
+            .action
+            .get_or_insert_with(ActionUpdate::default);
+        update.set_phase(phase);
     }
 
     fn set_action_ticks(&mut self, ticks: u32) {
