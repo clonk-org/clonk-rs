@@ -2060,6 +2060,14 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetHomebaseProduction", get_homebase_production);
     script.register_host_function("SetWind", set_wind);
     script.register_host_function("GetWind", get_wind);
+    script.register_host_function("Abs", abs_func);
+    script.register_host_function("Min", min_func);
+    script.register_host_function("Max", max_func);
+    script.register_host_function("Sqrt", sqrt_func);
+    script.register_host_function("Pow", pow_func);
+    script.register_host_function("BoundBy", bound_by_func);
+    script.register_host_function("Sin", sin_func);
+    script.register_host_function("Cos", cos_func);
     script.register_host_function("SetTemperature", set_temperature);
     script.register_host_function("GetTemperature", get_temperature);
     script.register_host_function("SetClimate", set_climate);
@@ -4507,6 +4515,299 @@ fn get_wind(args: &[Value]) -> Result<Value, RuntimeError> {
             .clone();
         Ok(Value::Int(context.wind_force()))
     })
+}
+
+// Mathematical host functions
+
+fn abs_func(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new("Abs expects 1 argument: value"));
+    }
+
+    match &args[0] {
+        Value::Int(value) => Ok(Value::Int(value.abs())),
+        Value::Nil => Ok(Value::Int(0)),
+        other => Err(RuntimeError::new(format!(
+            "Abs: expected int, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn min_func(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 2 {
+        return Err(RuntimeError::new("Min expects 2 arguments: val1, val2"));
+    }
+
+    let val1 = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Min: expected int for first argument, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let val2 = match &args[1] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Min: expected int for second argument, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    Ok(Value::Int(val1.min(val2)))
+}
+
+fn max_func(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 2 {
+        return Err(RuntimeError::new("Max expects 2 arguments: val1, val2"));
+    }
+
+    let val1 = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Max: expected int for first argument, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let val2 = match &args[1] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Max: expected int for second argument, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    Ok(Value::Int(val1.max(val2)))
+}
+
+fn sqrt_func(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 1 {
+        return Err(RuntimeError::new("Sqrt expects 1 argument: value"));
+    }
+
+    let value = match &args[0] {
+        Value::Int(v) => *v,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Sqrt: expected int, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    // C++ returns 0 for negative values
+    if value < 0 {
+        return Ok(Value::Int(0));
+    }
+
+    // C++ implementation does: sqrt, then adjusts for rounding
+    let result = (value as f64).sqrt() as i32;
+    Ok(Value::Int(result))
+}
+
+fn pow_func(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 2 {
+        return Err(RuntimeError::new("Pow expects 2 arguments: base, exponent"));
+    }
+
+    let base = match &args[0] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Pow: expected int for base, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let exponent = match &args[1] {
+        Value::Int(value) => *value,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Pow: expected int for exponent, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    if exponent < 0 {
+        return Ok(Value::Int(0)); // Match C++ behavior for negative exponents
+    }
+
+    Ok(Value::Int(base.pow(exponent as u32)))
+}
+
+fn bound_by_func(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 3 {
+        return Err(RuntimeError::new(
+            "BoundBy expects 3 arguments: value, min, max",
+        ));
+    }
+
+    let value = match &args[0] {
+        Value::Int(v) => *v,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "BoundBy: expected int for value, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let range1 = match &args[1] {
+        Value::Int(v) => *v,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "BoundBy: expected int for range1, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let range2 = match &args[2] {
+        Value::Int(v) => *v,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "BoundBy: expected int for range2, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    // BoundBy clamps value between range1 and range2 (order doesn't matter)
+    let min = range1.min(range2);
+    let max = range1.max(range2);
+    Ok(Value::Int(value.clamp(min, max)))
+}
+
+fn sin_func(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() || args.len() > 3 {
+        return Err(RuntimeError::new(
+            "Sin expects 1-3 arguments: angle, radius, precision",
+        ));
+    }
+
+    let angle = match &args[0] {
+        Value::Int(v) => *v,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Sin: expected int for angle, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let radius = if args.len() > 1 {
+        match &args[1] {
+            Value::Int(v) => *v,
+            Value::Nil => 1,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "Sin: expected int for radius, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    } else {
+        1
+    };
+
+    let precision = if args.len() > 2 {
+        match &args[2] {
+            Value::Int(v) => if *v == 0 { 1 } else { *v },
+            Value::Nil => 1,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "Sin: expected int for precision, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    } else {
+        1
+    };
+
+    // C++ implementation: modulo to prevent overflow, convert to radians
+    let angle_mod = angle % (360 * precision);
+    let angle_radians = (angle_mod as f64 / precision as f64) * std::f64::consts::PI / 180.0;
+    let result = (angle_radians.sin() * radius as f64).round() as i32;
+    Ok(Value::Int(result))
+}
+
+fn cos_func(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() || args.len() > 3 {
+        return Err(RuntimeError::new(
+            "Cos expects 1-3 arguments: angle, radius, precision",
+        ));
+    }
+
+    let angle = match &args[0] {
+        Value::Int(v) => *v,
+        Value::Nil => 0,
+        other => {
+            return Err(RuntimeError::new(format!(
+                "Cos: expected int for angle, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let radius = if args.len() > 1 {
+        match &args[1] {
+            Value::Int(v) => *v,
+            Value::Nil => 1,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "Cos: expected int for radius, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    } else {
+        1
+    };
+
+    let precision = if args.len() > 2 {
+        match &args[2] {
+            Value::Int(v) => if *v == 0 { 1 } else { *v },
+            Value::Nil => 1,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "Cos: expected int for precision, got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    } else {
+        1
+    };
+
+    // C++ implementation: modulo to prevent overflow, convert to radians
+    let angle_mod = angle % (360 * precision);
+    let angle_radians = (angle_mod as f64 / precision as f64) * std::f64::consts::PI / 180.0;
+    let result = (angle_radians.cos() * radius as f64).round() as i32;
+    Ok(Value::Int(result))
 }
 
 fn set_temperature(args: &[Value]) -> Result<Value, RuntimeError> {
