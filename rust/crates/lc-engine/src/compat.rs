@@ -2022,6 +2022,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("ObjectDistance", object_distance);
     script.register_host_function("GetX", get_x);
     script.register_host_function("GetY", get_y);
+    script.register_host_function("GetID", get_id);
     script.register_host_function("SetPosition", set_position);
     script.register_host_function("CreateObject", create_object);
     script.register_host_function("CreateConstruction", create_construction);
@@ -7645,6 +7646,46 @@ fn get_x(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn get_y(args: &[Value]) -> Result<Value, RuntimeError> {
     get_position_component(args, PositionComponent::Y)
+}
+
+fn get_id(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetID expects at most 1 argument: target object",
+        ));
+    }
+
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(0) {
+        target_id = parse_object_reference_argument(arg, "GetID", "target")?;
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        if let Some(target) = target_id {
+            // Lookup object by ID and return its definition_id
+            if let Some(world_object) = context.get_world_object(target) {
+                return Ok(Value::String(world_object.definition_id().to_string()));
+            }
+            // If target object not found, return nil
+            return Ok(Value::Nil);
+        }
+
+        // No argument provided - return current object's definition_id
+        if let Some(object) = context.object_context() {
+            let object_id = object.id();
+            if let Some(world_object) = context.get_world_object(object_id) {
+                return Ok(Value::String(world_object.definition_id().to_string()));
+            }
+        }
+
+        Ok(Value::Nil)
+    })
 }
 
 fn apply_position_bounds(
