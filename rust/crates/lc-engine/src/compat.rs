@@ -1954,6 +1954,49 @@ fn scale_velocity_value(value: i32, from_precision: i32, to_precision: i32) -> i
     scaled.max(i64::from(i32::MIN)).min(i64::from(i32::MAX)) as i32
 }
 
+/// GameCallEx - Broadcast a function call to Goal/Rule/Environment objects and scenario script
+///
+/// C++ signature: GameCallEx(string szFunction, any par0-par8)
+///
+/// Broadcasts an optional function call (prefixed with ~) to:
+/// 1. All objects with category Goal, Rule, or Environment
+/// 2. The scenario script
+///
+/// Returns the result from the scenario script call, or nil if no handlers exist.
+///
+/// TODO: Full implementation requires:
+/// - Iterating through world objects filtered by category
+/// - Calling script functions on those objects
+/// - Calling scenario script function
+/// For now, returns nil to unblock integration tests.
+fn game_call_ex(args: &[Value]) -> Result<Value, RuntimeError> {
+    // Validate we have at least a function name
+    if args.is_empty() {
+        return Err(RuntimeError::new("GameCallEx requires at least a function name"));
+    }
+
+    let _function_name = match &args[0] {
+        Value::String(s) => s.as_str(),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "GameCallEx function name must be string, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    // C++ implementation prefixes function name with ~ for failsafe calling,
+    // then broadcasts to Goal/Rule/Environment objects and scenario script.
+    //
+    // For now, return nil. The ~ prefix means the call is optional - if no
+    // handlers exist, it's not an error.
+    //
+    // Full implementation would require architectural changes to allow
+    // host functions to iterate objects and call script functions on them.
+
+    Ok(Value::Nil)
+}
+
 pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("AddEffect", add_effect);
     script.register_host_function("RemoveEffect", remove_effect);
@@ -2037,6 +2080,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Log", log_message);
     script.register_host_function("DebugLog", debug_log_message);
     script.register_host_function("GameOver", game_over);
+    script.register_host_function("GameCallEx", game_call_ex);
     script.register_host_function("Format", format_string);
     script.register_host_function("GetType", get_type);
     script.register_host_function("CreateArray", create_array);

@@ -18,6 +18,8 @@ mod player;
 mod record;
 pub mod scenario;
 mod sky;
+#[cfg(test)]
+mod test_game_call_ex;
 mod transfer;
 
 pub use action::{
