@@ -334,6 +334,22 @@ impl<'a> Lexer<'a> {
         self.peeked.map(|(_, ch, _, _)| ch)
     }
 
+    fn peek_char_at(&mut self, offset: usize) -> Option<char> {
+        // Get current position in the input
+        let current_idx = if let Some((idx, _, _, _)) = self.peeked {
+            idx
+        } else {
+            self.chars.clone().next().map(|(idx, _)| idx)?
+        };
+
+        // Calculate target position
+        let mut chars_iter = self.input[current_idx..].chars();
+        for _ in 0..offset {
+            chars_iter.next()?;
+        }
+        chars_iter.next()
+    }
+
     fn advance_position(&mut self, ch: char) {
         match ch {
             '\r' => {
@@ -447,7 +463,28 @@ impl<'a> Lexer<'a> {
             // Keyword operators are also contextual - treated as identifiers here,
             // recognized as operators in expression contexts by parser
             // "eq", "ne", "lt", "le", "gt", "ge", "and", "or", "not"
-            _ => TokenKind::Identifier(lexeme.to_string()),
+            _ => {
+                // Check if it looks like a C4ID:
+                // - Exactly 4 characters
+                // - Contains only uppercase letters, digits, or underscores
+                // - Not followed by '(' (function call) or ':' (label, except ::)
+                if lexeme.len() == 4
+                    && lexeme.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                {
+                    // Check what follows the identifier
+                    let next_is_call_or_label = self.peek_char()
+                        .map(|ch| ch == '(' || (ch == ':' && self.peek_char_at(1).map_or(true, |ch2| ch2 != ':')))
+                        .unwrap_or(false);
+
+                    if !next_is_call_or_label {
+                        TokenKind::C4Id(lexeme.to_string())
+                    } else {
+                        TokenKind::Identifier(lexeme.to_string())
+                    }
+                } else {
+                    TokenKind::Identifier(lexeme.to_string())
+                }
+            }
         };
         Token::new(kind, line, column)
     }

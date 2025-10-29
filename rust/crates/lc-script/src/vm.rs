@@ -602,6 +602,7 @@ impl<'a> Vm<'a> {
             Literal::Int(i) => Value::Int(*i),
             Literal::Bool(b) => Value::Bool(*b),
             Literal::String(s) => Value::String(s.clone()),
+            Literal::C4Id(id) => Value::C4Id(id.clone()),
             Literal::Nil => Value::Nil,
         }
     }

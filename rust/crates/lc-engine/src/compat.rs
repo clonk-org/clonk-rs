@@ -53,6 +53,7 @@ const MAX_VERTEX_COUNT: i32 = 30;
 const C4V_ANY: i32 = 0;
 const C4V_INT: i32 = 1;
 const C4V_BOOL: i32 = 2;
+const C4V_ID: i32 = 3;
 const C4V_STRING: i32 = 5;
 const C4V_ARRAY: i32 = 6;
 const C4V_MAP: i32 = 7;
@@ -2116,6 +2117,7 @@ fn value_to_data_string(value: &Value) -> String {
         Value::Bool(true) => "true".to_string(),
         Value::Bool(false) => "false".to_string(),
         Value::String(text) => format!("\"{text}\""),
+        Value::C4Id(id) => id.clone(),
         Value::Array(values) => {
             let inner = values
                 .iter()
@@ -2696,6 +2698,7 @@ fn get_type(args: &[Value]) -> Result<Value, RuntimeError> {
         Value::Int(_) => C4V_INT,
         Value::Bool(_) => C4V_BOOL,
         Value::String(_) => C4V_STRING,
+        Value::C4Id(_) => C4V_ID,
         Value::Array(_) => C4V_ARRAY,
         Value::Proplist(_) => C4V_MAP,
         Value::Nil => C4V_ANY,
@@ -7670,7 +7673,7 @@ fn get_id(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(target) = target_id {
             // Lookup object by ID and return its definition_id
             if let Some(world_object) = context.get_world_object(target) {
-                return Ok(Value::String(world_object.definition_id().to_string()));
+                return Ok(Value::C4Id(world_object.definition_id().to_string()));
             }
             // If target object not found, return nil
             return Ok(Value::Nil);
@@ -7680,7 +7683,7 @@ fn get_id(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(object) = context.object_context() {
             let object_id = object.id();
             if let Some(world_object) = context.get_world_object(object_id) {
-                return Ok(Value::String(world_object.definition_id().to_string()));
+                return Ok(Value::C4Id(world_object.definition_id().to_string()));
             }
         }
 
@@ -9769,6 +9772,7 @@ fn value_to_effect_var(value: &Value) -> EffectVarValue {
         Value::Int(value) => EffectVarValue::Int(*value),
         Value::Bool(value) => EffectVarValue::Bool(*value),
         Value::String(value) => EffectVarValue::String(value.clone()),
+        Value::C4Id(id) => EffectVarValue::String(id.clone()),
         Value::Array(entries) => {
             let vars = entries
                 .iter()

@@ -37,15 +37,24 @@ impl<'a> Parser<'a> {
             if let Some(directive) = self.try_parse_directive()? {
                 match directive.as_str() {
                     "#include" => {
-                        let id = self.expect_identifier("expected definition ID after #include")?;
-                        if let TokenKind::Identifier(id_str) = id.kind {
-                            includes.push(id_str);
+                        let id = self.next()?;
+                        match id.kind {
+                            TokenKind::Identifier(id_str) | TokenKind::C4Id(id_str) => {
+                                includes.push(id_str);
+                            }
+                            _ => {
+                                return Err(ParseError::new(
+                                    "expected definition ID after #include",
+                                    id.line,
+                                    id.column,
+                                ))
+                            }
                         }
                     }
                     "#appendto" => {
                         let next = self.next()?;
                         appendto = Some(match &next.kind {
-                            TokenKind::Identifier(id) => AppendTo::Id(id.clone()),
+                            TokenKind::Identifier(id) | TokenKind::C4Id(id) => AppendTo::Id(id.clone()),
                             TokenKind::Symbol(Symbol::Star) => AppendTo::Wildcard,
                             _ => {
                                 return Err(ParseError::new(
@@ -1324,6 +1333,7 @@ impl<'a> Parser<'a> {
         match token.kind {
             TokenKind::Number(value) => Ok(Expr::Literal(Literal::Int(value))),
             TokenKind::String(value) => Ok(Expr::Literal(Literal::String(value))),
+            TokenKind::C4Id(id) => Ok(Expr::Literal(Literal::C4Id(id))),
             TokenKind::Keyword(Keyword::True) => Ok(Expr::Literal(Literal::Bool(true))),
             TokenKind::Keyword(Keyword::False) => Ok(Expr::Literal(Literal::Bool(false))),
             TokenKind::Keyword(Keyword::Nil) => Ok(Expr::Literal(Literal::Nil)),

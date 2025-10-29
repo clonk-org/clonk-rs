@@ -10,6 +10,7 @@ pub enum TokenKind {
     Identifier(String),
     Number(i32),
     String(String),
+    C4Id(String), // 4-character definition ID like "CLNK", "COWB"
     Keyword(Keyword),
     Symbol(Symbol),
     Directive(String), // Directive like "#include", "#appendto", "#strict"

@@ -6,6 +6,7 @@ pub enum Value {
     Int(i32),
     Bool(bool),
     String(String),
+    C4Id(String),
     Array(Vec<Value>),
     Proplist(HashMap<String, Value>),
     Nil,
@@ -17,6 +18,7 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Int(i) => *i != 0,
             Value::String(s) => !s.is_empty(),
+            Value::C4Id(id) => !id.is_empty(),
             Value::Array(values) => !values.is_empty(),
             Value::Proplist(entries) => !entries.is_empty(),
             Value::Nil => false,
@@ -28,6 +30,7 @@ impl Value {
             Value::Int(_) => "int",
             Value::Bool(_) => "bool",
             Value::String(_) => "string",
+            Value::C4Id(_) => "id",
             Value::Array(_) => "array",
             Value::Proplist(_) => "proplist",
             Value::Nil => "nil",
@@ -40,6 +43,7 @@ pub enum Literal {
     Int(i32),
     Bool(bool),
     String(String),
+    C4Id(String),
     Nil,
 }
 
@@ -49,6 +53,7 @@ impl From<Literal> for Value {
             Literal::Int(i) => Value::Int(i),
             Literal::Bool(b) => Value::Bool(b),
             Literal::String(s) => Value::String(s),
+            Literal::C4Id(id) => Value::C4Id(id),
             Literal::Nil => Value::Nil,
         }
     }
@@ -60,6 +65,7 @@ impl fmt::Display for Value {
             Value::Int(i) => write!(f, "{i}"),
             Value::Bool(b) => write!(f, "{b}"),
             Value::String(s) => write!(f, "\"{}\"", s),
+            Value::C4Id(id) => write!(f, "{id}"),
             Value::Array(values) => {
                 let mut first = true;
                 write!(f, "[")?;
