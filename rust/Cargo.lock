@@ -2059,6 +2059,7 @@ name = "lc-script"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "serde",
  "thiserror",
 ]
 

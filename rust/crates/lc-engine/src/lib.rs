@@ -1800,6 +1800,10 @@ pub struct ObjectState {
     pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw_transform: Option<DrawTransform>,
+    /// Per-object storage for script-level local variables
+    /// These are initialized to nil in Construction() and persist across all function calls
+    #[serde(default)]
+    pub local_vars: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -1904,6 +1908,9 @@ impl ObjectState {
                 self.components = components.clone();
             }
         }
+        if let Some(local_vars) = &delta.local_vars {
+            self.local_vars = local_vars.clone();
+        }
 
         self.action.reconcile_with_library(library);
         ApplyDeltaOutcome {
@@ -1943,6 +1950,7 @@ struct ObjectDelta {
     draw_transform: Option<Option<DrawTransform>>,
     base_graphics: Option<Option<ObjectBaseGraphics>>,
     components: Option<HashMap<DefinitionId, u32>>,
+    local_vars: Option<HashMap<String, Value>>,
 }
 
 impl ObjectDelta {
@@ -2041,6 +2049,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             draw_transform: update.draw_transform,
             base_graphics: update.base_graphics,
             components: update.components,
+            local_vars: update.local_vars,
         }
     }
 }
@@ -2087,6 +2096,8 @@ pub struct ObjectUpdate {
     pub base_graphics: Option<Option<ObjectBaseGraphics>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub components: Option<HashMap<DefinitionId, u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_vars: Option<HashMap<String, Value>>,
 }
 
 impl ObjectUpdate {
@@ -2554,6 +2565,7 @@ impl Object {
             draw_transform: self.state.draw_transform,
             command_queue: self.command_queue.iter().cloned().collect(),
             command_stack: self.commands.snapshot(),
+            local_vars: self.state.local_vars.clone(),
         }
     }
 
@@ -3052,6 +3064,8 @@ pub struct ObjectSnapshot {
     pub command_queue: Vec<QueuedCommand>,
     #[serde(default)]
     pub command_stack: CommandStackSnapshot,
+    #[serde(default)]
+    pub local_vars: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3418,6 +3432,7 @@ pub struct Definition {
     name: String,
     script: ScriptEngine,
     includes: Vec<String>,
+    has_construction: bool,
     has_initialize: bool,
     has_step: bool,
     action_library: ActionLibrary,
@@ -3484,6 +3499,7 @@ impl Definition {
         let mut script = ScriptEngine::new();
         script.add_script(compiled_script);
         compat::register_host_functions(&mut script);
+        let has_construction = script.has_function("Construction");
         let has_initialize = script.has_function("Initialize");
         let has_step = script.has_function("Step");
         Ok(Self {
@@ -3491,6 +3507,7 @@ impl Definition {
             name,
             script,
             includes,
+            has_construction,
             has_initialize,
             has_step,
             action_library: ActionLibrary::default(),
@@ -3535,6 +3552,13 @@ impl Definition {
 
     pub fn merge_from(&mut self, parent: &Definition) {
         self.script.merge_from(&parent.script);
+        // Re-check function existence flags after merging parent functions
+        if !self.has_construction {
+            self.has_construction = self.script.has_function("Construction");
+        }
+        if !self.has_initialize {
+            self.has_initialize = self.script.has_function("Initialize");
+        }
     }
 
     pub fn function_count(&self) -> usize {
@@ -3964,17 +3988,19 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call("Initialize", &args),
+            || self.script.call_with_locals("Initialize", &args, &state.local_vars),
         );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
         let mut environment_delta = env_guard.finish();
-        let result = result.map_err(|source| EngineError::Script {
+        let (result, updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: "Initialize",
             source,
         })?;
         let mut batch = parse_command(&self.id, "Initialize", result)?;
+        // Store updated local variables in the delta so they persist
+        batch.delta.local_vars = Some(updated_local_vars);
         let compat::EffectContextOutcome {
             object: host_object_effects,
             global: host_global_effects,
@@ -4044,6 +4070,142 @@ impl Definition {
         }
         if !physics_delta.is_empty() {
             batch.physics = Some(physics_delta);
+        }
+        if host_trigger_game_over {
+            batch.trigger_game_over = true;
+        }
+        let audio_state = audio_guard.finish();
+        Ok((batch, audio_state, rng, next_object_id))
+    }
+
+    fn call_construction(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        rng: ChaCha8Rng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<(CommandBatch, AudioRegistry, ChaCha8Rng, u64), EngineError> {
+        if !self.has_construction {
+            return Ok((CommandBatch::default(), audio, rng, world.next_object_id()));
+        }
+        // Construction() takes no arguments
+        let args: [Value; 0] = [];
+        let physics_guard = enter_physics_context(physics);
+        let env_guard = enter_environment_context(environment, frame);
+        let guard = enter_random_context(rng);
+        let next_object_id = world.next_object_id();
+        let audio_guard = enter_audio_context(audio);
+        let (result, host_effects) = compat::with_effect_context_with_state(
+            Some(
+                compat::HostObjectContext::with_category(
+                    object_id,
+                    state.container,
+                    state.status,
+                    state.energy,
+                    state.damage,
+                    state.construction,
+                    state.owner,
+                    state.position,
+                    state.velocity,
+                    state.rotation,
+                    &state.effects,
+                    state.action.name.clone(),
+                    state.action.ticks,
+                    state.action.data,
+                    state.action.phase,
+                    self.action_library.clone(),
+                    state.direction,
+                    state.command_direction,
+                    0,
+                    state.action.target,
+                    state.action.target2,
+                    &state.vertices,
+                    state.category,
+                    self.ocf_base,
+                    self.crew_member,
+                    state.draw_transform,
+                    state.base_graphics.clone(),
+                )
+                .with_graphics_overlays(state.graphics_overlays.clone())
+                .with_base_graphics(state.base_graphics.clone())
+                .with_alive(state.alive)
+                .with_ocf(self.compute_ocf(state)),
+            ),
+            global_effects,
+            world,
+            next_object_id,
+            game_over_triggered,
+            || self.script.call_with_locals("Construction", &args, &state.local_vars),
+        );
+        let rng = guard.finish();
+        let mut physics_delta = physics_guard.finish();
+        let mut environment_delta = env_guard.finish();
+        let (_result, updated_local_vars) = result.map_err(|source| EngineError::Script {
+            definition: self.id.clone(),
+            function: "Construction",
+            source,
+        })?;
+        // Construction() return value is not used (it just returns 0 or nil)
+        // We only care about side effects (initializing local variables, etc.)
+        // But we DO need to capture updated local variable values
+        let mut batch = CommandBatch::default();
+        // Store updated local variables in the delta so they persist
+        batch.delta.local_vars = Some(updated_local_vars);
+        let compat::EffectContextOutcome {
+            object: host_object_effects,
+            global: host_global_effects,
+            object_update,
+            object_commands,
+            command_operations,
+            destroy_object,
+            environment: environment_from_host,
+            physics: physics_from_host,
+            spawns: host_spawns,
+            landscape: host_landscape_ops,
+            particles: host_particles,
+            transfer_zones: host_transfer_zones,
+            messages: host_messages,
+            player_commands: host_player_commands,
+            audio: host_audio,
+            trigger_game_over: host_trigger_game_over,
+            next_object_id,
+        } = host_effects;
+        batch.audio.extend(host_audio.events);
+        if !host_player_commands.is_empty() {
+            batch.player_commands.extend(host_player_commands);
+        }
+
+        if let Some(delta) = physics_from_host {
+            merge_physics_delta(&mut physics_delta, &delta);
+        }
+        if let Some(update) = environment_from_host {
+            merge_environment_delta(&mut environment_delta, &update);
+        }
+
+        if let Some(update) = object_update {
+            batch.delta.merge_update(update);
+        }
+        batch.spawns.extend(host_spawns);
+        batch.landscape_ops.extend(host_landscape_ops);
+        batch.particles.extend(host_particles);
+        batch.transfer_zones.extend(host_transfer_zones);
+        batch.messages.extend(host_messages);
+        batch.commands.extend(object_commands);
+        batch.command_ops.extend(command_operations);
+        batch.effects.extend(host_object_effects);
+        batch.global_effects.extend(host_global_effects);
+        batch.destroy = destroy_object;
+        if !physics_delta.is_empty() {
+            batch.physics = Some(physics_delta);
+        }
+        if !environment_delta.is_empty() {
+            batch.environment = Some(environment_delta);
         }
         if host_trigger_game_over {
             batch.trigger_game_over = true;
@@ -4124,17 +4286,18 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call("Step", &args),
+            || self.script.call_with_locals("Step", &args, &state.local_vars),
         );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
         let mut environment_delta = env_guard.finish();
-        let result = result.map_err(|source| EngineError::Script {
+        let (result, updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: "Step",
             source,
         })?;
         let mut batch = parse_command(&self.id, "Step", result)?;
+        batch.delta.local_vars = Some(updated_local_vars);
         let compat::EffectContextOutcome {
             object: host_object_effects,
             global: host_global_effects,
@@ -4282,12 +4445,12 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call(function, &args),
+            || self.script.call_with_locals(function, &args, &state.local_vars),
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let value = result.map_err(|source| EngineError::Script {
+        let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: kind.context(),
             source,
@@ -4300,6 +4463,14 @@ impl Definition {
         drop(value);
 
         let mut host_effects = host_effects;
+        // Store updated local variables so they persist
+        if let Some(object_update) = &mut host_effects.object_update {
+            object_update.local_vars = Some(updated_local_vars);
+        } else {
+            let mut update = ObjectUpdate::default();
+            update.local_vars = Some(updated_local_vars);
+            host_effects.object_update = Some(update);
+        }
         if !environment_delta.is_empty() {
             host_effects.environment = Some(environment_delta);
         }
@@ -4377,16 +4548,17 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call("MenuEntries", &args),
+            || self.script.call_with_locals("MenuEntries", &args, &state.local_vars),
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let value = result.map_err(|source| EngineError::Script {
+        let (value, _updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: "MenuEntries",
             source,
         })?;
+        // MenuEntries shouldn't modify local vars, so we discard them
         let entries = self.parse_context_menu_entries(value)?;
 
         if !outcome.object.is_empty()
@@ -4502,16 +4674,24 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call("MenuCommand", &args),
+            || self.script.call_with_locals("MenuCommand", &args, &state.local_vars),
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let value = result.map_err(|source| EngineError::Script {
+        let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: "MenuCommand",
             source,
         })?;
+        // Store updated local variables
+        if let Some(object_update) = &mut host_effects.object_update {
+            object_update.local_vars = Some(updated_local_vars);
+        } else {
+            let mut update = ObjectUpdate::default();
+            update.local_vars = Some(updated_local_vars);
+            host_effects.object_update = Some(update);
+        }
         let handled = match value {
             Value::Nil => false,
             Value::Bool(flag) => flag,
@@ -4612,16 +4792,24 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call(function, &args),
+            || self.script.call_with_locals(function, &args, &state.local_vars),
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let value = result.map_err(|source| EngineError::Script {
+        let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: self.id.clone(),
             function: "Control",
             source,
         })?;
+        // Store updated local variables
+        if let Some(object_update) = &mut host_effects.object_update {
+            object_update.local_vars = Some(updated_local_vars);
+        } else {
+            let mut update = ObjectUpdate::default();
+            update.local_vars = Some(updated_local_vars);
+            host_effects.object_update = Some(update);
+        }
         let handled = match value {
             Value::Nil => false,
             Value::Bool(flag) => flag,
@@ -4726,12 +4914,12 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call(function, &arg_values),
+            || self.script.call_with_locals(function, &arg_values, &state.local_vars),
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let value = result.map_err(|source| {
+        let (value, updated_local_vars) = result.map_err(|source| {
             let function_label: &'static str = Box::leak(function.to_string().into_boxed_str());
             EngineError::Script {
                 definition: self.id.clone(),
@@ -4739,6 +4927,14 @@ impl Definition {
                 source,
             }
         })?;
+        // Store updated local variables
+        if let Some(object_update) = &mut host_effects.object_update {
+            object_update.local_vars = Some(updated_local_vars);
+        } else {
+            let mut update = ObjectUpdate::default();
+            update.local_vars = Some(updated_local_vars);
+            host_effects.object_update = Some(update);
+        }
 
         if !environment_delta.is_empty() {
             host_effects.environment = Some(environment_delta);
@@ -4792,6 +4988,7 @@ impl Definition {
         let args_call = args.clone();
         let function_name = function.to_string();
         let function_call = function_name.clone();
+        let local_vars_call = state.local_vars.clone();
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
@@ -4835,16 +5032,24 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            move || self.script.call(&function_call, &args_call),
+            move || self.script.call_with_locals(&function_call, &args_call, &local_vars_call),
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let value = result.map_err(|source| EngineError::Script {
+        let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
             definition: format!("{}::{}", self.id, function),
             function: "MenuCallback",
             source,
         })?;
+        // Store updated local variables
+        if let Some(object_update) = &mut host_effects.object_update {
+            object_update.local_vars = Some(updated_local_vars);
+        } else {
+            let mut update = ObjectUpdate::default();
+            update.local_vars = Some(updated_local_vars);
+            host_effects.object_update = Some(update);
+        }
         let handled = match value {
             Value::Nil => false,
             Value::Bool(flag) => flag,
@@ -9199,6 +9404,7 @@ impl Engine {
                     base_graphics: snapshot.base_graphics.clone(),
                     graphics_overlays: snapshot.graphics_overlays.clone(),
                     draw_transform: snapshot.draw_transform,
+                    local_vars: snapshot.local_vars.clone(),
                 },
             );
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
@@ -12434,6 +12640,7 @@ impl Engine {
                 base_graphics: None,
                 graphics_overlays: Vec::new(),
                 draw_transform: None,
+                local_vars: HashMap::new(),
             },
         );
         object.ensure_material_capacity(self.materials.len());
@@ -12453,6 +12660,115 @@ impl Engine {
         self.physics.clamp_velocity(&mut object.state.velocity);
 
         let mut additional_spawns = Vec::new();
+
+        // Call Construction() before Initialize()
+        // Construction() initializes local variables that may be used in Initialize() or action callbacks
+        if self
+            .definitions
+            .get(&definition_id)
+            .map(|definition| definition.has_construction)
+            .unwrap_or(false)
+        {
+            let rng_state = self.rng.clone();
+            let (
+                CommandBatch {
+                    delta,
+                    spawns,
+                    destroy,
+                    commands,
+                    command_ops,
+                    effects,
+                    global_effects,
+                    environment,
+                    physics,
+                    landscape_ops,
+                    particles,
+                    transfer_zones,
+                    audio,
+                    messages,
+                    player_commands,
+                    trigger_game_over,
+                },
+                audio_state,
+                new_rng,
+                next_object_id,
+            ) = {
+                let definition = self
+                    .definitions
+                    .get(&definition_id)
+                    .expect("definition must exist");
+                definition.call_construction(
+                    &object.state,
+                    id,
+                    rng_state,
+                    &self.global_effects,
+                    self.physics,
+                    self.environment,
+                    self.frame,
+                    self.host_world_context(),
+                    self.game_over_triggered,
+                    self.audio_registry.clone(),
+                )?
+            };
+            self.rng = new_rng;
+            self.next_object_id = next_object_id;
+            self.audio_registry = audio_state;
+            if trigger_game_over {
+                self.request_game_over()?;
+            }
+            if let Some(update) = environment {
+                update.apply(&mut self.environment);
+            }
+            if let Some(delta) = physics {
+                self.apply_physics_delta(delta);
+            }
+            if !landscape_ops.is_empty() {
+                self.apply_landscape_operations(landscape_ops);
+            }
+            if !player_commands.is_empty() {
+                self.apply_player_commands(player_commands)?;
+            }
+            if destroy {
+                return Err(EngineError::InvalidScriptOutput {
+                    definition: definition_id.clone(),
+                    function: "Construction",
+                    detail: "Construction may not destroy the object".into(),
+                });
+            }
+            let outcome = object.state.apply_delta(&delta, &action_library);
+            if let Some(change) = outcome.action_change {
+                object.record_action_event(change.previous, ActionTransitionKind::Forced);
+            }
+            if let Some(change) = outcome.container_change {
+                container_changes.push(change);
+            }
+            let mut applied = object.apply_effect_commands(&effects);
+            effect_events.append(&mut applied);
+            self.apply_particle_commands(particles);
+            if !transfer_zones.is_empty() {
+                self.apply_transfer_zone_commands(transfer_zones)?;
+            }
+            if !global_effects.is_empty() {
+                self.apply_global_effect_commands(&global_effects);
+            }
+            self.physics.clamp_velocity(&mut object.state.velocity);
+            if !command_ops.is_empty() {
+                object.apply_command_operations(command_ops);
+            }
+            if !commands.is_empty() {
+                object.enqueue_commands(commands);
+            }
+            additional_spawns.extend(spawns);
+            if !audio.is_empty() {
+                self.pending_audio.extend(audio);
+            }
+            if !messages.is_empty() {
+                for command in messages {
+                    self.messages.apply_command(command);
+                }
+            }
+        }
+
         if self
             .definitions
             .get(&definition_id)

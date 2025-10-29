@@ -364,6 +364,7 @@ mod tests {
                 draw_transform: None,
                 command_queue: Vec::new(),
                 command_stack: CommandStackSnapshot::default(),
+                local_vars: HashMap::new(),
             }],
             environment: EnvironmentFrame::default(),
             sky: None,

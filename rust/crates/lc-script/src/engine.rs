@@ -160,6 +160,23 @@ impl Engine {
         vm.call(name, args).map_err(ScriptError::from)
     }
 
+    /// Call a function with per-object local variable context
+    /// Returns (result, updated_local_vars)
+    pub fn call_with_locals(
+        &self,
+        name: &str,
+        args: &[Value],
+        local_vars: &std::collections::HashMap<String, Value>,
+    ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            &self.var_decls,
+            self.debugger_hooks.clone(),
+        );
+        vm.call_with_locals(name, args, local_vars).map_err(ScriptError::from)
+    }
+
     pub fn has_function(&self, name: &str) -> bool {
         self.functions.contains_key(name)
     }

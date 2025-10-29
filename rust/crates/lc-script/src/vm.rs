@@ -34,6 +34,41 @@ impl<'a> Vm<'a> {
         self.invoke(name, args, 0)
     }
 
+    /// Call a function with per-object local variable context
+    /// Returns (result, updated_local_vars)
+    pub fn call_with_locals(
+        &self,
+        name: &str,
+        args: &[Value],
+        local_vars: &HashMap<String, Value>,
+    ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
+        self.invoke_with_locals(name, args, local_vars, 0)
+    }
+
+    fn invoke_with_locals(
+        &self,
+        name: &str,
+        args: &[Value],
+        local_vars: &HashMap<String, Value>,
+        depth: usize,
+    ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
+        if depth >= MAX_CALL_DEPTH {
+            return Err(RuntimeError::new("maximum call depth exceeded"));
+        }
+
+        if let Some(function) = self.functions.get(name) {
+            return self.invoke_script_function_with_locals(name, function, args, local_vars, depth);
+        }
+
+        if let Some(function) = self.host_functions.get(name) {
+            // Host functions don't modify local variables
+            let result = self.invoke_host_function(name, function, args)?;
+            return Ok((result, local_vars.clone()));
+        }
+
+        Err(RuntimeError::new(format!("unknown function '{name}'")))
+    }
+
     fn invoke(&self, name: &str, args: &[Value], depth: usize) -> Result<Value, RuntimeError> {
         if depth >= MAX_CALL_DEPTH {
             return Err(RuntimeError::new("maximum call depth exceeded"));
@@ -48,6 +83,67 @@ impl<'a> Vm<'a> {
         }
 
         Err(RuntimeError::new(format!("unknown function '{name}'")))
+    }
+
+    fn invoke_script_function_with_locals(
+        &self,
+        name: &str,
+        function: &Function,
+        args: &[Value],
+        local_vars: &HashMap<String, Value>,
+        depth: usize,
+    ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
+        // Allow calling with MORE arguments than declared (extras ignored)
+        // This matches C++ OpenClonk behavior for action callbacks
+        if args.len() < function.params.len() {
+            return Err(RuntimeError::new(format!(
+                "function '{name}' expects {} arguments but received {}",
+                function.params.len(),
+                args.len()
+            )));
+        }
+
+        if let Some(debugger) = &self.debugger {
+            if let Some(callback) = debugger.on_call() {
+                callback(name, args);
+            }
+        }
+
+        let mut env = Environment::new_with_params(&function.params, args);
+
+        // Initialize script-level local variables from the per-object storage
+        // Use passed-in values instead of always initializing to nil
+        for var_decl in self.var_decls {
+            let value = local_vars.get(&var_decl.name).cloned().unwrap_or(Value::Nil);
+            env.define(&var_decl.name, value);
+        }
+
+        let result = self.execute_statements(&function.body, &mut env, depth)?;
+        let value = match result {
+            ControlFlow::Return(v) => v,
+            ControlFlow::Normal => Value::Nil,
+            ControlFlow::Break | ControlFlow::LoopContinue => {
+                return Err(RuntimeError::new(
+                    format!("{} statement outside of loop", if matches!(result, ControlFlow::Break) { "break" } else { "continue" })
+                ));
+            }
+        };
+
+        if let Some(debugger) = &self.debugger {
+            if let Some(callback) = debugger.on_return() {
+                callback(name, &value);
+            }
+        }
+
+        // Extract updated local variable values from the environment
+        let mut updated_locals = HashMap::new();
+        for var_decl in self.var_decls {
+            if let Some(val) = env.get(&var_decl.name) {
+                updated_locals.insert(var_decl.name.clone(), val.clone());
+            }
+        }
+
+        Ok((value, updated_locals))
     }
 
     fn invoke_script_function(
