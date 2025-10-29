@@ -4286,17 +4286,11 @@ impl Definition {
             source,
         })?;
 
-        if !matches!(value, Value::Nil) {
-            return Err(EngineError::InvalidScriptOutput {
-                definition: self.id.clone(),
-                function: kind.context(),
-                detail: format!(
-                    "callback `{}` must return nil (got {})",
-                    function,
-                    value.type_name()
-                ),
-            });
-        }
+        // Action callbacks can return any value in C4Script.
+        // The return value is typically used to indicate success/failure (e.g., return 1).
+        // Unlike some other callback types, we don't validate or use the return value here.
+        // This matches the C++ engine behavior where callbacks like Scaling() return int.
+        drop(value);
 
         let mut host_effects = host_effects;
         if !environment_delta.is_empty() {
