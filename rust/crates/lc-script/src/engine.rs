@@ -106,6 +106,19 @@ impl Engine {
             // Only add if not already defined (child overrides parent)
             self.functions.entry(name.clone()).or_insert_with(|| function.clone());
         }
+
+        // Merge local variable declarations from parent
+        // Child definitions inherit parent's local variables
+        for var_decl in other.var_decls.iter() {
+            // Only add if not already declared (child overrides parent)
+            if !self.var_decls.iter().any(|v| v.name == var_decl.name) {
+                self.var_decls.push(var_decl.clone());
+            }
+        }
+    }
+
+    pub fn function_count(&self) -> usize {
+        self.functions.len()
     }
 
     pub fn includes(&self) -> Vec<String> {

@@ -3537,6 +3537,10 @@ impl Definition {
         self.script.merge_from(&parent.script);
     }
 
+    pub fn function_count(&self) -> usize {
+        self.script.function_count()
+    }
+
     pub fn from_resource(resource: &ResourceDefinitionData) -> Result<Self, EngineError> {
         let name = resource
             .core
@@ -7334,30 +7338,50 @@ impl Engine {
     }
 
     pub fn resolve_includes(&mut self) -> Result<(), EngineError> {
-        // Collect all definitions that have includes
-        let ids_with_includes: Vec<String> = self.definitions.iter()
-            .filter(|(_, def)| !def.includes().is_empty())
-            .map(|(id, _)| id.clone())
-            .collect();
+        // Iteratively merge includes until no more changes occur
+        // This ensures transitive dependencies are fully resolved
+        // (e.g., TRE2 -> TRE1 -> TREE means TRE2 gets functions from TREE)
+        let mut changed = true;
 
-        // For each definition with includes, merge parent functions
-        for child_id in ids_with_includes {
-            let includes = self.definitions.get(&child_id)
-                .map(|def| def.includes().to_vec())
-                .unwrap_or_default();
+        while changed {
+            changed = false;
 
-            for parent_id in &includes {
-                // Check if parent exists
-                if !self.definitions.contains_key(parent_id) {
-                    return Err(EngineError::UnknownDefinition(parent_id.clone()));
-                }
+            // Collect all definitions that have includes
+            let ids_with_includes: Vec<String> = self.definitions.iter()
+                .filter(|(_, def)| !def.includes().is_empty())
+                .map(|(id, _)| id.clone())
+                .collect();
 
-                // Clone the parent to avoid borrow checker issues
-                let parent = self.definitions.get(parent_id).unwrap().clone();
+            // For each definition with includes, merge parent functions
+            for child_id in ids_with_includes {
+                let includes = self.definitions.get(&child_id)
+                    .map(|def| def.includes().to_vec())
+                    .unwrap_or_default();
 
-                // Merge parent into child
-                if let Some(child) = self.definitions.get_mut(&child_id) {
-                    child.merge_from(&parent);
+                for parent_id in &includes {
+                    // Check if parent exists
+                    if !self.definitions.contains_key(parent_id) {
+                        return Err(EngineError::UnknownDefinition(parent_id.clone()));
+                    }
+
+                    // Clone the parent to avoid borrow checker issues
+                    let parent = self.definitions.get(parent_id).unwrap().clone();
+
+                    // Count functions before merge to detect changes
+                    let before_count = self.definitions.get(&child_id)
+                        .map(|def| def.function_count())
+                        .unwrap_or(0);
+
+                    // Merge parent into child
+                    if let Some(child) = self.definitions.get_mut(&child_id) {
+                        child.merge_from(&parent);
+
+                        // Check if we added any functions
+                        let after_count = child.function_count();
+                        if after_count > before_count {
+                            changed = true;
+                        }
+                    }
                 }
             }
         }
