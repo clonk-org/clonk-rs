@@ -459,6 +459,22 @@ impl Scenario {
         let mut handles: HashMap<String, ObjectId> = HashMap::new();
         let mut created = Vec::with_capacity(pending.len() + 4);
 
+        // CRITICAL: Pre-scan all spawns to find maximum explicit ID and reserve ID space
+        // This prevents conflicts between auto-assigned IDs (crew members) and explicit IDs (Objects.txt)
+        // Must happen BEFORE any objects are spawned to ensure crew get IDs beyond the explicit range
+        let max_explicit_id = pending
+            .iter()
+            .filter_map(|spawn| spawn.config.id)
+            .map(|id| id.as_u64())
+            .max();
+
+        if let Some(max_id) = max_explicit_id {
+            // Reserve ID space: ensure next_object_id is beyond all explicit IDs
+            if max_id >= engine.next_object_id {
+                engine.next_object_id = max_id + 1;
+            }
+        }
+
         while !pending.is_empty() {
             let mut progress = false;
             let mut idx = 0;

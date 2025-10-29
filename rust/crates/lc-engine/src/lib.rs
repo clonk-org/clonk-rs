@@ -6691,6 +6691,23 @@ impl Engine {
                 self.messages.apply_command(command);
             }
         }
+
+        // Pre-scan spawns to find maximum explicit ID and reserve ID space
+        // This prevents conflicts between auto-assigned IDs (from earlier objects like crew)
+        // and explicit IDs (from scenario Objects.txt)
+        let max_explicit_id = spawns
+            .iter()
+            .filter_map(|spawn| spawn.id)
+            .map(|id| id.as_u64())
+            .max();
+
+        if let Some(max_id) = max_explicit_id {
+            // Reserve ID space: ensure next_object_id is beyond all explicit IDs
+            if max_id >= self.next_object_id {
+                self.next_object_id = max_id + 1;
+            }
+        }
+
         let mut created = Vec::with_capacity(spawns.len());
         for spawn in spawns {
             let id = self.spawn_object(spawn)?;
