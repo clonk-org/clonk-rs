@@ -15746,6 +15746,7 @@ mod tests {
             Vec::new(),
             0,
             0,
+            0, // action_phase
             None,
             None,
         );
@@ -16801,6 +16802,7 @@ mod tests {
             "Idle",
             0,
             0,
+            0, // action_phase
             ActionLibrary::default(),
             Direction::Left,
             CommandDirection::Stop,
@@ -16847,6 +16849,7 @@ mod tests {
             "Idle",
             0,
             0,
+            0, // action_phase
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
@@ -16913,6 +16916,7 @@ mod tests {
             "Idle",
             0,
             0,
+            0, // action_phase
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
@@ -17005,6 +17009,7 @@ mod tests {
             "Idle",
             0,
             0,
+            0, // action_phase
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
@@ -17102,6 +17107,7 @@ mod tests {
             "Idle",
             0,
             0,
+            0, // action_phase
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
@@ -17145,6 +17151,7 @@ mod tests {
             "Idle",
             0,
             0,
+            0, // action_phase
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,
@@ -17212,6 +17219,7 @@ mod tests {
             "Idle",
             0,
             0,
+            0, // action_phase
             ActionLibrary::default(),
             Direction::Right,
             CommandDirection::Stop,

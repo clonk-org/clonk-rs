@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::{AssignmentTarget, BinaryOp, Expr, ForInit, Function, Parameter, Stmt, UnaryOp};
+use crate::ast::{AssignmentTarget, BinaryOp, Expr, ForInit, Function, Parameter, Stmt, UnaryOp, VarDecl};
 use crate::debugger::DebuggerHooks;
 use crate::engine::HostFunction;
 use crate::error::RuntimeError;
@@ -11,6 +11,7 @@ const MAX_CALL_DEPTH: usize = 64;
 pub struct Vm<'a> {
     functions: &'a HashMap<String, Function>,
     host_functions: &'a HashMap<String, HostFunction>,
+    var_decls: &'a [VarDecl],  // Script-level variable declarations
     debugger: Option<DebuggerHooks>,
 }
 
@@ -18,11 +19,13 @@ impl<'a> Vm<'a> {
     pub fn new(
         functions: &'a HashMap<String, Function>,
         host_functions: &'a HashMap<String, HostFunction>,
+        var_decls: &'a [VarDecl],
         debugger: Option<DebuggerHooks>,
     ) -> Self {
         Self {
             functions,
             host_functions,
+            var_decls,
             debugger,
         }
     }
@@ -71,6 +74,13 @@ impl<'a> Vm<'a> {
         }
 
         let mut env = Environment::new_with_params(&function.params, args);
+
+        // Initialize script-level local variables to nil
+        // This matches C++ engine behavior where local variables default to nil
+        for var_decl in self.var_decls {
+            env.define(&var_decl.name, Value::Nil);
+        }
+
         let result = self.execute_statements(&function.body, &mut env, depth)?;
         let value = match result {
             ControlFlow::Return(v) => v,

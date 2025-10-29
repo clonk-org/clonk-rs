@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::ast::{Function, Script as AstScript};
+use crate::ast::{Function, Script as AstScript, VarDecl};
 use crate::debugger::DebuggerHooks;
 use crate::error::{ParseError, RuntimeError, ScriptError};
 use crate::parser::Parser;
@@ -16,6 +16,7 @@ pub struct Script {
     includes: Vec<String>,
     appendto: Option<crate::ast::AppendTo>,
     strict_level: Option<u8>,
+    var_decls: Vec<VarDecl>,  // Script-level variable declarations
 }
 
 impl Default for Script {
@@ -25,6 +26,7 @@ impl Default for Script {
             includes: Vec::new(),
             appendto: None,
             strict_level: None,
+            var_decls: Vec::new(),
         }
     }
 }
@@ -46,6 +48,7 @@ impl Script {
             includes: ast.includes,
             appendto: ast.appendto,
             strict_level: ast.strict_level,
+            var_decls: ast.var_decls,
         }
     }
 
@@ -71,6 +74,7 @@ pub struct Engine {
     functions: HashMap<String, Function>,
     host_functions: HashMap<String, HostFunction>,
     debugger_hooks: Option<DebuggerHooks>,
+    var_decls: Vec<VarDecl>,  // Script-level variable declarations (local variables)
 }
 
 impl Engine {
@@ -79,6 +83,7 @@ impl Engine {
             functions: HashMap::new(),
             host_functions: HashMap::new(),
             debugger_hooks: None,
+            var_decls: Vec::new(),
         }
     }
 
@@ -92,6 +97,8 @@ impl Engine {
         for (name, function) in script.functions.into_iter() {
             self.functions.insert(name, function);
         }
+        // Store local variable declarations from the script
+        self.var_decls.extend(script.var_decls);
     }
 
     pub fn merge_from(&mut self, other: &Engine) {
@@ -134,6 +141,7 @@ impl Engine {
         let vm = Vm::new(
             &self.functions,
             &self.host_functions,
+            &self.var_decls,
             self.debugger_hooks.clone(),
         );
         vm.call(name, args).map_err(ScriptError::from)
