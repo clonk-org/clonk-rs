@@ -5,7 +5,12 @@ fn braceless_if_with_assignment() {
     let source = r#"func Test() { var dir; if(dir == 0) dir = -1; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -16,7 +21,12 @@ fn braceless_if_with_function_call_then_assignment() {
     let source = r#"func Test() { var dir; if(dir == GetDir()) dir = -1; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -26,7 +36,12 @@ fn braceless_while_with_assignment() {
     let source = r#"func Test() { var i = 0; while(i < 10) i = i + 1; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -37,7 +52,12 @@ fn warp_exact_pattern() {
     let source = r#"func Test() { var dir; if(dir == DIR_Left() ) dir = -1; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -47,7 +67,12 @@ fn braceless_if_with_compound_assignment() {
     let source = r#"func Test() { var x = 5; if(x > 0) x += 10; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }

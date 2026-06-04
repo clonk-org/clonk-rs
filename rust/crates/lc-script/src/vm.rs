@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use crate::ast::{AssignmentTarget, BinaryOp, Expr, ForInit, Function, Parameter, Stmt, UnaryOp, VarDecl};
+use crate::ast::{
+    AssignmentTarget, BinaryOp, Expr, ForInit, Function, Parameter, Stmt, UnaryOp, VarDecl,
+};
 use crate::debugger::DebuggerHooks;
 use crate::engine::HostFunction;
 use crate::error::RuntimeError;
@@ -11,7 +13,7 @@ const MAX_CALL_DEPTH: usize = 64;
 pub struct Vm<'a> {
     functions: &'a HashMap<String, Function>,
     host_functions: &'a HashMap<String, HostFunction>,
-    var_decls: &'a [VarDecl],  // Script-level variable declarations
+    var_decls: &'a [VarDecl], // Script-level variable declarations
     debugger: Option<DebuggerHooks>,
 }
 
@@ -57,7 +59,8 @@ impl<'a> Vm<'a> {
         }
 
         if let Some(function) = self.functions.get(name) {
-            return self.invoke_script_function_with_locals(name, function, args, local_vars, depth);
+            return self
+                .invoke_script_function_with_locals(name, function, args, local_vars, depth);
         }
 
         if let Some(function) = self.host_functions.get(name) {
@@ -114,7 +117,10 @@ impl<'a> Vm<'a> {
         // Initialize script-level local variables from the per-object storage
         // Use passed-in values instead of always initializing to nil
         for var_decl in self.var_decls {
-            let value = local_vars.get(&var_decl.name).cloned().unwrap_or(Value::Nil);
+            let value = local_vars
+                .get(&var_decl.name)
+                .cloned()
+                .unwrap_or(Value::Nil);
             env.define(&var_decl.name, value);
         }
 
@@ -123,9 +129,14 @@ impl<'a> Vm<'a> {
             ControlFlow::Return(v) => v,
             ControlFlow::Normal => Value::Nil,
             ControlFlow::Break | ControlFlow::LoopContinue => {
-                return Err(RuntimeError::new(
-                    format!("{} statement outside of loop", if matches!(result, ControlFlow::Break) { "break" } else { "continue" })
-                ));
+                return Err(RuntimeError::new(format!(
+                    "{} statement outside of loop",
+                    if matches!(result, ControlFlow::Break) {
+                        "break"
+                    } else {
+                        "continue"
+                    }
+                )));
             }
         };
 
@@ -182,9 +193,14 @@ impl<'a> Vm<'a> {
             ControlFlow::Return(v) => v,
             ControlFlow::Normal => Value::Nil,
             ControlFlow::Break | ControlFlow::LoopContinue => {
-                return Err(RuntimeError::new(
-                    format!("{} statement outside of loop", if matches!(result, ControlFlow::Break) { "break" } else { "continue" })
-                ));
+                return Err(RuntimeError::new(format!(
+                    "{} statement outside of loop",
+                    if matches!(result, ControlFlow::Break) {
+                        "break"
+                    } else {
+                        "continue"
+                    }
+                )));
             }
         };
 
@@ -284,7 +300,7 @@ impl<'a> Vm<'a> {
             Stmt::While { condition, body } => {
                 while self.evaluate(condition, env, depth)?.as_bool() {
                     match self.execute_block(body, env, depth)? {
-                        ControlFlow::Normal => {},
+                        ControlFlow::Normal => {}
                         ControlFlow::LoopContinue => continue,
                         ControlFlow::Break => break,
                         ControlFlow::Return(value) => return Ok(ControlFlow::Return(value)),
@@ -327,14 +343,14 @@ impl<'a> Vm<'a> {
 
                     // Execute body
                     match self.execute_block(body, env, depth)? {
-                        ControlFlow::Normal => {},
+                        ControlFlow::Normal => {}
                         ControlFlow::LoopContinue => {
                             // Execute increment before continuing
                             if let Some(incr) = increment {
                                 self.evaluate(incr, env, depth)?;
                             }
                             continue;
-                        },
+                        }
                         ControlFlow::Break => break,
                         ControlFlow::Return(value) => return Ok(ControlFlow::Return(value)),
                     }
@@ -375,7 +391,7 @@ impl<'a> Vm<'a> {
 
                     // Execute body
                     match self.execute_block(body, env, depth)? {
-                        ControlFlow::Normal => {},
+                        ControlFlow::Normal => {}
                         ControlFlow::LoopContinue => continue,
                         ControlFlow::Break => break,
                         ControlFlow::Return(value) => return Ok(ControlFlow::Return(value)),
@@ -428,31 +444,39 @@ impl<'a> Vm<'a> {
             }
             Expr::Binary(lhs, op, rhs) => {
                 let left = self.evaluate(lhs, env, depth)?;
+                // && and || are Lua-style: they return the surviving operand
+                // value unchanged, not a coerced bool (C4AulExec.cpp:999-1021,
+                // AB_JUMPAND/AB_JUMPOR leave the operand on the stack).
                 if matches!(op, BinaryOp::And) {
                     if !left.as_bool() {
-                        return Ok(Value::Bool(false));
+                        return Ok(left);
                     }
-                    let right = self.evaluate(rhs, env, depth)?;
-                    return Ok(Value::Bool(right.as_bool()));
+                    return self.evaluate(rhs, env, depth);
                 }
                 if matches!(op, BinaryOp::Or) {
                     if left.as_bool() {
-                        return Ok(Value::Bool(true));
+                        return Ok(left);
                     }
-                    let right = self.evaluate(rhs, env, depth)?;
-                    return Ok(Value::Bool(right.as_bool()));
+                    return self.evaluate(rhs, env, depth);
                 }
                 let right = self.evaluate(rhs, env, depth)?;
                 self.eval_binary(left, op, right)
             }
-            Expr::Call { callee, args, is_optional, forward_rest } => {
+            Expr::Call {
+                callee,
+                args,
+                is_optional,
+                forward_rest,
+            } => {
                 // For optional calls (->~Method()), return nil if method doesn't exist
                 // instead of throwing an error
                 if *is_optional {
                     match callee.as_ref() {
                         Expr::Property(_base, name) => {
                             // Try to find the function
-                            if !self.functions.contains_key(name) && !self.host_functions.contains_key(name) {
+                            if !self.functions.contains_key(name)
+                                && !self.host_functions.contains_key(name)
+                            {
                                 // Method doesn't exist - return nil without evaluating args
                                 return Ok(Value::Nil);
                             }
@@ -487,9 +511,7 @@ impl<'a> Vm<'a> {
                     }
                     // Extract function name from callee expression
                     match callee.as_ref() {
-                        Expr::Variable(name) => {
-                            self.invoke(name, &evaluated_args, depth + 1)
-                        }
+                        Expr::Variable(name) => self.invoke(name, &evaluated_args, depth + 1),
                         Expr::Property(_base, name) => {
                             // For now, just call the method name directly
                             // TODO: Implement proper object method dispatch when we have object support
@@ -547,10 +569,12 @@ impl<'a> Vm<'a> {
                 let old_value = self.get_target_value(env, &target)?;
                 let new_value = match old_value {
                     Value::Int(i) => Value::Int(i + 1),
-                    other => return Err(RuntimeError::new(format!(
-                        "cannot increment non-integer value: {:?}",
-                        other
-                    ))),
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "cannot increment non-integer value: {:?}",
+                            other
+                        )))
+                    }
                 };
                 self.assign_target(env, &target, new_value.clone())?;
                 Ok(new_value)
@@ -560,10 +584,12 @@ impl<'a> Vm<'a> {
                 let old_value = self.get_target_value(env, &target)?;
                 let new_value = match old_value {
                     Value::Int(i) => Value::Int(i - 1),
-                    other => return Err(RuntimeError::new(format!(
-                        "cannot decrement non-integer value: {:?}",
-                        other
-                    ))),
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "cannot decrement non-integer value: {:?}",
+                            other
+                        )))
+                    }
                 };
                 self.assign_target(env, &target, new_value.clone())?;
                 Ok(new_value)
@@ -573,10 +599,12 @@ impl<'a> Vm<'a> {
                 let old_value = self.get_target_value(env, &target)?;
                 let new_value = match &old_value {
                     Value::Int(i) => Value::Int(i + 1),
-                    other => return Err(RuntimeError::new(format!(
-                        "cannot increment non-integer value: {:?}",
-                        other
-                    ))),
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "cannot increment non-integer value: {:?}",
+                            other
+                        )))
+                    }
                 };
                 self.assign_target(env, &target, new_value)?;
                 Ok(old_value)
@@ -586,10 +614,12 @@ impl<'a> Vm<'a> {
                 let old_value = self.get_target_value(env, &target)?;
                 let new_value = match &old_value {
                     Value::Int(i) => Value::Int(i - 1),
-                    other => return Err(RuntimeError::new(format!(
-                        "cannot decrement non-integer value: {:?}",
-                        other
-                    ))),
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "cannot decrement non-integer value: {:?}",
+                            other
+                        )))
+                    }
                 };
                 self.assign_target(env, &target, new_value)?;
                 Ok(old_value)
@@ -609,21 +639,22 @@ impl<'a> Vm<'a> {
 
     fn eval_unary(&self, op: &UnaryOp, value: Value) -> Result<Value, RuntimeError> {
         match op {
-            UnaryOp::Negate => match value {
-                Value::Int(i) => Ok(Value::Int(-i)),
-                other => Err(RuntimeError::new(format!(
-                    "cannot apply unary '-' to {}",
-                    other.type_name()
-                ))),
-            },
+            // C4AulExec.cpp:468-470 AB_Neg: SetInt(-_getInt()) — coerce nil->0,
+            // bool->0/1; wrapping_neg matches C++ on i32::MIN instead of panicking.
+            UnaryOp::Negate => value
+                .as_c4_int()
+                .map(|i| Value::Int(i.wrapping_neg()))
+                .ok_or_else(|| {
+                    RuntimeError::new(format!("cannot apply unary '-' to {}", value.type_name()))
+                }),
             UnaryOp::Not => Ok(Value::Bool(!value.as_bool())),
-            UnaryOp::BitwiseNot => match value {
-                Value::Int(i) => Ok(Value::Int(!i)),
-                other => Err(RuntimeError::new(format!(
-                    "cannot apply unary '~' to {}",
-                    other.type_name()
-                ))),
-            },
+            // C4AulExec.cpp:460-462 AB_BitNot: SetInt(~_getInt()).
+            UnaryOp::BitwiseNot => value
+                .as_c4_int()
+                .map(|i| Value::Int(!i))
+                .ok_or_else(|| {
+                    RuntimeError::new(format!("cannot apply unary '~' to {}", value.type_name()))
+                }),
         }
     }
 
@@ -633,48 +664,27 @@ impl<'a> Vm<'a> {
             Add => self.eval_add(left, right),
             Sub => self.eval_int_op(left, right, |a, b| a - b, "-"),
             Mul => self.eval_int_op(left, right, |a, b| a * b, "*"),
-            Div => {
-                let rhs = match right {
-                    Value::Int(i) => i,
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "cannot apply '/' to operands of type int and {}",
-                            other.type_name()
-                        )))
-                    }
-                };
-                if rhs == 0 {
-                    return Err(RuntimeError::new("division by zero"));
-                }
-                match left {
-                    Value::Int(lhs) => Ok(Value::Int(lhs / rhs)),
-                    other => Err(RuntimeError::new(format!(
-                        "cannot apply '/' to operands of type {} and int",
-                        other.type_name()
-                    ))),
-                }
-            }
-            Mod => {
-                let rhs = match right {
-                    Value::Int(i) => i,
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "cannot apply '%' to operands of type int and {}",
-                            other.type_name()
-                        )))
-                    }
-                };
-                if rhs == 0 {
-                    return Err(RuntimeError::new("modulo by zero"));
-                }
-                match left {
-                    Value::Int(lhs) => Ok(Value::Int(lhs % rhs)),
-                    other => Err(RuntimeError::new(format!(
-                        "cannot apply '%' to operands of type {} and int",
-                        other.type_name()
-                    ))),
-                }
-            }
+            Div => match (left.as_c4_int(), right.as_c4_int()) {
+                // C4AulExec.cpp:504-507: divisor 0 yields 0, not an error.
+                (Some(_), Some(0)) => Ok(Value::Int(0)),
+                // wrapping_div avoids a debug panic on i32::MIN / -1 (C++ wraps).
+                (Some(lhs), Some(rhs)) => Ok(Value::Int(lhs.wrapping_div(rhs))),
+                _ => Err(RuntimeError::new(format!(
+                    "cannot apply '/' to operands of type {} and {}",
+                    left.type_name(),
+                    right.type_name()
+                ))),
+            },
+            Mod => match (left.as_c4_int(), right.as_c4_int()) {
+                // C4AulExec.cpp:523-526: modulo by 0 yields 0, not an error.
+                (Some(_), Some(0)) => Ok(Value::Int(0)),
+                (Some(lhs), Some(rhs)) => Ok(Value::Int(lhs.wrapping_rem(rhs))),
+                _ => Err(RuntimeError::new(format!(
+                    "cannot apply '%' to operands of type {} and {}",
+                    left.type_name(),
+                    right.type_name()
+                ))),
+            },
             Pow => {
                 let rhs = match right {
                     Value::Int(i) => i,
@@ -720,7 +730,10 @@ impl<'a> Vm<'a> {
 
     fn eval_add(&self, left: Value, right: Value) -> Result<Value, RuntimeError> {
         match (left, right) {
-            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
+            // String concatenation stands in for C4Script's `..` operator (the
+            // lexer does not yet tokenize `..`); keep it when either side is a
+            // string. C++'s own `+` (AB_Sum) is integer-only. String+String uses
+            // the raw inner text (to_string() would quote it).
             (Value::String(mut a), Value::String(b)) => {
                 a.push_str(&b);
                 Ok(Value::String(a))
@@ -734,11 +747,17 @@ impl<'a> Vm<'a> {
                 result.push_str(&b);
                 Ok(Value::String(result))
             }
-            (a, b) => Err(RuntimeError::new(format!(
-                "cannot apply '+' to operands of type {} and {}",
-                a.type_name(),
-                b.type_name()
-            ))),
+            // C++ AB_Sum (C4AulExec.cpp:538-545): integer add with `_getInt()`
+            // coercion (nil->0, bool->0/1). wrapping_add matches C++ 2's-complement
+            // overflow instead of panicking in debug builds.
+            (a, b) => match (a.as_c4_int(), b.as_c4_int()) {
+                (Some(x), Some(y)) => Ok(Value::Int(x.wrapping_add(y))),
+                _ => Err(RuntimeError::new(format!(
+                    "cannot apply '+' to operands of type {} and {}",
+                    a.type_name(),
+                    b.type_name()
+                ))),
+            },
         }
     }
 
@@ -752,12 +771,14 @@ impl<'a> Vm<'a> {
     where
         F: Fn(i32, i32) -> i32,
     {
-        match (left, right) {
-            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(op(a, b))),
-            (a, b) => Err(RuntimeError::new(format!(
+        // Coerce operands like C++ `_getInt()` (nil->0, bool->0/1) for every
+        // integer operator (C4AulExec.cpp `CheckOpPars<C4V_Any, ...>`).
+        match (left.as_c4_int(), right.as_c4_int()) {
+            (Some(a), Some(b)) => Ok(Value::Int(op(a, b))),
+            _ => Err(RuntimeError::new(format!(
                 "cannot apply '{symbol}' to operands of type {} and {}",
-                a.type_name(),
-                b.type_name()
+                left.type_name(),
+                right.type_name()
             ))),
         }
     }
@@ -772,12 +793,14 @@ impl<'a> Vm<'a> {
     where
         F: Fn(i32, i32) -> bool,
     {
-        match (left, right) {
-            (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(cmp(a, b))),
-            (a, b) => Err(RuntimeError::new(format!(
+        // C++ comparisons (<, <=, >, >=) coerce both sides via `_getInt()` and
+        // return a bool (C4AulExec.cpp:562-592).
+        match (left.as_c4_int(), right.as_c4_int()) {
+            (Some(a), Some(b)) => Ok(Value::Bool(cmp(a, b))),
+            _ => Err(RuntimeError::new(format!(
                 "cannot apply '{symbol}' to operands of type {} and {}",
-                a.type_name(),
-                b.type_name()
+                left.type_name(),
+                right.type_name()
             ))),
         }
     }
@@ -957,7 +980,11 @@ impl<'a> Vm<'a> {
                 env.define(&slot_name, value);
                 Ok(())
             }
-            AssignmentTarget::MethodSlot { object, method, args } => {
+            AssignmentTarget::MethodSlot {
+                object,
+                method,
+                args,
+            } => {
                 // Evaluate the object to get its identity
                 let object_value = self.evaluate(object, env, 0)?;
                 let object_id = match object_value {
@@ -1111,7 +1138,11 @@ impl<'a> Vm<'a> {
                 );
                 Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
             }
-            AssignmentTarget::MethodSlot { object, method, args } => {
+            AssignmentTarget::MethodSlot {
+                object,
+                method,
+                args,
+            } => {
                 // Evaluate the object to get its identity
                 let object_value = self.evaluate(object, env, 0)?;
                 let object_id = match object_value {
@@ -1165,17 +1196,26 @@ impl<'a> Vm<'a> {
             Expr::Variable(name) => Ok(AssignmentTarget::Variable(name.clone())),
             Expr::Property(base, name) => {
                 let base_target = self.expr_to_assignment_target(base)?;
-                Ok(AssignmentTarget::Property(Box::new(base_target), name.clone()))
+                Ok(AssignmentTarget::Property(
+                    Box::new(base_target),
+                    name.clone(),
+                ))
             }
             Expr::Index(_, _) => {
                 // Index expressions are not yet supported as assignment targets
                 // This would require extending AssignmentTarget to include Index variant
                 Err(RuntimeError::new(
-                    "index expressions as increment/decrement targets not yet supported".to_string(),
+                    "index expressions as increment/decrement targets not yet supported"
+                        .to_string(),
                 ))
             }
             // Special case: Local(expr), Var(expr), and EffectVar(args...) are valid for increment/decrement
-            Expr::Call { callee, args, is_optional, .. } => {
+            Expr::Call {
+                callee,
+                args,
+                is_optional,
+                ..
+            } => {
                 if let Expr::Variable(ref name) = **callee {
                     if !is_optional {
                         if name == "Local" && args.len() == 1 {
@@ -1196,7 +1236,11 @@ impl<'a> Vm<'a> {
                 // Handle obj->LocalN("key"), obj->Local(index), etc.
                 else if let Expr::Property(ref object, ref method) = **callee {
                     if !is_optional {
-                        if method == "LocalN" || method == "Local" || method == "Var" || method == "EffectVar" {
+                        if method == "LocalN"
+                            || method == "Local"
+                            || method == "Var"
+                            || method == "EffectVar"
+                        {
                             return Ok(AssignmentTarget::MethodSlot {
                                 object: object.clone(),
                                 method: method.clone(),
@@ -1286,8 +1330,14 @@ mod tests {
     use super::*;
     use crate::parser::Parser;
 
-    fn execute_script(source: &str, entry_point: &str, args: &[Value]) -> Result<Value, RuntimeError> {
-        let script = Parser::new(source).parse_script().expect("parse should succeed");
+    fn execute_script(
+        source: &str,
+        entry_point: &str,
+        args: &[Value],
+    ) -> Result<Value, RuntimeError> {
+        let script = Parser::new(source)
+            .parse_script()
+            .expect("parse should succeed");
         let functions: HashMap<String, Function> = script
             .functions
             .into_iter()

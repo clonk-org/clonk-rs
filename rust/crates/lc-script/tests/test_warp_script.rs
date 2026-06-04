@@ -26,7 +26,12 @@ private func Warp(clonk)
 "#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -37,7 +42,12 @@ fn scope_resolution_call() {
     let source = r#"func Test() { var obj; obj->WARP::Connect(nil); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -48,7 +58,12 @@ fn comma_return_with_parentheses() {
     let source = r#"func Test() { return(0, Message("test")); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }

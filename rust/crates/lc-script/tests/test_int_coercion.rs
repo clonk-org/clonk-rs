@@ -1,0 +1,68 @@
+// Parity: integer operators coerce nil->0 and bool->0/1, like C++ _getInt().
+//
+// C++ oracle: src/C4AulExec.cpp. Every integer operator reads its operands with
+// `_getInt()` under `CheckOpPars<C4V_Any, C4V_Any, ...>` (no type conversion),
+// e.g. AB_Sum (line 540): pPar1->SetInt(pPar1->_getInt() + pPar2->_getInt()).
+// src/C4Value.h:170 `_getInt() const { return Data.Int; }` — Int and Bool share
+// the Data.Int storage (bool is 0/1) and nil's Data is 0. So nil, false, and
+// true behave as 0, 0, and 1 in every integer/comparison/bitwise context.
+//
+// The Rust VM previously required both operands to be Value::Int and threw a
+// type error otherwise, diverging from C++ whenever a comparison result (Bool)
+// or a nil (e.g. a failed lookup) flowed into arithmetic.
+
+use lc_script::{Engine, Value};
+
+fn eval(source: &str) -> Value {
+    let mut engine = Engine::new();
+    engine.load_script(source).expect("script should load");
+    engine.call("Test", &[]).expect("call succeeds")
+}
+
+#[test]
+fn nil_coerces_to_zero_in_addition() {
+    // _getInt(nil) == 0  =>  nil + 5 == 5
+    assert_eq!(eval("func Test() { return nil + 5; }"), Value::Int(5));
+}
+
+#[test]
+fn bool_coerces_to_int_in_addition() {
+    assert_eq!(eval("func Test() { return true + 1; }"), Value::Int(2));
+    assert_eq!(eval("func Test() { return false + 1; }"), Value::Int(1));
+}
+
+#[test]
+fn comparison_result_flows_into_arithmetic() {
+    // (3 > 2) is bool true == 1  =>  +10 == 11
+    assert_eq!(eval("func Test() { return (3 > 2) + 10; }"), Value::Int(11));
+    // (2 > 9) is bool false == 0  =>  5 * 0 == 0
+    assert_eq!(eval("func Test() { return 5 * (2 > 9); }"), Value::Int(0));
+}
+
+#[test]
+fn nil_coerces_to_zero_in_comparison() {
+    // 0 < 5 == true
+    assert_eq!(eval("func Test() { return nil < 5; }"), Value::Bool(true));
+}
+
+#[test]
+fn bool_coerces_in_bitwise_and_multiply() {
+    // 7 & 1 == 1
+    assert_eq!(eval("func Test() { return 7 & true; }"), Value::Int(1));
+    // nil * 3 == 0
+    assert_eq!(eval("func Test() { return nil * 3; }"), Value::Int(0));
+}
+
+#[test]
+fn unary_minus_coerces_like_cpp() {
+    // C4AulExec.cpp:468-470 AB_Neg: SetInt(-_getInt())
+    assert_eq!(eval("func Test() { return -nil; }"), Value::Int(0));
+    assert_eq!(eval("func Test() { return -true; }"), Value::Int(-1));
+}
+
+#[test]
+fn unary_bitnot_coerces_like_cpp() {
+    // C4AulExec.cpp:460-462 AB_BitNot: SetInt(~_getInt()); ~0 == -1, ~1 == -2
+    assert_eq!(eval("func Test() { return ~nil; }"), Value::Int(-1));
+    assert_eq!(eval("func Test() { return ~true; }"), Value::Int(-2));
+}

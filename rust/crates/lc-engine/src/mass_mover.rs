@@ -1,7 +1,5 @@
-use rand::Rng;
-use rand_chacha::ChaCha8Rng;
-
 use crate::landscape::Landscape;
+use crate::rng::LcgRng;
 use crate::{MaterialId, MaterialSet};
 
 const MAX_MASS_MOVERS: usize = 10_000;
@@ -109,7 +107,7 @@ impl MassMoverSet {
         x: i32,
         y: i32,
         execute_immediately: bool,
-        rng: &mut ChaCha8Rng,
+        rng: &mut LcgRng,
     ) -> bool {
         self.spawn_queue.push(MassMoverSpawn {
             x,
@@ -125,7 +123,7 @@ impl MassMoverSet {
         &mut self,
         landscape: &mut Landscape,
         materials: &MaterialSet,
-        rng: &mut ChaCha8Rng,
+        rng: &mut LcgRng,
     ) {
         let mut index = 0;
         while index < self.movers.len() {
@@ -149,7 +147,7 @@ impl MassMoverSet {
         &mut self,
         landscape: &mut Landscape,
         materials: &MaterialSet,
-        rng: &mut ChaCha8Rng,
+        rng: &mut LcgRng,
     ) {
         while let Some(spawn) = self.spawn_queue.pop() {
             let Some(index) = self.try_add_mover(landscape, materials, spawn.x, spawn.y) else {
@@ -209,7 +207,7 @@ impl MassMover {
         &mut self,
         landscape: &mut Landscape,
         materials: &MaterialSet,
-        rng: &mut ChaCha8Rng,
+        rng: &mut LcgRng,
     ) -> (bool, Option<MassMoverSpawn>) {
         if !self.active {
             return (false, None);
@@ -244,7 +242,7 @@ impl MassMover {
         let spawn = MassMoverSpawn {
             x: target.0,
             y: target.1,
-            execute_immediately: rnd3(rng) == 0,
+            execute_immediately: rng.rnd3() == 0,
         };
 
         (true, Some(spawn))
@@ -288,8 +286,4 @@ fn find_liquid_target(
     }
 
     None
-}
-
-fn rnd3(rng: &mut ChaCha8Rng) -> i32 {
-    rng.gen_range(0..3) - 1
 }

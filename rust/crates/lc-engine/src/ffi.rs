@@ -1,18 +1,17 @@
 use crate::pathfinder::Path;
+use crate::rng::LcgRng;
 use crate::{
     control::{
-        interpret_player_control_command, parse_control_ini, CommandKind, ControlCommand,
-        ControlPacket, PlayerControlData,
+        interpret_player_control_command, parse_control_ini, ControlEvent, ControlPacket,
+        PlayerControlData,
     },
     ActionState, CommandDirection, CommandStackSnapshot, CrewCommandTarget, CrewRole,
     CrewSelectionState, Direction, DrawTransform, EffectState, Engine, EngineError, EngineState,
     EnvironmentFrame, FloatVector2, HudPlayerSnapshot, HudSnapshot, Landscape,
-    NetworkPacketDirection, NetworkPacketSnapshot, ObjectId, ObjectSnapshot, ObjectStatus,
-    ObjectUpdate, ObjectVertex, ParticleLayer, ParticleSnapshot, Playback, PlayerInputState,
-    Recorder, Recording, Scenario, SimulationSnapshot, SurfaceSnapshot, Vector2,
+    NetworkPacketDirection, NetworkPacketSnapshot, ObjectBaseGraphics, ObjectId, ObjectSnapshot,
+    ObjectStatus, ObjectUpdate, ObjectVertex, ParticleLayer, ParticleSnapshot, Playback,
+    PlayerInputState, Recorder, Recording, Scenario, SimulationSnapshot, SurfaceSnapshot, Vector2,
 };
-use rand::SeedableRng;
-use rand_chacha::ChaCha8Rng;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
@@ -21,6 +20,8 @@ use std::os::raw::c_char;
 use std::path::PathBuf;
 use std::ptr;
 use std::slice;
+
+use crate::math::{itofix, C4Fixed, FixedVec2};
 
 #[repr(C)]
 pub struct LcEngineEffectSnapshot {
@@ -61,6 +62,13 @@ pub struct LcEngineObjectSnapshot {
     pub position_y: i32,
     pub velocity_x: i32,
     pub velocity_y: i32,
+    pub rotation: i32,
+    pub fixed_position_x: i32,
+    pub fixed_position_y: i32,
+    pub fixed_velocity_x: i32,
+    pub fixed_velocity_y: i32,
+    pub fixed_rotation: i32,
+    pub rotation_velocity: i32,
     pub energy: i32,
     pub construction: i32,
     pub damage: i32,
@@ -235,7 +243,15 @@ pub struct LcEngineRuntimeObjectState {
     pub position_y: i32,
     pub velocity_x: i32,
     pub velocity_y: i32,
+    pub rotation: i32,
+    pub fixed_position_x: i32,
+    pub fixed_position_y: i32,
+    pub fixed_velocity_x: i32,
+    pub fixed_velocity_y: i32,
+    pub fixed_rotation: i32,
+    pub rotation_velocity: i32,
     pub energy: i32,
+    pub construction: i32,
     pub damage: i32,
     pub owner: i32,
     pub category: i32,
@@ -502,6 +518,36 @@ pub struct LcEngineRuntimeObjectStateArray {
     base_graphics_names: Vec<Option<CString>>,
 }
 
+fn snapshot_fixed_position(object: &ObjectSnapshot) -> FixedVec2 {
+    object
+        .fixed_position
+        .unwrap_or_else(|| FixedVec2::from_ints(object.position.x, object.position.y))
+}
+
+fn snapshot_fixed_velocity(object: &ObjectSnapshot) -> FixedVec2 {
+    object
+        .fixed_velocity
+        .unwrap_or_else(|| FixedVec2::from_ints(object.velocity.x, object.velocity.y))
+}
+
+fn optional_fixed_vec(raw_x: i32, raw_y: i32, pixels: Vector2) -> Option<FixedVec2> {
+    let fixed = FixedVec2::new(C4Fixed::from_raw(raw_x), C4Fixed::from_raw(raw_y));
+    if fixed == FixedVec2::from_ints(pixels.x, pixels.y) {
+        None
+    } else {
+        Some(fixed)
+    }
+}
+
+fn optional_fixed(raw: i32, pixel: i32) -> Option<C4Fixed> {
+    let fixed = C4Fixed::from_raw(raw);
+    if fixed == itofix(pixel) {
+        None
+    } else {
+        Some(fixed)
+    }
+}
+
 impl LcEngineRuntimeObjectStateArray {
     fn from_snapshot(snapshot: &SimulationSnapshot) -> Result<Self, String> {
         let mut buffer = Self {
@@ -546,6 +592,12 @@ impl LcEngineRuntimeObjectStateArray {
 
             let has_container = object.container.is_some();
             let container_id = object.container.map(|id| id.as_u64()).unwrap_or_default();
+            let fixed_position = snapshot_fixed_position(object);
+            let fixed_velocity = snapshot_fixed_velocity(object);
+            let fixed_rotation = object
+                .fixed_rotation
+                .unwrap_or_else(|| itofix(object.rotation));
+            let rotation_velocity = object.rotation_velocity.unwrap_or(C4Fixed::ZERO);
 
             let (has_base_graphics, base_definition_ptr, base_graphics_ptr, base_blit_mode) =
                 if let Some(base) = object.base_graphics.as_ref() {
@@ -593,6 +645,13 @@ impl LcEngineRuntimeObjectStateArray {
                 position_y: object.position.y,
                 velocity_x: object.velocity.x,
                 velocity_y: object.velocity.y,
+                rotation: object.rotation,
+                fixed_position_x: fixed_position.x.val(),
+                fixed_position_y: fixed_position.y.val(),
+                fixed_velocity_x: fixed_velocity.x.val(),
+                fixed_velocity_y: fixed_velocity.y.val(),
+                fixed_rotation: fixed_rotation.val(),
+                rotation_velocity: rotation_velocity.val(),
                 energy: object.energy,
                 construction: object.construction,
                 damage: object.damage,
@@ -804,7 +863,7 @@ unsafe fn make_snapshot(
             definition_id,
             position: Vector2::new(entry.position_x, entry.position_y),
             velocity: Vector2::new(entry.velocity_x, entry.velocity_y),
-            rotation: 0,
+            rotation: entry.rotation.rem_euclid(360),
             energy: entry.energy,
             construction: entry.construction,
             damage: entry.damage,
@@ -838,6 +897,23 @@ unsafe fn make_snapshot(
             },
             command_queue: Vec::new(),
             command_stack: CommandStackSnapshot::default(),
+            local_vars: HashMap::new(),
+            fixed_position: optional_fixed_vec(
+                entry.fixed_position_x,
+                entry.fixed_position_y,
+                Vector2::new(entry.position_x, entry.position_y),
+            ),
+            fixed_velocity: optional_fixed_vec(
+                entry.fixed_velocity_x,
+                entry.fixed_velocity_y,
+                Vector2::new(entry.velocity_x, entry.velocity_y),
+            ),
+            rotation_velocity: if entry.rotation_velocity == 0 {
+                None
+            } else {
+                Some(C4Fixed::from_raw(entry.rotation_velocity))
+            },
+            fixed_rotation: optional_fixed(entry.fixed_rotation, entry.rotation.rem_euclid(360)),
         });
     }
     snapshots.sort_by_key(|object| object.id);
@@ -1090,15 +1166,17 @@ unsafe fn make_snapshot(
         known_crew_owners,
         eliminated_crew_owners,
         landscape: None,
-        rng: ChaCha8Rng::seed_from_u64(frame),
+        rng: LcgRng::seed_from_u64(frame),
         hud: HudSnapshot {
             players: hud_players_vec,
+            messages: Vec::new(),
         },
         surfaces: surface_snapshots,
         controls: control_entries,
         network_packets: network_snapshots,
         definition_categories: HashMap::new(),
         transfer_zones: Vec::new(),
+        menu_requests: Vec::new(),
         audio: Vec::new(),
     })
 }
@@ -2435,6 +2513,13 @@ global func Step(state, frame, random)
             position_y: 20,
             velocity_x: -1,
             velocity_y: 2,
+            rotation: 0,
+            fixed_position_x: itofix(10).val(),
+            fixed_position_y: itofix(20).val(),
+            fixed_velocity_x: itofix(-1).val(),
+            fixed_velocity_y: itofix(2).val(),
+            fixed_rotation: itofix(0).val(),
+            rotation_velocity: C4Fixed::ZERO.val(),
             energy: 95,
             construction: crate::FULL_CON,
             damage: 0,
@@ -2508,6 +2593,113 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn make_snapshot_preserves_raw_fixed_object_state() {
+        let definition = CString::new("Clonk").unwrap();
+        let action = CString::new("Tumble").unwrap();
+        let object = LcEngineObjectSnapshot {
+            id: 77,
+            definition_id: definition.as_ptr(),
+            position_x: 2,
+            position_y: -3,
+            velocity_x: 0,
+            velocity_y: 1,
+            rotation: 5,
+            fixed_position_x: itofix(2).val() + 123,
+            fixed_position_y: itofix(-3).val() - 456,
+            fixed_velocity_x: 300,
+            fixed_velocity_y: itofix(1).val() + 789,
+            fixed_rotation: itofix(5).val() + 42,
+            rotation_velocity: itofix(1).val(),
+            energy: 0,
+            construction: crate::FULL_CON,
+            damage: 0,
+            magic_energy: 0,
+            magic_capacity: 0,
+            owner: -1,
+            category: crate::DEFAULT_CATEGORY,
+            crew_member: false,
+            alive: true,
+            action_name: action.as_ptr(),
+            action_phase: 0,
+            action_ticks: 0,
+            action_data: 0,
+            direction: 0,
+            command_direction: 0,
+            effects: ptr::null(),
+            effect_count: 0,
+            vertices: ptr::null(),
+            vertex_count: 0,
+            has_container: false,
+            container_id: 0,
+            contents: ptr::null(),
+            contents_len: 0,
+            has_base_graphics: false,
+            base_definition_id: ptr::null(),
+            base_graphics_name: ptr::null(),
+            base_blit_mode: 0,
+            has_draw_transform: false,
+            draw_scale_x: 1.0,
+            draw_scale_y: 1.0,
+            draw_offset_x: 0.0,
+            draw_offset_y: 0.0,
+        };
+
+        let snapshot = unsafe {
+            call_make_snapshot(
+                9,
+                &object,
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+
+        let recorded = &snapshot.objects[0];
+        assert_eq!(recorded.position, Vector2::new(2, -3));
+        assert_eq!(
+            recorded
+                .fixed_position
+                .expect("raw fixed position preserved")
+                .x
+                .val(),
+            itofix(2).val() + 123
+        );
+        assert_eq!(
+            recorded
+                .fixed_velocity
+                .expect("raw fixed velocity preserved")
+                .x
+                .val(),
+            300
+        );
+        assert_eq!(
+            recorded
+                .rotation_velocity
+                .expect("raw rdir preserved")
+                .val(),
+            itofix(1).val()
+        );
+        assert_eq!(
+            recorded.fixed_rotation.expect("raw fix_r preserved").val(),
+            itofix(5).val() + 42
+        );
+    }
+
+    #[test]
     fn make_snapshot_collects_vertices() {
         let definition = CString::new("Clonk").unwrap();
         let action = CString::new("Walk").unwrap();
@@ -2533,6 +2725,13 @@ global func Step(state, frame, random)
             position_y: 0,
             velocity_x: 0,
             velocity_y: 0,
+            rotation: 0,
+            fixed_position_x: itofix(0).val(),
+            fixed_position_y: itofix(0).val(),
+            fixed_velocity_x: itofix(0).val(),
+            fixed_velocity_y: itofix(0).val(),
+            fixed_rotation: itofix(0).val(),
+            rotation_velocity: C4Fixed::ZERO.val(),
             energy: 0,
             construction: crate::FULL_CON,
             damage: 0,
@@ -2725,6 +2924,13 @@ global func Step(state, frame, random)
             position_y: 0,
             velocity_x: 0,
             velocity_y: 0,
+            rotation: 0,
+            fixed_position_x: itofix(0).val(),
+            fixed_position_y: itofix(0).val(),
+            fixed_velocity_x: itofix(0).val(),
+            fixed_velocity_y: itofix(0).val(),
+            fixed_rotation: itofix(0).val(),
+            rotation_velocity: C4Fixed::ZERO.val(),
             energy: 0,
             construction: crate::FULL_CON,
             damage: 0,
@@ -2766,6 +2972,13 @@ global func Step(state, frame, random)
             position_y: 0,
             velocity_x: 0,
             velocity_y: 0,
+            rotation: 0,
+            fixed_position_x: itofix(0).val(),
+            fixed_position_y: itofix(0).val(),
+            fixed_velocity_x: itofix(0).val(),
+            fixed_velocity_y: itofix(0).val(),
+            fixed_rotation: itofix(0).val(),
+            rotation_velocity: C4Fixed::ZERO.val(),
             energy: 0,
             construction: crate::FULL_CON,
             damage: 0,
@@ -3316,6 +3529,51 @@ global func Step(state, frame, random)
         assert_eq!(state.sky_color_r, 10);
         assert_eq!(state.sky_color_g, 20);
         assert_eq!(state.sky_color_b, 30);
+    }
+
+    #[test]
+    fn runtime_object_state_export_preserves_raw_fixed_state() {
+        let mut runtime = RuntimeHandle::new();
+        runtime
+            .engine
+            .register_definition(
+                Definition::from_script(
+                    "Mover",
+                    "Mover",
+                    "global func Initialize(state, random) { return nil; }",
+                )
+                .unwrap(),
+            )
+            .expect("definition registers");
+        let id = runtime
+            .engine
+            .spawn_object(SpawnConfig::new("Mover").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = runtime.engine.find_object_index(id).expect("object exists");
+        let object = &mut runtime.engine.objects[idx];
+        object.fixed_position = FixedVec2::new(C4Fixed::from_raw(12345), C4Fixed::from_raw(-23456));
+        object.set_fixed_velocity(FixedVec2::new(
+            C4Fixed::from_raw(300),
+            C4Fixed::from_raw(70000),
+        ));
+        object.state.rotation = 5;
+        object.fixed_rotation = C4Fixed::from_raw(itofix(5).val() + 42);
+        object.rotation_velocity = itofix(1);
+
+        let snapshot = runtime.engine.snapshot();
+        let buffer =
+            LcEngineRuntimeObjectStateArray::from_snapshot(&snapshot).expect("snapshot exports");
+        assert_eq!(buffer.objects.len(), 1);
+        let state = &buffer.objects[0];
+        assert_eq!(state.position_x, 0);
+        assert_eq!(state.fixed_position_x, 12345);
+        assert_eq!(state.fixed_position_y, -23456);
+        assert_eq!(state.velocity_x, 0);
+        assert_eq!(state.fixed_velocity_x, 300);
+        assert_eq!(state.fixed_velocity_y, 70000);
+        assert_eq!(state.rotation, 5);
+        assert_eq!(state.fixed_rotation, itofix(5).val() + 42);
+        assert_eq!(state.rotation_velocity, itofix(1).val());
     }
 
     #[test]

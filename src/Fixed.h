@@ -20,13 +20,12 @@
    This is rather silly. Nowadays we should simply use floats. However,
    I never dared changing the whole thing. */
 /* 01-17-2002: I think the whole, ugly fixed-thing has to be revived,
-   because floating point calculations are not guaranteed to be network
-   safe...however, it can be solved as a data type with operator
-   overloading, automatic type conversions, etc now   - Sven2 */
+   because floating point calculations are not guaranteed to be
+   deterministic across peers...however, it can be solved as a data type
+   with operator overloading, automatic type conversions, etc now   - Sven2 */
 /* After some time with synchronous float use, C4Fixed is used again to
    work around the problem that different compilers produce different
-   floating point code, leading to desyncs between linux and windows
-   engines. */
+   floating point code, causing cross-platform simulation divergence. */
 
 #pragma once
 

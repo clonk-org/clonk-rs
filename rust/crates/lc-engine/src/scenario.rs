@@ -310,7 +310,14 @@ impl Scenario {
 
         // Load scenario-local definitions from Locals.c4d (or Locals.ocd/Locals.ocg)
         // Support case-insensitive matching for the folder name
-        for locals_name in &["Locals.c4d", "Locals.ocd", "Locals.ocg", "locals.c4d", "locals.ocd", "locals.ocg"] {
+        for locals_name in &[
+            "Locals.c4d",
+            "Locals.ocd",
+            "Locals.ocg",
+            "locals.c4d",
+            "locals.ocd",
+            "locals.ocg",
+        ] {
             if let Ok(locals_group) = group.open_child(locals_name) {
                 collect_definitions_from_group(&locals_group, &mut seen_ids, &mut collected)?;
                 break; // Only process the first matching Locals folder

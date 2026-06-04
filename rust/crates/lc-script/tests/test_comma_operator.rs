@@ -6,7 +6,12 @@ fn mgsm_line_24_pattern() {
     let source = r#"func Test() { if (!SetAction("Wait")) return (0, RemoveObject()); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -17,7 +22,12 @@ fn simple_comma_in_return() {
     let source = r#"func Test() { return (0, 42); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -28,7 +38,12 @@ fn comma_with_three_expressions() {
     let source = r#"func Test() { return (1, 2, 3); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -39,7 +54,12 @@ fn comma_with_function_calls() {
     let source = r#"func Test() { return (1, Message("test"), Sound("Click")); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -50,7 +70,12 @@ fn comma_with_assignment() {
     let source = r#"func Test() { var x; return (1, x = 42); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -61,7 +86,12 @@ fn comma_in_variable_initializer() {
     let source = r#"func Test() { var x = (0, 42); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -72,7 +102,12 @@ fn comma_in_if_condition() {
     let source = r#"func Test() { var x; if ((x = 5, x > 0)) return 1; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -83,7 +118,12 @@ fn comma_in_while_condition() {
     let source = r#"func Test() { var x; while ((x = x + 1, x < 10)) {} }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -94,7 +134,12 @@ fn nested_comma_expressions() {
     let source = r#"func Test() { return (1, (2, 3)); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -105,7 +150,12 @@ fn lock_pattern() {
     let source = r#"func Test() { return (1, Message("test"), Sound("Error")); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -116,18 +166,44 @@ fn kingdoms_pattern() {
     let source = r#"func Test() { var clonk; if (!clonk) return (0, RemoveObject()); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
 
 #[test]
-fn comma_in_var_decl_without_parens() {
-    // var x = 1, 2 is valid - evaluates to var x = 2
-    let source = r#"func Test() { var x = 1, 2; }"#;
-    let result = lc_script::Script::compile(source);
-    if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
-    }
-    assert!(result.is_ok());
+fn comma_in_var_decl_without_parens_is_rejected_like_cpp() {
+    // C4Script has NO comma operator (it is absent from C4ScriptOpMap,
+    // src/C4AulParse.cpp:423). Inside a `var` declaration the comma is a
+    // *declarator separator* (`var a = 1, b = 2;` declares two variables), so
+    // C++ `Parse_Var` (src/C4AulParse.cpp:3252) parses the initializer with
+    // `Parse_Expression()` — which stops at the comma — and then expects another
+    // variable NAME. `var x = 1, 2;` therefore fails in C++ ("variable name"
+    // expected, finding the int `2`). The Rust port must reject it identically.
+    let rejected = lc_script::Script::compile(r#"func Test() { var x = 1, 2; }"#);
+    assert!(
+        rejected.is_err(),
+        "unparenthesized comma in a var declaration must be rejected (C4Script has no comma operator)"
+    );
+
+    // The standard multi-declarator form must keep compiling: here the comma is
+    // a declarator separator (`var a = 1` then `b = 2`), which C++ Parse_Var
+    // supports directly.
+    assert!(
+        lc_script::Script::compile(r#"func Test() { var a = 1, b = 2; return a + b; }"#).is_ok(),
+        "standard multi-declarator var should compile (comma is a declarator separator)"
+    );
+
+    // NOTE (pre-existing parity divergence, see PORT_STATUS.md): the Rust port
+    // currently ALSO accepts a parenthesized comma sequence such as
+    // `var x = (1, 2)`. C++ does NOT — its `(...)` parser (C4AulParse.cpp:2933)
+    // reads exactly one expression then matches `)`. In C++ a comma-sequence is
+    // only legal inside a `return (...)` statement (the `multi_params_hack`,
+    // C4AulParse.cpp:2069). So `var x = (1, 2)` should eventually be rejected for
+    // parity; it is not asserted here to avoid pinning the divergence as correct.
 }

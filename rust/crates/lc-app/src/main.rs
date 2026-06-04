@@ -116,13 +116,26 @@ fn sprite_map_key(definition_id: &str, graphics_name: Option<&str>) -> String {
 #[derive(Debug, Parser)]
 #[command(name = "lc-app", about = "LegacyClonk Rust runtime", version)]
 struct Cli {
-    #[arg(long = "test-load", value_name = "PATH", help = "Test scenario loading without starting the UI")]
+    #[arg(
+        long = "test-load",
+        value_name = "PATH",
+        help = "Test scenario loading without starting the UI"
+    )]
     test_load: Option<std::path::PathBuf>,
 
-    #[arg(long = "integration-test", value_name = "PATH", help = "Run full scenario integration test (load, apply, start, run frames)")]
+    #[arg(
+        long = "integration-test",
+        value_name = "PATH",
+        help = "Run full scenario integration test (load, apply, start, run frames)"
+    )]
     integration_test: Option<std::path::PathBuf>,
 
-    #[arg(long = "test-frames", value_name = "N", default_value_t = 60, help = "Number of frames to run during integration test")]
+    #[arg(
+        long = "test-frames",
+        value_name = "N",
+        default_value_t = 60,
+        help = "Number of frames to run during integration test"
+    )]
     test_frames: u32,
 
     #[arg(long = "host", value_name = "ADDR", conflicts_with = "join")]
@@ -136,6 +149,19 @@ struct Cli {
 
     #[arg(long = "player-name", value_name = "NAME", default_value = "Player")]
     player_name: String,
+
+    #[arg(
+        long = "sandbox",
+        help = "Boot straight into the built-in sandbox scenario (skips the menu); useful for capturing the in-game scene"
+    )]
+    sandbox: bool,
+
+    #[arg(
+        long = "dump-frame",
+        value_name = "PATH",
+        help = "Headless: boot the sandbox, advance --test-frames frames, render one in-game frame to a PNG at PATH, and exit (no window). For visual rendering-parity checks."
+    )]
+    dump_frame: Option<std::path::PathBuf>,
 }
 
 struct RuntimeConfig {
@@ -572,8 +598,10 @@ fn test_scenario_load(path: &std::path::Path, app_paths: Option<&Arc<AppPaths>>)
     use std::time::Instant;
 
     println!("Testing scenario load from: {}", path.display());
-    println!("Using InstallDefinitionResolver with app paths: {}",
-        if app_paths.is_some() { "yes" } else { "no" });
+    println!(
+        "Using InstallDefinitionResolver with app paths: {}",
+        if app_paths.is_some() { "yes" } else { "no" }
+    );
 
     let resolver = InstallDefinitionResolver::new(app_paths.map(|p| p.clone()));
     let start = Instant::now();
@@ -581,9 +609,15 @@ fn test_scenario_load(path: &std::path::Path, app_paths: Option<&Arc<AppPaths>>)
     match Scenario::load_from_path_with(path, &resolver) {
         Ok(scenario) => {
             let elapsed = start.elapsed();
-            println!("\n✓ Successfully loaded scenario in {:.2}s", elapsed.as_secs_f32());
+            println!(
+                "\n✓ Successfully loaded scenario in {:.2}s",
+                elapsed.as_secs_f32()
+            );
             println!("  Name: {}", scenario.name().unwrap_or("<unnamed>"));
-            println!("  Description: {}", scenario.description().unwrap_or("<no description>"));
+            println!(
+                "  Description: {}",
+                scenario.description().unwrap_or("<no description>")
+            );
 
             let mut def_count = 0;
             scenario.visit_definition_groups(|_id, _group| {
@@ -596,11 +630,78 @@ fn test_scenario_load(path: &std::path::Path, app_paths: Option<&Arc<AppPaths>>)
         }
         Err(err) => {
             let elapsed = start.elapsed();
-            eprintln!("\n✗ Failed to load scenario after {:.2}s", elapsed.as_secs_f32());
+            eprintln!(
+                "\n✗ Failed to load scenario after {:.2}s",
+                elapsed.as_secs_f32()
+            );
             eprintln!("  Error: {}", err);
             Err(anyhow::anyhow!("Scenario load failed: {}", err))
         }
     }
+}
+
+/// Headless: boot the sandbox scenario, advance `test_frames` simulation frames,
+/// render one in-game frame to the renderer's CPU surface, and write it as a PNG.
+/// No window/event loop, so the in-game scene can be captured for rendering-parity
+/// checks without depending on window focus/compositing.
+fn run_sandbox_dump(
+    dump_path: &std::path::Path,
+    test_frames: u32,
+    app_paths: Option<&Arc<AppPaths>>,
+    runtime: RuntimeConfig,
+) -> Result<()> {
+    use std::thread;
+    use std::time::Duration;
+
+    let mut app = GameApp::new(
+        1280,
+        720,
+        AudioOptions::default(),
+        app_paths.map(|v| &**v),
+        runtime,
+    )
+    .context("failed to initialise app for frame dump")?;
+    app.auto_start_sandbox = true;
+
+    // Pump update() until async boot finishes and the sandbox auto-starts (Running).
+    let mut booted = false;
+    for _ in 0..600 {
+        if matches!(app.mode, AppMode::Running) {
+            booted = true;
+            break;
+        }
+        app.update().context("update while booting sandbox")?;
+        thread::sleep(Duration::from_millis(2));
+    }
+    if !booted {
+        anyhow::bail!("sandbox did not reach running mode for frame dump");
+    }
+
+    // Advance the simulation so the scene has settled.
+    for _ in 0..test_frames {
+        app.update().context("update while advancing sandbox")?;
+    }
+
+    // Render one frame to the CPU surface, then encode it.
+    let (w, h) = {
+        let s = app.graphics.surface();
+        (s.width(), s.height())
+    };
+    let mut frame = vec![0u8; (w as usize) * (h as usize) * 4];
+    app.render(&mut frame)
+        .context("failed to render dump frame")?;
+    let png = encode_surface_to_png(app.graphics.surface())
+        .context("failed to encode dump frame to PNG")?;
+    std::fs::write(dump_path, &png)
+        .with_context(|| format!("failed to write {}", dump_path.display()))?;
+    println!(
+        "wrote {} ({}x{}, after {} frames)",
+        dump_path.display(),
+        w,
+        h,
+        test_frames
+    );
+    Ok(())
 }
 
 fn run_integration_test(
@@ -660,7 +761,10 @@ fn run_integration_test(
     let mut waited_frames = 0;
     for _ in 0..480 {
         if matches!(app.mode, AppMode::Running) {
-            println!("Scenario reached Running state after {} update cycles", waited_frames);
+            println!(
+                "Scenario reached Running state after {} update cycles",
+                waited_frames
+            );
             break;
         }
         app.update()
@@ -681,7 +785,10 @@ fn run_integration_test(
     }
 
     let elapsed = start.elapsed();
-    println!("\n✓ Integration test PASSED in {:.2}s", elapsed.as_secs_f32());
+    println!(
+        "\n✓ Integration test PASSED in {:.2}s",
+        elapsed.as_secs_f32()
+    );
     println!("  Scenario started successfully");
     println!("  Ran {} frames without errors", test_frames);
 
@@ -717,6 +824,11 @@ fn main() -> Result<()> {
     // Handle integration-test mode: full scenario lifecycle test
     if let Some(test_path) = &cli.integration_test {
         return run_integration_test(test_path, cli.test_frames, app_paths.as_ref(), runtime);
+    }
+
+    // Handle headless frame dump: render one in-game sandbox frame to PNG and exit.
+    if let Some(dump_path) = &cli.dump_frame {
+        return run_sandbox_dump(dump_path, cli.test_frames, app_paths.as_ref(), runtime);
     }
 
     let event_loop = EventLoop::new();
@@ -756,6 +868,7 @@ fn main() -> Result<()> {
         runtime,
     )
     .context("failed to initialise app state")?;
+    app.auto_start_sandbox = cli.sandbox;
 
     let mut previous_instant = Instant::now();
     let mut accumulator = Duration::ZERO;
@@ -2053,6 +2166,10 @@ struct GameApp {
     sprite_cache: Arc<HashMap<String, DefinitionSprite>>,
     loading_state: Option<ScenarioLoadingState>,
     boot_loading: Option<BootLoadingState>,
+    /// When set, boot straight into the sandbox scenario once boot loading
+    /// finishes (the `--sandbox` flag), instead of showing the menu. Cleared
+    /// after the first auto-start so returning to the menu behaves normally.
+    auto_start_sandbox: bool,
     ingame_pointer: Option<ViewportPointer>,
     mouse_state: Option<IngameMouseState>,
     exit_requested: bool,
@@ -4323,6 +4440,7 @@ impl GameApp {
             sprite_cache: Arc::clone(&sprite_cache),
             loading_state: None,
             boot_loading,
+            auto_start_sandbox: false,
             ingame_pointer: None,
             mouse_state: None,
             exit_requested: false,
@@ -6929,9 +7047,25 @@ impl GameApp {
             self.boot_loading = None;
             self.material_library = library;
             self.apply_material_library();
-            self.mode = AppMode::Menu;
-            self.show_main_menu();
-            self.ensure_menu_music();
+            // A scenario load can be started before boot finishes (mode is
+            // already `Loading`). Boot completion must NOT yank the app back to
+            // the menu in that case: the `Menu` update arm does not poll scenario
+            // loading, so doing so would strand the in-flight load forever. Stay
+            // in `Loading` and let `poll_loading` carry the scenario to `Running`.
+            if self.loading_state.is_none() {
+                self.mode = AppMode::Menu;
+                self.show_main_menu();
+                self.ensure_menu_music();
+                // `--sandbox`: jump straight into the built-in sandbox once boot
+                // completes, so the in-game scene can be launched/captured without
+                // navigating the menu. One-shot, so return_to_menu works after.
+                if self.auto_start_sandbox {
+                    self.auto_start_sandbox = false;
+                    if let Err(err) = self.start_sandbox_scenario(FrontendScenario::fallback()) {
+                        tracing::warn!(error = ?err, "failed to auto-start sandbox scenario");
+                    }
+                }
+            }
         }
     }
 
@@ -9110,8 +9244,12 @@ fn sandbox_music_bytes() -> &'static [u8] {
 fn load_menu_music() -> Result<Vec<u8>> {
     let paths = AppPaths::discover()?;
     let music_group_path = find_music_group(&paths)?;
-    let group = Group::open(&music_group_path)
-        .with_context(|| format!("failed to open music group at {}", music_group_path.display()))?;
+    let group = Group::open(&music_group_path).with_context(|| {
+        format!(
+            "failed to open music group at {}",
+            music_group_path.display()
+        )
+    })?;
 
     // Try Frontend.ogg first (main menu music in C++)
     let music_data = group
@@ -9217,7 +9355,6 @@ fn compute_mix_values(
     (base_volume * best_audibility, pan.clamp(-1.0, 1.0))
 }
 
-
 fn walker_script() -> &'static str {
     r#"
 global func Initialize(state, random) { return nil; }
@@ -9235,8 +9372,6 @@ mod tests {
         Vector2, DEFAULT_CATEGORY,
     };
     use parking_lot::ReentrantMutex;
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha8Rng;
     use std::collections::HashMap;
     use std::env;
     use std::ffi::OsString;
@@ -9260,6 +9395,22 @@ mod tests {
             "ENERGY "
         ));
         assert!(!overlay_text_needs_update("Paused", "ENERGY "));
+    }
+
+    /// Pump the app until asynchronous boot loading completes and the main menu
+    /// is shown. A freshly constructed `GameApp` starts in `AppMode::Loading`
+    /// while the boot/material-library thread runs; it transitions to
+    /// `AppMode::Menu` only after `update()` polls the boot completion. Panics if
+    /// it never settles, so a genuinely stuck boot still fails the test.
+    fn wait_for_menu(app: &mut GameApp) {
+        for _ in 0..480 {
+            if matches!(app.mode, AppMode::Menu) {
+                return;
+            }
+            app.update().expect("tick while waiting for boot to finish");
+            thread::sleep(Duration::from_millis(2));
+        }
+        panic!("app did not reach menu mode in time");
     }
 
     fn wait_for_running(app: &mut GameApp) {
@@ -9317,6 +9468,11 @@ mod tests {
             draw_transform: None,
             command_queue: Vec::new(),
             command_stack: CommandStackSnapshot::default(),
+            local_vars: HashMap::new(),
+            fixed_position: None,
+            fixed_velocity: None,
+            rotation_velocity: None,
+            fixed_rotation: None,
         }
     }
 
@@ -9345,7 +9501,7 @@ mod tests {
             known_crew_owners,
             eliminated_crew_owners: Vec::new(),
             landscape: None,
-            rng: ChaCha8Rng::seed_from_u64(1),
+            rng: lc_engine::LcgRng::seed_from_u64(1),
             surfaces: Vec::new(),
             hud: HudSnapshot {
                 players: hud_players,
@@ -9636,6 +9792,11 @@ mod tests {
                 draw_transform: None,
                 command_queue: Vec::new(),
                 command_stack: CommandStackSnapshot::default(),
+                local_vars: HashMap::new(),
+                fixed_position: None,
+                fixed_velocity: None,
+                rotation_velocity: None,
+                fixed_rotation: None,
             },
             ObjectSnapshot {
                 id: teammate,
@@ -9667,6 +9828,11 @@ mod tests {
                 draw_transform: None,
                 command_queue: Vec::new(),
                 command_stack: CommandStackSnapshot::default(),
+                local_vars: HashMap::new(),
+                fixed_position: None,
+                fixed_velocity: None,
+                rotation_velocity: None,
+                fixed_rotation: None,
             },
         ];
 
@@ -9686,7 +9852,7 @@ mod tests {
             known_crew_owners: vec![1],
             eliminated_crew_owners: Vec::new(),
             landscape: None,
-            rng: ChaCha8Rng::seed_from_u64(1),
+            rng: lc_engine::LcgRng::seed_from_u64(1),
             surfaces: Vec::new(),
             hud: HudSnapshot {
                 players: vec![HudPlayerSnapshot {
@@ -9869,6 +10035,10 @@ mod tests {
             },
         )
         .expect("initialise app with audio");
+
+        // Menu music is started by `ensure_menu_music()` when asynchronous boot
+        // loading completes and the menu is shown; pump boot to that point first.
+        wait_for_menu(&mut app);
 
         assert!(
             app.audio
@@ -10072,6 +10242,10 @@ mod tests {
                     },
                 )
                 .expect("initialise app after restart");
+
+                // Boot loading is asynchronous; let it settle to the menu before
+                // asserting the fresh session is at the menu (not mid-game).
+                wait_for_menu(&mut app);
 
                 assert!(
                     app.last_save_path

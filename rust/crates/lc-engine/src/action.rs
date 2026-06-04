@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::ObjectId;
+use crate::{math::C4Fixed, ObjectId};
 
 const DEFAULT_ACTION_NAME: &str = "Idle";
 
@@ -30,6 +30,8 @@ pub struct ActionSpec {
     pub no_other_action: bool,
     #[serde(default)]
     pub dig_free: Option<i32>,
+    #[serde(default)]
+    pub attach: u32,
 }
 
 impl ActionSpec {
@@ -46,6 +48,7 @@ impl ActionSpec {
             abort_call: None,
             no_other_action: false,
             dig_free: None,
+            attach: 0,
         }
     }
 
@@ -103,6 +106,11 @@ impl ActionSpec {
         self.dig_free = Some(dig_free);
         self
     }
+
+    pub fn with_attach(mut self, attach: u32) -> Self {
+        self.attach = attach;
+        self
+    }
 }
 
 impl Default for ActionSpec {
@@ -119,6 +127,7 @@ impl Default for ActionSpec {
             abort_call: None,
             no_other_action: false,
             dig_free: None,
+            attach: 0,
         }
     }
 }
@@ -195,6 +204,40 @@ impl ActionProcedure {
             }
             ActionProcedure::Hang | ActionProcedure::Attach | ActionProcedure::Scale => 0,
             ActionProcedure::Dig => 0,
+            ActionProcedure::Undefined
+            | ActionProcedure::Flight
+            | ActionProcedure::Walk
+            | ActionProcedure::Kneel
+            | ActionProcedure::Throw
+            | ActionProcedure::Bridge
+            | ActionProcedure::Build
+            | ActionProcedure::Push
+            | ActionProcedure::Chop
+            | ActionProcedure::Lift
+            | ActionProcedure::Fight
+            | ActionProcedure::Connect
+            | ActionProcedure::Pull
+            | ActionProcedure::Other => base_gravity,
+        }
+    }
+
+    pub fn gravity_component_fixed(self, base_gravity: C4Fixed) -> C4Fixed {
+        match self {
+            ActionProcedure::Float | ActionProcedure::Swim => {
+                let raw = i64::from(base_gravity.val());
+                let mut magnitude = raw.abs();
+                if magnitude > 0 {
+                    magnitude = (magnitude + 1) / 2;
+                    if magnitude == 0 {
+                        magnitude = 1;
+                    }
+                }
+                C4Fixed::from_raw((if raw < 0 { -magnitude } else { magnitude }) as i32)
+            }
+            ActionProcedure::Hang | ActionProcedure::Attach | ActionProcedure::Scale => {
+                C4Fixed::ZERO
+            }
+            ActionProcedure::Dig => C4Fixed::ZERO,
             ActionProcedure::Undefined
             | ActionProcedure::Flight
             | ActionProcedure::Walk
@@ -351,6 +394,10 @@ impl ActionLibrary {
 
     pub fn dig_free_for_action(&self, action: &str) -> Option<i32> {
         self.specs.get(action).and_then(|spec| spec.dig_free)
+    }
+
+    pub fn attach_for_action(&self, action: &str) -> u32 {
+        self.specs.get(action).map(|spec| spec.attach).unwrap_or(0)
     }
 
     fn advance_with_spec(

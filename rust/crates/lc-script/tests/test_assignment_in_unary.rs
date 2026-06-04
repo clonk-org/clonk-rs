@@ -13,7 +13,12 @@ fn dynb_line_57_pattern() {
     "#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -24,7 +29,12 @@ fn not_with_assignment() {
     let source = r#"func Test() { var x; if(!x = 42) return 1; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -35,7 +45,12 @@ fn not_with_addition_preserved() {
     let source = r#"func Test() { var a = 1; var b = 2; return !a + b; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -46,7 +61,12 @@ fn not_with_function_call() {
     let source = r#"func Test() { return !GetFlag(); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -57,7 +77,12 @@ fn not_with_parenthesized_assignment() {
     let source = r#"func Test() { var x; if(!(x = 42)) return 1; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -78,7 +103,12 @@ fn not_with_complex_assignment() {
     let source = r#"func Test() { var x, a = 1, b = 2; if(!x = a + b) return 1; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -89,7 +119,12 @@ fn bitwise_not_precedence_preserved() {
     let source = r#"func Test() { var a = 5; return ~a + 1; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -100,7 +135,12 @@ fn negate_precedence_preserved() {
     let source = r#"func Test() { var a = 5; return -a + 1; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }

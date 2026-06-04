@@ -67,8 +67,8 @@ fn local_variables_in_action_callback() {
     .expect("script compiles");
 
     // Configure action with StartCall
-    use std::collections::HashMap;
     use lc_engine::{ActionSpec, ActionState};
+    use std::collections::HashMap;
 
     let mut actions = HashMap::new();
     actions.insert("Idle".to_string(), ActionSpec::default());
@@ -92,5 +92,8 @@ fn local_variables_in_action_callback() {
 
     // Verify object exists
     let snapshot = engine.tick().expect("tick should succeed");
-    assert!(snapshot.object(obj).is_some(), "object should exist after tick");
+    assert!(
+        snapshot.object(obj).is_some(),
+        "object should exist after tick"
+    );
 }

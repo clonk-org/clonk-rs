@@ -6,7 +6,12 @@ fn indi_line_818_pattern() {
     let source = r#"func ControlCommandFinished (string CommandName, object Target, any Tx, int Ty, object Target2, any Data) { }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -17,7 +22,12 @@ fn any_type_first_param() {
     let source = r#"func Test(any x) { }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -28,7 +38,12 @@ fn any_type_middle_param() {
     let source = r#"func Test(int x, any y, string z) { }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -39,7 +54,12 @@ fn multiple_any_params() {
     let source = r#"func Test(any x, any y) { }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -50,7 +70,12 @@ fn jungle_clonk_pattern() {
     let source = r#"func ControlCommandFinished (string CommandName, object Target, any Tx, int Ty, object Target2, any Data) { return(1); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -61,7 +86,12 @@ fn any_with_other_types() {
     let source = r#"func Test(int a, bool b, string c, object d, id e, array f, proplist g, effect h, any i) { }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -72,7 +102,12 @@ fn existing_types_still_work() {
     let source = r#"func Test(int x, bool y, string z, object obj) { }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }

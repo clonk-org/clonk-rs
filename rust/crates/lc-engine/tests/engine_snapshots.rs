@@ -15,14 +15,16 @@ where
     let update = env::var_os("UPDATE_ENGINE_SNAPSHOTS").is_some();
 
     let baseline = match File::open(&baseline_path) {
-        Ok(file) => Some(
-            Recording::from_reader(BufReader::new(file)).unwrap_or_else(|err| {
+        Ok(file) => match Recording::from_reader(BufReader::new(file)) {
+            Ok(recording) => Some(recording),
+            Err(_err) if update => None,
+            Err(err) => {
                 panic!(
                     "failed to parse baseline {}: {err}",
                     baseline_path.display()
                 )
-            }),
-        ),
+            }
+        },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => panic!("failed to open baseline {}: {err}", baseline_path.display()),
     };

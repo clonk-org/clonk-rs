@@ -49,7 +49,10 @@ fn action_callback_can_return_int() {
     // The C++ engine allows this behavior
     // The StartCall will be triggered during spawn with the action
     let snapshot = engine.tick().expect("tick should succeed");
-    assert!(snapshot.object(obj).is_some(), "object should exist after tick");
+    assert!(
+        snapshot.object(obj).is_some(),
+        "object should exist after tick"
+    );
 }
 
 #[test]
@@ -96,5 +99,8 @@ fn scaling_callback_returns_int() {
 
     // Verify object exists and action works
     let snapshot = engine.tick().expect("tick should succeed");
-    assert!(snapshot.object(obj).is_some(), "object should exist after tick");
+    assert!(
+        snapshot.object(obj).is_some(),
+        "object should exist after tick"
+    );
 }

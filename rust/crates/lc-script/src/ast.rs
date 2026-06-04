@@ -16,8 +16,8 @@ impl Default for AccessLevel {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppendTo {
-    Id(String),      // Append to specific definition
-    Wildcard,        // Append to all definitions (*)
+    Id(String), // Append to specific definition
+    Wildcard,   // Append to all definitions (*)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,10 +37,10 @@ pub struct VarDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Script {
     pub functions: Vec<Function>,
-    pub var_decls: Vec<VarDecl>,       // Top-level variable declarations
-    pub includes: Vec<String>,         // List of included definition IDs
-    pub appendto: Option<AppendTo>,    // Optional append target
-    pub strict_level: Option<u8>,      // Strict mode level (1, 2, or 3)
+    pub var_decls: Vec<VarDecl>,    // Top-level variable declarations
+    pub includes: Vec<String>,      // List of included definition IDs
+    pub appendto: Option<AppendTo>, // Optional append target
+    pub strict_level: Option<u8>,   // Strict mode level (1, 2, or 3)
 }
 
 impl Script {
@@ -99,13 +99,11 @@ impl TypeAnnotation {
             TypeAnnotation::Effect => "effect".to_string(),
             TypeAnnotation::Nil => "nil".to_string(),
             TypeAnnotation::Any => "any".to_string(),
-            TypeAnnotation::Union(types) => {
-                types
-                    .iter()
-                    .map(|t| t.to_string())
-                    .collect::<Vec<_>>()
-                    .join("|")
-            }
+            TypeAnnotation::Union(types) => types
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join("|"),
         }
     }
 }
@@ -134,7 +132,11 @@ impl Parameter {
         }
     }
 
-    pub fn with_reference(name: String, type_annotation: Option<TypeAnnotation>, is_reference: bool) -> Self {
+    pub fn with_reference(
+        name: String,
+        type_annotation: Option<TypeAnnotation>,
+        is_reference: bool,
+    ) -> Self {
         Self {
             name,
             type_annotation,
@@ -182,9 +184,9 @@ pub enum Stmt {
         body: Vec<Stmt>,
     },
     ForIn {
-        variable: String,      // The iteration variable
-        declare_var: bool,     // true if using "var variable", false if pre-declared
-        iterable: Expr,        // Expression to iterate over
+        variable: String,  // The iteration variable
+        declare_var: bool, // true if using "var variable", false if pre-declared
+        iterable: Expr,    // Expression to iterate over
         body: Vec<Stmt>,
     },
     Block(Vec<Stmt>),
@@ -196,7 +198,7 @@ pub enum Stmt {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ForInit {
     VarDecls(Vec<(String, Option<Expr>)>), // var i = 0, j = 1
-    Expr(Expr),                             // i = 0
+    Expr(Expr),                            // i = 0
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -204,15 +206,17 @@ pub enum AssignmentTarget {
     Variable(String),
     Property(Box<AssignmentTarget>, String),
     Index(Box<AssignmentTarget>, Box<Expr>), // arr[index] as lvalue
-    LocalSlot(Box<Expr>), // Local(expr) as lvalue - object-local slot
-    VarSlot(Box<Expr>),   // Var(expr) as lvalue - function-local slot
+    LocalSlot(Box<Expr>),                    // Local(expr) as lvalue - object-local slot
+    VarSlot(Box<Expr>),                      // Var(expr) as lvalue - function-local slot
     EffectSlot(Vec<Expr>), // EffectVar(index, target, effect_num) as lvalue - effect variable slot
-    MethodSlot {           // obj->LocalN("key") as lvalue - method-accessed slot
+    MethodSlot {
+        // obj->LocalN("key") as lvalue - method-accessed slot
         object: Box<Expr>,
         method: String,
         args: Vec<Expr>,
     },
-    FunctionCall {         // func(&...) as lvalue - reference-returning function call
+    FunctionCall {
+        // func(&...) as lvalue - reference-returning function call
         name: String,
         args: Vec<Expr>,
     },
@@ -225,7 +229,12 @@ pub enum Expr {
     This,
     Unary(UnaryOp, Box<Expr>),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
-    Call { callee: Box<Expr>, args: Vec<Expr>, is_optional: bool, forward_rest: bool },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+        is_optional: bool,
+        forward_rest: bool,
+    },
     Array(Vec<Expr>),
     Proplist(Vec<(String, Expr)>),
     Index(Box<Expr>, Box<Expr>),

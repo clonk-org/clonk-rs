@@ -60,7 +60,7 @@ fn attach_procedure_synchronizes_position_and_container() -> Result<(), Box<dyn 
     let attached = snapshot
         .object(attached_id)
         .expect("attached object must exist after tick");
-    assert_eq!(attached.position, Vector2::new(104, 74));
+    assert_eq!(attached.position, Vector2::new(104, 73));
     assert_eq!(attached.velocity, Vector2::new(0, 0));
     assert_eq!(attached.container, Some(chest_id));
 

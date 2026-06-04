@@ -230,6 +230,12 @@ static int32_t NormalizeCategory(int32_t desired, int32_t fallback) {
     return (desired & ~C4D_SortLimit) | sort_bits;
 }
 
+static C4Fixed C4FixedFromRaw(int32_t raw) {
+    C4Fixed value;
+    value.val = raw;
+    return value;
+}
+
 C4Object *CreateRuntimeObject(
     C4Game &game,
     const LcEngineRuntimeObjectState &state,
@@ -273,10 +279,10 @@ C4Object *CreateRuntimeObject(
             nullptr,
             state.position_x,
             state.position_y,
-            0,
-            Fix0,
-            Fix0,
-            Fix0,
+            state.rotation,
+            C4FixedFromRaw(state.fixed_velocity_x),
+            C4FixedFromRaw(state.fixed_velocity_y),
+            C4FixedFromRaw(state.rotation_velocity),
             state.owner)) {
         StdStrBuf message;
         message.Format(
@@ -290,6 +296,13 @@ C4Object *CreateRuntimeObject(
 
     const int32_t normalized_category = NormalizeCategory(state.category, definition->Category);
     object->SetCategory(normalized_category);
+    object->fix_x = C4FixedFromRaw(state.fixed_position_x);
+    object->fix_y = C4FixedFromRaw(state.fixed_position_y);
+    object->fix_r = C4FixedFromRaw(state.fixed_rotation);
+    object->r = state.rotation;
+    object->xdir = C4FixedFromRaw(state.fixed_velocity_x);
+    object->ydir = C4FixedFromRaw(state.fixed_velocity_y);
+    object->rdir = C4FixedFromRaw(state.rotation_velocity);
 
     object->Con = std::clamp(state.construction, 0, FullCon);
     object->UpdateMass();
@@ -336,12 +349,15 @@ void ApplyRuntimeObjectStateToC4Object(
     object.old_y = object.y;
     object.x = pos_x;
     object.y = pos_y;
-    object.fix_x = itofix(pos_x);
-    object.fix_y = itofix(pos_y);
+    object.r = state.rotation;
+    object.fix_x = C4FixedFromRaw(state.fixed_position_x);
+    object.fix_y = C4FixedFromRaw(state.fixed_position_y);
+    object.fix_r = C4FixedFromRaw(state.fixed_rotation);
     object.motion_x = vel_x;
     object.motion_y = vel_y;
-    object.xdir = itofix(vel_x);
-    object.ydir = itofix(vel_y);
+    object.xdir = C4FixedFromRaw(state.fixed_velocity_x);
+    object.ydir = C4FixedFromRaw(state.fixed_velocity_y);
+    object.rdir = C4FixedFromRaw(state.rotation_velocity);
 
     object.Energy = state.energy;
     object.Damage = std::max<int32_t>(state.damage, 0);
@@ -1121,6 +1137,13 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
         entry.snapshot.position_y = fixtoi(object->fix_y);
         entry.snapshot.velocity_x = fixtoi(object->xdir);
         entry.snapshot.velocity_y = fixtoi(object->ydir);
+        entry.snapshot.rotation = object->r;
+        entry.snapshot.fixed_position_x = object->fix_x.val;
+        entry.snapshot.fixed_position_y = object->fix_y.val;
+        entry.snapshot.fixed_velocity_x = object->xdir.val;
+        entry.snapshot.fixed_velocity_y = object->ydir.val;
+        entry.snapshot.fixed_rotation = object->fix_r.val;
+        entry.snapshot.rotation_velocity = object->rdir.val;
         entry.snapshot.energy = object->Energy;
         entry.snapshot.damage = object->Damage;
         entry.snapshot.magic_energy = object->MagicEnergy;

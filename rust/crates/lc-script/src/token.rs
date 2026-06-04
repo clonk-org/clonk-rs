@@ -51,15 +51,15 @@ pub enum Keyword {
     Proplist,
     Effect,
     // Keyword operators (synonyms for symbolic operators)
-    Eq,   // ==
-    Ne,   // !=
-    Lt,   // <
-    Le,   // <=
-    Gt,   // >
-    Ge,   // >=
-    And,  // &&
-    Or,   // ||
-    Not,  // !
+    Eq,  // ==
+    Ne,  // !=
+    Lt,  // <
+    Le,  // <=
+    Gt,  // >
+    Ge,  // >=
+    And, // &&
+    Or,  // ||
+    Not, // !
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +71,7 @@ pub enum Symbol {
     Comma,
     Semicolon,
     Colon,
-    ColonColon,  // :: (scope resolution)
+    ColonColon, // :: (scope resolution)
     Plus,
     PlusPlus,
     Minus,
@@ -81,7 +81,7 @@ pub enum Symbol {
     Slash,
     Percent,
     Dot,
-    Ellipsis,  // ... (varargs forwarder)
+    Ellipsis, // ... (varargs forwarder)
     Equal,
     EqualEqual,
     Bang,
@@ -103,11 +103,11 @@ pub enum Symbol {
     LBracket,
     RBracket,
     // String comparison operators
-    StringEqual,       // S=
-    StringNotEqual,    // S!=
-    StringLess,        // S<
-    StringLessEqual,   // S<=
-    StringGreater,     // S>
+    StringEqual,        // S=
+    StringNotEqual,     // S!=
+    StringLess,         // S<
+    StringLessEqual,    // S<=
+    StringGreater,      // S>
     StringGreaterEqual, // S>=
     // Compound assignment operators
     PlusEqual,

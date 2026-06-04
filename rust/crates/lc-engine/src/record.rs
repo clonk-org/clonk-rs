@@ -321,12 +321,11 @@ impl fmt::Display for Recording {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::LcgRng;
     use crate::{
         ActionState, CommandDirection, CommandStackSnapshot, Direction, EnvironmentFrame,
         HudSnapshot, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2, OWNER_NONE,
     };
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha8Rng;
     use std::collections::HashMap;
 
     fn make_snapshot(frame: u64, energy: i32) -> SimulationSnapshot {
@@ -365,6 +364,10 @@ mod tests {
                 command_queue: Vec::new(),
                 command_stack: CommandStackSnapshot::default(),
                 local_vars: HashMap::new(),
+                fixed_position: None,
+                fixed_velocity: None,
+                rotation_velocity: None,
+                fixed_rotation: None,
             }],
             environment: EnvironmentFrame::default(),
             sky: None,
@@ -377,7 +380,7 @@ mod tests {
             known_crew_owners: Vec::new(),
             eliminated_crew_owners: Vec::new(),
             landscape: None,
-            rng: ChaCha8Rng::seed_from_u64(frame),
+            rng: LcgRng::seed_from_u64(frame),
             hud: HudSnapshot::default(),
             surfaces: Vec::new(),
             controls: Vec::new(),

@@ -401,7 +401,9 @@ fn return_statement_handles_parenthesized_expressions_with_operators() {
     );
 
     assert_eq!(
-        engine.call("ReturnParenDivide", &[]).expect("call succeeds"),
+        engine
+            .call("ReturnParenDivide", &[])
+            .expect("call succeeds"),
         Value::Int(255)
     );
     assert_eq!(
@@ -409,11 +411,15 @@ fn return_statement_handles_parenthesized_expressions_with_operators() {
         Value::Int(150)
     );
     assert_eq!(
-        engine.call("ReturnParenMultiply", &[]).expect("call succeeds"),
+        engine
+            .call("ReturnParenMultiply", &[])
+            .expect("call succeeds"),
         Value::Int(50)
     );
     assert_eq!(
-        engine.call("ReturnComplexExpr", &[]).expect("call succeeds"),
+        engine
+            .call("ReturnComplexExpr", &[])
+            .expect("call succeeds"),
         Value::Int(204)
     );
 }
@@ -444,11 +450,15 @@ fn array_index_assignment_works() {
     );
 
     assert_eq!(
-        engine.call("TestArrayIndexAssignment", &[]).expect("call succeeds"),
+        engine
+            .call("TestArrayIndexAssignment", &[])
+            .expect("call succeeds"),
         Value::Int(60)
     );
     assert_eq!(
-        engine.call("TestNestedArrayAssignment", &[]).expect("call succeeds"),
+        engine
+            .call("TestNestedArrayAssignment", &[])
+            .expect("call succeeds"),
         Value::Int(10)
     );
 }

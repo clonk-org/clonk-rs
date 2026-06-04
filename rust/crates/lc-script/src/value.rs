@@ -25,6 +25,23 @@ impl Value {
         }
     }
 
+    /// Mirror C++ `C4Value::_getInt()` (C4Value.h:170) for the value types with
+    /// a deterministic integer representation. C++ stores Int and Bool in the
+    /// same `Data.Int` slot (bool is 0/1) and nil's `Data` is 0, so the integer
+    /// operators — which read operands via `_getInt()` under
+    /// `CheckOpPars<C4V_Any, ...>` (no conversion, C4AulExec.cpp) — treat nil,
+    /// false, and true as 0, 0, and 1. String/Array/Proplist have no
+    /// deterministic integer value in C++ (their `Data` is a pointer), so they
+    /// return `None` and the caller keeps its type-error behavior.
+    pub fn as_c4_int(&self) -> Option<i32> {
+        match self {
+            Value::Int(i) => Some(*i),
+            Value::Bool(b) => Some(*b as i32),
+            Value::Nil => Some(0),
+            _ => None,
+        }
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Int(_) => "int",

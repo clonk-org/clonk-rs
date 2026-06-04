@@ -41,8 +41,10 @@ struct MenuButton {
 impl StartupMainMenu {
     pub fn new(font: Arc<dyn TextFont>, textures: Option<ButtonTextures>) -> Self {
         let buttons = vec![
-            MenuButton::new("Local Game", MainMenuItem::LocalGame),
-            MenuButton::new("Network Game", MainMenuItem::NetworkGame),
+            // Labels match the C++ main menu (IDS_BTN_LOCALGAME="&Start Game",
+            // IDS_DLG_NETSTART="Start Network Game" in System.c4g/LanguageUS.txt).
+            MenuButton::new("Start Game", MainMenuItem::LocalGame),
+            MenuButton::new("Start Network Game", MainMenuItem::NetworkGame),
             MenuButton::new("Player Selection", MainMenuItem::PlayerSelection),
             MenuButton::new("Options", MainMenuItem::Options),
             MenuButton::new("About", MainMenuItem::About),
@@ -167,18 +169,8 @@ impl StartupMainMenu {
             self.layout = self.compute_layout();
         }
 
-        let panel_rect = self.panel_rect();
-        if let Some(rect) = panel_rect {
-            let backdrop = GuiRect::new(
-                rect.origin.x + 4.0,
-                rect.origin.y + 4.0,
-                rect.size.width,
-                rect.size.height,
-            );
-            fill_rect(surface, &backdrop, Color::new(0, 0, 0, 120));
-            fill_rect(surface, &rect, Color::new(16, 28, 52, 235));
-        }
-
+        // C++ C4StartupMainDlg draws the buttons directly over the loader
+        // background — there is no panel backdrop or footer box.
         for (index, rect) in self.layout.iter().enumerate() {
             let state = ButtonVisualState::from_indices(
                 index,
@@ -189,25 +181,27 @@ impl StartupMainMenu {
             self.draw_button(surface, rect, &self.buttons[index], state);
         }
 
-        if let Some(rect) = panel_rect {
-            let footer_height = 28.0_f32.min(rect.size.height * 0.18);
-            let footer_rect = GuiRect::new(
-                rect.origin.x + 12.0,
-                rect.origin.y + rect.size.height - footer_height - 12.0,
-                rect.size.width - 24.0,
-                footer_height,
-            );
-            fill_rect(surface, &footer_rect, Color::new(8, 14, 28, 210));
-            draw_text(
-                surface,
-                &footer_rect,
-                participants_label,
-                Color::new(220, 220, 240, 255),
-                footer_rect.size.height * 0.55,
-                8.0,
-                self.font.as_ref(),
-            );
-        }
+        // Participants label: plain white, right-aligned near the bottom-right
+        // (C++ Label at Wdt*39/40, Hgt*9/10, ARight; C4StartupMainDlg.cpp:69).
+        let width = self.size.width.max(1.0);
+        let height = self.size.height.max(1.0);
+        let font_size = (height * 0.03).clamp(14.0, 30.0);
+        let metrics = self.font.measure_text(participants_label, font_size);
+        let label_rect = GuiRect::new(
+            (width * 39.0 / 40.0 - metrics.width).max(0.0),
+            height * 9.0 / 10.0,
+            metrics.width,
+            font_size,
+        );
+        draw_text(
+            surface,
+            &label_rect,
+            participants_label,
+            Color::new(255, 255, 255, 255),
+            font_size,
+            0.0,
+            self.font.as_ref(),
+        );
     }
 
     fn move_selection(&mut self, delta: isize) -> Vec<MainMenuAction> {
@@ -260,18 +254,31 @@ impl StartupMainMenu {
             fill_rect(surface, rect, color);
         }
 
+        // C++ C4GUI button captions use C4GUI_ButtonFontClr = 0xffffff00 (yellow)
+        // when active and C4GUI_InactCaptionFontClr = 0xffafafaf when disabled
+        // (src/C4Gui.h:53-56, drawn at C4GuiButton.cpp:109).
         let text_color = if button.enabled {
-            Color::new(236, 242, 255, 255)
+            Color::new(0xff, 0xff, 0x00, 0xff)
         } else {
-            Color::new(164, 172, 192, 255)
+            Color::new(0xaf, 0xaf, 0xaf, 0xff)
         };
+        // C++ renders the button caption centred within the plank; centre both
+        // axes using the measured text extent.
+        let font_size = (rect.size.height * 0.48).clamp(16.0, 32.0);
+        let metrics = self.font.measure_text(button.label, font_size);
+        let text_rect = GuiRect::new(
+            rect.origin.x + ((rect.size.width - metrics.width) * 0.5).max(0.0),
+            rect.origin.y + ((rect.size.height - font_size) * 0.5).max(0.0),
+            metrics.width,
+            font_size,
+        );
         draw_text(
             surface,
-            rect,
+            &text_rect,
             button.label,
             text_color,
-            (rect.size.height * 0.48).clamp(18.0, 32.0),
-            rect.size.height * 0.22,
+            font_size,
+            0.0,
             self.font.as_ref(),
         );
     }
@@ -292,56 +299,28 @@ impl StartupMainMenu {
 
         let width = self.size.width.max(1.0);
         let height = self.size.height.max(1.0);
-        let panel_margin = (width * 0.04).clamp(16.0, 48.0);
-        let panel_width_nominal = (width * 0.34).clamp(280.0, 420.0);
-        let available_width = (width - panel_margin * 2.0).max(200.0);
-        let panel_width = panel_width_nominal
-            .min(available_width)
-            .max(220.0f32.min(available_width));
-        let button_height = (height * 0.075).clamp(46.0, 72.0);
-        let spacing = button_height * 0.18;
-
-        let total_buttons_height =
-            button_height * self.buttons.len() as f32 + spacing * (self.buttons.len() as f32 - 1.0);
-        let available_height = (height - panel_margin * 2.0).max(button_height * 2.5);
-        let min_panel_height = (height * 0.55)
-            .max(button_height * 2.5)
-            .min(available_height);
-        let desired_height = total_buttons_height + button_height * 0.85;
-        let panel_height = desired_height.max(min_panel_height).min(available_height);
-
-        let panel_x = width - panel_width - panel_margin;
-        let panel_y = height / 2.0 - panel_height / 2.0;
+        // Mirror C++ C4StartupMainDlg (C4StartupMainDlg.cpp:44-65): the buttons
+        // occupy the right 2/5 of the width (`caMain.GetFromRight(Wdt*2/5)`),
+        // inset by `Wdt/26` horizontally and `40 + Hgt/8` vertically, stacked from
+        // the top at `C4GUI_BigButtonHgt` (40) each with `iButtonPadding` (2)
+        // between. The fixed C++ logical sizes are scaled to the render height so
+        // the layout matches across resolutions; the full-width planks float over
+        // the loader background (no panel backdrop).
+        let panel_x = width * 3.0 / 5.0;
+        let panel_w = width * 2.0 / 5.0;
+        let hmargin = width / 26.0;
+        let button_x = panel_x + hmargin;
+        let button_w = (panel_w - hmargin * 2.0).max(1.0);
+        let button_height = (height * 0.062).clamp(34.0, 60.0);
+        let padding = (button_height * 0.05).max(2.0);
+        let top_margin = height / 8.0 + button_height;
 
         let mut rects = Vec::with_capacity(self.buttons.len());
-        let start_y = panel_y + (panel_height - total_buttons_height) * 0.5;
         for (idx, _) in self.buttons.iter().enumerate() {
-            let y = start_y + idx as f32 * (button_height + spacing);
-            rects.push(GuiRect::new(
-                panel_x + 24.0,
-                y,
-                panel_width - 48.0,
-                button_height,
-            ));
+            let y = top_margin + idx as f32 * (button_height + padding);
+            rects.push(GuiRect::new(button_x, y, button_w, button_height));
         }
         rects
-    }
-
-    fn panel_rect(&self) -> Option<GuiRect> {
-        if self.layout.is_empty() {
-            return None;
-        }
-        let first = self.layout.first()?;
-        let last = self.layout.last()?;
-        let top = first.origin.y - (first.size.height * 0.5);
-        let bottom = last.origin.y + last.size.height + (last.size.height * 0.85);
-        let height = (bottom - top).max(0.0);
-        Some(GuiRect::new(
-            first.origin.x - 24.0,
-            top,
-            first.size.width + 48.0,
-            height,
-        ))
     }
 }
 

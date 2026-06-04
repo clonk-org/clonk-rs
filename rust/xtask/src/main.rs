@@ -35,13 +35,17 @@ fn main() -> Result<()> {
             let tail: Vec<String> = args.collect();
             ffi_command(&tail)
         }
+        Some("parity") => {
+            let tail: Vec<String> = args.collect();
+            parity_command(&tail)
+        }
         Some(cmd) => bail!("unknown command `{}` (try `cargo xtask --help`)", cmd),
     }
 }
 
 fn print_usage() {
     tracing::info!(
-        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask ffi [options]           Build staticlib/cdylib artifacts for C++ integration."
+        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask ffi [options]           Build staticlib/cdylib artifacts for C++ integration.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md)."
     );
 }
 
@@ -75,6 +79,59 @@ fn print_engine_snapshots_usage() {
     tracing::info!(
         "Usage:\n  cargo xtask engine-snapshots record\n  cargo xtask engine-snapshots verify"
     );
+}
+
+/// `cargo xtask parity record|verify` — the C++↔Rust differential parity harness
+/// (see `parity/README.md`). `record` regenerates the C++ golden oracle from the
+/// real engine primitives; `verify` runs the Rust differential check.
+fn parity_command(args: &[String]) -> Result<()> {
+    if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h") {
+        tracing::info!(
+            "Usage:\n  cargo xtask parity record   Regenerate the C++ golden oracle (parity/golden).\n  cargo xtask parity verify   Run the Rust differential check against the golden."
+        );
+        return Ok(());
+    }
+    let paths = WorkspacePaths::detect()?;
+    match args[0].as_str() {
+        "record" => {
+            if args.len() > 1 {
+                bail!("`parity record` does not take additional arguments");
+            }
+            let script = paths.repo_root.join("parity/oracle/gen_golden.sh");
+            let status = Command::new("bash")
+                .arg(&script)
+                .status()
+                .with_context(|| format!("failed to run {}", script.display()))?;
+            if !status.success() {
+                bail!("parity golden generation failed ({status})");
+            }
+            Ok(())
+        }
+        "verify" => {
+            if args.len() > 1 {
+                bail!("`parity verify` does not take additional arguments");
+            }
+            let status = Command::new("cargo")
+                .current_dir(&paths.workspace_dir)
+                .args([
+                    "test",
+                    "-p",
+                    "lc-engine",
+                    "--lib",
+                    "parity_differential_matches_cpp_golden",
+                ])
+                .status()
+                .context("failed to run cargo test for parity verify")?;
+            if !status.success() {
+                bail!("parity differential check failed ({status})");
+            }
+            Ok(())
+        }
+        other => bail!(
+            "unknown `parity` subcommand `{}` (try `cargo xtask parity --help`)",
+            other
+        ),
+    }
 }
 
 fn ffi_command(args: &[String]) -> Result<()> {

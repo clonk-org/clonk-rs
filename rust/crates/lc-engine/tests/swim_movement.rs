@@ -38,7 +38,15 @@ fn swim_procedure_handles_direction_and_drift() -> Result<(), Box<dyn std::error
         .object(object_id)
         .expect("object must exist after swimming up-right");
     assert_eq!(object.velocity.x, 2);
-    assert_eq!(object.velocity.y, -1);
+    assert_eq!(object.velocity.y, -2);
+    assert_eq!(
+        object
+            .fixed_velocity
+            .expect("swim gravity remains sub-pixel")
+            .y
+            .val(),
+        -131006
+    );
 
     engine.apply_object_update(
         object_id,
@@ -50,7 +58,15 @@ fn swim_procedure_handles_direction_and_drift() -> Result<(), Box<dyn std::error
         .object(object_id)
         .expect("object must exist after drifting in water");
     assert_eq!(object.velocity.x, 0);
-    assert_eq!(object.velocity.y, 1);
+    assert_eq!(object.velocity.y, 0);
+    assert_eq!(
+        object
+            .fixed_velocity
+            .expect("swim drift keeps fixed gravity")
+            .y
+            .val(),
+        66
+    );
 
     Ok(())
 }

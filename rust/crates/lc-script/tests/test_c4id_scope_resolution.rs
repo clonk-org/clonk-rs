@@ -14,7 +14,11 @@ fn test_c4id_in_scope_resolution() {
     "#;
 
     let result = Script::compile(source);
-    assert!(result.is_ok(), "Should parse C4ID in scope resolution: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Should parse C4ID in scope resolution: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -31,7 +35,11 @@ fn test_c4id_after_arrow_operator() {
     "#;
 
     let result = Script::compile(source);
-    assert!(result.is_ok(), "Should parse C4ID after -> operator: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Should parse C4ID after -> operator: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -48,5 +56,9 @@ fn test_complex_c4id_scope_resolution() {
     "#;
 
     let result = Script::compile(source);
-    assert!(result.is_ok(), "Should parse complex C4ID scope resolution: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Should parse complex C4ID scope resolution: {:?}",
+        result.err()
+    );
 }

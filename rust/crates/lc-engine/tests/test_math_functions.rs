@@ -21,7 +21,9 @@ fn abs_function_should_work() {
     .expect("script compiles");
 
     engine.register_definition(script).unwrap();
-    let obj = engine.spawn_object(SpawnConfig::new("TEST".to_string())).unwrap();
+    let obj = engine
+        .spawn_object(SpawnConfig::new("TEST".to_string()))
+        .unwrap();
 
     // Initialize should return Abs(-42) = 42
     // This test will fail until we implement Abs
@@ -45,7 +47,9 @@ fn max_function_should_work() {
     .expect("script compiles");
 
     engine.register_definition(script).unwrap();
-    let obj = engine.spawn_object(SpawnConfig::new("TEST".to_string())).unwrap();
+    let obj = engine
+        .spawn_object(SpawnConfig::new("TEST".to_string()))
+        .unwrap();
 
     // Initialize should return Max(30, 50) = 50
     // This test will fail until we implement Max
@@ -69,7 +73,9 @@ fn min_function_should_work() {
     .expect("script compiles");
 
     engine.register_definition(script).unwrap();
-    let obj = engine.spawn_object(SpawnConfig::new("TEST".to_string())).unwrap();
+    let obj = engine
+        .spawn_object(SpawnConfig::new("TEST".to_string()))
+        .unwrap();
 
     // Initialize should return Min(30, 50) = 30
     // This test will fail until we implement Min
@@ -96,7 +102,9 @@ fn tree_still_callback_should_use_abs() {
     .expect("script compiles");
 
     engine.register_definition(script).unwrap();
-    let obj = engine.spawn_object(SpawnConfig::new("TREE".to_string())).unwrap();
+    let obj = engine
+        .spawn_object(SpawnConfig::new("TREE".to_string()))
+        .unwrap();
 
     // This test will fail until we implement Abs
 }

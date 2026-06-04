@@ -325,6 +325,10 @@ impl Landscape {
         height.max(0)
     }
 
+    pub fn estimated_height(&self) -> i32 {
+        self.estimate_world_height()
+    }
+
     pub fn apply_temperature_conversions(
         &mut self,
         materials: &MaterialSet,

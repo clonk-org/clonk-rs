@@ -16,7 +16,7 @@ pub struct Script {
     includes: Vec<String>,
     appendto: Option<crate::ast::AppendTo>,
     strict_level: Option<u8>,
-    var_decls: Vec<VarDecl>,  // Script-level variable declarations
+    var_decls: Vec<VarDecl>, // Script-level variable declarations
 }
 
 impl Default for Script {
@@ -74,7 +74,7 @@ pub struct Engine {
     functions: HashMap<String, Function>,
     host_functions: HashMap<String, HostFunction>,
     debugger_hooks: Option<DebuggerHooks>,
-    var_decls: Vec<VarDecl>,  // Script-level variable declarations (local variables)
+    var_decls: Vec<VarDecl>, // Script-level variable declarations (local variables)
 }
 
 impl Engine {
@@ -104,7 +104,9 @@ impl Engine {
     pub fn merge_from(&mut self, other: &Engine) {
         for (name, function) in other.functions.iter() {
             // Only add if not already defined (child overrides parent)
-            self.functions.entry(name.clone()).or_insert_with(|| function.clone());
+            self.functions
+                .entry(name.clone())
+                .or_insert_with(|| function.clone());
         }
 
         // Merge local variable declarations from parent
@@ -174,7 +176,8 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         );
-        vm.call_with_locals(name, args, local_vars).map_err(ScriptError::from)
+        vm.call_with_locals(name, args, local_vars)
+            .map_err(ScriptError::from)
     }
 
     pub fn has_function(&self, name: &str) -> bool {

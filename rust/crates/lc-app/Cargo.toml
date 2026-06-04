@@ -27,6 +27,4 @@ png = "0.17"
 time = { version = "0.3", features = ["formatting", "macros"] }
 
 [dev-dependencies]
-rand = "0.8"
-rand_chacha = "0.3"
 tempfile = "3.8"

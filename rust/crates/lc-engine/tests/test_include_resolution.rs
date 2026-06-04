@@ -30,7 +30,8 @@ fn action_callback_should_resolve_through_include() {
         global func Step(state, frame, random) { return nil; }
         private func Still() { return nil; }
         "#,
-    ).unwrap();
+    )
+    .unwrap();
     engine.register_definition(parent).unwrap();
 
     // Register child definition that includes parent
@@ -41,11 +42,14 @@ fn action_callback_should_resolve_through_include() {
         #strict
         #include TRE1
         "#,
-    ).unwrap();
+    )
+    .unwrap();
     engine.register_definition(child).unwrap();
 
     // Now spawn a TRE2 object
-    let obj = engine.spawn_object(SpawnConfig::new("TRE2".to_string())).unwrap();
+    let obj = engine
+        .spawn_object(SpawnConfig::new("TRE2".to_string()))
+        .unwrap();
 
     // The object should exist
     assert_eq!(obj, ObjectId::new(1));

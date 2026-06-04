@@ -3769,7 +3769,11 @@ mod tests {
 
         let script = state.step(&ctx);
         match script.events.first() {
-            Some(CommandEvent::ControlCommandAcquire { caller, definition_id, .. }) => {
+            Some(CommandEvent::ControlCommandAcquire {
+                caller,
+                definition_id,
+                ..
+            }) => {
                 assert_eq!(*caller, builder_id);
                 assert_eq!(definition_id, "WOOD");
             }
@@ -4149,8 +4153,7 @@ mod tests {
         let mut stack = CommandStack::new();
         stack
             .push_back(
-                CommandRequest::new(CommandId::Acquire)
-                    .with_data(CommandData::Text("WOOD".into())),
+                CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
             )
             .expect("command queued");
 
@@ -4182,11 +4185,19 @@ mod tests {
                 break;
             }
             frame += 1;
-            assert!(frame < 1000, "test timeout - no new command after {} frames", frame);
+            assert!(
+                frame < 1000,
+                "test timeout - no new command after {} frames",
+                frame
+            );
         }
 
         // Verify that a Get command was pushed to the stack
-        assert_eq!(stack.len(), 2, "expected Get command to be pushed onto stack");
+        assert_eq!(
+            stack.len(),
+            2,
+            "expected Get command to be pushed onto stack"
+        );
     }
 
     #[test]
@@ -4238,8 +4249,7 @@ mod tests {
         let mut stack = CommandStack::new();
         stack
             .push_back(
-                CommandRequest::new(CommandId::Acquire)
-                    .with_data(CommandData::Text("WOOD".into())),
+                CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
             )
             .expect("command queued");
 
@@ -4271,11 +4281,19 @@ mod tests {
                 break;
             }
             frame += 1;
-            assert!(frame < 1000, "test timeout - no new command after {} frames", frame);
+            assert!(
+                frame < 1000,
+                "test timeout - no new command after {} frames",
+                frame
+            );
         }
 
         // Verify that a Get command was pushed to the stack
-        assert_eq!(stack.len(), 2, "expected Get command to be pushed onto stack");
+        assert_eq!(
+            stack.len(),
+            2,
+            "expected Get command to be pushed onto stack"
+        );
     }
 
     #[test]
@@ -4325,8 +4343,7 @@ mod tests {
         let mut stack = CommandStack::new();
         stack
             .push_back(
-                CommandRequest::new(CommandId::Acquire)
-                    .with_data(CommandData::Text("WOOD".into())),
+                CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
             )
             .expect("command queued");
 
@@ -4337,8 +4354,9 @@ mod tests {
         ));
 
         assert!(stack.set_acquire_script_result(AcquireScriptResult::Continue));
+        let initial_len = stack.len();
         let mut frame = ctx.frame + 1;
-        let mut result = loop {
+        loop {
             let step_ctx = CommandRuntimeContext {
                 frame,
                 position: ctx.position,
@@ -4352,19 +4370,35 @@ mod tests {
                 transfer_zones: ctx.transfer_zones,
             };
             let step_result = stack.step(&step_ctx).expect("acquire evaluation");
-            if !step_result.operations.is_empty() {
-                break step_result;
+            assert_eq!(step_result.status, CommandStatus::Running);
+            // `CommandStack::step` applies the command's operations to the stack
+            // internally (it drains `result.operations`), so detect the requested
+            // Get by the new front entry rather than by `result.operations` (which
+            // is always empty here). The bounded frame guard keeps a never-pushed
+            // regression a failure rather than an infinite hang.
+            if stack.len() > initial_len {
+                break;
             }
             frame += 1;
-        };
-        assert_eq!(result.status, CommandStatus::Running);
-        assert_eq!(result.operations.len(), 1);
-        match &result.operations[0] {
-            CommandOperation::PushFront(request) => {
-                assert_eq!(request.id, CommandId::Get);
-                assert_eq!(request.target, Some(item_id));
+            assert!(
+                frame < 1000,
+                "test timeout - no Get command after {frame} frames"
+            );
+        }
+
+        // Acquire should request a Get for the WOOD held inside the grabbable
+        // container; verify the pushed sub-command targets the contained item.
+        let snapshot = stack.snapshot();
+        assert_eq!(snapshot.commands.len(), 2);
+        match &snapshot.commands[0].state {
+            CommandState::Get(state) => {
+                assert_eq!(state.target, Some(item_id));
             }
-            other => panic!("expected get request, got {:?}", other),
+            other => panic!("expected get command at front, got {other:?}"),
+        }
+        match &snapshot.commands[1].state {
+            CommandState::Acquire(_) => {}
+            other => panic!("expected acquire command beneath get, got {other:?}"),
         }
     }
 

@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+const C4D_MAX_VERTEX: usize = 30;
+const C4M_SOLID: i32 = 50;
+
 /// Files required to construct an engine definition from a classic C4 definition folder.
 #[derive(Debug, Clone)]
 pub struct Definition {
@@ -78,14 +81,27 @@ pub struct DefCore {
     pub picture: Option<PictureRect>,
     pub color_by_owner: bool,
     pub shape: Option<PictureRect>,
+    pub vertices: Vec<DefVertex>,
+    pub contact_density: i32,
     pub collection: Option<PictureRect>,
     pub collection_limit: Option<u32>,
     pub collectible: bool,
     pub constructable: bool,
     pub con_size_off: i32,
     pub basement: i32,
+    pub rotateable: i32,
+    pub border_bound: i32,
+    pub upright_attach: u32,
     pub components: Vec<DefComponent>,
     pub line_connect: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefVertex {
+    pub x: i32,
+    pub y: i32,
+    pub cnat: u32,
+    pub friction: i32,
 }
 
 impl DefCore {
@@ -152,6 +168,7 @@ pub struct ActionDefinition {
     pub abort_call: Option<String>,
     pub no_other_action: bool,
     pub dig_free: Option<i32>,
+    pub attach: u32,
     pub directions: Option<u32>,
     pub flip_dir: Option<u32>,
     pub facet: Option<ActionFacet>,
@@ -213,12 +230,21 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut picture: Option<PictureRect> = None;
     let mut color_by_owner = false;
     let mut shape: Option<PictureRect> = None;
+    let mut vertex_count: usize = 0;
+    let mut vertex_x = [0i32; C4D_MAX_VERTEX];
+    let mut vertex_y = [0i32; C4D_MAX_VERTEX];
+    let mut vertex_cnat = [0u32; C4D_MAX_VERTEX];
+    let mut vertex_friction = [0i32; C4D_MAX_VERTEX];
+    let mut contact_density: i32 = C4M_SOLID;
     let mut collection: Option<PictureRect> = None;
     let mut collection_limit: Option<u32> = None;
     let mut collectible = false;
     let mut constructable = false;
     let mut con_size_off: i32 = 0;
     let mut basement: i32 = 0;
+    let mut rotateable: i32 = 0;
+    let mut border_bound: i32 = 0;
+    let mut upright_attach: u32 = 0;
     let mut components: Vec<DefComponent> = Vec::new();
     let mut line_connect: u32 = 0;
 
@@ -284,6 +310,26 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "shape" => {
                 shape = parse_rect(value);
             }
+            "vertices" => {
+                vertex_count = parse_i32(value)
+                    .unwrap_or(0)
+                    .clamp(0, C4D_MAX_VERTEX as i32) as usize;
+            }
+            "vertexx" => {
+                fill_i32_array(value, &mut vertex_x);
+            }
+            "vertexy" => {
+                fill_i32_array(value, &mut vertex_y);
+            }
+            "vertexcnat" => {
+                fill_u32_array(value, &mut vertex_cnat);
+            }
+            "vertexfriction" => {
+                fill_i32_array(value, &mut vertex_friction);
+            }
+            "contactdensity" => {
+                contact_density = parse_i32(value).unwrap_or(C4M_SOLID);
+            }
             "collection" => {
                 collection = parse_rect(value).filter(|rect| rect.width > 0 && rect.height > 0);
             }
@@ -305,6 +351,15 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "basement" => {
                 basement = parse_i32(value).unwrap_or(0).max(0);
             }
+            "rotate" => {
+                rotateable = parse_i32(value).unwrap_or(0).max(0);
+            }
+            "borderbound" => {
+                border_bound = parse_i32(value).unwrap_or(0).max(0);
+            }
+            "uprightattach" => {
+                upright_attach = parse_i32(value).unwrap_or(0).max(0) as u32;
+            }
             "components" => {
                 components = parse_components(value);
             }
@@ -321,6 +376,15 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         category = 0;
     }
 
+    let vertices = (0..vertex_count)
+        .map(|idx| DefVertex {
+            x: vertex_x[idx],
+            y: vertex_y[idx],
+            cnat: vertex_cnat[idx],
+            friction: vertex_friction[idx],
+        })
+        .collect();
+
     Ok(DefCore {
         id,
         name,
@@ -331,12 +395,17 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         picture,
         color_by_owner,
         shape,
+        vertices,
+        contact_density,
         collection,
         collection_limit,
         collectible,
         constructable,
         con_size_off,
         basement,
+        rotateable,
+        border_bound,
+        upright_attach,
         components,
         line_connect,
     })
@@ -576,6 +645,9 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
             }
             "digfree" => {
                 current_definition.dig_free = parse_i32(value);
+            }
+            "attach" => {
+                current_definition.attach = parse_i32(value).unwrap_or(0).max(0) as u32;
             }
             "directions" => {
                 current_definition.directions = parse_u32(value);
@@ -1134,6 +1206,32 @@ fn parse_u32(value: &str) -> Option<u32> {
     parse_i64(value).and_then(|num| if num < 0 { None } else { Some(num as u32) })
 }
 
+fn fill_i32_array(value: &str, target: &mut [i32]) {
+    for slot in target.iter_mut() {
+        *slot = 0;
+    }
+    for (slot, parsed) in target.iter_mut().zip(parse_int_array(value)) {
+        *slot = parsed;
+    }
+}
+
+fn fill_u32_array(value: &str, target: &mut [u32]) {
+    for slot in target.iter_mut() {
+        *slot = 0;
+    }
+    for (slot, parsed) in target.iter_mut().zip(parse_int_array(value)) {
+        *slot = parsed.max(0) as u32;
+    }
+}
+
+fn parse_int_array(value: &str) -> impl Iterator<Item = i32> + '_ {
+    value
+        .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .filter_map(parse_i32)
+}
+
 fn parse_rect(value: &str) -> Option<PictureRect> {
     let mut parts = value
         .split(|c: char| c == ',' || c == ';')
@@ -1327,6 +1425,19 @@ DigFree=24
     }
 
     #[test]
+    fn parse_act_map_records_attach_mask() {
+        let data = br#"
+[Action]
+Name=Scale
+Procedure=Scale
+Attach=1
+"#;
+        let map = parse_act_map(data).expect("act map parsed");
+        let scale = map.actions.get("Scale").expect("scale action present");
+        assert_eq!(scale.attach, 1);
+    }
+
+    #[test]
     fn parse_def_core_value_mass_picture() {
         let data = br#"
             [DefCore]
@@ -1381,6 +1492,79 @@ DigFree=24
         );
         assert_eq!(parsed.collection_limit, Some(3));
         assert!(parsed.collectible);
+    }
+
+    #[test]
+    fn parse_def_core_rotate_field() {
+        let data = br#"
+            [DefCore]
+            id=SPNR
+            Rotate=12
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert_eq!(parsed.rotateable, 12);
+    }
+
+    #[test]
+    fn parse_def_core_shape_vertices_and_contact_metadata() {
+        let data = br#"
+            [DefCore]
+            id=CLNK
+            Shape=-8,-16,16,32
+            Vertices=3
+            VertexX=0,-4,4
+            VertexY=9,3,3
+            VertexCNAT=8,1,2
+            VertexFriction=100,300,300
+            ContactDensity=25
+            BorderBound=7
+            UprightAttach=8
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert_eq!(parsed.vertices.len(), 3);
+        assert_eq!(
+            parsed.vertices[0],
+            DefVertex {
+                x: 0,
+                y: 9,
+                cnat: 8,
+                friction: 100,
+            }
+        );
+        assert_eq!(
+            parsed.vertices[2],
+            DefVertex {
+                x: 4,
+                y: 3,
+                cnat: 2,
+                friction: 300,
+            }
+        );
+        assert_eq!(parsed.contact_density, 25);
+        assert_eq!(parsed.border_bound, 7);
+        assert_eq!(parsed.upright_attach, 8);
+    }
+
+    #[test]
+    fn parse_def_core_vertex_arrays_zero_fill_missing_entries() {
+        let data = br#"
+            [DefCore]
+            id=SPRS
+            Vertices=4
+            VertexX=-2,2
+            VertexY=5
+            VertexFriction=20,30
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert_eq!(parsed.vertices.len(), 4);
+        assert_eq!(parsed.vertices[0].x, -2);
+        assert_eq!(parsed.vertices[1].x, 2);
+        assert_eq!(parsed.vertices[2].x, 0);
+        assert_eq!(parsed.vertices[0].y, 5);
+        assert_eq!(parsed.vertices[1].y, 0);
+        assert_eq!(parsed.vertices[0].friction, 20);
+        assert_eq!(parsed.vertices[1].friction, 30);
+        assert_eq!(parsed.vertices[2].friction, 0);
     }
 
     #[test]

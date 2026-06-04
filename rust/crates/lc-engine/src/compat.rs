@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{hash_map::Entry, BTreeMap, HashMap};
+use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet};
 use std::convert::TryFrom;
 use std::rc::Rc;
 
@@ -7,12 +7,14 @@ use crate::command::{
     CommandData, CommandId, CommandMode, CommandOperation, CommandRequest, MAX_COMMAND_STACK,
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
-use crate::math::integer_distance;
+use crate::math::{fixtoi_prec, integer_distance, itofix_prec, C4Fixed, FixedVec2};
 use crate::message::{
     MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_MULTIPLE,
     HORIZONTAL_POSITION_FLAGS, VERTICAL_POSITION_FLAGS,
 };
 use crate::ocf;
+use crate::rng::LcgRng;
+use crate::sector::{SectorMap, SectorObject};
 #[cfg(test)]
 use crate::LiquidSegment;
 #[cfg(test)]
@@ -28,8 +30,6 @@ use crate::{
     CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
 };
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
-use rand::Rng;
-use rand_chacha::ChaCha8Rng;
 use std::mem;
 use tracing::{debug, info};
 
@@ -341,6 +341,7 @@ pub(crate) struct HostWorldContext {
     order: Rc<Vec<ObjectId>>,
     landscape: Option<Rc<Landscape>>,
     definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
+    sectors: Option<Rc<SectorMap>>,
     transfer_zones: Rc<Vec<TransferZoneState>>,
     players: Rc<HashMap<i32, PlayerState>>,
     player_order: Rc<Vec<i32>>,
@@ -356,6 +357,7 @@ impl Default for HostWorldContext {
             order: Rc::new(Vec::new()),
             landscape: None,
             definitions: Rc::new(HashMap::new()),
+            sectors: None,
             transfer_zones: Rc::new(Vec::new()),
             players: Rc::new(HashMap::new()),
             player_order: Rc::new(Vec::new()),
@@ -420,6 +422,9 @@ impl HostWorldContext {
         I: IntoIterator<Item = HostWorldObject>,
     {
         let map = objects.into_iter().collect::<Vec<HostWorldObject>>();
+        let sectors = landscape
+            .as_ref()
+            .map(|landscape| Rc::new(build_host_sector_map(&map, &definitions, landscape)));
         let mut order = Vec::with_capacity(map.len());
         let mut lookup = HashMap::with_capacity(map.len());
         for object in map {
@@ -432,6 +437,7 @@ impl HostWorldContext {
             order: Rc::new(order),
             landscape: landscape.map(Rc::new),
             definitions: Rc::new(definitions),
+            sectors,
             transfer_zones: Rc::new(transfer_zones),
             player_order: Rc::new({
                 let mut ids: Vec<_> = players.keys().copied().collect();
@@ -477,6 +483,24 @@ impl HostWorldContext {
         self.definitions.get(id)
     }
 
+    fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
+        host_object_shape_rect(object, &self.definitions)
+    }
+
+    fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
+        self.sectors.as_ref().map(|sectors| {
+            let area = sectors.area(rect);
+            sectors.object_ids_in_area(&area)
+        })
+    }
+
+    fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
+        self.sectors.as_ref().map(|sectors| {
+            let area = sectors.area(rect);
+            sectors.shape_ids_in_area(&area)
+        })
+    }
+
     pub(crate) fn player_ids(&self) -> &[i32] {
         self.player_order.as_ref()
     }
@@ -490,9 +514,81 @@ impl HostWorldContext {
     }
 }
 
+fn build_host_sector_map(
+    objects: &[HostWorldObject],
+    definitions: &HashMap<DefinitionId, DefinitionMetadata>,
+    landscape: &Landscape,
+) -> SectorMap {
+    let width = i32::try_from(landscape.width()).unwrap_or(i32::MAX);
+    let height = landscape.estimated_height();
+    let mut sectors = SectorMap::new(width, height);
+    sectors.rebuild(
+        objects
+            .iter()
+            .filter_map(|object| host_sector_record(object, definitions)),
+    );
+    sectors
+}
+
+fn host_sector_record(
+    object: &HostWorldObject,
+    definitions: &HashMap<DefinitionId, DefinitionMetadata>,
+) -> Option<SectorObject> {
+    if matches!(object.status(), ObjectStatus::Deleted) {
+        return None;
+    }
+    Some(SectorObject {
+        id: object.id,
+        position: object.position(),
+        shape_rect: host_object_shape_rect(object, definitions),
+    })
+}
+
+fn host_object_shape_rect(
+    object: &HostWorldObject,
+    definitions: &HashMap<DefinitionId, DefinitionMetadata>,
+) -> DefinitionRect {
+    definitions
+        .get(object.definition_id())
+        .and_then(|metadata| metadata.shape)
+        .map(|rect| {
+            DefinitionRect::new(
+                object.position.x.saturating_add(rect.x),
+                object.position.y.saturating_add(rect.y),
+                rect.width,
+                rect.height,
+            )
+        })
+        .or_else(|| host_vertex_bounds_rect(object.position(), object.vertices()))
+        .unwrap_or_else(|| DefinitionRect::new(object.position.x, object.position.y, 1, 1))
+}
+
+fn host_vertex_bounds_rect(position: Vector2, vertices: &[ObjectVertex]) -> Option<DefinitionRect> {
+    let first = vertices.first()?;
+    let mut min_x = first.x;
+    let mut max_x = first.x;
+    let mut min_y = first.y;
+    let mut max_y = first.y;
+    for vertex in &vertices[1..] {
+        min_x = min_x.min(vertex.x);
+        max_x = max_x.max(vertex.x);
+        min_y = min_y.min(vertex.y);
+        max_y = max_y.max(vertex.y);
+    }
+    Some(DefinitionRect::new(
+        position.x.saturating_add(min_x),
+        position.y.saturating_add(min_y),
+        max_x.saturating_sub(min_x).saturating_add(1),
+        max_y.saturating_sub(min_y).saturating_add(1),
+    ))
+}
+
 trait WorldAccessor {
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject>;
     fn object_ids(&self) -> Vec<ObjectId>;
+    fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect;
+    fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>>;
+    fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>>;
 }
 
 impl WorldAccessor for HostWorldContext {
@@ -503,6 +599,18 @@ impl WorldAccessor for HostWorldContext {
     fn object_ids(&self) -> Vec<ObjectId> {
         self.object_ids().to_vec()
     }
+
+    fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
+        self.object_shape_rect(object)
+    }
+
+    fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
+        self.object_sector_ids_in_rect(rect)
+    }
+
+    fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
+        self.shape_sector_ids_in_rect(rect)
+    }
 }
 
 impl WorldAccessor for EffectHostContext {
@@ -512,6 +620,42 @@ impl WorldAccessor for EffectHostContext {
 
     fn object_ids(&self) -> Vec<ObjectId> {
         self.world_object_ids()
+    }
+
+    fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
+        if self.pending_objects.contains_key(&object.id) {
+            host_object_shape_rect(object, self.world.definitions.as_ref())
+        } else {
+            self.world.object_shape_rect(object)
+        }
+    }
+
+    fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
+        let mut ids = self.world.object_sector_ids_in_rect(rect)?;
+        let mut seen = ids.iter().copied().collect::<HashSet<_>>();
+        for &id in &self.pending_order {
+            let Some(object) = self.pending_objects.get(&id) else {
+                continue;
+            };
+            if rect.contains_point(object.position.x, object.position.y) && seen.insert(id) {
+                ids.push(id);
+            }
+        }
+        Some(ids)
+    }
+
+    fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
+        let mut ids = self.world.shape_sector_ids_in_rect(rect)?;
+        let mut seen = ids.iter().copied().collect::<HashSet<_>>();
+        for &id in &self.pending_order {
+            let Some(object) = self.pending_objects.get(&id) else {
+                continue;
+            };
+            if self.object_shape_rect(object).overlaps(&rect) && seen.insert(id) {
+                ids.push(id);
+            }
+        }
+        Some(ids)
     }
 }
 
@@ -1739,6 +1883,14 @@ impl FindObjectParams {
         self.width == -1 && self.height == -1
     }
 
+    fn is_point_query(&self) -> bool {
+        !self.is_full_range() && self.width == 0 && self.height == 0
+    }
+
+    fn is_rect_query(&self) -> bool {
+        self.width > 0 && self.height > 0
+    }
+
     fn matches_object(&self, object: &HostWorldObject) -> bool {
         if matches!(object.status(), ObjectStatus::Deleted) {
             return false;
@@ -1807,17 +1959,18 @@ impl FindObjectParams {
         true
     }
 
-    fn matches_area(&self, object: &HostWorldObject) -> bool {
+    fn matches_area(&self, world: &impl WorldAccessor, object: &HostWorldObject) -> bool {
         if self.is_full_range() || self.is_closest_query() {
             return true;
         }
 
-        if self.width == 0 && self.height == 0 {
-            let position = object.position();
-            return position.x == self.x && position.y == self.y;
+        if self.is_point_query() {
+            return world
+                .object_shape_rect(object)
+                .contains_point(self.x, self.y);
         }
 
-        if self.width > 0 && self.height > 0 {
+        if self.is_rect_query() {
             let position = object.position();
             let dx = position.x - self.x;
             let dy = position.y - self.y;
@@ -1831,6 +1984,28 @@ impl FindObjectParams {
         let id = self.find_next?;
         let object = world.get_object(id)?;
         Some(squared_distance(object.position(), self.x, self.y))
+    }
+
+    fn candidate_ids(&self, world: &impl WorldAccessor) -> Vec<ObjectId> {
+        if self.is_closest_query() || self.is_full_range() {
+            return world.object_ids();
+        }
+
+        if self.is_point_query() {
+            let rect = DefinitionRect::new(self.x, self.y, 1, 1);
+            return world
+                .shape_sector_ids_in_rect(rect)
+                .unwrap_or_else(|| world.object_ids());
+        }
+
+        if self.is_rect_query() {
+            let rect = DefinitionRect::new(self.x, self.y, self.width, self.height);
+            return world
+                .object_sector_ids_in_rect(rect)
+                .unwrap_or_else(|| world.object_ids());
+        }
+
+        Vec::new()
     }
 }
 
@@ -1937,23 +2112,6 @@ fn normalise_precision(value: i32) -> i32 {
     }
 }
 
-fn scale_velocity_value(value: i32, from_precision: i32, to_precision: i32) -> i32 {
-    let from = normalise_precision(from_precision);
-    let to = normalise_precision(to_precision);
-    let numerator = i64::from(value) * i64::from(to);
-    let divisor = i64::from(from);
-    if divisor == 0 {
-        return 0;
-    }
-    let adjusted = if numerator >= 0 {
-        numerator + divisor / 2
-    } else {
-        numerator - divisor / 2
-    };
-    let scaled = adjusted / divisor;
-    scaled.max(i64::from(i32::MIN)).min(i64::from(i32::MAX)) as i32
-}
-
 /// GameCallEx - Broadcast a function call to Goal/Rule/Environment objects and scenario script
 ///
 /// C++ signature: GameCallEx(string szFunction, any par0-par8)
@@ -1972,7 +2130,9 @@ fn scale_velocity_value(value: i32, from_precision: i32, to_precision: i32) -> i
 fn game_call_ex(args: &[Value]) -> Result<Value, RuntimeError> {
     // Validate we have at least a function name
     if args.is_empty() {
-        return Err(RuntimeError::new("GameCallEx requires at least a function name"));
+        return Err(RuntimeError::new(
+            "GameCallEx requires at least a function name",
+        ));
     }
 
     let _function_name = match &args[0] {
@@ -2060,6 +2220,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetXDir", get_x_dir);
     script.register_host_function("SetYDir", set_y_dir);
     script.register_host_function("GetYDir", get_y_dir);
+    script.register_host_function("SetRDir", set_r_dir);
+    script.register_host_function("GetRDir", get_r_dir);
     script.register_host_function("FindObject", find_object);
     script.register_host_function("FindObjects", find_objects);
     script.register_host_function("ObjectCount", object_count);
@@ -2136,7 +2298,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SoundLevel", sound_level);
 }
 
-pub(crate) fn enter_random_context(rng: ChaCha8Rng) -> RandomContextGuard {
+pub(crate) fn enter_random_context(rng: LcgRng) -> RandomContextGuard {
     RANDOM_CONTEXT.with(|cell| {
         assert!(
             cell.borrow().is_none(),
@@ -3723,11 +3885,11 @@ enum EffectScope {
 
 #[derive(Debug)]
 struct RandomContext {
-    rng: RefCell<ChaCha8Rng>,
+    rng: RefCell<LcgRng>,
 }
 
 impl RandomContext {
-    fn into_rng(self) -> ChaCha8Rng {
+    fn into_rng(self) -> LcgRng {
         self.rng.into_inner()
     }
 }
@@ -3737,7 +3899,7 @@ pub(crate) struct RandomContextGuard {
 }
 
 impl RandomContextGuard {
-    pub fn finish(mut self) -> ChaCha8Rng {
+    pub fn finish(mut self) -> LcgRng {
         let context = self
             .context
             .take()
@@ -4270,8 +4432,7 @@ fn random(args: &[Value]) -> Result<Value, RuntimeError> {
             .ok_or_else(|| RuntimeError::new("Random: host context unavailable"))?
             .clone();
         let mut rng = context.rng.borrow_mut();
-        let upper = range as u32;
-        let value = rng.gen_range(0..upper) as i32;
+        let value = rng.random(range);
         Ok(Value::Int(value))
     })
 }
@@ -4801,7 +4962,13 @@ fn sin_func(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let precision = if args.len() > 2 {
         match &args[2] {
-            Value::Int(v) => if *v == 0 { 1 } else { *v },
+            Value::Int(v) => {
+                if *v == 0 {
+                    1
+                } else {
+                    *v
+                }
+            }
             Value::Nil => 1,
             other => {
                 return Err(RuntimeError::new(format!(
@@ -4856,7 +5023,13 @@ fn cos_func(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let precision = if args.len() > 2 {
         match &args[2] {
-            Value::Int(v) => if *v == 0 { 1 } else { *v },
+            Value::Int(v) => {
+                if *v == 0 {
+                    1
+                } else {
+                    *v
+                }
+            }
             Value::Nil => 1,
             other => {
                 return Err(RuntimeError::new(format!(
@@ -6803,7 +6976,7 @@ fn find_object(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
     let mut skip_until = params.find_next;
-    for object_id in world.object_ids() {
+    for object_id in params.candidate_ids(world) {
         let Some(object) = world.get_object(object_id) else {
             continue;
         };
@@ -6816,7 +6989,7 @@ fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> 
         if !params.matches_object(&object) {
             continue;
         }
-        if params.matches_area(&object) {
+        if params.matches_area(world, &object) {
             return Some(object_id);
         }
     }
@@ -6826,7 +6999,7 @@ fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> 
 fn find_object_closest(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
     let reference = params.reference_distance(world);
     let mut best: Option<(ObjectId, i64)> = None;
-    for object_id in world.object_ids() {
+    for object_id in params.candidate_ids(world) {
         let Some(object) = world.get_object(object_id) else {
             continue;
         };
@@ -6891,7 +7064,7 @@ fn object_count(args: &[Value]) -> Result<Value, RuntimeError> {
 fn collect_linear_matches(world: &impl WorldAccessor, params: &FindObjectParams) -> Vec<ObjectId> {
     let mut matches = Vec::new();
     let mut skip_until = params.find_next;
-    for object_id in world.object_ids() {
+    for object_id in params.candidate_ids(world) {
         let Some(object) = world.get_object(object_id) else {
             continue;
         };
@@ -6901,7 +7074,7 @@ fn collect_linear_matches(world: &impl WorldAccessor, params: &FindObjectParams)
             }
             continue;
         }
-        if params.matches_object(&object) && params.matches_area(&object) {
+        if params.matches_object(&object) && params.matches_area(world, &object) {
             matches.push(object_id);
         }
     }
@@ -6911,7 +7084,7 @@ fn collect_linear_matches(world: &impl WorldAccessor, params: &FindObjectParams)
 fn collect_closest_matches(world: &impl WorldAccessor, params: &FindObjectParams) -> Vec<ObjectId> {
     let reference = params.reference_distance(world);
     let mut matches = Vec::new();
-    for (order_index, object_id) in world.object_ids().into_iter().enumerate() {
+    for (order_index, object_id) in params.candidate_ids(world).into_iter().enumerate() {
         let Some(object) = world.get_object(object_id) else {
             continue;
         };
@@ -7522,14 +7695,14 @@ impl VelocityComponent {
         }
     }
 
-    fn extract(&self, velocity: Vector2) -> i32 {
+    fn extract_fixed(&self, velocity: FixedVec2) -> C4Fixed {
         match self {
             VelocityComponent::X => velocity.x,
             VelocityComponent::Y => velocity.y,
         }
     }
 
-    fn assign(&self, velocity: &mut Vector2, value: i32) {
+    fn assign_fixed(&self, velocity: &mut FixedVec2, value: C4Fixed) {
         match self {
             VelocityComponent::X => velocity.x = value,
             VelocityComponent::Y => velocity.y = value,
@@ -7578,22 +7751,26 @@ fn get_velocity_component(
             None => return Ok(Value::Nil),
         };
 
-        let fetch_velocity = |object_velocity: Vector2| {
-            let component_value = component.extract(object_velocity);
-            let scaled =
-                scale_velocity_value(component_value, DEFAULT_VELOCITY_PRECISION, precision);
-            Value::Int(scaled)
+        let effective_precision = normalise_precision(precision);
+        let fetch_velocity = |fixed_velocity: FixedVec2| {
+            // C++ GetXDir/GetYDir return fixtoi(xdir/ydir, prec). `C4Script.cpp:1167`.
+            let component_value = component.extract_fixed(fixed_velocity);
+            Value::Int(fixtoi_prec(component_value, effective_precision))
         };
 
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
                 if target == object.id() {
-                    return Ok(fetch_velocity(object.velocity()));
+                    return Ok(fetch_velocity(object.fixed_velocity()));
                 }
             }
 
             if let Some(other) = context.get_world_object(target) {
-                return Ok(fetch_velocity(other.velocity()));
+                // World objects only carry whole-pixel velocity from their
+                // snapshot; reconstruct fixed via itofix (sub-pixel fidelity for
+                // foreign objects awaits the snapshot work, task B).
+                let velocity = other.velocity();
+                return Ok(fetch_velocity(FixedVec2::from_ints(velocity.x, velocity.y)));
             }
 
             return Ok(Value::Nil);
@@ -7603,7 +7780,7 @@ fn get_velocity_component(
             Some(object) => object,
             None => return Ok(Value::Nil),
         };
-        Ok(fetch_velocity(object.velocity()))
+        Ok(fetch_velocity(object.fixed_velocity()))
     })
 }
 
@@ -7663,10 +7840,14 @@ fn set_velocity_component(
             }
         }
 
-        let mut updated_velocity = object.velocity();
-        let scaled = scale_velocity_value(value, precision, DEFAULT_VELOCITY_PRECISION);
-        component.assign(&mut updated_velocity, scaled);
-        object.set_velocity(updated_velocity);
+        // C++ SetXDir/SetYDir set xdir/ydir = itofix(value, prec) (default
+        // precision 10), storing fractional `C4Fixed` velocity. `C4Script.cpp:697`.
+        let mut fixed = object.fixed_velocity();
+        component.assign_fixed(
+            &mut fixed,
+            itofix_prec(value, normalise_precision(precision)),
+        );
+        object.set_fixed_velocity(fixed);
         Ok(Value::Bool(true))
     })
 }
@@ -7685,6 +7866,122 @@ fn set_x_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn set_y_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     set_velocity_component(args, VelocityComponent::Y)
+}
+
+fn set_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
+    // C++ FnSetRDir(value, [target], [precision = 10]) sets rdir = itofix(value,
+    // precision), a fractional `C4Fixed` angular velocity. `C4Script.cpp:710`.
+    if args.is_empty() {
+        return Err(RuntimeError::new(
+            "SetRDir expects at least 1 argument: value",
+        ));
+    }
+
+    let value = value_to_i32(&args[0], "SetRDir", "value")?;
+    let mut index = 1;
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(index) {
+        if matches!(arg, Value::Proplist(_) | Value::Nil | Value::Int(0)) {
+            target_id = parse_object_reference_argument(arg, "SetRDir", "target")?;
+            index += 1;
+        }
+    }
+
+    let mut precision = DEFAULT_VELOCITY_PRECISION;
+    if let Some(arg) = args.get(index) {
+        precision = value_to_i32(arg, "SetRDir", "precision")?;
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "SetRDir: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetRDir requires an active engine context"))?;
+
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        object.set_rotation_velocity(itofix_prec(value, normalise_precision(precision)));
+        Ok(Value::Bool(true))
+    })
+}
+
+fn get_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
+    // C++ FnGetRDir([target], [precision = 10]) returns fixtoi(rdir, precision).
+    // `C4Script.cpp` GetRDir.
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "GetRDir expects at most 2 arguments: target, precision",
+        ));
+    }
+
+    let mut index = 0;
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(index) {
+        if matches!(arg, Value::Proplist(_) | Value::Nil | Value::Int(0)) {
+            target_id = parse_object_reference_argument(arg, "GetRDir", "target")?;
+            index += 1;
+        }
+    }
+
+    let mut precision = DEFAULT_VELOCITY_PRECISION;
+    if let Some(arg) = args.get(index) {
+        precision = value_to_i32(arg, "GetRDir", "precision")?;
+        index += 1;
+    }
+
+    if index < args.len() {
+        return Err(RuntimeError::new(
+            "GetRDir: additional arguments are not supported",
+        ));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let effective_precision = normalise_precision(precision);
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_context() {
+                if target == object.id() {
+                    return Ok(Value::Int(fixtoi_prec(
+                        object.rotation_velocity(),
+                        effective_precision,
+                    )));
+                }
+            }
+            // Foreign objects do not expose `rdir` to scripts yet (no snapshot
+            // field); report nil rather than a fabricated value.
+            return Ok(Value::Nil);
+        }
+
+        let object = match context.object_context() {
+            Some(object) => object,
+            None => return Ok(Value::Nil),
+        };
+        Ok(Value::Int(fixtoi_prec(
+            object.rotation_velocity(),
+            effective_precision,
+        )))
+    })
 }
 
 fn get_x(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -10538,7 +10835,12 @@ struct ObjectScopeContext {
     current_direction: Direction,
     current_command_direction: CommandDirection,
     current_position: Vector2,
-    current_velocity: Vector2,
+    /// Sub-pixel velocity in 16.16 fixed-point. Precision-aware velocity
+    /// surfaces (`SetXDir`/`GetXDir`) read and write this directly so that
+    /// fractional `C4Fixed` velocity survives the script boundary. Seeded from
+    /// the whole-pixel velocity at scope entry (full sub-pixel fidelity on
+    /// entry awaits the snapshot work, task B).
+    current_fixed_velocity: FixedVec2,
     current_rotation: i32,
     vertices: Vec<ObjectVertex>,
     graphics_overlays: Vec<ObjectGraphicsOverlay>,
@@ -10612,7 +10914,7 @@ impl ObjectScopeContext {
             current_direction: direction,
             current_command_direction: command_direction,
             current_position: position,
-            current_velocity: velocity,
+            current_fixed_velocity: FixedVec2::from_ints(velocity.x, velocity.y),
             current_rotation: rotation.rem_euclid(360),
             vertices,
             graphics_overlays,
@@ -10979,18 +11281,35 @@ impl ObjectScopeContext {
         self.pending_update.command_direction = Some(command_direction);
     }
 
-    fn velocity(&self) -> Vector2 {
+    fn fixed_velocity(&self) -> FixedVec2 {
         self.pending_update
-            .velocity
-            .unwrap_or(self.current_velocity)
+            .fixed_velocity
+            .unwrap_or(self.current_fixed_velocity)
     }
 
-    fn set_velocity(&mut self, velocity: Vector2) {
-        if self.velocity() == velocity && self.pending_update.velocity.is_none() {
-            return;
-        }
-        self.current_velocity = velocity;
-        self.pending_update.velocity = Some(velocity);
+    /// Set the sub-pixel velocity and keep the whole-pixel mirror derived from
+    /// it (`fixtoi`), so both `GetXDir`-style reads and the integer snapshot
+    /// stay consistent with the `C4Fixed` source of truth.
+    fn set_fixed_velocity(&mut self, velocity: FixedVec2) {
+        self.current_fixed_velocity = velocity;
+        self.pending_update.fixed_velocity = Some(velocity);
+        // Keep the whole-pixel mirror consistent (fixtoi of the fixed value).
+        self.pending_update.velocity = Some(Vector2::new(velocity.int_x(), velocity.int_y()));
+    }
+
+    /// Angular velocity (`rdir`) as seen by `GetRDir`. The script object snapshot
+    /// does not yet carry the live `rdir`, so the entry value reads as zero; a
+    /// `SetRDir` earlier in the same call is reflected via the pending update.
+    /// (Threading the live `rdir` into the script snapshot is a shared follow-up
+    /// with full `GetXDir` entry fidelity.)
+    fn rotation_velocity(&self) -> C4Fixed {
+        self.pending_update
+            .rotation_velocity
+            .unwrap_or(C4Fixed::ZERO)
+    }
+
+    fn set_rotation_velocity(&mut self, rotation_velocity: C4Fixed) {
+        self.pending_update.rotation_velocity = Some(rotation_velocity);
     }
 
     fn effective_position(&self) -> Vector2 {
@@ -11139,7 +11458,6 @@ mod tests {
     use crate::ActionSpec;
     use crate::AudioCommand;
     use proptest::prelude::*;
-    use rand::{Rng, SeedableRng};
     use std::collections::HashMap;
     use std::fmt;
     use std::sync::{Arc, Mutex};
@@ -11149,15 +11467,18 @@ mod tests {
     use tracing_subscriber::registry::Registry;
 
     const EXPECTED_HOST_FUNCTIONS: &[&str] = &[
+        "Abs",
         "AddCommand",
         "AddEffect",
         "AddMessage",
         "AppendCommand",
         "BlastFree",
+        "BoundBy",
         "ClearParticles",
         "Contained",
         "Contents",
         "ContentsCount",
+        "Cos",
         "CreateArray",
         "CreateConstruction",
         "CreateObject",
@@ -11181,6 +11502,7 @@ mod tests {
         "GBackSemiSolid",
         "GBackSky",
         "GBackSolid",
+        "GameCallEx",
         "GameOver",
         "GetActTime",
         "GetAction",
@@ -11202,6 +11524,7 @@ mod tests {
         "GetGravity",
         "GetHomebaseMaterial",
         "GetHomebaseProduction",
+        "GetID",
         "GetIndexOf",
         "GetKeys",
         "GetLength",
@@ -11210,6 +11533,7 @@ mod tests {
         "GetObjectStatus",
         "GetOwner",
         "GetPath",
+        "GetPhase",
         "GetPlayerByIndex",
         "GetPlayerCount",
         "GetPlayerID",
@@ -11221,6 +11545,7 @@ mod tests {
         "GetPlrValueGain",
         "GetProcedure",
         "GetR",
+        "GetRDir",
         "GetScore",
         "GetSelectCount",
         "GetTemperature",
@@ -11237,12 +11562,15 @@ mod tests {
         "GetY",
         "GetYDir",
         "Log",
+        "Max",
         "Message",
+        "Min",
         "ObjectCount",
         "ObjectDistance",
         "PathFree",
         "PlayerMessage",
         "PlrMessage",
+        "Pow",
         "Random",
         "RemoveEffect",
         "RemoveObject",
@@ -11262,17 +11590,21 @@ mod tests {
         "SetObjDrawTransform2",
         "SetObjectStatus",
         "SetOwner",
+        "SetPhase",
         "SetPlrKnowledge",
         "SetPosition",
         "SetR",
+        "SetRDir",
         "SetTemperature",
         "SetTransferZone",
         "SetWind",
         "SetXDir",
         "SetYDir",
         "ShakeFree",
+        "Sin",
         "Sound",
         "SoundLevel",
+        "Sqrt",
     ];
 
     #[test]
@@ -13168,11 +13500,11 @@ mod tests {
         }
 
         #[test]
-        fn random_matches_chacha_stream(seed in any::<u64>(), range in 1i32..=1024) {
-            let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
-            let expected = expected_rng.gen_range(0..(range as u32)) as i32;
+        fn random_matches_cpp_lcg(seed in any::<u64>(), range in 1i32..=1024) {
+            let mut expected_rng = LcgRng::new(seed as u32);
+            let expected = expected_rng.random(range);
 
-            let guard = enter_random_context(ChaCha8Rng::seed_from_u64(seed));
+            let guard = enter_random_context(LcgRng::new(seed as u32));
             let value = random(&[Value::Int(range)]).expect("Random with context succeeds");
             let _ = guard.finish();
 
@@ -13182,14 +13514,14 @@ mod tests {
 
         #[test]
         fn random_sequence_remains_deterministic(seed in any::<u64>()) {
-            let mut expected_rng = ChaCha8Rng::seed_from_u64(seed);
+            let mut expected_rng = LcgRng::new(seed as u32);
             let expected = [
-                expected_rng.gen_range(0..100) as i32,
-                expected_rng.gen_range(0..100) as i32,
-                expected_rng.gen_range(0..100) as i32,
+                expected_rng.random(100),
+                expected_rng.random(100),
+                expected_rng.random(100),
             ];
 
-            let guard = enter_random_context(ChaCha8Rng::seed_from_u64(seed));
+            let guard = enter_random_context(LcgRng::new(seed as u32));
             let first = random(&[Value::Int(100)]).expect("first draw succeeds");
             let second = random(&[Value::Int(100)]).expect("second draw succeeds");
             let third = random(&[Value::Int(100)]).expect("third draw succeeds");
@@ -14785,7 +15117,9 @@ mod tests {
                 get_x_dir(&[])
             });
         let value = result.expect("GetXDir succeeds");
-        assert_eq!(value, Value::Int(12));
+        // C++ GetXDir default precision 10 returns fixtoi(xdir, 10): for a
+        // 12 px/frame velocity that is 12 * 10 = 120. `C4Script.cpp:1167`.
+        assert_eq!(value, Value::Int(120));
     }
 
     #[test]
@@ -14817,7 +15151,9 @@ mod tests {
                 get_y_dir(&args)
             });
         let value = result.expect("GetYDir succeeds");
-        assert_eq!(value, Value::Int(13));
+        // C++ GetYDir(precision = 5) returns fixtoi(ydir, 5): for a 25 px/frame
+        // velocity that is 25 * 5 = 125. `C4Script.cpp:1174`.
+        assert_eq!(value, Value::Int(125));
     }
 
     #[test]
@@ -14844,7 +15180,8 @@ mod tests {
         let args = [object_reference_value(ObjectId::new(42))];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_x_dir(&args));
         let value = result.expect("GetXDir target succeeds");
-        assert_eq!(value, Value::Int(-8));
+        // GetXDir on another object: fixtoi(xdir, 10) for -8 px/frame = -80.
+        assert_eq!(value, Value::Int(-80));
     }
 
     #[test]
@@ -14858,23 +15195,63 @@ mod tests {
     }
 
     #[test]
-    fn set_x_dir_records_object_update() {
+    fn set_x_dir_stores_subpixel_fixed_velocity_like_cpp() {
+        // C++ FnSetXDir(15) with default precision 10 sets xdir = itofix(15, 10)
+        // = 1.5 px/frame (raw 16.16 value 98304). `C4Script.cpp:697`.
         let args = [Value::Int(15)];
         let (result, outcome) = with_object_host_context(|| set_x_dir(&args));
-        let value = result.expect("SetXDir succeeds");
-        assert_eq!(value, Value::Bool(true));
+        assert_eq!(result.expect("SetXDir succeeds"), Value::Bool(true));
         let update = outcome.object_update.expect("velocity update recorded");
-        assert_eq!(update.velocity, Some(Vector2::new(15, 0)));
+        let fixed = update.fixed_velocity.expect("fixed velocity recorded");
+        assert_eq!(fixed.x, itofix_prec(15, 10));
+        assert_eq!(fixed.x.val(), 98304);
+        assert_eq!(fixed.y, C4Fixed::ZERO);
+        // The whole-pixel mirror is derived via fixtoi(1.5) = 2.
+        assert_eq!(update.velocity, Some(Vector2::new(2, 0)));
     }
 
     #[test]
     fn set_y_dir_applies_precision_when_recording_update() {
+        // C++ FnSetYDir(5, prec = 5) sets ydir = itofix(5, 5) = 1.0 px/frame
+        // (raw 16.16 value 65536). `C4Script.cpp:723`.
         let args = [Value::Int(5), Value::Nil, Value::Int(5)];
         let (result, outcome) = with_object_host_context(|| set_y_dir(&args));
         let value = result.expect("SetYDir succeeds");
         assert_eq!(value, Value::Bool(true));
         let update = outcome.object_update.expect("velocity update recorded");
-        assert_eq!(update.velocity, Some(Vector2::new(0, 10)));
+        let fixed = update.fixed_velocity.expect("fixed velocity recorded");
+        assert_eq!(fixed.y, itofix_prec(5, 5));
+        assert_eq!(fixed.y.val(), 65536);
+        // Whole-pixel mirror is fixtoi(1.0) = 1.
+        assert_eq!(update.velocity, Some(Vector2::new(0, 1)));
+    }
+
+    #[test]
+    fn set_r_dir_stores_subpixel_rotation_velocity_like_cpp() {
+        // C++ FnSetRDir(10) with default precision 10 sets rdir = itofix(10, 10)
+        // = 1.0 deg/frame (raw 16.16 value 65536). `C4Script.cpp:710`.
+        let args = [Value::Int(10)];
+        let (result, outcome) = with_object_host_context(|| set_r_dir(&args));
+        assert_eq!(result.expect("SetRDir succeeds"), Value::Bool(true));
+        let update = outcome
+            .object_update
+            .expect("rotation velocity update recorded");
+        let rdir = update
+            .rotation_velocity
+            .expect("rotation velocity recorded");
+        assert_eq!(rdir, itofix_prec(10, 10));
+        assert_eq!(rdir.val(), 65536);
+    }
+
+    #[test]
+    fn get_r_dir_reflects_pending_set_r_dir() {
+        // Within a call, GetRDir reflects a prior SetRDir: SetRDir(10) is
+        // 1.0 deg/frame, so GetRDir() at default precision 10 returns 10.
+        let (result, _) = with_object_host_context(|| {
+            set_r_dir(&[Value::Int(10)])?;
+            get_r_dir(&[])
+        });
+        assert_eq!(result.expect("GetRDir succeeds"), Value::Int(10));
     }
 
     #[test]
@@ -14884,6 +15261,17 @@ mod tests {
         let args = [Value::Int(4), Value::Proplist(target)];
         let (result, outcome) = with_object_host_context(|| set_x_dir(&args));
         let value = result.expect("SetXDir returns bool");
+        assert_eq!(value, Value::Bool(false));
+        assert!(outcome.object_update.is_none());
+    }
+
+    #[test]
+    fn set_r_dir_respects_target_filter() {
+        let mut target = HashMap::new();
+        target.insert("id".into(), Value::Int(99));
+        let args = [Value::Int(4), Value::Proplist(target)];
+        let (result, outcome) = with_object_host_context(|| set_r_dir(&args));
+        let value = result.expect("SetRDir returns bool");
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.object_update.is_none());
     }
@@ -16850,6 +17238,133 @@ mod tests {
             panic!("expected integer id, got {id_value:?}");
         };
         assert_eq!(*id, matching_id.as_u64() as i32);
+    }
+
+    #[test]
+    fn find_object_point_uses_sector_shape_candidates() {
+        let id = ObjectId::new(61);
+        let mut definitions = HashMap::new();
+        definitions.insert(
+            "Wide".to_string(),
+            DefinitionMetadata {
+                shape: Some(DefinitionRect::new(-10, -5, 20, 10)),
+                ..DefinitionMetadata::default()
+            },
+        );
+        let world = HostWorldContext::with_landscape(
+            vec![HostWorldObject::new(
+                id,
+                "Wide",
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                OWNER_NONE,
+                100,
+                crate::FULL_CON,
+                Vector2::new(40, 10),
+                Vector2::ZERO,
+                Vec::new(),
+                0,
+                0,
+                None,
+            )],
+            Some(Landscape::flat(120, 120)),
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+
+        let args = [
+            Value::String("Wide".into()),
+            Value::Int(31),
+            Value::Int(10),
+            Value::Int(0),
+            Value::Int(0),
+        ];
+        let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
+        assert_eq!(
+            result.expect("FindObject succeeds"),
+            object_reference_value(id)
+        );
+    }
+
+    #[test]
+    fn find_objects_sector_range_preserves_world_order() {
+        let first = ObjectId::new(71);
+        let second = ObjectId::new(72);
+        let world = HostWorldContext::with_landscape(
+            vec![
+                HostWorldObject::new(
+                    first,
+                    "Dummy",
+                    ObjectStatus::Normal,
+                    "Idle",
+                    None,
+                    None,
+                    None,
+                    OWNER_NONE,
+                    100,
+                    crate::FULL_CON,
+                    Vector2::new(70, 10),
+                    Vector2::ZERO,
+                    Vec::new(),
+                    0,
+                    0,
+                    None,
+                ),
+                HostWorldObject::new(
+                    second,
+                    "Dummy",
+                    ObjectStatus::Normal,
+                    "Idle",
+                    None,
+                    None,
+                    None,
+                    OWNER_NONE,
+                    100,
+                    crate::FULL_CON,
+                    Vector2::new(10, 10),
+                    Vector2::ZERO,
+                    Vec::new(),
+                    0,
+                    0,
+                    None,
+                ),
+            ],
+            Some(Landscape::flat(120, 120)),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let args = [
+            Value::String("Dummy".into()),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(120),
+            Value::Int(20),
+        ];
+        let (result, _) = with_effect_context(None, &[], world, 1, || find_objects(&args));
+        let value = result.expect("FindObjects succeeds");
+        match value {
+            Value::Array(entries) => {
+                assert_eq!(
+                    entries,
+                    vec![
+                        object_reference_value(first),
+                        object_reference_value(second)
+                    ]
+                );
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
     }
 
     #[test]

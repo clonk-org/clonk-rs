@@ -45,7 +45,11 @@ impl<'a> Lexer<'a> {
                         continue;
                     } else if self.peek_char() == Some('=') {
                         self.bump_char();
-                        return Ok(Token::new(TokenKind::Symbol(Symbol::SlashEqual), line, column));
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::SlashEqual),
+                            line,
+                            column,
+                        ));
                     } else {
                         return Ok(Token::new(TokenKind::Symbol(Symbol::Slash), line, column));
                     }
@@ -55,13 +59,21 @@ impl<'a> Lexer<'a> {
                     match self.peek_char() {
                         Some('=') => {
                             self.bump_char();
-                            return Ok(Token::new(TokenKind::Symbol(Symbol::StringEqual), line, column));
+                            return Ok(Token::new(
+                                TokenKind::Symbol(Symbol::StringEqual),
+                                line,
+                                column,
+                            ));
                         }
                         Some('!') => {
                             self.bump_char();
                             if self.peek_char() == Some('=') {
                                 self.bump_char();
-                                return Ok(Token::new(TokenKind::Symbol(Symbol::StringNotEqual), line, column));
+                                return Ok(Token::new(
+                                    TokenKind::Symbol(Symbol::StringNotEqual),
+                                    line,
+                                    column,
+                                ));
                             }
                             return Err(ParseError::new(
                                 "expected '=' after 'S!' in string comparison operator".to_string(),
@@ -73,17 +85,33 @@ impl<'a> Lexer<'a> {
                             self.bump_char();
                             if self.peek_char() == Some('=') {
                                 self.bump_char();
-                                return Ok(Token::new(TokenKind::Symbol(Symbol::StringLessEqual), line, column));
+                                return Ok(Token::new(
+                                    TokenKind::Symbol(Symbol::StringLessEqual),
+                                    line,
+                                    column,
+                                ));
                             }
-                            return Ok(Token::new(TokenKind::Symbol(Symbol::StringLess), line, column));
+                            return Ok(Token::new(
+                                TokenKind::Symbol(Symbol::StringLess),
+                                line,
+                                column,
+                            ));
                         }
                         Some('>') => {
                             self.bump_char();
                             if self.peek_char() == Some('=') {
                                 self.bump_char();
-                                return Ok(Token::new(TokenKind::Symbol(Symbol::StringGreaterEqual), line, column));
+                                return Ok(Token::new(
+                                    TokenKind::Symbol(Symbol::StringGreaterEqual),
+                                    line,
+                                    column,
+                                ));
                             }
-                            return Ok(Token::new(TokenKind::Symbol(Symbol::StringGreater), line, column));
+                            return Ok(Token::new(
+                                TokenKind::Symbol(Symbol::StringGreater),
+                                line,
+                                column,
+                            ));
                         }
                         _ => {
                             // 'S' alone is an identifier, let it fall through to identifier lexing
@@ -133,7 +161,11 @@ impl<'a> Lexer<'a> {
                     // Check for :: (scope resolution)
                     if self.peek_char() == Some(':') {
                         self.bump_char();
-                        return Ok(Token::new(TokenKind::Symbol(Symbol::ColonColon), line, column));
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::ColonColon),
+                            line,
+                            column,
+                        ));
                     }
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Colon), line, column));
                 }
@@ -143,7 +175,11 @@ impl<'a> Lexer<'a> {
                         self.bump_char();
                         if self.peek_char() == Some('.') {
                             self.bump_char();
-                            return Ok(Token::new(TokenKind::Symbol(Symbol::Ellipsis), line, column));
+                            return Ok(Token::new(
+                                TokenKind::Symbol(Symbol::Ellipsis),
+                                line,
+                                column,
+                            ));
                         } else {
                             // Two dots is an error - not valid in C4Script
                             return Err(ParseError::new(
@@ -158,11 +194,19 @@ impl<'a> Lexer<'a> {
                 '+' => {
                     if self.peek_char() == Some('+') {
                         self.bump_char();
-                        return Ok(Token::new(TokenKind::Symbol(Symbol::PlusPlus), line, column));
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::PlusPlus),
+                            line,
+                            column,
+                        ));
                     }
                     if self.peek_char() == Some('=') {
                         self.bump_char();
-                        return Ok(Token::new(TokenKind::Symbol(Symbol::PlusEqual), line, column));
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::PlusEqual),
+                            line,
+                            column,
+                        ));
                     }
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Plus), line, column));
                 }
@@ -173,29 +217,49 @@ impl<'a> Lexer<'a> {
                     }
                     if self.peek_char() == Some('-') {
                         self.bump_char();
-                        return Ok(Token::new(TokenKind::Symbol(Symbol::MinusMinus), line, column));
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::MinusMinus),
+                            line,
+                            column,
+                        ));
                     }
                     if self.peek_char() == Some('=') {
                         self.bump_char();
-                        return Ok(Token::new(TokenKind::Symbol(Symbol::MinusEqual), line, column));
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::MinusEqual),
+                            line,
+                            column,
+                        ));
                     }
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Minus), line, column));
                 }
                 '*' => {
                     if self.peek_char() == Some('*') {
                         self.bump_char();
-                        return Ok(Token::new(TokenKind::Symbol(Symbol::StarStar), line, column));
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::StarStar),
+                            line,
+                            column,
+                        ));
                     }
                     if self.peek_char() == Some('=') {
                         self.bump_char();
-                        return Ok(Token::new(TokenKind::Symbol(Symbol::StarEqual), line, column));
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::StarEqual),
+                            line,
+                            column,
+                        ));
                     }
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Star), line, column));
                 }
                 '%' => {
                     if self.peek_char() == Some('=') {
                         self.bump_char();
-                        return Ok(Token::new(TokenKind::Symbol(Symbol::PercentEqual), line, column));
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::PercentEqual),
+                            line,
+                            column,
+                        ));
                     }
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Percent), line, column));
                 }
@@ -226,9 +290,17 @@ impl<'a> Lexer<'a> {
                         self.bump_char();
                         if self.peek_char() == Some('=') {
                             self.bump_char();
-                            return Ok(Token::new(TokenKind::Symbol(Symbol::LeftShiftEqual), line, column));
+                            return Ok(Token::new(
+                                TokenKind::Symbol(Symbol::LeftShiftEqual),
+                                line,
+                                column,
+                            ));
                         }
-                        return Ok(Token::new(TokenKind::Symbol(Symbol::LeftShift), line, column));
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::LeftShift),
+                            line,
+                            column,
+                        ));
                     }
                     if self.peek_char() == Some('=') {
                         self.bump_char();
@@ -245,9 +317,17 @@ impl<'a> Lexer<'a> {
                         self.bump_char();
                         if self.peek_char() == Some('=') {
                             self.bump_char();
-                            return Ok(Token::new(TokenKind::Symbol(Symbol::RightShiftEqual), line, column));
+                            return Ok(Token::new(
+                                TokenKind::Symbol(Symbol::RightShiftEqual),
+                                line,
+                                column,
+                            ));
                         }
-                        return Ok(Token::new(TokenKind::Symbol(Symbol::RightShift), line, column));
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::RightShift),
+                            line,
+                            column,
+                        ));
                     }
                     if self.peek_char() == Some('=') {
                         self.bump_char();
@@ -266,9 +346,17 @@ impl<'a> Lexer<'a> {
                     }
                     if self.peek_char() == Some('=') {
                         self.bump_char();
-                        return Ok(Token::new(TokenKind::Symbol(Symbol::AndEqual), line, column));
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::AndEqual),
+                            line,
+                            column,
+                        ));
                     }
-                    return Ok(Token::new(TokenKind::Symbol(Symbol::Ampersand), line, column));
+                    return Ok(Token::new(
+                        TokenKind::Symbol(Symbol::Ampersand),
+                        line,
+                        column,
+                    ));
                 }
                 '|' => {
                     if self.peek_char() == Some('|') {
@@ -284,7 +372,11 @@ impl<'a> Lexer<'a> {
                 '^' => {
                     if self.peek_char() == Some('=') {
                         self.bump_char();
-                        return Ok(Token::new(TokenKind::Symbol(Symbol::XorEqual), line, column));
+                        return Ok(Token::new(
+                            TokenKind::Symbol(Symbol::XorEqual),
+                            line,
+                            column,
+                        ));
                     }
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Caret), line, column));
                 }
@@ -469,11 +561,18 @@ impl<'a> Lexer<'a> {
                 // - Contains only uppercase letters, digits, or underscores
                 // - Not followed by '(' (function call) or ':' (label, except ::)
                 if lexeme.len() == 4
-                    && lexeme.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                    && lexeme
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
                 {
                     // Check what follows the identifier
-                    let next_is_call_or_label = self.peek_char()
-                        .map(|ch| ch == '(' || (ch == ':' && self.peek_char_at(1).map_or(true, |ch2| ch2 != ':')))
+                    let next_is_call_or_label = self
+                        .peek_char()
+                        .map(|ch| {
+                            ch == '('
+                                || (ch == ':'
+                                    && self.peek_char_at(1).map_or(true, |ch2| ch2 != ':'))
+                        })
                         .unwrap_or(false);
 
                     if !next_is_call_or_label {
@@ -552,11 +651,13 @@ impl<'a> Lexer<'a> {
                     let hex_slice = &self.input[hex_start..end_idx];
                     match i32::from_str_radix(hex_slice, 16) {
                         Ok(value) => return Ok(Token::new(TokenKind::Number(value), line, column)),
-                        Err(_) => return Err(ParseError::new(
-                            format!("hexadecimal literal out of range: 0x{hex_slice}"),
-                            line,
-                            column,
-                        )),
+                        Err(_) => {
+                            return Err(ParseError::new(
+                                format!("hexadecimal literal out of range: 0x{hex_slice}"),
+                                line,
+                                column,
+                            ))
+                        }
                     }
                 }
             }
@@ -634,7 +735,11 @@ impl<'a> Lexer<'a> {
                 '$' => {
                     // Found closing '$', extract the key without the $ delimiters
                     let key = &self.input[start_idx + 1..idx];
-                    return Ok(Token::new(TokenKind::LocaleKey(key.to_string()), line, column));
+                    return Ok(Token::new(
+                        TokenKind::LocaleKey(key.to_string()),
+                        line,
+                        column,
+                    ));
                 }
                 '\n' | '\r' => {
                     return Err(ParseError::new(
@@ -678,28 +783,40 @@ mod tests {
     fn tokenizes_private_keyword() {
         let tokens = lex_all("private").unwrap();
         assert_eq!(tokens.len(), 1);
-        assert!(matches!(tokens[0].kind, TokenKind::Keyword(Keyword::Private)));
+        assert!(matches!(
+            tokens[0].kind,
+            TokenKind::Keyword(Keyword::Private)
+        ));
     }
 
     #[test]
     fn tokenizes_protected_keyword() {
         let tokens = lex_all("protected").unwrap();
         assert_eq!(tokens.len(), 1);
-        assert!(matches!(tokens[0].kind, TokenKind::Keyword(Keyword::Protected)));
+        assert!(matches!(
+            tokens[0].kind,
+            TokenKind::Keyword(Keyword::Protected)
+        ));
     }
 
     #[test]
     fn tokenizes_public_keyword() {
         let tokens = lex_all("public").unwrap();
         assert_eq!(tokens.len(), 1);
-        assert!(matches!(tokens[0].kind, TokenKind::Keyword(Keyword::Public)));
+        assert!(matches!(
+            tokens[0].kind,
+            TokenKind::Keyword(Keyword::Public)
+        ));
     }
 
     #[test]
     fn tokenizes_global_keyword() {
         let tokens = lex_all("global").unwrap();
         assert_eq!(tokens.len(), 1);
-        assert!(matches!(tokens[0].kind, TokenKind::Keyword(Keyword::Global)));
+        assert!(matches!(
+            tokens[0].kind,
+            TokenKind::Keyword(Keyword::Global)
+        ));
     }
 
     #[test]
@@ -709,7 +826,8 @@ mod tests {
         // Should tokenize successfully despite \r\n endings
         assert!(tokens.len() > 0);
         // Check that the second var is on line 2
-        let var_positions: Vec<_> = tokens.iter()
+        let var_positions: Vec<_> = tokens
+            .iter()
             .filter(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Var)))
             .collect();
         assert_eq!(var_positions.len(), 2);
@@ -721,7 +839,8 @@ mod tests {
     fn tracks_line_numbers_correctly() {
         let source = "var a = 1;\nvar b = 2;\nvar c = 3;";
         let tokens = lex_all(source).unwrap();
-        let var_positions: Vec<_> = tokens.iter()
+        let var_positions: Vec<_> = tokens
+            .iter()
             .filter(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Var)))
             .collect();
         assert_eq!(var_positions.len(), 3);
@@ -787,7 +906,8 @@ mod tests {
     fn skips_line_comments() {
         let source = "var x = 1; // this is a comment\nvar y = 2;";
         let tokens = lex_all(source).unwrap();
-        let var_count = tokens.iter()
+        let var_count = tokens
+            .iter()
             .filter(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Var)))
             .count();
         assert_eq!(var_count, 2);
@@ -797,7 +917,8 @@ mod tests {
     fn skips_block_comments() {
         let source = "var x = 1; /* this is\na block comment */ var y = 2;";
         let tokens = lex_all(source).unwrap();
-        let var_count = tokens.iter()
+        let var_count = tokens
+            .iter()
             .filter(|t| matches!(t.kind, TokenKind::Keyword(Keyword::Var)))
             .count();
         assert_eq!(var_count, 2);
@@ -811,7 +932,10 @@ mod tests {
         if let TokenKind::Number(n) = tokens[0].kind {
             assert_eq!(n, 0xa0c0ff);
         } else {
-            panic!("Expected hex literal to be tokenized as Number, got {:?}", tokens[0].kind);
+            panic!(
+                "Expected hex literal to be tokenized as Number, got {:?}",
+                tokens[0].kind
+            );
         }
     }
 
@@ -847,7 +971,8 @@ mod tests {
         let tokens = result.unwrap();
         // Should have: identifier, lparen, string, comma, number, comma, number, comma, number, comma, number, comma, number, comma, hex, rparen
         // Find the last number token (should be the hex literal)
-        let number_tokens: Vec<_> = tokens.iter()
+        let number_tokens: Vec<_> = tokens
+            .iter()
             .filter(|t| matches!(t.kind, TokenKind::Number(_)))
             .collect();
         // Should have 5 number tokens: 0, 0, 0, 0, 30, 0xa0c0ff

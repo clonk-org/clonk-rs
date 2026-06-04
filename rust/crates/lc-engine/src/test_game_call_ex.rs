@@ -14,7 +14,11 @@ fn test_game_call_ex_parses() {
 
     let result = Script::compile(source);
     // This will fail initially because GameCallEx is not yet registered
-    assert!(result.is_ok(), "Should recognize GameCallEx: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Should recognize GameCallEx: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -30,7 +34,11 @@ fn test_game_call_ex_with_multiple_params() {
     "#;
 
     let result = Script::compile(source);
-    assert!(result.is_ok(), "Should handle GameCallEx with parameters: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Should handle GameCallEx with parameters: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -44,5 +52,9 @@ fn test_game_call_ex_minimal() {
     "#;
 
     let result = Script::compile(source);
-    assert!(result.is_ok(), "Should handle minimal GameCallEx call: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Should handle minimal GameCallEx call: {:?}",
+        result.err()
+    );
 }

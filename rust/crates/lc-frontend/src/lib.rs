@@ -3367,7 +3367,6 @@ mod tests {
         PlayerState, RgbColor, Vector2,
     };
     use lc_graphics::{BitmapFont, PixelFormat};
-    use rand::SeedableRng;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -3422,6 +3421,11 @@ mod tests {
                 draw_transform: None,
                 command_queue: Vec::new(),
                 command_stack: CommandStackSnapshot::default(),
+                local_vars: HashMap::new(),
+                fixed_position: None,
+                fixed_velocity: None,
+                rotation_velocity: None,
+                fixed_rotation: None,
             }],
             environment: EnvironmentFrame::default(),
             sky: None,
@@ -3434,7 +3438,7 @@ mod tests {
             known_crew_owners: Vec::new(),
             eliminated_crew_owners: Vec::new(),
             landscape: Some(Landscape::flat(256, 120)),
-            rng: rand_chacha::ChaCha8Rng::seed_from_u64(0),
+            rng: lc_engine::LcgRng::seed_from_u64(0),
             surfaces: Vec::new(),
             hud: Default::default(),
             controls: Vec::new(),

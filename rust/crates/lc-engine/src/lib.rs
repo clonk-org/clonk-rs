@@ -13,10 +13,14 @@ mod material;
 mod math;
 mod message;
 pub mod ocf;
+#[cfg(test)]
+mod parity_differential;
 mod pathfinder;
 mod player;
 mod record;
+mod rng;
 pub mod scenario;
+mod sector;
 mod sky;
 #[cfg(test)]
 mod test_game_call_ex;
@@ -97,6 +101,7 @@ use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use material::MaterialReactionKind;
 use message::{MessageCommand, MessageManager, MessageSpec, PersistedMessage};
 use ocf::NORMAL as OCF_NORMAL;
+use sector::{SectorMap, SectorObject};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
@@ -106,6 +111,8 @@ use std::ops::AddAssign;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::math::{fixed100, fixtoi, itofix, C4Fixed, FixedVec2};
+pub use crate::rng::LcgRng;
 use lc_resources::definition::ActionFacet as ResourceActionFacet;
 use lc_resources::{
     ActionDefinition as ResourceActionDefinition, PictureRect as ResourcePictureRect,
@@ -113,8 +120,7 @@ use lc_resources::{
 };
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, ScriptError, Value};
 use mass_mover::MassMoverSet;
-use rand::{seq::SliceRandom, Rng, SeedableRng};
-use rand_chacha::ChaCha8Rng;
+use rand::{seq::SliceRandom, Rng};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sky::SkyState;
 use thiserror::Error;
@@ -297,6 +303,14 @@ pub const CNAT_BOTTOM: u32 = 8;
 pub const CNAT_CENTER: u32 = 16;
 pub const CNAT_MULTI_ATTACH: u32 = 32;
 pub const CNAT_NO_COLLISION: u32 = 64;
+const CNAT_FLAGS: u32 = CNAT_MULTI_ATTACH | CNAT_NO_COLLISION;
+const C4D_BORDER_SIDES: i32 = 1;
+const C4D_BORDER_TOP: i32 = 2;
+const C4D_BORDER_BOTTOM: i32 = 4;
+const CONTACT_DENSITY_SOLID: i32 = 50;
+const ATTACH_RANGE: i32 = 5;
+const FIX_FULL_CIRCLE: i32 = 360;
+const FIX_HALF_CIRCLE: i32 = 180;
 
 pub const CATEGORY_STATIC_BACK: i32 = 1 << 0;
 pub const CATEGORY_STRUCTURE: i32 = 1 << 1;
@@ -320,8 +334,8 @@ pub const LINE_CONNECT_LIQUID_PUMP: u32 = 1 << 6;
 pub const LINE_CONNECT_CONNECT_ROPE: u32 = 1 << 7;
 pub const LINE_CONNECT_ENERGY_HOLDER: u32 = 1 << 8;
 
-fn default_rng() -> ChaCha8Rng {
-    ChaCha8Rng::seed_from_u64(0)
+fn default_rng() -> LcgRng {
+    LcgRng::default()
 }
 
 fn compute_blast_size(radius: i32) -> i64 {
@@ -995,20 +1009,17 @@ impl PhysicsSettings {
         Self::DEFAULT_MAX_HORIZONTAL_SPEED
     }
 
-    fn clamp_velocity(&self, velocity: &mut Vector2) {
-        if velocity.y > self.max_fall_speed {
-            velocity.y = self.max_fall_speed;
-        }
-        if velocity.y < self.max_rise_speed {
-            velocity.y = self.max_rise_speed;
-        }
+    pub fn gravity_as_c4fixed(&self) -> C4Fixed {
+        fixed100(self.gravity) / 5
+    }
+
+    fn clamp_fixed_velocity(&self, velocity: &mut FixedVec2) {
+        let min_vertical = self.max_rise_speed.min(self.max_fall_speed);
+        let max_vertical = self.max_rise_speed.max(self.max_fall_speed);
+        velocity.y =
+            clamp_fixed_to_limit_pair(velocity.y, itofix(min_vertical), itofix(max_vertical));
         let max_horizontal = self.max_horizontal_speed.max(0);
-        if velocity.x > max_horizontal {
-            velocity.x = max_horizontal;
-        }
-        if velocity.x < -max_horizontal {
-            velocity.x = -max_horizontal;
-        }
+        velocity.x = clamp_fixed_to_limit(velocity.x, max_horizontal);
     }
 }
 
@@ -1565,7 +1576,7 @@ impl EnvironmentSettings {
         ambient.saturating_add(offset).clamp(-100, 100)
     }
 
-    pub fn advance_frame(&mut self, rng: &mut ChaCha8Rng) {
+    pub fn advance_frame(&mut self, rng: &mut LcgRng) {
         self.refresh_runtime_fields();
         self.update_season();
         self.update_temperature_from_season();
@@ -1598,10 +1609,10 @@ impl EnvironmentSettings {
         self.wind.saturating_add(delta)
     }
 
-    fn apply_to_velocity(&self, velocity: &mut Vector2, frame: u64) {
+    fn apply_to_velocity(&self, velocity: &mut FixedVec2, frame: u64) {
         let wind_force = self.wind_force(frame);
         if wind_force != 0 {
-            velocity.x = velocity.x.saturating_add(wind_force);
+            velocity.x += fixed100(wind_force);
         }
     }
 
@@ -1662,7 +1673,7 @@ impl EnvironmentSettings {
         }
     }
 
-    fn update_wind(&mut self, rng: &mut ChaCha8Rng) {
+    fn update_wind(&mut self, rng: &mut LcgRng) {
         if self.wind_update_interval == 0 || self.wind_variation == 0 {
             self.wind_target = self.wind;
             self.wind_update_timer = 0;
@@ -1932,7 +1943,15 @@ impl ObjectState {
 struct ObjectDelta {
     position: Option<Vector2>,
     velocity: Option<Vector2>,
+    /// Sub-pixel velocity in 16.16 fixed-point. When present, this takes
+    /// precedence over the whole-pixel `velocity` mirror so that script
+    /// surfaces (e.g. `SetXDir`) can express fractional `C4Fixed` velocity
+    /// exactly, matching C++ `pObj->xdir = itofix(n, prec)` (`C4Script.cpp:697`).
+    fixed_velocity: Option<FixedVec2>,
     rotation: Option<i32>,
+    /// Sub-pixel angular velocity (16.16 fixed-point degrees/frame) set by
+    /// `SetRDir`. Mirrors C++ `pObj->rdir = itofix(n, prec)` (`C4Script.cpp:710`).
+    rotation_velocity: Option<C4Fixed>,
     energy: Option<i32>,
     damage: Option<i32>,
     magic_energy: Option<i32>,
@@ -1963,8 +1982,14 @@ impl ObjectDelta {
         if let Some(velocity) = update.velocity {
             self.velocity = Some(velocity);
         }
+        if let Some(fixed_velocity) = update.fixed_velocity {
+            self.fixed_velocity = Some(fixed_velocity);
+        }
         if let Some(rotation) = update.rotation {
             self.rotation = Some(rotation);
+        }
+        if let Some(rotation_velocity) = update.rotation_velocity {
+            self.rotation_velocity = Some(rotation_velocity);
         }
         if let Some(energy) = update.energy {
             self.energy = Some(energy);
@@ -2031,7 +2056,9 @@ impl From<ObjectUpdate> for ObjectDelta {
         Self {
             position: update.position,
             velocity: update.velocity,
+            fixed_velocity: update.fixed_velocity,
             rotation: update.rotation,
+            rotation_velocity: update.rotation_velocity,
             energy: update.energy,
             construction: update.construction,
             damage: update.damage,
@@ -2060,6 +2087,14 @@ impl From<ObjectUpdate> for ObjectDelta {
 pub struct ObjectUpdate {
     pub position: Option<Vector2>,
     pub velocity: Option<Vector2>,
+    /// Sub-pixel velocity in 16.16 fixed-point, set by precision-aware script
+    /// surfaces (`SetXDir`/`SetYDir`). Takes precedence over `velocity` when
+    /// applied. Mirrors C++ storing velocity as `C4Fixed` (`C4Object.h` xdir/ydir).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_velocity: Option<FixedVec2>,
+    /// Sub-pixel angular velocity (16.16 fixed degrees/frame) from `SetRDir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_velocity: Option<C4Fixed>,
     #[serde(default)]
     pub rotation: Option<i32>,
     pub energy: Option<i32>,
@@ -2232,7 +2267,9 @@ impl ObjectUpdate {
     pub fn is_empty(&self) -> bool {
         self.position.is_none()
             && self.velocity.is_none()
+            && self.fixed_velocity.is_none()
             && self.rotation.is_none()
+            && self.rotation_velocity.is_none()
             && self.energy.is_none()
             && self.construction.is_none()
             && self.damage.is_none()
@@ -2448,6 +2485,15 @@ struct Object {
     id: ObjectId,
     definition_id: DefinitionId,
     state: ObjectState,
+    fixed_position: FixedVec2,
+    fixed_velocity: FixedVec2,
+    /// 16.16 fixed-point rotation accumulator (C++ `fix_r`, `C4Object.h:149`).
+    /// `state.rotation` (whole degrees) is its `fixtoi` projection.
+    fixed_rotation: C4Fixed,
+    /// 16.16 fixed-point angular velocity in degrees/frame (C++ `rdir`,
+    /// `C4Object.h:150`). Set by `SetRDir`; applied as `fix_r += rdir * 5` each
+    /// frame (`C4Movement.cpp:376`).
+    rotation_velocity: C4Fixed,
     destroyed: bool,
     command_queue: VecDeque<QueuedCommand>,
     commands: CommandStack,
@@ -2484,11 +2530,30 @@ struct CommandQueueOutcome {
     particles: Vec<ParticleCommand>,
 }
 
+/// Record a fixed-point vector in a snapshot only when it carries sub-pixel
+/// detail beyond its whole-pixel projection — i.e. when `fixtoi(fixed)` would
+/// not round-trip back to `fixed`. Returns `None` for whole-pixel values so the
+/// snapshot stays minimal and reconstructs losslessly via `itofix(pixels)`.
+fn subpixel_or_none(fixed: FixedVec2, pixels: Vector2) -> Option<FixedVec2> {
+    if fixed == FixedVec2::from_ints(pixels.x, pixels.y) {
+        None
+    } else {
+        Some(fixed)
+    }
+}
+
 impl Object {
     fn new(id: ObjectId, definition_id: DefinitionId, state: ObjectState) -> Self {
+        let fixed_position = FixedVec2::from_ints(state.position.x, state.position.y);
+        let fixed_velocity = FixedVec2::from_ints(state.velocity.x, state.velocity.y);
+        let fixed_rotation = itofix(state.rotation);
         Self {
             id,
             definition_id,
+            fixed_position,
+            fixed_velocity,
+            fixed_rotation,
+            rotation_velocity: C4Fixed::ZERO,
             destroyed: matches!(state.status, ObjectStatus::Deleted),
             state,
             command_queue: VecDeque::new(),
@@ -2501,6 +2566,478 @@ impl Object {
     #[allow(dead_code)]
     fn command_count(&self) -> usize {
         self.commands.len()
+    }
+
+    fn fixed_vec_to_pixels(value: FixedVec2) -> Vector2 {
+        Vector2::new(value.int_x(), value.int_y())
+    }
+
+    fn position_pixels(&self) -> Vector2 {
+        Self::fixed_vec_to_pixels(self.fixed_position)
+    }
+
+    fn velocity_pixels(&self) -> Vector2 {
+        Self::fixed_vec_to_pixels(self.fixed_velocity)
+    }
+
+    fn set_position(&mut self, position: Vector2) {
+        self.state.position = position;
+        self.fixed_position = FixedVec2::from_ints(position.x, position.y);
+    }
+
+    fn set_velocity(&mut self, velocity: Vector2) {
+        self.state.velocity = velocity;
+        self.fixed_velocity = FixedVec2::from_ints(velocity.x, velocity.y);
+    }
+
+    fn set_velocity_preserving_subpixel(&mut self, velocity: Vector2) {
+        fn preserve_axis(fixed: &mut C4Fixed, previous: i32, resolved: i32) {
+            if resolved == previous {
+                return;
+            }
+            if resolved == 0 {
+                *fixed = C4Fixed::ZERO;
+                return;
+            }
+            if previous != 0 && previous.signum() != resolved.signum() {
+                *fixed = -*fixed;
+                return;
+            }
+            *fixed = itofix(resolved);
+        }
+
+        let previous = self.state.velocity;
+        preserve_axis(&mut self.fixed_velocity.x, previous.x, velocity.x);
+        preserve_axis(&mut self.fixed_velocity.y, previous.y, velocity.y);
+        self.refresh_velocity_from_fixed();
+    }
+
+    fn refresh_velocity_from_fixed(&mut self) {
+        self.state.velocity = self.velocity_pixels();
+    }
+
+    #[cfg(test)]
+    fn set_fixed_velocity(&mut self, velocity: FixedVec2) {
+        self.fixed_velocity = velocity;
+        self.state.velocity = self.velocity_pixels();
+    }
+
+    fn clamp_velocity(&mut self, physics: &PhysicsSettings) {
+        physics.clamp_fixed_velocity(&mut self.fixed_velocity);
+        self.refresh_velocity_from_fixed();
+    }
+
+    fn apply_delta(
+        &mut self,
+        delta: &ObjectDelta,
+        action_library: &ActionLibrary,
+    ) -> ApplyDeltaOutcome {
+        let outcome = self.state.apply_delta(delta, action_library);
+        if let Some(position) = delta.position {
+            self.fixed_position = FixedVec2::from_ints(position.x, position.y);
+        } else {
+            self.state.position = self.position_pixels();
+        }
+        if let Some(fixed_velocity) = delta.fixed_velocity {
+            // Sub-pixel velocity is authoritative; derive the whole-pixel mirror
+            // from it (matches C++ where xdir/ydir as C4Fixed are the source of
+            // truth and the integer view is `fixtoi`).
+            self.fixed_velocity = fixed_velocity;
+            self.state.velocity = self.velocity_pixels();
+        } else if let Some(velocity) = delta.velocity {
+            self.fixed_velocity = FixedVec2::from_ints(velocity.x, velocity.y);
+        } else {
+            self.state.velocity = self.velocity_pixels();
+        }
+        if delta.rotation.is_some() {
+            // An explicit rotation re-seeds the fixed accumulator, mirroring C++
+            // forcing `fix_r = itofix(r)` (`C4Movement.cpp:418`).
+            self.fixed_rotation = itofix(self.state.rotation);
+        }
+        if let Some(rotation_velocity) = delta.rotation_velocity {
+            self.rotation_velocity = rotation_velocity;
+        }
+        outcome
+    }
+
+    fn advance_fixed_position(&mut self) {
+        self.fixed_position += self.fixed_velocity;
+        self.state.position = self.position_pixels();
+        self.state.velocity = self.velocity_pixels();
+    }
+
+    fn advance_fixed_position_per_pixel(
+        &mut self,
+        landscape: Option<&Landscape>,
+        materials: &MaterialSet,
+        movement: MovementContactConfig<'_>,
+    ) -> bool {
+        let Some(landscape) = landscape else {
+            self.advance_fixed_position();
+            return false;
+        };
+
+        if self.state.vertices.is_empty() {
+            self.advance_fixed_position_heightmap(landscape, materials);
+            return false;
+        }
+
+        if movement.attach != 0 {
+            return self.advance_attached_shape_position(landscape, materials, movement);
+        }
+
+        self.fixed_position.x += self.fixed_velocity.x;
+        let mut target_x = fixtoi(self.fixed_position.x);
+        self.apply_side_bounds(&mut target_x, landscape, movement);
+        while self.state.position.x != target_x {
+            let next_x = self.state.position.x + sign_i32(target_x - self.state.position.x);
+            let candidate = Vector2::new(next_x, self.state.position.y);
+            let contact = shape_contact_check(
+                &self.state.vertices,
+                candidate,
+                landscape,
+                materials,
+                movement.contact_density,
+            );
+            if contact.is_contact() {
+                self.fixed_position.x = itofix(self.state.position.x);
+                redirect_force(&mut self.fixed_velocity.x, &mut self.fixed_velocity.y, -1);
+                apply_contact_friction(&mut self.fixed_velocity.y, contact.first_friction());
+                break;
+            }
+            self.state.position.x = next_x;
+        }
+
+        self.fixed_position.y += self.fixed_velocity.y;
+        let mut target_y = fixtoi(self.fixed_position.y);
+        self.apply_vertical_bounds(&mut target_y, landscape, movement);
+        while self.state.position.y != target_y {
+            let next_y = self.state.position.y + sign_i32(target_y - self.state.position.y);
+            let candidate = Vector2::new(self.state.position.x, next_y);
+            let contact = shape_contact_check(
+                &self.state.vertices,
+                candidate,
+                landscape,
+                materials,
+                movement.contact_density,
+            );
+            if contact.is_contact() {
+                self.fixed_position.y = itofix(self.state.position.y);
+                apply_contact_friction(&mut self.fixed_velocity.x, contact.first_friction());
+                if !contact.has_vertex_cnat(CNAT_LEFT) {
+                    redirect_force(&mut self.fixed_velocity.y, &mut self.fixed_velocity.x, -1);
+                } else if !contact.has_vertex_cnat(CNAT_RIGHT) {
+                    redirect_force(&mut self.fixed_velocity.y, &mut self.fixed_velocity.x, 1);
+                } else {
+                    if movement.rotateable > 0 && contact.count() == 1 && !self.state.alive {
+                        redirect_force(
+                            &mut self.fixed_velocity.y,
+                            &mut self.rotation_velocity,
+                            -contact.first_weight(),
+                        );
+                    }
+                    self.fixed_velocity.y = C4Fixed::ZERO;
+                }
+                break;
+            }
+            self.state.position.y = next_y;
+        }
+
+        self.state.velocity = self.velocity_pixels();
+        false
+    }
+
+    fn advance_fixed_position_heightmap(&mut self, landscape: &Landscape, materials: &MaterialSet) {
+        self.fixed_position.x += self.fixed_velocity.x;
+        let target_x = fixtoi(self.fixed_position.x);
+        while self.state.position.x != target_x {
+            let next_x = self.state.position.x + sign_i32(target_x - self.state.position.x);
+            let candidate = Vector2::new(next_x, self.state.position.y);
+            if landscape
+                .resolve_collision(candidate, self.state.velocity)
+                .collided
+            {
+                self.fixed_position.x = itofix(self.state.position.x);
+                self.fixed_velocity.x = C4Fixed::ZERO;
+                self.apply_landscape_contact_material(landscape, materials, candidate.x);
+                break;
+            }
+            self.state.position.x = next_x;
+        }
+
+        self.fixed_position.y += self.fixed_velocity.y;
+        let target_y = fixtoi(self.fixed_position.y);
+        while self.state.position.y != target_y {
+            let next_y = self.state.position.y + sign_i32(target_y - self.state.position.y);
+            let candidate = Vector2::new(self.state.position.x, next_y);
+            if landscape
+                .resolve_collision(candidate, self.state.velocity)
+                .collided
+            {
+                self.fixed_position.y = itofix(self.state.position.y);
+                self.fixed_velocity.y = C4Fixed::ZERO;
+                self.apply_landscape_contact_material(landscape, materials, candidate.x);
+                break;
+            }
+            self.state.position.y = next_y;
+        }
+
+        self.state.velocity = self.velocity_pixels();
+    }
+
+    fn advance_attached_shape_position(
+        &mut self,
+        landscape: &Landscape,
+        materials: &MaterialSet,
+        movement: MovementContactConfig<'_>,
+    ) -> bool {
+        self.fixed_position += self.fixed_velocity;
+        let mut target_x = fixtoi(self.fixed_position.x);
+        let mut target_y = fixtoi(self.fixed_position.y);
+        self.apply_side_bounds(&mut target_x, landscape, movement);
+        self.apply_vertical_bounds(&mut target_y, landscape, movement);
+
+        let mut no_attach = false;
+        let mut first_step = true;
+        while first_step || self.state.position.x != target_x || self.state.position.y != target_y {
+            first_step = false;
+            let original = Vector2::new(
+                self.state.position.x + sign_i32(target_x - self.state.position.x),
+                self.state.position.y + sign_i32(target_y - self.state.position.y),
+            );
+            let mut candidate = original;
+            if !shape_attach(
+                &self.state.vertices,
+                &mut candidate,
+                movement.attach,
+                landscape,
+                materials,
+                movement.contact_density,
+            ) {
+                no_attach = true;
+            }
+
+            let contact = shape_contact_check(
+                &self.state.vertices,
+                candidate,
+                landscape,
+                materials,
+                movement.contact_density,
+            );
+            if contact.is_contact() {
+                self.fixed_position =
+                    FixedVec2::from_ints(self.state.position.x, self.state.position.y);
+                break;
+            }
+
+            if candidate == self.state.position {
+                break;
+            }
+
+            let override_x = candidate.x != original.x;
+            let override_y = candidate.y != original.y;
+            self.state.position = candidate;
+
+            if override_x {
+                target_x = self.state.position.x;
+                self.fixed_velocity.x = C4Fixed::ZERO;
+                self.fixed_position.x = itofix(self.state.position.x);
+            }
+            if override_y {
+                target_y = self.state.position.y;
+                self.fixed_velocity.y = C4Fixed::ZERO;
+                self.fixed_position.y = itofix(self.state.position.y);
+            }
+        }
+
+        self.state.velocity = self.velocity_pixels();
+        no_attach
+    }
+
+    fn apply_side_bounds(
+        &mut self,
+        target_x: &mut i32,
+        landscape: &Landscape,
+        movement: MovementContactConfig<'_>,
+    ) {
+        if movement.border_bound & C4D_BORDER_SIDES == 0 {
+            return;
+        }
+        let shape_x = movement.shape_rect.map(|shape| shape.x).unwrap_or(0);
+        if target_bounds(
+            &mut self.fixed_position.x,
+            -shape_x,
+            landscape.width() as i32 + shape_x,
+        )
+        .is_some()
+        {
+            *target_x = fixtoi(self.fixed_position.x);
+            self.fixed_velocity.x = C4Fixed::ZERO;
+            self.state.velocity = self.velocity_pixels();
+        }
+    }
+
+    fn apply_vertical_bounds(
+        &mut self,
+        target_y: &mut i32,
+        landscape: &Landscape,
+        movement: MovementContactConfig<'_>,
+    ) {
+        let shape_y = movement.shape_rect.map(|shape| shape.y).unwrap_or(0);
+        if movement.border_bound & C4D_BORDER_TOP != 0 && self.fixed_position.y < itofix(-shape_y) {
+            self.fixed_position.y = itofix(-shape_y);
+            *target_y = fixtoi(self.fixed_position.y);
+            self.fixed_velocity.y = C4Fixed::ZERO;
+        }
+        if movement.border_bound & C4D_BORDER_BOTTOM != 0 {
+            let bottom = landscape.estimated_height() + shape_y;
+            if self.fixed_position.y > itofix(bottom) {
+                self.fixed_position.y = itofix(bottom);
+                *target_y = fixtoi(self.fixed_position.y);
+                self.fixed_velocity.y = C4Fixed::ZERO;
+            }
+        }
+        self.state.velocity = self.velocity_pixels();
+    }
+
+    fn apply_landscape_contact_material(
+        &mut self,
+        landscape: &Landscape,
+        materials: &MaterialSet,
+        x: i32,
+    ) {
+        if let Some(material_id) = landscape.solid_material_at(x) {
+            if let Some(material) = materials.get_by_id(material_id) {
+                self.apply_material_interaction(material);
+            }
+        }
+    }
+
+    /// Accumulate angular velocity into the fixed rotation, mirroring the fixed
+    /// state pieces of C++ `C4Movement.cpp:373-436`: rotation only advances for
+    /// rotateable definitions, `fix_r += rdir * 5`, finite `Def->Rotateable`
+    /// ranges clamp `fix_r`/zero `rdir`, then contact-aware rotation walks one
+    /// degree at a time before the half-circle wrap projects the integer degree.
+    fn advance_fixed_rotation(
+        &mut self,
+        landscape: Option<&Landscape>,
+        materials: &MaterialSet,
+        movement: MovementContactConfig<'_>,
+        no_attach: bool,
+    ) {
+        if movement.rotateable <= 0 {
+            self.fixed_rotation = C4Fixed::ZERO;
+            self.rotation_velocity = C4Fixed::ZERO;
+            self.state.rotation = 0;
+            return;
+        }
+        if !self.rotation_velocity.is_nonzero() {
+            return;
+        }
+        self.fixed_rotation += self.rotation_velocity * 5;
+        if movement.rotateable > 1 {
+            let limit = itofix(movement.rotateable);
+            if self.fixed_rotation > limit {
+                self.fixed_rotation = limit;
+                self.rotation_velocity = C4Fixed::ZERO;
+            }
+            if self.fixed_rotation < -limit {
+                self.fixed_rotation = -limit;
+                self.rotation_velocity = C4Fixed::ZERO;
+            }
+        }
+
+        let target_rotation = fixtoi(self.fixed_rotation);
+        if let Some(landscape) = landscape {
+            if !self.state.vertices.is_empty() {
+                self.advance_fixed_rotation_with_contact(
+                    target_rotation,
+                    landscape,
+                    materials,
+                    movement,
+                    no_attach,
+                );
+            } else {
+                self.state.rotation = target_rotation;
+            }
+        } else {
+            self.state.rotation = target_rotation;
+        }
+
+        // Circle bounds: keep fix_r within (-180°, 180°]. C4Movement.cpp:434-435.
+        let half_circle = itofix(FIX_HALF_CIRCLE);
+        let full_circle = itofix(FIX_FULL_CIRCLE);
+        if self.fixed_rotation < -half_circle {
+            self.fixed_rotation += full_circle;
+            self.state.rotation = fixtoi(self.fixed_rotation);
+        }
+        if self.fixed_rotation > half_circle {
+            self.fixed_rotation -= full_circle;
+            self.state.rotation = fixtoi(self.fixed_rotation);
+        }
+    }
+
+    fn advance_fixed_rotation_with_contact(
+        &mut self,
+        target_rotation: i32,
+        landscape: &Landscape,
+        materials: &MaterialSet,
+        movement: MovementContactConfig<'_>,
+        no_attach: bool,
+    ) {
+        let fallback_base;
+        let base_vertices = if movement.definition_vertices.is_empty() {
+            fallback_base = self.state.vertices.clone();
+            fallback_base.as_slice()
+        } else {
+            movement.definition_vertices
+        };
+
+        while self.state.rotation != target_rotation {
+            let previous_rotation = self.state.rotation;
+            let previous_vertices = self.state.vertices.clone();
+            let previous_position = self.state.position;
+
+            self.state.rotation += sign_i32(target_rotation - self.state.rotation);
+            self.state.vertices = rotated_vertices(base_vertices, self.state.rotation);
+
+            let mut candidate_position = self.state.position;
+            if movement.attach != 0 && !no_attach {
+                shape_attach(
+                    &self.state.vertices,
+                    &mut candidate_position,
+                    movement.attach,
+                    landscape,
+                    materials,
+                    movement.contact_density,
+                );
+            }
+
+            let contact = shape_contact_check(
+                &self.state.vertices,
+                candidate_position,
+                landscape,
+                materials,
+                movement.contact_density,
+            );
+            if contact.is_contact() {
+                self.state.rotation = previous_rotation;
+                self.state.vertices = previous_vertices;
+                self.state.position = previous_position;
+                self.fixed_position =
+                    FixedVec2::from_ints(previous_position.x, previous_position.y);
+                self.fixed_rotation = itofix(previous_rotation);
+                if contact.count() == 1 {
+                    redirect_force(&mut self.rotation_velocity, &mut self.fixed_velocity.y, -1);
+                }
+                self.rotation_velocity = C4Fixed::ZERO;
+                self.refresh_velocity_from_fixed();
+                break;
+            }
+
+            self.state.position = candidate_position;
+            self.fixed_position = FixedVec2::from_ints(candidate_position.x, candidate_position.y);
+        }
     }
 
     fn apply_command_operations<I>(&mut self, operations: I)
@@ -2537,11 +3074,20 @@ impl Object {
         let procedure = library
             .and_then(|lib| lib.procedure_name_for_action(&self.state.action.name))
             .map(|name| name.to_string());
+        let position = self.position_pixels();
+        let velocity = self.velocity_pixels();
+        // Persist the exact `rdir`/`fix_r` only while actively rotating; a static
+        // object's orientation is fully captured by the whole-degree `rotation`.
+        let rotation_state = if self.rotation_velocity.is_nonzero() {
+            (Some(self.rotation_velocity), Some(self.fixed_rotation))
+        } else {
+            (None, None)
+        };
         ObjectSnapshot {
             id: self.id,
             definition_id: self.definition_id.clone(),
-            position: self.state.position,
-            velocity: self.state.velocity,
+            position,
+            velocity,
             rotation: self.state.rotation.rem_euclid(360),
             energy: self.state.energy,
             damage: self.state.damage,
@@ -2568,6 +3114,10 @@ impl Object {
             command_queue: self.command_queue.iter().cloned().collect(),
             command_stack: self.commands.snapshot(),
             local_vars: self.state.local_vars.clone(),
+            fixed_position: subpixel_or_none(self.fixed_position, position),
+            fixed_velocity: subpixel_or_none(self.fixed_velocity, velocity),
+            rotation_velocity: rotation_state.0,
+            fixed_rotation: rotation_state.1,
         }
     }
 
@@ -2631,11 +3181,18 @@ impl Object {
     fn apply_material_interaction(&mut self, material: &Material) {
         let friction = material.friction();
         if friction != 0 {
-            self.state.velocity.x = apply_horizontal_friction(self.state.velocity.x, friction);
+            self.fixed_velocity.x =
+                apply_horizontal_friction_fixed(self.fixed_velocity.x, friction);
+            self.refresh_velocity_from_fixed();
             for vertex in &mut self.state.vertices {
                 vertex.friction = friction;
             }
         }
+    }
+
+    fn apply_collision_resolution(&mut self, resolution: &CollisionResolution) {
+        self.set_position(resolution.position);
+        self.set_velocity_preserving_subpixel(resolution.velocity);
     }
 
     fn insert_effect(&mut self, mut effect: EffectState) -> (EffectState, Option<EffectState>) {
@@ -2746,7 +3303,7 @@ impl Object {
 
             let command = self.command_queue.pop_front().expect("front exists");
             let delta: ObjectDelta = command.update.into();
-            let delta_outcome = self.state.apply_delta(&delta, action_library);
+            let delta_outcome = self.apply_delta(&delta, action_library);
             if let Some(change) = delta_outcome.action_change {
                 self.record_action_event(change.previous, ActionTransitionKind::Forced);
             }
@@ -2767,7 +3324,7 @@ impl Object {
                     outcome.destroy = true;
                 }
             }
-            physics.clamp_velocity(&mut self.state.velocity);
+            self.clamp_velocity(physics);
             if command.destroy {
                 if !matches!(self.state.status, ObjectStatus::Deleted) {
                     effect_events.extend(self.mark_destroyed());
@@ -2795,8 +3352,7 @@ impl Object {
                 let resolution =
                     (**landscape_ref).resolve_collision(self.state.position, self.state.velocity);
                 if resolution.collided {
-                    self.state.position = resolution.position;
-                    self.state.velocity = resolution.velocity;
+                    self.apply_collision_resolution(&resolution);
                     if let Some(material_id) = resolution.material {
                         if let Some(material) = materials.get_by_id(material_id) {
                             self.apply_material_interaction(material);
@@ -3068,6 +3624,25 @@ pub struct ObjectSnapshot {
     pub command_stack: CommandStackSnapshot,
     #[serde(default)]
     pub local_vars: HashMap<String, Value>,
+    /// Raw 16.16 fixed-point position, recorded only when it carries sub-pixel
+    /// detail beyond the whole-pixel `position` (i.e. `position != fixtoi(fix)`).
+    /// `None` ⇒ reconstruct losslessly via `itofix(position)`. Mirrors C++
+    /// persisting both `x` and `fix_x` (`C4Object.cpp:2742`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_position: Option<FixedVec2>,
+    /// Raw 16.16 fixed-point velocity, recorded only when it carries sub-pixel
+    /// detail beyond the whole-pixel `velocity`. `None` ⇒ `itofix(velocity)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_velocity: Option<FixedVec2>,
+    /// Raw 16.16 fixed-point angular velocity (`rdir`) and rotation accumulator
+    /// (`fix_r`), recorded together only while the object is actively rotating
+    /// (`rdir != 0`). `None` ⇒ a static object whose orientation is fully
+    /// captured by `rotation`. Preserves rotation across save/restore so a
+    /// reloaded spinning object stays in lockstep (C++ persists `fix_r`/`rdir`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_velocity: Option<C4Fixed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_rotation: Option<C4Fixed>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3101,7 +3676,7 @@ pub struct SimulationSnapshot {
     #[serde(default)]
     pub landscape: Option<Landscape>,
     #[serde(default = "default_rng")]
-    pub rng: ChaCha8Rng,
+    pub rng: LcgRng,
     #[serde(default)]
     pub surfaces: Vec<SurfaceSnapshot>,
     #[serde(default)]
@@ -3167,7 +3742,7 @@ pub struct EngineState {
     pub pending_menu_requests: Vec<MenuRequest>,
     #[serde(default)]
     pub game_over: bool,
-    pub rng: ChaCha8Rng,
+    pub rng: LcgRng,
 }
 
 impl EngineState {
@@ -3308,12 +3883,58 @@ impl DefinitionRect {
         }
         true
     }
+
+    pub fn contains_point(&self, x: i32, y: i32) -> bool {
+        if !self.is_positive() {
+            return false;
+        }
+        let local_x = i64::from(x) - i64::from(self.x);
+        let local_y = i64::from(y) - i64::from(self.y);
+        local_x >= 0
+            && local_y >= 0
+            && local_x < i64::from(self.width)
+            && local_y < i64::from(self.height)
+    }
+
+    pub fn overlaps(&self, other: &Self) -> bool {
+        if !self.is_positive() || !other.is_positive() {
+            return false;
+        }
+        let self_right = i64::from(self.x) + i64::from(self.width);
+        let self_bottom = i64::from(self.y) + i64::from(self.height);
+        let other_right = i64::from(other.x) + i64::from(other.width);
+        let other_bottom = i64::from(other.y) + i64::from(other.height);
+        i64::from(self.x) < other_right
+            && i64::from(other.x) < self_right
+            && i64::from(self.y) < other_bottom
+            && i64::from(other.y) < self_bottom
+    }
 }
 
 impl From<ResourcePictureRect> for DefinitionRect {
     fn from(rect: ResourcePictureRect) -> Self {
         Self::new(rect.x, rect.y, rect.width, rect.height)
     }
+}
+
+fn vertex_bounds_rect(position: Vector2, vertices: &[ObjectVertex]) -> Option<DefinitionRect> {
+    let first = vertices.first()?;
+    let mut min_x = first.x;
+    let mut max_x = first.x;
+    let mut min_y = first.y;
+    let mut max_y = first.y;
+    for vertex in &vertices[1..] {
+        min_x = min_x.min(vertex.x);
+        max_x = max_x.max(vertex.x);
+        min_y = min_y.min(vertex.y);
+        max_y = max_y.max(vertex.y);
+    }
+    Some(DefinitionRect::new(
+        position.x.saturating_add(min_x),
+        position.y.saturating_add(min_y),
+        max_x.saturating_sub(min_x).saturating_add(1),
+        max_y.saturating_sub(min_y).saturating_add(1),
+    ))
 }
 
 #[derive(Clone)]
@@ -3450,12 +4071,17 @@ pub struct Definition {
     sprite_image: Option<DefinitionSpriteImage>,
     sprite_variants: HashMap<String, DefinitionSpriteImage>,
     shape: Option<DefinitionRect>,
+    shape_vertices: Vec<ObjectVertex>,
+    contact_density: i32,
     collection_rect: Option<DefinitionRect>,
     collection_limit: Option<u32>,
     collectible: bool,
     constructable: bool,
     construction_offset: i32,
     basement: i32,
+    rotateable: i32,
+    border_bound: i32,
+    upright_attach: u32,
     components: Vec<DefinitionComponent>,
     line_connect: u32,
 }
@@ -3489,8 +4115,8 @@ impl Definition {
         let name = name.into();
 
         // Compile the script to extract includes before adding to engine
-        let compiled_script = lc_script::Script::compile(source)
-            .map_err(|parse_error| EngineError::Script {
+        let compiled_script =
+            lc_script::Script::compile(source).map_err(|parse_error| EngineError::Script {
                 definition: id.clone(),
                 function: "load",
                 source: parse_error.into(),
@@ -3525,12 +4151,17 @@ impl Definition {
             sprite_image: None,
             sprite_variants: HashMap::new(),
             shape: None,
+            shape_vertices: Vec::new(),
+            contact_density: CONTACT_DENSITY_SOLID,
             collection_rect: None,
             collection_limit: None,
             collectible: false,
             constructable: false,
             construction_offset: 0,
             basement: 0,
+            rotateable: 0,
+            border_bound: 0,
+            upright_attach: 0,
             components: Vec::new(),
             line_connect: 0,
         })
@@ -3616,12 +4247,28 @@ impl Definition {
             definition.set_sprite_variants(variants);
         }
         definition.set_shape_rect(resource.core.shape.map(DefinitionRect::from));
+        definition.set_shape_vertices(
+            resource
+                .core
+                .vertices
+                .iter()
+                .map(|vertex| {
+                    ObjectVertex::new(vertex.x, vertex.y)
+                        .with_cnat(vertex.cnat)
+                        .with_friction(vertex.friction)
+                })
+                .collect(),
+        );
+        definition.set_contact_density(resource.core.contact_density);
         definition.set_collection_rect(resource.core.collection.map(DefinitionRect::from));
         definition.set_collection_limit(resource.core.collection_limit);
         definition.set_collectible(resource.core.collectible);
         definition.set_constructable(resource.core.constructable);
         definition.set_construction_offset(resource.core.con_size_off);
         definition.set_basement(resource.core.basement);
+        definition.set_rotateable(resource.core.rotateable);
+        definition.set_border_bound(resource.core.border_bound);
+        definition.set_upright_attach(resource.core.upright_attach);
         if !resource.core.components.is_empty() {
             let components = resource
                 .core
@@ -3674,6 +4321,9 @@ impl Definition {
         }
         if let Some(dig_free) = action.dig_free {
             spec = spec.with_dig_free(dig_free);
+        }
+        if action.attach != 0 {
+            spec = spec.with_attach(action.attach);
         }
         let mut graphics = DefinitionActionGraphics::default();
         graphics.length = action.length;
@@ -3758,16 +4408,28 @@ impl Definition {
     }
 
     pub fn ocf_base(&self) -> u32 {
-        self.ocf_base
+        if self.rotateable > 0 {
+            self.ocf_base | crate::ocf::ROTATE
+        } else {
+            self.ocf_base
+        }
     }
 
     pub fn set_ocf_base(&mut self, ocf: u32) {
         self.ocf_base = ocf | OCF_NORMAL;
     }
 
+    pub fn rotateable(&self) -> i32 {
+        self.rotateable
+    }
+
+    pub fn set_rotateable(&mut self, rotateable: i32) {
+        self.rotateable = rotateable.max(0);
+    }
+
     pub fn compute_ocf(&self, state: &ObjectState) -> u32 {
         let mut ocf = crate::ocf::compute(
-            self.ocf_base,
+            self.ocf_base(),
             self.crew_member,
             state.alive,
             state.status,
@@ -3860,6 +4522,38 @@ impl Definition {
         self.shape = rect;
     }
 
+    pub fn shape_vertices(&self) -> &[ObjectVertex] {
+        &self.shape_vertices
+    }
+
+    pub fn set_shape_vertices(&mut self, vertices: Vec<ObjectVertex>) {
+        self.shape_vertices = vertices;
+    }
+
+    pub fn contact_density(&self) -> i32 {
+        self.contact_density
+    }
+
+    pub fn set_contact_density(&mut self, contact_density: i32) {
+        self.contact_density = contact_density;
+    }
+
+    pub fn border_bound(&self) -> i32 {
+        self.border_bound
+    }
+
+    pub fn set_border_bound(&mut self, border_bound: i32) {
+        self.border_bound = border_bound.max(0);
+    }
+
+    pub fn upright_attach(&self) -> u32 {
+        self.upright_attach
+    }
+
+    pub fn set_upright_attach(&mut self, upright_attach: u32) {
+        self.upright_attach = upright_attach;
+    }
+
     pub fn collection_rect(&self) -> Option<DefinitionRect> {
         self.collection_rect
     }
@@ -3929,7 +4623,7 @@ impl Definition {
         state: &ObjectState,
         object_id: ObjectId,
         random: i32,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
@@ -3937,7 +4631,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(CommandBatch, AudioRegistry, ChaCha8Rng, u64), EngineError> {
+    ) -> Result<(CommandBatch, AudioRegistry, LcgRng, u64), EngineError> {
         if !self.has_initialize {
             return Ok((CommandBatch::default(), audio, rng, world.next_object_id()));
         }
@@ -3990,7 +4684,10 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call_with_locals("Initialize", &args, &state.local_vars),
+            || {
+                self.script
+                    .call_with_locals("Initialize", &args, &state.local_vars)
+            },
         );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
@@ -4084,7 +4781,7 @@ impl Definition {
         &self,
         state: &ObjectState,
         object_id: ObjectId,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
@@ -4092,7 +4789,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(CommandBatch, AudioRegistry, ChaCha8Rng, u64), EngineError> {
+    ) -> Result<(CommandBatch, AudioRegistry, LcgRng, u64), EngineError> {
         if !self.has_construction {
             return Ok((CommandBatch::default(), audio, rng, world.next_object_id()));
         }
@@ -4143,7 +4840,10 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call_with_locals("Construction", &args, &state.local_vars),
+            || {
+                self.script
+                    .call_with_locals("Construction", &args, &state.local_vars)
+            },
         );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
@@ -4222,14 +4922,14 @@ impl Definition {
         object_id: ObjectId,
         frame: u64,
         random: i32,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(CommandBatch, AudioRegistry, ChaCha8Rng, u64), EngineError> {
+    ) -> Result<(CommandBatch, AudioRegistry, LcgRng, u64), EngineError> {
         if !self.has_step {
             return Ok((CommandBatch::default(), audio, rng, world.next_object_id()));
         }
@@ -4288,7 +4988,10 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call_with_locals("Step", &args, &state.local_vars),
+            || {
+                self.script
+                    .call_with_locals("Step", &args, &state.local_vars)
+            },
         );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
@@ -4384,7 +5087,7 @@ impl Definition {
         state: &ObjectState,
         object_id: ObjectId,
         action_name: &str,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
@@ -4392,7 +5095,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(compat::EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
+    ) -> Result<(compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
         // Note: We don't validate function existence here because has_function() only
         // checks the current script's functions and doesn't traverse #include inheritance.
         // Scripts can inherit callbacks from parent scripts (e.g., TRPR inherits Throwing
@@ -4447,7 +5150,10 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call_with_locals(function, &args, &state.local_vars),
+            || {
+                self.script
+                    .call_with_locals(function, &args, &state.local_vars)
+            },
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -4488,7 +5194,7 @@ impl Definition {
         &self,
         state: &ObjectState,
         object_id: ObjectId,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
@@ -4496,7 +5202,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(Vec<ContextMenuEntry>, AudioRegistry, ChaCha8Rng), EngineError> {
+    ) -> Result<(Vec<ContextMenuEntry>, AudioRegistry, LcgRng), EngineError> {
         if !self.script.has_function("MenuEntries") {
             return Ok((Vec::new(), audio, rng));
         }
@@ -4550,7 +5256,10 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call_with_locals("MenuEntries", &args, &state.local_vars),
+            || {
+                self.script
+                    .call_with_locals("MenuEntries", &args, &state.local_vars)
+            },
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -4601,7 +5310,7 @@ impl Definition {
         object_id: ObjectId,
         kind: MenuCommandKind,
         selection: &MenuCommandSelection,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
@@ -4609,15 +5318,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<
-        (
-            bool,
-            compat::EffectContextOutcome,
-            AudioRegistry,
-            ChaCha8Rng,
-        ),
-        EngineError,
-    > {
+    ) -> Result<(bool, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
         if !self.script.has_function("MenuCommand") {
             let next_object_id = world.next_object_id();
             return Ok((
@@ -4676,7 +5377,10 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call_with_locals("MenuCommand", &args, &state.local_vars),
+            || {
+                self.script
+                    .call_with_locals("MenuCommand", &args, &state.local_vars)
+            },
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -4722,7 +5426,7 @@ impl Definition {
         state: &ObjectState,
         object_id: ObjectId,
         function: &str,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
@@ -4730,15 +5434,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<
-        (
-            bool,
-            compat::EffectContextOutcome,
-            AudioRegistry,
-            ChaCha8Rng,
-        ),
-        EngineError,
-    > {
+    ) -> Result<(bool, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
         if !self.script.has_function(function) {
             let next_object_id = world.next_object_id();
             return Ok((
@@ -4794,7 +5490,10 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call_with_locals(function, &args, &state.local_vars),
+            || {
+                self.script
+                    .call_with_locals(function, &args, &state.local_vars)
+            },
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -4844,7 +5543,7 @@ impl Definition {
         object_id: ObjectId,
         function: &str,
         args: &[Value],
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
@@ -4852,15 +5551,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<
-        (
-            Value,
-            compat::EffectContextOutcome,
-            AudioRegistry,
-            ChaCha8Rng,
-        ),
-        EngineError,
-    > {
+    ) -> Result<(Value, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
         if !self.script.has_function(function) {
             let next_object_id = world.next_object_id();
             return Ok((
@@ -4916,7 +5607,10 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call_with_locals(function, &arg_values, &state.local_vars),
+            || {
+                self.script
+                    .call_with_locals(function, &arg_values, &state.local_vars)
+            },
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -4954,7 +5648,7 @@ impl Definition {
         state: &ObjectState,
         object_id: ObjectId,
         function: &str,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
@@ -4962,15 +5656,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<
-        (
-            bool,
-            compat::EffectContextOutcome,
-            AudioRegistry,
-            ChaCha8Rng,
-        ),
-        EngineError,
-    > {
+    ) -> Result<(bool, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
         if !self.script.has_function(function) {
             let next_object_id = world.next_object_id();
             return Ok((
@@ -5034,7 +5720,10 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            move || self.script.call_with_locals(&function_call, &args_call, &local_vars_call),
+            move || {
+                self.script
+                    .call_with_locals(&function_call, &args_call, &local_vars_call)
+            },
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -5177,7 +5866,7 @@ impl Definition {
         state: &ObjectState,
         object_id: ObjectId,
         effect: &EffectState,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
@@ -5185,7 +5874,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
         self.dispatch_effect_callback(
             state,
             object_id,
@@ -5210,14 +5899,14 @@ impl Definition {
         object_id: ObjectId,
         effect: &EffectState,
         frame: u64,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
         self.dispatch_effect_callback(
             state,
             object_id,
@@ -5242,7 +5931,7 @@ impl Definition {
         object_id: ObjectId,
         effect: &EffectState,
         reason: EffectStopReason,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
@@ -5250,7 +5939,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
         self.dispatch_effect_callback(
             state,
             object_id,
@@ -5277,7 +5966,7 @@ impl Definition {
         event: &'static str,
         function_label: &'static str,
         mut extras: Vec<Value>,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
@@ -5285,7 +5974,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(EffectContextOutcome, AudioRegistry, ChaCha8Rng), EngineError> {
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
         let next_object_id = world.next_object_id();
         if !self.script.has_effect_callback(&effect.name, event) {
             return Ok((
@@ -5409,13 +6098,13 @@ impl ScenarioScript {
     fn initialize(
         &mut self,
         snapshot: &SimulationSnapshot,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         random: i32,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
         audio: AudioRegistry,
-    ) -> Result<(ScenarioBatch, AudioRegistry, ChaCha8Rng), EngineError> {
+    ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         if !self.has_initialize {
             return Ok((ScenarioBatch::default(), audio, rng));
         }
@@ -5438,14 +6127,14 @@ impl ScenarioScript {
     fn step(
         &mut self,
         snapshot: &SimulationSnapshot,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         random: i32,
         frame: u64,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
         audio: AudioRegistry,
-    ) -> Result<(ScenarioBatch, AudioRegistry, ChaCha8Rng), EngineError> {
+    ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         if !self.has_step {
             return Ok((ScenarioBatch::default(), audio, rng));
         }
@@ -5480,13 +6169,13 @@ impl ScenarioScript {
         function: &'static str,
         args: Vec<Value>,
         snapshot: &SimulationSnapshot,
-        rng: ChaCha8Rng,
+        rng: LcgRng,
         env_frame: u64,
         global_effects: &[EffectState],
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
         audio: AudioRegistry,
-    ) -> Result<(ScenarioBatch, AudioRegistry, ChaCha8Rng), EngineError> {
+    ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
         let guard = enter_random_context(rng);
@@ -5650,9 +6339,10 @@ pub struct Engine {
     materials: MaterialSet,
     objects: Vec<Object>,
     next_object_id: u64,
-    rng: ChaCha8Rng,
+    rng: LcgRng,
     frame: u64,
     landscape: Option<Landscape>,
+    sectors: Option<SectorMap>,
     physics: PhysicsSettings,
     environment: EnvironmentSettings,
     sky: Option<SkyState>,
@@ -5694,12 +6384,16 @@ fn fnv_update(mut hash: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
-fn clamp_to_limit(value: i32, limit: i32) -> i32 {
+fn clamp_fixed_to_limit(value: C4Fixed, limit: i32) -> C4Fixed {
     if limit <= 0 {
-        0
+        C4Fixed::ZERO
     } else {
-        value.clamp(-limit, limit)
+        value.clamp(itofix(-limit), itofix(limit))
     }
+}
+
+fn clamp_fixed_to_limit_pair(value: C4Fixed, min: C4Fixed, max: C4Fixed) -> C4Fixed {
+    value.clamp(min, max)
 }
 
 fn saturating_i64_to_i32(value: i64) -> i32 {
@@ -5720,17 +6414,21 @@ fn saturating_u64_to_i32(value: u64) -> i32 {
     }
 }
 
-fn step_toward(current: i32, desired: i32, step: i32) -> i32 {
-    if current == desired || step <= 0 {
+fn step_fixed_toward(current: C4Fixed, desired: C4Fixed, step: C4Fixed) -> C4Fixed {
+    if current == desired || step <= C4Fixed::ZERO {
         return desired;
     }
-    let delta = desired - current;
+    let delta = i64::from(desired.val()) - i64::from(current.val());
+    let step = i64::from(step.val());
     if delta.abs() <= step {
         desired
-    } else if delta > 0 {
-        current.saturating_add(step)
     } else {
-        current.saturating_sub(step)
+        let next = if delta > 0 {
+            i64::from(current.val()).saturating_add(step)
+        } else {
+            i64::from(current.val()).saturating_sub(step)
+        };
+        C4Fixed::from_raw(saturating_i64_to_i32(next))
     }
 }
 
@@ -5783,133 +6481,369 @@ fn fight_distance_threshold(
     fighter_span.max(target_span).max(MIN_THRESHOLD)
 }
 
-fn apply_horizontal_friction(value: i32, friction: i32) -> i32 {
-    if value == 0 || friction == 0 {
+fn apply_horizontal_friction_fixed(value: C4Fixed, friction: i32) -> C4Fixed {
+    let raw = value.val();
+    if raw == 0 || friction == 0 {
         return value;
     }
-    let friction = friction.max(0).min(100);
+    let friction = friction.clamp(0, 100);
     if friction == 0 {
         return value;
     }
-    let magnitude = value.abs();
-    let mut retained = magnitude.saturating_mul(100 - friction) / 100;
+    let magnitude = i64::from(raw).abs();
+    let mut retained = magnitude.saturating_mul(i64::from(100 - friction)) / 100;
     if retained == magnitude && friction > 0 {
         retained = magnitude.saturating_sub(1);
     }
-    if retained == 0 {
+    let signed = if retained == 0 {
         0
-    } else if value > 0 {
+    } else if raw > 0 {
         retained
     } else {
         -retained
+    };
+    C4Fixed::from_raw(saturating_i64_to_i32(signed))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MovementContactConfig<'a> {
+    definition_vertices: &'a [ObjectVertex],
+    contact_density: i32,
+    border_bound: i32,
+    shape_rect: Option<DefinitionRect>,
+    attach: u32,
+    rotateable: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ContactVertexInfo {
+    x: i32,
+    contact_cnat: u32,
+    friction: i32,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ShapeContact {
+    contact_cnat: u32,
+    vertices: Vec<ContactVertexInfo>,
+}
+
+impl ShapeContact {
+    fn count(&self) -> i32 {
+        self.vertices.len() as i32
+    }
+
+    fn is_contact(&self) -> bool {
+        !self.vertices.is_empty()
+    }
+
+    fn has_vertex_cnat(&self, cnat: u32) -> bool {
+        self.vertices
+            .iter()
+            .any(|vertex| vertex.contact_cnat & cnat != 0)
+    }
+
+    fn first_friction(&self) -> i32 {
+        self.vertices
+            .first()
+            .map(|vertex| vertex.friction)
+            .unwrap_or(0)
+    }
+
+    fn first_weight(&self) -> i32 {
+        match self.vertices.first().map(|vertex| vertex.x).unwrap_or(0) {
+            x if x < 0 => -1,
+            x if x > 0 => 1,
+            _ => 0,
+        }
+    }
+}
+
+fn sign_i32(value: i32) -> i32 {
+    value.signum()
+}
+
+fn redirect_force(from: &mut C4Fixed, to: &mut C4Fixed, direction: i32) {
+    let redirect = fixed100(50);
+    let magnitude =
+        C4Fixed::from_raw(saturating_i64_to_i32(i64::from(from.val()).abs())).min(redirect);
+    if magnitude == C4Fixed::ZERO {
+        return;
+    }
+    *from -= magnitude * from.val().signum();
+    *to += magnitude * direction;
+}
+
+fn apply_contact_friction(value: &mut C4Fixed, percent: i32) {
+    let friction = fixed100(30) * percent / 100;
+    if *value > friction {
+        *value -= friction;
+    } else if *value < -friction {
+        *value += friction;
+    } else {
+        *value = C4Fixed::ZERO;
+    }
+}
+
+fn rotated_vertices(vertices: &[ObjectVertex], rotation: i32) -> Vec<ObjectVertex> {
+    if rotation.rem_euclid(360) == 0 {
+        return vertices.to_vec();
+    }
+    let angle = itofix(rotation.rem_euclid(360));
+    let cos = angle.cos_deg();
+    let sin = angle.sin_deg();
+    vertices
+        .iter()
+        .map(|vertex| {
+            let x = fixtoi(cos * vertex.x - sin * vertex.y);
+            let y = fixtoi(sin * vertex.x + cos * vertex.y);
+            ObjectVertex {
+                x,
+                y,
+                cnat: vertex.cnat,
+                friction: vertex.friction,
+            }
+        })
+        .collect()
+}
+
+fn shape_contact_check(
+    vertices: &[ObjectVertex],
+    position: Vector2,
+    landscape: &Landscape,
+    materials: &MaterialSet,
+    contact_density: i32,
+) -> ShapeContact {
+    let mut contact = ShapeContact::default();
+    for vertex in vertices {
+        if vertex.cnat & CNAT_NO_COLLISION != 0 {
+            continue;
+        }
+        let x = position.x + vertex.x;
+        let y = position.y + vertex.y;
+        if landscape.density_at(x, y, materials) < contact_density {
+            continue;
+        }
+
+        contact.contact_cnat |= vertex.cnat;
+        let mut vertex_contact = CNAT_CENTER;
+        if landscape.density_at(x, y - 1, materials) >= contact_density {
+            vertex_contact |= CNAT_TOP;
+        }
+        if landscape.density_at(x, y + 1, materials) >= contact_density {
+            vertex_contact |= CNAT_BOTTOM;
+        }
+        if landscape.density_at(x - 1, y, materials) >= contact_density {
+            vertex_contact |= CNAT_LEFT;
+        }
+        if landscape.density_at(x + 1, y, materials) >= contact_density {
+            vertex_contact |= CNAT_RIGHT;
+        }
+        contact.vertices.push(ContactVertexInfo {
+            x: vertex.x,
+            contact_cnat: vertex_contact,
+            friction: vertex.friction,
+        });
+    }
+    contact
+}
+
+fn attach_direction(attach: u32) -> (i32, i32) {
+    match attach & !CNAT_FLAGS {
+        CNAT_TOP => (0, -1),
+        CNAT_BOTTOM => (0, 1),
+        CNAT_LEFT => (-1, 0),
+        CNAT_RIGHT => (1, 0),
+        _ => (0, 0),
+    }
+}
+
+fn shape_attach(
+    vertices: &[ObjectVertex],
+    position: &mut Vector2,
+    attach: u32,
+    landscape: &Landscape,
+    materials: &MaterialSet,
+    contact_density: i32,
+) -> bool {
+    let (xcd, ycd) = attach_direction(attach);
+    if xcd == 0 && ycd == 0 {
+        return false;
+    }
+    let xcrng = ATTACH_RANGE * xcd * -1;
+    let ycrng = ATTACH_RANGE * ycd * -1;
+    let mut attached = false;
+
+    if attach & CNAT_MULTI_ATTACH == 0 {
+        for vertex in vertices {
+            if vertex.cnat & attach == 0 {
+                continue;
+            }
+            let mut xcnt = xcrng;
+            let mut ycnt = ycrng;
+            while xcnt != -xcrng || ycnt != -ycrng {
+                let ax = position.x + vertex.x + xcnt + xcd;
+                let ay = position.y + vertex.y + ycnt + ycd;
+                if ax >= 0
+                    && ax < landscape.width() as i32
+                    && landscape.density_at(ax, ay, materials) >= contact_density
+                {
+                    position.x += xcnt;
+                    position.y += ycnt;
+                    attached = true;
+                    break;
+                }
+                xcnt += xcd;
+                ycnt += ycd;
+            }
+        }
+    } else {
+        let mut xcnt = xcrng;
+        let mut ycnt = ycrng;
+        'search: while xcnt != -xcrng || ycnt != -ycrng {
+            for vertex in vertices {
+                if vertex.cnat & attach == 0 {
+                    continue;
+                }
+                let ax = position.x + vertex.x + xcnt + xcd;
+                let ay = position.y + vertex.y + ycnt + ycd;
+                if ax >= 0
+                    && ax < landscape.width() as i32
+                    && landscape.density_at(ax, ay, materials) >= contact_density
+                {
+                    position.x += xcnt;
+                    position.y += ycnt;
+                    attached = true;
+                    break 'search;
+                }
+            }
+            xcnt += xcd;
+            ycnt += ycd;
+        }
+    }
+
+    attached
+}
+
+fn target_bounds(target: &mut C4Fixed, low: i32, high: i32) -> Option<i32> {
+    let low = itofix(low);
+    let high = itofix(high);
+    if *target < low {
+        *target = low;
+        Some(-1)
+    } else if *target > high {
+        *target = high;
+        Some(1)
+    } else {
+        None
     }
 }
 
 fn apply_float_command_movement(
-    velocity: &mut Vector2,
+    velocity: &mut FixedVec2,
     command_direction: CommandDirection,
     profile: MovementProfile,
 ) {
     let (dx, dy) = command_direction.axis_components();
-    let accel = profile.float_acceleration.max(0);
+    let accel = itofix(profile.float_acceleration.max(0));
 
-    if dx != 0 && accel > 0 {
-        velocity.x = clamp_to_limit(velocity.x.saturating_add(dx * accel), profile.float_speed);
+    if dx != 0 && accel > C4Fixed::ZERO {
+        velocity.x = clamp_fixed_to_limit(velocity.x + accel * dx, profile.float_speed);
     } else {
-        velocity.x = clamp_to_limit(velocity.x, profile.float_speed);
+        velocity.x = clamp_fixed_to_limit(velocity.x, profile.float_speed);
     }
 
-    if dy != 0 && accel > 0 {
-        velocity.y = clamp_to_limit(velocity.y.saturating_add(dy * accel), profile.float_speed);
+    if dy != 0 && accel > C4Fixed::ZERO {
+        velocity.y = clamp_fixed_to_limit(velocity.y + accel * dy, profile.float_speed);
     } else {
-        velocity.y = clamp_to_limit(velocity.y, profile.float_speed);
+        velocity.y = clamp_fixed_to_limit(velocity.y, profile.float_speed);
     }
 }
 
-fn decelerate_toward_zero(value: i32, accel: i32) -> i32 {
-    if accel <= 0 {
+fn decelerate_fixed_toward_zero(value: C4Fixed, accel: C4Fixed) -> C4Fixed {
+    if accel <= C4Fixed::ZERO {
         return value;
     }
-    if value > 0 {
-        (value - accel).max(0)
-    } else if value < 0 {
-        (value + accel).min(0)
+    if value > C4Fixed::ZERO {
+        (value - accel).max(C4Fixed::ZERO)
+    } else if value < C4Fixed::ZERO {
+        (value + accel).min(C4Fixed::ZERO)
     } else {
-        0
+        C4Fixed::ZERO
     }
 }
 
 fn apply_walk_command_movement(
-    velocity: &mut Vector2,
+    velocity: &mut FixedVec2,
     command_direction: CommandDirection,
     profile: MovementProfile,
 ) {
-    let accel = profile.walk_acceleration.max(0);
+    let accel = itofix(profile.walk_acceleration.max(0));
     let limit = profile.walk_speed;
 
     match command_direction {
         CommandDirection::Left | CommandDirection::UpLeft | CommandDirection::DownLeft => {
-            if accel > 0 {
-                velocity.x = velocity.x.saturating_sub(accel);
+            if accel > C4Fixed::ZERO {
+                velocity.x -= accel;
             }
         }
         CommandDirection::Right | CommandDirection::UpRight | CommandDirection::DownRight => {
-            if accel > 0 {
-                velocity.x = velocity.x.saturating_add(accel);
+            if accel > C4Fixed::ZERO {
+                velocity.x += accel;
             }
         }
         CommandDirection::Stop | CommandDirection::Up | CommandDirection::Down => {
-            if accel > 0 {
-                velocity.x = decelerate_toward_zero(velocity.x, accel);
+            if accel > C4Fixed::ZERO {
+                velocity.x = decelerate_fixed_toward_zero(velocity.x, accel);
             }
         }
     }
 
-    velocity.x = clamp_to_limit(velocity.x, limit);
+    velocity.x = clamp_fixed_to_limit(velocity.x, limit);
 }
 
 fn apply_swim_command_movement(
-    velocity: &mut Vector2,
+    velocity: &mut FixedVec2,
     command_direction: CommandDirection,
     profile: MovementProfile,
-    gravity_component: i32,
+    gravity_component: C4Fixed,
 ) {
-    let accel = profile.swim_acceleration.max(0);
+    let accel = itofix(profile.swim_acceleration.max(0));
     let limit = profile.swim_speed;
 
     match command_direction {
         CommandDirection::Stop => {
-            if accel > 0 {
-                velocity.x = decelerate_toward_zero(velocity.x, accel);
+            if accel > C4Fixed::ZERO {
+                velocity.x = decelerate_fixed_toward_zero(velocity.x, accel);
                 let vertical_without_gravity = velocity.y - gravity_component;
-                let decelerated = decelerate_toward_zero(vertical_without_gravity, accel);
+                let decelerated = decelerate_fixed_toward_zero(vertical_without_gravity, accel);
                 velocity.y = decelerated + gravity_component;
             }
         }
         _ => {
-            if accel > 0 {
+            if accel > C4Fixed::ZERO {
                 let (dx, dy) = command_direction.axis_components();
                 if dx != 0 {
-                    velocity.x = velocity.x.saturating_add(dx * accel);
+                    velocity.x += accel * dx;
                 }
                 if dy != 0 {
-                    velocity.y = velocity.y.saturating_add(dy * accel);
+                    velocity.y += accel * dy;
                 }
             }
         }
     }
 
-    velocity.x = clamp_to_limit(velocity.x, limit);
-    velocity.y = clamp_to_limit(velocity.y, limit);
+    velocity.x = clamp_fixed_to_limit(velocity.x, limit);
+    velocity.y = clamp_fixed_to_limit(velocity.y, limit);
 }
 
 fn apply_scale_command_movement(
-    velocity: &mut Vector2,
+    velocity: &mut FixedVec2,
     command_direction: CommandDirection,
     profile: MovementProfile,
     facing: Direction,
 ) {
-    let accel = profile.scale_acceleration.max(0);
+    let accel = itofix(profile.scale_acceleration.max(0));
     let limit = profile.scale_speed;
     let effective_direction = match (facing, command_direction) {
         (Direction::Left, CommandDirection::Left) | (Direction::Right, CommandDirection::Right) => {
@@ -5920,68 +6854,68 @@ fn apply_scale_command_movement(
 
     match effective_direction {
         CommandDirection::Up | CommandDirection::UpLeft | CommandDirection::UpRight => {
-            if accel > 0 {
-                velocity.y = velocity.y.saturating_sub(accel);
+            if accel > C4Fixed::ZERO {
+                velocity.y -= accel;
             }
         }
         CommandDirection::Down | CommandDirection::DownLeft | CommandDirection::DownRight => {
-            if accel > 0 {
-                velocity.y = velocity.y.saturating_add(accel);
+            if accel > C4Fixed::ZERO {
+                velocity.y += accel;
             }
         }
         CommandDirection::Left | CommandDirection::Right | CommandDirection::Stop => {
-            if accel > 0 {
-                velocity.y = decelerate_toward_zero(velocity.y, accel);
+            if accel > C4Fixed::ZERO {
+                velocity.y = decelerate_fixed_toward_zero(velocity.y, accel);
             }
         }
     }
 
-    velocity.y = clamp_to_limit(velocity.y, limit);
-    velocity.x = 0;
+    velocity.y = clamp_fixed_to_limit(velocity.y, limit);
+    velocity.x = C4Fixed::ZERO;
 }
 
 fn apply_hangle_command_movement(
-    velocity: &mut Vector2,
+    velocity: &mut FixedVec2,
     command_direction: CommandDirection,
     profile: MovementProfile,
     facing: Direction,
 ) -> Option<Direction> {
-    let accel = profile.hangle_acceleration.max(0);
+    let accel = itofix(profile.hangle_acceleration.max(0));
     let limit = profile.hangle_speed;
 
     match command_direction {
         CommandDirection::Left | CommandDirection::UpLeft | CommandDirection::DownLeft => {
-            if accel > 0 {
-                velocity.x = velocity.x.saturating_sub(accel);
+            if accel > C4Fixed::ZERO {
+                velocity.x -= accel;
             }
         }
         CommandDirection::Right | CommandDirection::UpRight | CommandDirection::DownRight => {
-            if accel > 0 {
-                velocity.x = velocity.x.saturating_add(accel);
+            if accel > C4Fixed::ZERO {
+                velocity.x += accel;
             }
         }
         CommandDirection::Up => {
-            if accel > 0 {
+            if accel > C4Fixed::ZERO {
                 if matches!(facing, Direction::Left) {
-                    velocity.x = velocity.x.saturating_sub(accel);
+                    velocity.x -= accel;
                 } else {
-                    velocity.x = velocity.x.saturating_add(accel);
+                    velocity.x += accel;
                 }
             }
         }
         CommandDirection::Stop | CommandDirection::Down => {
-            if accel > 0 {
-                velocity.x = decelerate_toward_zero(velocity.x, accel);
+            if accel > C4Fixed::ZERO {
+                velocity.x = decelerate_fixed_toward_zero(velocity.x, accel);
             }
         }
     }
 
-    velocity.x = clamp_to_limit(velocity.x, limit);
-    velocity.y = 0;
+    velocity.x = clamp_fixed_to_limit(velocity.x, limit);
+    velocity.y = C4Fixed::ZERO;
 
-    if velocity.x < 0 {
+    if velocity.x < C4Fixed::ZERO {
         Some(Direction::Left)
-    } else if velocity.x > 0 {
+    } else if velocity.x > C4Fixed::ZERO {
         Some(Direction::Right)
     } else {
         None
@@ -5989,18 +6923,20 @@ fn apply_hangle_command_movement(
 }
 
 fn apply_dig_command_movement(
-    velocity: &mut Vector2,
+    velocity: &mut FixedVec2,
     command_direction: CommandDirection,
     profile: MovementProfile,
     facing: Direction,
 ) -> Option<Direction> {
     let speed = profile.dig_speed.max(0);
     let half_speed = speed / 2;
+    let speed = itofix(speed);
+    let half_speed = itofix(half_speed);
 
     match command_direction {
         CommandDirection::Stop => {
-            velocity.x = 0;
-            velocity.y = 0;
+            velocity.x = C4Fixed::ZERO;
+            velocity.y = C4Fixed::ZERO;
             return None;
         }
         CommandDirection::Up => {
@@ -6017,14 +6953,14 @@ fn apply_dig_command_movement(
         }
         CommandDirection::Left => {
             velocity.x = -speed;
-            velocity.y = 0;
+            velocity.y = C4Fixed::ZERO;
         }
         CommandDirection::DownLeft => {
             velocity.x = -speed;
             velocity.y = speed;
         }
         CommandDirection::Down => {
-            velocity.x = 0;
+            velocity.x = C4Fixed::ZERO;
             velocity.y = speed;
         }
         CommandDirection::DownRight => {
@@ -6033,7 +6969,7 @@ fn apply_dig_command_movement(
         }
         CommandDirection::Right => {
             velocity.x = speed;
-            velocity.y = 0;
+            velocity.y = C4Fixed::ZERO;
         }
         CommandDirection::UpRight => {
             velocity.x = speed;
@@ -6041,9 +6977,9 @@ fn apply_dig_command_movement(
         }
     }
 
-    if velocity.x < 0 {
+    if velocity.x < C4Fixed::ZERO {
         Some(Direction::Left)
-    } else if velocity.x > 0 {
+    } else if velocity.x > C4Fixed::ZERO {
         Some(Direction::Right)
     } else {
         None
@@ -6061,9 +6997,10 @@ impl Engine {
             materials: MaterialSet::default(),
             objects: Vec::new(),
             next_object_id: 1,
-            rng: ChaCha8Rng::seed_from_u64(seed),
+            rng: LcgRng::seed_from_u64(seed),
             frame: 0,
             landscape: None,
+            sectors: None,
             physics: PhysicsSettings::default(),
             environment: EnvironmentSettings::default(),
             sky: None,
@@ -6441,6 +7378,7 @@ impl Engine {
             landscape.set_default_solid_material(default);
         }
         self.landscape = Some(landscape);
+        self.reset_sectors_from_landscape();
     }
 
     pub fn blast_circle(
@@ -6467,11 +7405,123 @@ impl Engine {
 
     pub fn clear_landscape(&mut self) {
         self.landscape = None;
+        self.sectors = None;
         self.material_particles.clear();
     }
 
     pub fn landscape(&self) -> Option<&Landscape> {
         self.landscape.as_ref()
+    }
+
+    fn reset_sectors_from_landscape(&mut self) {
+        let Some(landscape) = self.landscape.as_ref() else {
+            self.sectors = None;
+            return;
+        };
+        let width = saturating_u64_to_i32(u64::from(landscape.width()));
+        let height = landscape.estimated_height();
+        self.sectors = Some(SectorMap::new(width, height));
+        self.rebuild_sectors();
+    }
+
+    fn rebuild_sectors(&mut self) {
+        let records = self
+            .objects
+            .iter()
+            .filter_map(|object| self.sector_record_for_object(object))
+            .collect::<Vec<_>>();
+        if let Some(sectors) = self.sectors.as_mut() {
+            sectors.rebuild(records);
+        }
+    }
+
+    fn update_sector_for_index(&mut self, index: usize) {
+        let Some(object) = self.objects.get(index) else {
+            return;
+        };
+        let object_id = object.id;
+        let record = self.sector_record_for_object(object);
+        let Some(sectors) = self.sectors.as_mut() else {
+            return;
+        };
+        match record {
+            Some(record) => sectors.update(record),
+            None => sectors.remove(object_id),
+        }
+    }
+
+    fn sector_record_for_object(&self, object: &Object) -> Option<SectorObject> {
+        if object.destroyed || matches!(object.state.status, ObjectStatus::Deleted) {
+            return None;
+        }
+        let position = object.state.position;
+        let shape_rect = self.object_shape_rect(object);
+        Some(SectorObject {
+            id: object.id,
+            position,
+            shape_rect,
+        })
+    }
+
+    fn object_shape_rect(&self, object: &Object) -> DefinitionRect {
+        let position = object.state.position;
+        self.definitions
+            .get(&object.definition_id)
+            .and_then(|definition| definition.shape_rect())
+            .map(|rect| {
+                DefinitionRect::new(
+                    position.x.saturating_add(rect.x),
+                    position.y.saturating_add(rect.y),
+                    rect.width,
+                    rect.height,
+                )
+            })
+            .or_else(|| vertex_bounds_rect(position, &object.state.vertices))
+            .unwrap_or_else(|| DefinitionRect::new(position.x, position.y, 1, 1))
+    }
+
+    #[allow(dead_code)]
+    fn at_object(
+        &self,
+        point: Vector2,
+        mask: u32,
+        exclude: Option<ObjectId>,
+    ) -> Option<(usize, ObjectId, u32)> {
+        let candidate_ids = self
+            .sectors
+            .as_ref()
+            .map(|sectors| sectors.object_ids_at(point.x, point.y).to_vec())
+            .unwrap_or_else(|| self.objects.iter().map(|object| object.id).collect());
+        for candidate_id in candidate_ids {
+            if exclude == Some(candidate_id) {
+                continue;
+            }
+            let Some(candidate_idx) = self.find_object_index(candidate_id) else {
+                continue;
+            };
+            let candidate = &self.objects[candidate_idx];
+            if candidate.destroyed
+                || !candidate.state.status.is_active()
+                || candidate.state.container.is_some()
+            {
+                continue;
+            }
+            let candidate_ocf = self.object_ocf_at_index(candidate_idx);
+            if candidate_ocf & (mask | crate::ocf::EXCLUSIVE) == 0 {
+                continue;
+            }
+            if !self
+                .object_shape_rect(candidate)
+                .contains_point(point.x, point.y)
+            {
+                continue;
+            }
+            if candidate_ocf & mask != 0 {
+                return Some((candidate_idx, candidate_id, candidate_ocf));
+            }
+            return None;
+        }
+        None
     }
 
     pub fn find_path(
@@ -6496,7 +7546,7 @@ impl Engine {
     pub fn set_physics(&mut self, physics: PhysicsSettings) {
         self.physics = physics;
         for object in &mut self.objects {
-            self.physics.clamp_velocity(&mut object.state.velocity);
+            object.clamp_velocity(&self.physics);
         }
     }
 
@@ -7554,14 +8604,18 @@ impl Engine {
             changed = false;
 
             // Collect all definitions that have includes
-            let ids_with_includes: Vec<String> = self.definitions.iter()
+            let ids_with_includes: Vec<String> = self
+                .definitions
+                .iter()
                 .filter(|(_, def)| !def.includes().is_empty())
                 .map(|(id, _)| id.clone())
                 .collect();
 
             // For each definition with includes, merge parent functions
             for child_id in ids_with_includes {
-                let includes = self.definitions.get(&child_id)
+                let includes = self
+                    .definitions
+                    .get(&child_id)
                     .map(|def| def.includes().to_vec())
                     .unwrap_or_default();
 
@@ -7575,7 +8629,9 @@ impl Engine {
                     let parent = self.definitions.get(parent_id).unwrap().clone();
 
                     // Count functions before merge to detect changes
-                    let before_count = self.definitions.get(&child_id)
+                    let before_count = self
+                        .definitions
+                        .get(&child_id)
                         .map(|def| def.function_count())
                         .unwrap_or(0);
 
@@ -7814,8 +8870,8 @@ impl Engine {
         }
 
         if self.environment.lightning > 0
-            && self.rng.gen_range(0..35) == 0
-            && self.rng.gen_range(0..100) < self.environment.lightning
+            && self.rng.random(35) == 0
+            && self.rng.random(100) < self.environment.lightning
         {
             if let Some(width) = self
                 .landscape
@@ -7823,7 +8879,7 @@ impl Engine {
                 .map(|landscape| landscape.width() as i32)
             {
                 if width > 0 {
-                    let position = self.rng.gen_range(0..width);
+                    let position = self.rng.random(width);
                     if self.trigger_lightning(position)? {
                         self.weather_events
                             .push(WeatherEvent::Lightning { position });
@@ -8261,13 +9317,62 @@ impl Engine {
             }
 
             self.apply_physics_at_index(idx);
-            {
+            let action_name = self.objects[idx].state.action.name.clone();
+            let (
+                definition_vertices,
+                contact_density,
+                border_bound,
+                shape_rect,
+                rotateable,
+                attach,
+            ) = self
+                .definitions
+                .get(&self.objects[idx].definition_id)
+                .map(|definition| {
+                    (
+                        definition.shape_vertices().to_vec(),
+                        definition.contact_density(),
+                        definition.border_bound(),
+                        definition.shape_rect(),
+                        definition.rotateable(),
+                        action_library.attach_for_action(&action_name),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        Vec::new(),
+                        CONTACT_DENSITY_SOLID,
+                        0,
+                        None,
+                        0,
+                        action_library.attach_for_action(&action_name),
+                    )
+                });
+            let movement = MovementContactConfig {
+                definition_vertices: &definition_vertices,
+                contact_density,
+                border_bound,
+                shape_rect,
+                attach,
+                rotateable,
+            };
+            let no_attach = {
+                let landscape = self.landscape.as_ref();
+                let materials = &self.materials;
                 let object = &mut self.objects[idx];
-                object.state.position += object.state.velocity;
+                let no_attach =
+                    object.advance_fixed_position_per_pixel(landscape, materials, movement);
+                object.advance_fixed_rotation(landscape, materials, movement, no_attach);
+                no_attach
+            };
+            self.update_sector_for_index(idx);
+            if no_attach {
+                self.apply_no_attach_action(idx, &action_library);
             }
 
             self.apply_landscape_at_index(idx);
-            self.auto_collect_at_index(idx)?;
+            self.update_sector_for_index(idx);
+            self.cross_check_at_index(idx)?;
 
             let object_id = self.objects[idx].id;
             let state_snapshot = self.objects[idx].state.clone();
@@ -8345,7 +9450,7 @@ impl Engine {
                 let object = &mut self.objects[idx];
                 let previous_owner = object.state.owner;
                 let mut container_change = None;
-                let delta_outcome = object.state.apply_delta(&delta, &action_library);
+                let delta_outcome = object.apply_delta(&delta, &action_library);
                 if let Some(change) = delta_outcome.action_change {
                     object.record_action_event(change.previous, ActionTransitionKind::Forced);
                 }
@@ -8354,7 +9459,7 @@ impl Engine {
                 }
                 let mut applied = object.apply_effect_commands(&effects);
                 effect_events.append(&mut applied);
-                self.physics.clamp_velocity(&mut object.state.velocity);
+                object.clamp_velocity(&self.physics);
                 if destroy {
                     effect_events.extend(object.mark_destroyed());
                 }
@@ -8372,6 +9477,7 @@ impl Engine {
                     container_change,
                 )
             };
+            self.update_sector_for_index(idx);
             if !audio.is_empty() {
                 self.pending_audio.extend(audio);
             }
@@ -8457,15 +9563,18 @@ impl Engine {
                     self.apply_container_change(object_id, previous_container, new_container)?;
                 }
             }
+            self.update_sector_for_index(idx);
 
             self.trigger_action_callbacks(idx, Some(previous_action_name))?;
+            self.update_sector_for_index(idx);
 
             if self.objects[idx].destroyed {
                 continue;
             }
 
             self.apply_landscape_at_index(idx);
-            self.auto_collect_at_index(idx)?;
+            self.update_sector_for_index(idx);
+            self.cross_check_at_index(idx)?;
             let (procedure, line_connect, ocf_base, collectible) = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
@@ -8522,6 +9631,7 @@ impl Engine {
 
         self.detach_destroyed_objects()?;
         self.objects.retain(|object| !object.destroyed);
+        self.rebuild_sectors();
         let alive: HashSet<_> = self.objects.iter().map(|object| object.id).collect();
         self.messages.tick(&alive);
         self.transfer_zones.retain_existing(&alive);
@@ -8594,10 +9704,10 @@ impl Engine {
             let mut container_change = None;
 
             if let Some(position) = position {
-                object.state.position = position;
+                object.set_position(position);
             }
             if let Some(velocity) = velocity {
-                object.state.velocity = velocity;
+                object.set_velocity(velocity);
             }
             if let Some(energy) = energy {
                 object.state.energy = energy;
@@ -8648,14 +9758,13 @@ impl Engine {
                 object.state.graphics_overlays = overlays;
             }
 
-            self.physics.clamp_velocity(&mut object.state.velocity);
+            object.clamp_velocity(&self.physics);
 
             if let Some(landscape) = landscape.as_ref() {
                 let resolution =
                     landscape.resolve_collision(object.state.position, object.state.velocity);
                 if resolution.collided {
-                    object.state.position = resolution.position;
-                    object.state.velocity = resolution.velocity;
+                    object.apply_collision_resolution(&resolution);
                     if let Some(material_id) = resolution.material {
                         if let Some(material) = self.materials.get_by_id(material_id) {
                             object.apply_material_interaction(material);
@@ -8673,15 +9782,18 @@ impl Engine {
             )
         };
 
+        self.update_sector_for_index(index);
         self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
         if let Some((previous_container, new_container)) = container_change {
             self.apply_container_change(object_id, previous_container, new_container)?;
         }
         self.trigger_action_callbacks(index, Some(previous_action_name))?;
+        self.update_sector_for_index(index);
         if self.objects[index].destroyed
             || matches!(self.objects[index].state.status, ObjectStatus::Deleted)
         {
             self.detach_destroyed_objects()?;
+            self.update_sector_for_index(index);
         }
         self.refresh_elimination_state();
         self.check_game_over()?;
@@ -8894,7 +10006,7 @@ impl Engine {
 
             if let Some(update) = object_update {
                 let delta: ObjectDelta = update.into();
-                let outcome = object.state.apply_delta(&delta, action_library);
+                let outcome = object.apply_delta(&delta, action_library);
                 if let Some(change) = outcome.action_change {
                     object.record_action_event(change.previous, ActionTransitionKind::Forced);
                 }
@@ -8923,8 +10035,9 @@ impl Engine {
                 effect_events.append(&mut applied);
             }
 
-            self.physics.clamp_velocity(&mut object.state.velocity);
+            object.clamp_velocity(&self.physics);
         }
+        self.update_sector_for_index(index);
 
         let (new_owner, new_crew_member) = {
             let object = &self.objects[index];
@@ -9010,6 +10123,7 @@ impl Engine {
                 container_changes.push((previous_container, new_container));
             }
         }
+        self.update_sector_for_index(index);
 
         for (previous, new) in container_changes {
             self.apply_container_change(object_id, previous, new)?;
@@ -9409,6 +10523,23 @@ impl Engine {
                     local_vars: snapshot.local_vars.clone(),
                 },
             );
+            // Restore authoritative sub-pixel state when the snapshot carried it
+            // (whole-pixel objects fall back to the `itofix` set by `Object::new`).
+            if let Some(fixed_position) = snapshot.fixed_position {
+                object.fixed_position = fixed_position;
+                object.state.position = object.position_pixels();
+            }
+            if let Some(fixed_velocity) = snapshot.fixed_velocity {
+                object.fixed_velocity = fixed_velocity;
+                object.state.velocity = object.velocity_pixels();
+            }
+            if let Some(rotation_velocity) = snapshot.rotation_velocity {
+                object.rotation_velocity = rotation_velocity;
+            }
+            if let Some(fixed_rotation) = snapshot.fixed_rotation {
+                object.fixed_rotation = fixed_rotation;
+                object.state.rotation = fixtoi(fixed_rotation);
+            }
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
             object
                 .commands
@@ -9418,6 +10549,7 @@ impl Engine {
                 container_assignments.push((snapshot.id, container));
             }
         }
+        self.reset_sectors_from_landscape();
 
         for (object_id, container) in container_assignments {
             self.apply_container_change(object_id, None, Some(container))?;
@@ -9492,7 +10624,7 @@ impl Engine {
     fn run_effect_events_for_object(
         definition: &Definition,
         game_over_triggered: bool,
-        mut rng: ChaCha8Rng,
+        mut rng: LcgRng,
         object_id: ObjectId,
         object: &mut Object,
         events: Vec<EffectEvent>,
@@ -9513,7 +10645,7 @@ impl Engine {
             Vec<LandscapeOperation>,
             bool,
             AudioRegistry,
-            ChaCha8Rng,
+            LcgRng,
         ),
         EngineError,
     > {
@@ -9630,9 +10762,7 @@ impl Engine {
             if let Some(update) = object_update {
                 let mut delta = ObjectDelta::default();
                 delta.merge_update(update);
-                let outcome = object
-                    .state
-                    .apply_delta(&delta, definition.action_library());
+                let outcome = object.apply_delta(&delta, definition.action_library());
                 if let Some(change) = outcome.action_change {
                     object.record_action_event(change.previous, ActionTransitionKind::Forced);
                 }
@@ -9708,22 +10838,15 @@ impl Engine {
         self.set_physics(physics);
     }
 
-    fn apply_landscape(&self, state: &mut ObjectState) {
+    fn apply_landscape(&self, object: &mut Object) {
         if let Some(landscape) = &self.landscape {
-            let resolution = landscape.resolve_collision(state.position, state.velocity);
+            let resolution =
+                landscape.resolve_collision(object.state.position, object.state.velocity);
             if resolution.collided {
-                state.position = resolution.position;
-                state.velocity = resolution.velocity;
+                object.apply_collision_resolution(&resolution);
                 if let Some(material_id) = resolution.material {
                     if let Some(material) = self.materials.get_by_id(material_id) {
-                        let friction = material.friction();
-                        if friction != 0 {
-                            state.velocity.x =
-                                apply_horizontal_friction(state.velocity.x, friction);
-                            for vertex in &mut state.vertices {
-                                vertex.friction = friction;
-                            }
-                        }
+                        object.apply_material_interaction(material);
                     }
                 }
             }
@@ -9997,16 +11120,17 @@ impl Engine {
         let action_target = self.objects[idx].state.action.target;
 
         let (procedure, movement_profile, gravity_component) = {
+            let gravity = self.physics.gravity_as_c4fixed();
             if let Some(definition) = self.definitions.get(&definition_id) {
                 let object = &self.objects[idx];
                 let procedure = definition
                     .action_library()
                     .procedure_for_action(&object.state.action.name);
-                let gravity = procedure.gravity_component(self.physics.gravity);
+                let gravity = procedure.gravity_component_fixed(gravity);
                 (procedure, definition.movement_profile(), gravity)
             } else {
                 let procedure = ActionProcedure::default();
-                let gravity = procedure.gravity_component(self.physics.gravity);
+                let gravity = procedure.gravity_component_fixed(gravity);
                 (procedure, MovementProfile::default(), gravity)
             }
         };
@@ -10059,26 +11183,26 @@ impl Engine {
 
         {
             let object = &mut self.objects[idx];
-            object.state.velocity.y = object.state.velocity.y.saturating_add(gravity_component);
+            object.fixed_velocity.y += gravity_component;
             if procedure.allows_wind() {
                 self.environment
-                    .apply_to_velocity(&mut object.state.velocity, self.frame);
+                    .apply_to_velocity(&mut object.fixed_velocity, self.frame);
             }
             if procedure.locks_vertical_velocity() {
-                object.state.velocity.y = 0;
+                object.fixed_velocity.y = C4Fixed::ZERO;
             }
             let mut pending_direction = None;
             match procedure {
                 ActionProcedure::Float | ActionProcedure::Flight => {
                     apply_float_command_movement(
-                        &mut object.state.velocity,
+                        &mut object.fixed_velocity,
                         command_direction,
                         movement_profile,
                     );
                 }
                 ActionProcedure::Swim => {
                     apply_swim_command_movement(
-                        &mut object.state.velocity,
+                        &mut object.fixed_velocity,
                         command_direction,
                         movement_profile,
                         gravity_component,
@@ -10086,14 +11210,14 @@ impl Engine {
                 }
                 ActionProcedure::Walk => {
                     apply_walk_command_movement(
-                        &mut object.state.velocity,
+                        &mut object.fixed_velocity,
                         command_direction,
                         movement_profile,
                     );
                 }
                 ActionProcedure::Scale => {
                     apply_scale_command_movement(
-                        &mut object.state.velocity,
+                        &mut object.fixed_velocity,
                         command_direction,
                         movement_profile,
                         object.state.direction,
@@ -10101,7 +11225,7 @@ impl Engine {
                 }
                 ActionProcedure::Hang => {
                     pending_direction = apply_hangle_command_movement(
-                        &mut object.state.velocity,
+                        &mut object.fixed_velocity,
                         command_direction,
                         movement_profile,
                         object.state.direction,
@@ -10109,7 +11233,7 @@ impl Engine {
                 }
                 ActionProcedure::Dig => {
                     pending_direction = apply_dig_command_movement(
-                        &mut object.state.velocity,
+                        &mut object.fixed_velocity,
                         command_direction,
                         movement_profile,
                         object.state.direction,
@@ -10118,12 +11242,12 @@ impl Engine {
                 ActionProcedure::Push => {
                     if !push_handled {
                         // If push was not handled earlier (shouldn't happen), ensure velocities stay zeroed.
-                        object.state.velocity = Vector2::ZERO;
+                        object.fixed_velocity = FixedVec2::ZERO;
                     }
                 }
                 ActionProcedure::Pull => {
                     if !pull_handled {
-                        object.state.velocity = Vector2::ZERO;
+                        object.fixed_velocity = FixedVec2::ZERO;
                     }
                 }
                 _ => {}
@@ -10135,11 +11259,13 @@ impl Engine {
                 | ActionProcedure::Throw
                 | ActionProcedure::Connect
                 | ActionProcedure::Chop => {
-                    object.state.velocity = Vector2::ZERO;
+                    object.fixed_velocity = FixedVec2::ZERO;
                 }
                 _ => {}
             }
-            self.physics.clamp_velocity(&mut object.state.velocity);
+            self.physics
+                .clamp_fixed_velocity(&mut object.fixed_velocity);
+            object.refresh_velocity_from_fixed();
             match procedure {
                 ActionProcedure::Walk => {
                     if object.state.velocity.x < 0 {
@@ -10220,11 +11346,14 @@ impl Engine {
         };
         let lift_force = lift_speed.max(1);
         let physics = self.physics;
+        let desired_velocity = itofix(desired_velocity);
+        let lift_force = itofix(lift_force);
 
         let adjust_velocity = |object: &mut Object| {
-            let new_velocity = step_toward(object.state.velocity.y, desired_velocity, lift_force);
-            object.state.velocity.y = new_velocity;
-            physics.clamp_velocity(&mut object.state.velocity);
+            object.fixed_velocity.y =
+                step_fixed_toward(object.fixed_velocity.y, desired_velocity, lift_force);
+            physics.clamp_fixed_velocity(&mut object.fixed_velocity);
+            object.refresh_velocity_from_fixed();
         };
 
         if target_idx == lifter_idx {
@@ -10660,7 +11789,7 @@ impl Engine {
             object.state.action.target2 = None;
         }
         object.state.command_direction = CommandDirection::Stop;
-        object.state.velocity = Vector2::ZERO;
+        object.set_velocity(Vector2::ZERO);
         if matches!(result, ActionUpdateResult::Applied)
             && previous.name != object.state.action.name
         {
@@ -10670,6 +11799,47 @@ impl Engine {
 
     fn reset_lift_action(&mut self, idx: usize, definition_id: &DefinitionId) {
         self.reset_action_to_default(idx, definition_id, true);
+    }
+
+    fn apply_no_attach_action(&mut self, idx: usize, library: &ActionLibrary) {
+        if idx >= self.objects.len() {
+            return;
+        }
+
+        let previous = self.objects[idx].state.action.clone();
+        if previous.name == library.default_action() {
+            return;
+        }
+
+        let next_action = if library.contains("Jump") {
+            "Jump"
+        } else {
+            library.default_action()
+        };
+
+        let update = ActionUpdate {
+            name: Some(next_action.to_string()),
+            phase: Some(0),
+            ticks: Some(0),
+            force: true,
+            data: None,
+            target: Some(None),
+            target2: Some(None),
+        };
+
+        let object = &mut self.objects[idx];
+        let result = object
+            .state
+            .action
+            .apply_update_with_library(&update, library);
+        object.state.action.target = None;
+        object.state.action.target2 = None;
+        object.state.command_direction = CommandDirection::Stop;
+        if matches!(result, ActionUpdateResult::Applied)
+            && previous.name != object.state.action.name
+        {
+            object.record_action_event(previous, ActionTransitionKind::Forced);
+        }
     }
 
     fn apply_attach_procedure(&mut self, idx: usize, definition_id: &DefinitionId) -> bool {
@@ -10748,8 +11918,8 @@ impl Engine {
         );
 
         let object = &mut self.objects[idx];
-        object.state.position = new_position;
-        object.state.velocity = Vector2::ZERO;
+        object.set_position(new_position);
+        object.set_velocity(Vector2::ZERO);
 
         true
     }
@@ -10983,10 +12153,15 @@ impl Engine {
 
         let fighter = &mut self.objects[idx];
         fighter.state.direction = desired_direction;
-        let new_velocity = step_toward(fighter.state.velocity.x, desired_velocity, walk_accel);
-        fighter.state.velocity.x = clamp_to_limit(new_velocity, walk_speed);
-        fighter.state.velocity.y = 0;
-        physics.clamp_velocity(&mut fighter.state.velocity);
+        let new_velocity = step_fixed_toward(
+            fighter.fixed_velocity.x,
+            itofix(desired_velocity),
+            itofix(walk_accel),
+        );
+        fighter.fixed_velocity.x = clamp_fixed_to_limit(new_velocity, walk_speed);
+        fighter.fixed_velocity.y = C4Fixed::ZERO;
+        physics.clamp_fixed_velocity(&mut fighter.fixed_velocity);
+        fighter.refresh_velocity_from_fixed();
 
         true
     }
@@ -11081,17 +12256,25 @@ impl Engine {
         acceleration: i32,
         physics: PhysicsSettings,
     ) {
-        let accel = acceleration.max(0);
-        let new_target_velocity =
-            step_toward(target.state.velocity.x, desired_target_velocity, accel);
-        target.state.velocity.x = clamp_to_limit(new_target_velocity, speed_limit);
-        physics.clamp_velocity(&mut target.state.velocity);
+        let accel = itofix(acceleration.max(0));
+        let new_target_velocity = step_fixed_toward(
+            target.fixed_velocity.x,
+            itofix(desired_target_velocity),
+            accel,
+        );
+        target.fixed_velocity.x = clamp_fixed_to_limit(new_target_velocity, speed_limit);
+        physics.clamp_fixed_velocity(&mut target.fixed_velocity);
+        target.refresh_velocity_from_fixed();
 
-        let new_puller_velocity =
-            step_toward(puller.state.velocity.x, desired_puller_velocity, accel);
-        puller.state.velocity.x = clamp_to_limit(new_puller_velocity, speed_limit);
-        puller.state.velocity.y = 0;
-        physics.clamp_velocity(&mut puller.state.velocity);
+        let new_puller_velocity = step_fixed_toward(
+            puller.fixed_velocity.x,
+            itofix(desired_puller_velocity),
+            accel,
+        );
+        puller.fixed_velocity.x = clamp_fixed_to_limit(new_puller_velocity, speed_limit);
+        puller.fixed_velocity.y = C4Fixed::ZERO;
+        physics.clamp_fixed_velocity(&mut puller.fixed_velocity);
+        puller.refresh_velocity_from_fixed();
     }
 
     fn update_push_pair(
@@ -11103,13 +12286,20 @@ impl Engine {
         straighten: bool,
         physics: PhysicsSettings,
     ) {
-        let new_target_velocity =
-            step_toward(target.state.velocity.x, desired_target_velocity, push_accel);
-        target.state.velocity.x = clamp_to_limit(new_target_velocity, push_speed);
+        let push_accel = push_accel.max(0);
+        let push_accel_fixed = itofix(push_accel);
+        let new_target_velocity = step_fixed_toward(
+            target.fixed_velocity.x,
+            itofix(desired_target_velocity),
+            push_accel_fixed,
+        );
+        target.fixed_velocity.x = clamp_fixed_to_limit(new_target_velocity, push_speed);
         if straighten && push_accel > 0 {
-            target.state.velocity.y = decelerate_toward_zero(target.state.velocity.y, push_accel);
+            target.fixed_velocity.y =
+                decelerate_fixed_toward_zero(target.fixed_velocity.y, push_accel_fixed);
         }
-        physics.clamp_velocity(&mut target.state.velocity);
+        physics.clamp_fixed_velocity(&mut target.fixed_velocity);
+        target.refresh_velocity_from_fixed();
 
         let mut desired_pusher_velocity = desired_target_velocity;
         if desired_pusher_velocity == 0 {
@@ -11122,11 +12312,15 @@ impl Engine {
             }
         }
 
-        let new_pusher_velocity =
-            step_toward(pusher.state.velocity.x, desired_pusher_velocity, push_accel);
-        pusher.state.velocity.x = clamp_to_limit(new_pusher_velocity, push_speed);
-        pusher.state.velocity.y = 0;
-        physics.clamp_velocity(&mut pusher.state.velocity);
+        let new_pusher_velocity = step_fixed_toward(
+            pusher.fixed_velocity.x,
+            itofix(desired_pusher_velocity),
+            push_accel_fixed,
+        );
+        pusher.fixed_velocity.x = clamp_fixed_to_limit(new_pusher_velocity, push_speed);
+        pusher.fixed_velocity.y = C4Fixed::ZERO;
+        physics.clamp_fixed_velocity(&mut pusher.fixed_velocity);
+        pusher.refresh_velocity_from_fixed();
     }
 
     fn desired_pull_velocity(
@@ -11216,13 +12410,16 @@ impl Engine {
             return;
         }
         let object = &mut self.objects[idx];
-        object.state.position = resolution.position;
-        object.state.velocity = resolution.velocity;
+        object.apply_collision_resolution(&resolution);
         if let Some(material_id) = resolution.material {
             if let Some(material) = self.materials.get_by_id(material_id) {
                 object.apply_material_interaction(material);
             }
         }
+    }
+
+    fn cross_check_at_index(&mut self, idx: usize) -> Result<(), EngineError> {
+        self.auto_collect_at_index(idx)
     }
 
     fn auto_collect_at_index(&mut self, idx: usize) -> Result<(), EngineError> {
@@ -11276,8 +12473,22 @@ impl Engine {
             None
         };
 
+        let collector_shape_rect = self.object_shape_rect(&self.objects[idx]);
+        let candidate_ids = self
+            .sectors
+            .as_ref()
+            .map(|sectors| {
+                let area = sectors.area(collector_shape_rect);
+                sectors.object_ids_in_area(&area)
+            })
+            .unwrap_or_else(|| self.objects.iter().map(|object| object.id).collect());
+
         let mut candidates = Vec::new();
-        for (candidate_idx, candidate) in self.objects.iter().enumerate() {
+        for candidate_id in candidate_ids {
+            let Some(candidate_idx) = self.find_object_index(candidate_id) else {
+                continue;
+            };
+            let candidate = &self.objects[candidate_idx];
             if candidate_idx == idx || candidate.destroyed {
                 continue;
             }
@@ -11352,7 +12563,7 @@ impl Engine {
     }
 
     fn next_random_i32(&mut self) -> i32 {
-        self.rng.gen()
+        self.rng.random(i32::MAX)
     }
 
     fn next_object_id(&mut self) -> ObjectId {
@@ -12380,12 +13591,13 @@ impl Engine {
                 corrode_resistance,
                 corrosion_probability,
             } => {
+                // C4Material.cpp:701,724 – two Random() calls for corrosion check
                 let success = if let Some(probability) = corrosion_probability {
                     let clamped = probability.clamp(0, 100);
-                    self.rng.gen_range(0..100) < clamped
+                    self.rng.random(100) < clamped
                 } else {
                     let resistance = corrode_resistance.max(1);
-                    self.rng.gen_range(0..=resistance) < corrosive_strength.max(1)
+                    self.rng.random(resistance + 1) < corrosive_strength.max(1)
                 };
                 if success {
                     if let Some(landscape) = self.landscape.as_mut() {
@@ -12464,8 +13676,9 @@ impl Engine {
             }
             if Self::particle_intersects_object(px, py, object) {
                 if friction != 0 {
-                    object.state.velocity.x =
-                        apply_horizontal_friction(object.state.velocity.x, friction);
+                    object.fixed_velocity.x =
+                        apply_horizontal_friction_fixed(object.fixed_velocity.x, friction);
+                    object.refresh_velocity_from_fixed();
                     for vertex in &mut object.state.vertices {
                         vertex.friction = friction;
                     }
@@ -12578,7 +13791,13 @@ impl Engine {
             category,
         } = config;
 
-        let (action_library, definition_category, default_action_state, default_crew_member) = {
+        let (
+            action_library,
+            definition_category,
+            default_action_state,
+            default_crew_member,
+            definition_vertices,
+        ) = {
             let definition_ref = self
                 .definitions
                 .get(&definition_id)
@@ -12588,6 +13807,7 @@ impl Engine {
                 definition_ref.category(),
                 definition_ref.default_action_state(),
                 definition_ref.is_crew(),
+                definition_ref.shape_vertices().to_vec(),
             )
         };
         let mut initial_action = match action {
@@ -12614,6 +13834,12 @@ impl Engine {
             .map(|value| normalize_category(value, definition_category))
             .unwrap_or(definition_category);
 
+        let initial_vertices = if vertices.is_empty() {
+            definition_vertices
+        } else {
+            vertices
+        };
+
         let mut object = Object::new(
             id,
             definition_id.clone(),
@@ -12630,7 +13856,7 @@ impl Engine {
                 direction,
                 command_direction,
                 effects: Vec::new(),
-                vertices,
+                vertices: initial_vertices,
                 container: None,
                 contents: Vec::new(),
                 components: HashMap::new(),
@@ -12659,7 +13885,7 @@ impl Engine {
             effect_events.append(&mut initial_events);
         }
 
-        self.physics.clamp_velocity(&mut object.state.velocity);
+        object.clamp_velocity(&self.physics);
 
         let mut additional_spawns = Vec::new();
 
@@ -12737,7 +13963,7 @@ impl Engine {
                     detail: "Construction may not destroy the object".into(),
                 });
             }
-            let outcome = object.state.apply_delta(&delta, &action_library);
+            let outcome = object.apply_delta(&delta, &action_library);
             if let Some(change) = outcome.action_change {
                 object.record_action_event(change.previous, ActionTransitionKind::Forced);
             }
@@ -12753,7 +13979,7 @@ impl Engine {
             if !global_effects.is_empty() {
                 self.apply_global_effect_commands(&global_effects);
             }
-            self.physics.clamp_velocity(&mut object.state.velocity);
+            object.clamp_velocity(&self.physics);
             if !command_ops.is_empty() {
                 object.apply_command_operations(command_ops);
             }
@@ -12845,7 +14071,7 @@ impl Engine {
                     detail: "Initialize may not destroy the object".into(),
                 });
             }
-            let outcome = object.state.apply_delta(&delta, &action_library);
+            let outcome = object.apply_delta(&delta, &action_library);
             if let Some(change) = outcome.action_change {
                 object.record_action_event(change.previous, ActionTransitionKind::Forced);
             }
@@ -12861,7 +14087,7 @@ impl Engine {
             if !global_effects.is_empty() {
                 self.apply_global_effect_commands(&global_effects);
             }
-            self.physics.clamp_velocity(&mut object.state.velocity);
+            object.clamp_velocity(&self.physics);
             if !command_ops.is_empty() {
                 object.apply_command_operations(command_ops);
             }
@@ -12944,13 +14170,15 @@ impl Engine {
             }
         }
 
-        self.apply_landscape(&mut object.state);
+        self.apply_landscape(&mut object);
         self.objects.push(object);
+        let index = self.objects.len() - 1;
+        self.update_sector_for_index(index);
         for (previous, new) in container_changes {
             self.apply_container_change(id, previous, new)?;
         }
-        let index = self.objects.len() - 1;
         self.trigger_action_callbacks(index, None)?;
+        self.update_sector_for_index(index);
         Ok((id, additional_spawns))
     }
 
@@ -13499,11 +14727,12 @@ fn parse_command(
     match value {
         Value::Nil => Ok(CommandBatch::default()),
         Value::Proplist(map) => parse_command_from_proplist(definition, function, map),
-        other => Err(EngineError::InvalidScriptOutput {
-            definition: definition.to_string(),
-            function,
-            detail: format!("expected proplist or nil, got {}", other.type_name()),
-        }),
+        // C++ parity: lifecycle callbacks (Initialize/Step) have their return
+        // value DISCARDED by the engine (e.g. C4Object.cpp:1483 calls
+        // `Call(PSF_Initialize)` as a bare statement). Real definitions routinely
+        // return an int from Initialize. The command-delta proplist is an additive
+        // Rust convenience; any other return type is simply ignored, never an error.
+        _ => Ok(CommandBatch::default()),
     }
 }
 
@@ -14546,11 +15775,12 @@ fn value_to_liquid_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::C4Fixed;
+    use crate::rng::LcgRng;
     use crate::scenario::{ClearObjectObjective, CreateObjectObjective, ScenarioObjectives};
     use lc_resources::MaterialLibrary;
     use lc_script::Value;
     use rand::Rng;
-    use rand_chacha::ChaCha8Rng;
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
@@ -15149,7 +16379,7 @@ global func MenuCommand(state, kind, selection)
     fn wind_variation_adjusts_over_time() {
         let mut settings = EnvironmentSettings::new(5).with_wind_variation(4, 40);
         let base = settings.base_wind;
-        let mut rng = ChaCha8Rng::seed_from_u64(1234);
+        let mut rng = LcgRng::seed_from_u64(1234);
         let mut probe = rng.clone();
         let range = settings.wind_variation.abs();
         let lower = base.saturating_sub(range);
@@ -15297,6 +16527,28 @@ global func MenuCommand(state, kind, selection)
         }
         "#;
         Definition::from_script("Test", "Test", source).expect("script compiles")
+    }
+
+    #[test]
+    fn initialize_returning_non_proplist_is_ignored_like_cpp() {
+        // C++ parity: C4Object.cpp:1483 invokes `Call(PSF_Initialize)` as a bare
+        // statement and DISCARDS the return value. Real Clonk definitions return
+        // an int (or anything) from Initialize; the engine must not reject such a
+        // return. The command-delta proplist convention is an additive Rust
+        // convenience for synthetic fixtures, not a requirement on real content.
+        let source = r#"
+        global func Initialize(state, random) { return 1; }
+        "#;
+        let definition = Definition::from_script("CLNK", "Clonk", source).expect("script compiles");
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("register definition");
+        let spawned = engine.spawn_object(SpawnConfig::new("CLNK").with_energy(50));
+        assert!(
+            spawned.is_ok(),
+            "Initialize returning an int must not error (C++ discards the return): {spawned:?}"
+        );
     }
 
     #[test]
@@ -16191,17 +17443,17 @@ global func MenuCommand(state, kind, selection)
             .spawn_object(SpawnConfig::new("RandomUser"))
             .expect("spawn succeeds");
 
-        let mut expected_rng = ChaCha8Rng::seed_from_u64(0);
-        let _ = expected_rng.gen::<i32>(); // Initialize random draw
-        let _ = expected_rng.gen::<i32>(); // First tick random parameter
-        let first_expected = expected_rng.gen_range(0..10);
+        let mut expected_rng = LcgRng::seed_from_u64(0);
+        let _ = expected_rng.random(i32::MAX); // Initialize random argument
+        let _ = expected_rng.random(i32::MAX); // First tick random argument
+        let first_expected = expected_rng.random(10);
 
         let first_tick = engine.tick().expect("first tick succeeds");
         let object = first_tick.object(id).expect("object present");
         assert_eq!(object.energy, first_expected);
 
-        let _ = expected_rng.gen::<i32>(); // Second tick random parameter
-        let second_expected = expected_rng.gen_range(0..10);
+        let _ = expected_rng.random(i32::MAX); // Second tick random argument
+        let second_expected = expected_rng.random(10);
 
         let second_tick = engine.tick().expect("second tick succeeds");
         let object = second_tick.object(id).expect("object present");
@@ -16287,8 +17539,16 @@ global func MenuCommand(state, kind, selection)
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity.y, 4);
+        assert_eq!(object.velocity.y, 0);
         assert_eq!(object.velocity.x, 0);
+        assert_eq!(
+            object
+                .fixed_velocity
+                .expect("gravity should remain sub-pixel")
+                .y
+                .val(),
+            524
+        );
     }
 
     #[test]
@@ -16321,7 +17581,15 @@ global func MenuCommand(state, kind, selection)
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity, Vector2::new(3, 4));
+        assert_eq!(object.velocity, Vector2::new(3, 3));
+        assert_eq!(
+            object
+                .fixed_velocity
+                .expect("gravity should remain sub-pixel")
+                .y
+                .val(),
+            196739
+        );
     }
 
     #[test]
@@ -16354,7 +17622,15 @@ global func MenuCommand(state, kind, selection)
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity.y, 3);
+        assert_eq!(object.velocity.y, 0);
+        assert_eq!(
+            object
+                .fixed_velocity
+                .expect("float gravity should remain sub-pixel")
+                .y
+                .val(),
+            393
+        );
     }
 
     #[test]
@@ -16389,7 +17665,15 @@ global func MenuCommand(state, kind, selection)
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity, Vector2::new(2, -1));
+        assert_eq!(object.velocity, Vector2::new(2, -2));
+        assert_eq!(
+            object
+                .fixed_velocity
+                .expect("float gravity should remain sub-pixel")
+                .y
+                .val(),
+            -131006
+        );
     }
 
     #[test]
@@ -16422,8 +17706,16 @@ global func MenuCommand(state, kind, selection)
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity.y, 3);
+        assert_eq!(object.velocity.y, 0);
         assert_eq!(object.velocity.x, 0);
+        assert_eq!(
+            object
+                .fixed_velocity
+                .expect("swim gravity should remain sub-pixel")
+                .y
+                .val(),
+            393
+        );
     }
 
     #[test]
@@ -16497,10 +17789,14 @@ global func MenuCommand(state, kind, selection)
         engine
             .register_definition(crate_definition)
             .expect("crate registers");
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
 
         let target_id = engine
             .spawn_object(SpawnConfig::new("Crate"))
             .expect("target spawns");
+        let target_idx = engine.find_object_index(target_id).expect("target exists");
+        engine.objects[target_idx]
+            .set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, C4Fixed::from_raw(300)));
 
         let mut lift_action = ActionState::new("Lift");
         lift_action.target = Some(target_id);
@@ -16516,6 +17812,8 @@ global func MenuCommand(state, kind, selection)
         let snapshot = engine.tick().expect("tick succeeds");
         let target = snapshot.object(target_id).expect("target present");
         assert!(target.velocity.y < 0, "lift should pull target upward");
+        let target_idx = engine.find_object_index(target_id).expect("target exists");
+        assert_eq!(engine.objects[target_idx].fixed_velocity.y.val(), -130772);
         let lifter = snapshot.object(lifter_id).expect("lifter present");
         assert_eq!(lifter.action.name, "Lift");
     }
@@ -17572,6 +18870,7 @@ func ControlDig() { SetAction("Dig"); return true; }
         engine
             .register_definition(build_definition())
             .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
 
         let id = engine
             .spawn_object(
@@ -17584,13 +18883,13 @@ func ControlDig() { SetAction("Dig"); return true; }
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.position, Vector2::new(1, 1));
-        assert_eq!(object.velocity, Vector2::new(2, 1));
+        assert_eq!(object.position, Vector2::new(1, 0));
+        assert_eq!(object.velocity, Vector2::new(2, 0));
 
         let snapshot = engine.tick().expect("second tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.position, Vector2::new(3, 3));
-        assert_eq!(object.velocity, Vector2::new(3, 2));
+        assert_eq!(object.position, Vector2::new(3, 0));
+        assert_eq!(object.velocity, Vector2::new(3, 0));
     }
 
     #[test]
@@ -17608,6 +18907,7 @@ func ControlDig() { SetAction("Dig"); return true; }
         engine
             .register_definition(Definition::from_script("Drift", "Drift", script).unwrap())
             .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
 
         let id = engine
             .spawn_object(
@@ -17621,13 +18921,45 @@ func ControlDig() { SetAction("Dig"); return true; }
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity, Vector2::new(2, 1));
-        assert_eq!(object.position, Vector2::new(2, 1));
+        assert_eq!(object.velocity, Vector2::ZERO);
+        assert_eq!(object.position, Vector2::ZERO);
+        assert_eq!(
+            object
+                .fixed_velocity
+                .expect("wind should remain sub-pixel")
+                .x
+                .val(),
+            1310
+        );
+        assert_eq!(
+            object
+                .fixed_position
+                .expect("wind movement should remain sub-pixel")
+                .x
+                .val(),
+            1310
+        );
 
         let snapshot = engine.tick().expect("second tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity, Vector2::new(4, 2));
-        assert_eq!(object.position, Vector2::new(6, 3));
+        assert_eq!(object.velocity, Vector2::ZERO);
+        assert_eq!(object.position, Vector2::ZERO);
+        assert_eq!(
+            object
+                .fixed_velocity
+                .expect("wind should accumulate in fixed velocity")
+                .x
+                .val(),
+            2620
+        );
+        assert_eq!(
+            object
+                .fixed_position
+                .expect("wind movement should accumulate in fixed position")
+                .x
+                .val(),
+            3930
+        );
     }
 
     #[test]
@@ -17719,6 +19051,11 @@ func ControlDig() { SetAction("Dig"); return true; }
         engine
             .register_definition(target_definition)
             .expect("target registers");
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
 
         let target_id = engine
             .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(10, 0)))
@@ -17739,6 +19076,9 @@ func ControlDig() { SetAction("Dig"); return true; }
                     .with_command_direction(CommandDirection::Right),
             )
             .expect("pusher spawns");
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
+        engine.objects[pusher_idx]
+            .set_fixed_velocity(FixedVec2::new(C4Fixed::from_raw(98304), C4Fixed::ZERO));
 
         let snapshot = engine.tick().expect("tick succeeds");
         let pusher = snapshot
@@ -17752,6 +19092,10 @@ func ControlDig() { SetAction("Dig"); return true; }
             .object(target_id)
             .expect("target present after tick");
         assert!(target.velocity.x >= 0);
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
+        let target_idx = engine.find_object_index(target_id).expect("target exists");
+        assert_eq!(engine.objects[pusher_idx].fixed_velocity.x.val(), 294912);
+        assert_eq!(engine.objects[target_idx].fixed_velocity.x.val(), 196608);
 
         let snapshot = engine.tick().expect("second tick succeeds");
         let target_after = snapshot
@@ -17852,6 +19196,11 @@ func ControlDig() { SetAction("Dig"); return true; }
         engine
             .register_definition(target_definition)
             .expect("target registers");
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
 
         let vertices = vec![
             ObjectVertex::new(-10, -10),
@@ -17884,6 +19233,9 @@ func ControlDig() { SetAction("Dig"); return true; }
                     .with_command_direction(CommandDirection::Right),
             )
             .expect("puller spawns");
+        let puller_idx = engine.find_object_index(puller_id).expect("puller exists");
+        engine.objects[puller_idx]
+            .set_fixed_velocity(FixedVec2::new(C4Fixed::from_raw(98304), C4Fixed::ZERO));
 
         let snapshot = engine.tick().expect("tick succeeds");
         let puller = snapshot
@@ -17897,6 +19249,10 @@ func ControlDig() { SetAction("Dig"); return true; }
             .object(target_id)
             .expect("target present after tick");
         assert!(target.velocity.x >= 0);
+        let puller_idx = engine.find_object_index(puller_id).expect("puller exists");
+        let target_idx = engine.find_object_index(target_id).expect("target exists");
+        assert_eq!(engine.objects[puller_idx].fixed_velocity.x.val(), 294912);
+        assert_eq!(engine.objects[target_idx].fixed_velocity.x.val(), 196608);
 
         let snapshot = engine.tick().expect("second tick succeeds");
         let target_after = snapshot
@@ -18005,6 +19361,11 @@ func ControlDig() { SetAction("Dig"); return true; }
         engine
             .register_definition(opponent_definition)
             .expect("opponent definition registers");
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
 
         let vertices = vec![
             ObjectVertex::new(-8, -8),
@@ -18032,6 +19393,11 @@ func ControlDig() { SetAction("Dig"); return true; }
                     .with_action(fight_state),
             )
             .expect("fighter spawns");
+        let fighter_idx = engine
+            .find_object_index(fighter_id)
+            .expect("fighter exists");
+        engine.objects[fighter_idx]
+            .set_fixed_velocity(FixedVec2::new(C4Fixed::from_raw(98304), C4Fixed::ZERO));
 
         engine
             .apply_object_update(
@@ -18056,6 +19422,10 @@ func ControlDig() { SetAction("Dig"); return true; }
             fighter.position.x > 0,
             "fighter should have moved horizontally"
         );
+        let fighter_idx = engine
+            .find_object_index(fighter_id)
+            .expect("fighter exists");
+        assert_eq!(engine.objects[fighter_idx].fixed_velocity.x.val(), 294912);
     }
 
     #[test]
@@ -18249,7 +19619,7 @@ func ControlDig() { SetAction("Dig"); return true; }
             .with_temperature_range(30)
             .with_season(0)
             .with_temperature(-40);
-        let mut rng = ChaCha8Rng::seed_from_u64(0);
+        let mut rng = LcgRng::seed_from_u64(0);
         settings.advance_frame(&mut rng);
         assert_eq!(settings.temperature, -39);
     }
@@ -18261,7 +19631,7 @@ func ControlDig() { SetAction("Dig"); return true; }
             .with_temperature_range(20)
             .with_season(50)
             .with_temperature(40);
-        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        let mut rng = LcgRng::seed_from_u64(1);
         settings.advance_frame(&mut rng);
         assert_eq!(settings.temperature, 39);
     }
@@ -18949,6 +20319,119 @@ func ControlDig() { SetAction("Dig"); return true; }
     }
 
     #[test]
+    fn snapshot_round_trip_preserves_sub_pixel_velocity() {
+        // Sub-pixel velocity (raw 16.16 fractions below one whole pixel) must
+        // survive a snapshot save/restore. C++ persists both the integer mirror
+        // and the fixed value (`C4Object.cpp:2742`); the integer-only path would
+        // round the velocity to whole pixels (fixtoi) and lose the fraction.
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(build_definition())
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Test").with_position(Vector2::new(5, 5)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        // x: pure sub-pixel (rounds to 0 px); y: 1 px + sub-pixel fraction.
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(
+            C4Fixed::from_raw(300),
+            C4Fixed::from_raw(70000),
+        ));
+
+        let snapshot = engine.snapshot();
+
+        let mut restored = Engine::with_seed(0);
+        restored
+            .register_definition(build_definition())
+            .expect("definition registers");
+        restored
+            .restore_snapshot(&snapshot)
+            .expect("snapshot restores");
+
+        let ridx = restored
+            .find_object_index(id)
+            .expect("restored object exists");
+        assert_eq!(restored.objects[ridx].fixed_velocity.x.val(), 300);
+        assert_eq!(restored.objects[ridx].fixed_velocity.y.val(), 70000);
+    }
+
+    #[test]
+    fn json_save_load_preserves_sub_pixel_velocity() {
+        // The save-game path serializes through JSON; sub-pixel velocity must
+        // survive serialize -> deserialize -> restore so a reloaded game stays
+        // in lockstep with one that ran continuously.
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(build_definition())
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Test").with_position(Vector2::new(5, 5)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(
+            C4Fixed::from_raw(300),
+            C4Fixed::from_raw(70000),
+        ));
+
+        let json = engine
+            .capture_state()
+            .to_json_string()
+            .expect("state serializes");
+
+        let mut restored = Engine::with_seed(0);
+        restored
+            .register_definition(build_definition())
+            .expect("definition registers");
+        let state = EngineState::from_json_str(&json).expect("state deserializes");
+        restored.restore_state(&state).expect("state restores");
+
+        let ridx = restored
+            .find_object_index(id)
+            .expect("restored object exists");
+        assert_eq!(restored.objects[ridx].fixed_velocity.x.val(), 300);
+        assert_eq!(restored.objects[ridx].fixed_velocity.y.val(), 70000);
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_rotation_velocity() {
+        // A spinning object's angular velocity (rdir) and rotation accumulator
+        // (fix_r) must survive save/restore so a reloaded game keeps turning in
+        // lockstep — mirroring C++ persisting rdir/fix_r.
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(build_definition())
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Test").with_position(Vector2::new(5, 5)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        // 1.0 deg/frame angular velocity, mid-rotation with a sub-degree fix_r.
+        engine.objects[idx].rotation_velocity = itofix(1);
+        engine.objects[idx].fixed_rotation = C4Fixed::from_raw(327680 + 300);
+
+        let json = engine
+            .capture_state()
+            .to_json_string()
+            .expect("state serializes");
+
+        let mut restored = Engine::with_seed(0);
+        restored
+            .register_definition(build_definition())
+            .expect("definition registers");
+        let state = EngineState::from_json_str(&json).expect("state deserializes");
+        restored.restore_state(&state).expect("state restores");
+
+        let ridx = restored
+            .find_object_index(id)
+            .expect("restored object exists");
+        assert_eq!(
+            restored.objects[ridx].rotation_velocity.val(),
+            itofix(1).val()
+        );
+        assert_eq!(restored.objects[ridx].fixed_rotation.val(), 327680 + 300);
+    }
+
+    #[test]
     fn crew_elimination_marks_owner_after_last_crew_destroyed() {
         let mut engine = Engine::with_seed(0);
         let mut definition = build_definition();
@@ -19213,6 +20696,7 @@ func ControlDig() { SetAction("Dig"); return true; }
         engine
             .register_definition(Definition::from_script("Test", "Test", source).unwrap())
             .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
 
         let id = engine
             .spawn_object(SpawnConfig::new("Test"))
@@ -19220,7 +20704,7 @@ func ControlDig() { SetAction("Dig"); return true; }
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.position, Vector2::new(0, 1));
+        assert_eq!(object.position, Vector2::new(0, 0));
         assert_eq!(object.energy, 42);
         assert_eq!(snapshot.objects.len(), 2, "spawned child should exist");
 
@@ -19229,7 +20713,7 @@ func ControlDig() { SetAction("Dig"); return true; }
             .iter()
             .find(|obj| obj.id != id)
             .expect("child object present");
-        assert_eq!(spawned.position, Vector2::new(5, 1));
+        assert_eq!(spawned.position, Vector2::new(5, 0));
         assert_eq!(spawned.energy, 42);
     }
 
@@ -19768,7 +21252,7 @@ func ControlDig() { SetAction("Dig"); return true; }
     fn custom_physics_settings_affect_integration() {
         let mut engine = Engine::with_seed(42);
         engine
-            .register_definition(build_definition())
+            .register_definition(simple_definition("Test"))
             .expect("definition registers");
         engine.set_physics(PhysicsSettings::new(2, 6, -8));
 
@@ -19782,8 +21266,847 @@ func ControlDig() { SetAction("Dig"); return true; }
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity.y, 2);
-        assert_eq!(object.position.y, 2);
+        assert_eq!(object.velocity.y, 0);
+        assert_eq!(object.position.y, 0);
+        assert_eq!(
+            object
+                .fixed_velocity
+                .expect("custom gravity should remain sub-pixel")
+                .y
+                .val(),
+            262
+        );
+        assert_eq!(
+            object
+                .fixed_position
+                .expect("custom gravity movement should remain sub-pixel")
+                .y
+                .val(),
+            262
+        );
+    }
+
+    #[test]
+    fn fixed_point_velocity_accumulates_sub_pixel_motion() {
+        let mut engine = Engine::with_seed(42);
+        engine
+            .register_definition(simple_definition("Test"))
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 0, 0));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Test").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx]
+            .set_fixed_velocity(FixedVec2::new(C4Fixed::from_raw(300), C4Fixed::ZERO));
+
+        for _ in 0..109 {
+            let snapshot = engine.tick().expect("tick succeeds");
+            let object = snapshot.object(id).expect("object present");
+            assert_eq!(object.position.x, 0);
+        }
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        // `fixtoi` rounds to nearest: 110 * 300 = 33000, just over 0.5px.
+        assert_eq!(object.position.x, 1);
+        assert_eq!(object.velocity.x, 0);
+    }
+
+    #[test]
+    fn gravity_accumulates_as_c4fixed_matching_cpp_golden() {
+        // Mirrors parity/golden/parity_golden.json movement[0]: C4Movement.cpp:643
+        // applies ydir += GravAccel with raw GravAccel 13107 each frame.
+        let mut engine = Engine::with_seed(42);
+        engine
+            .register_definition(simple_definition("Test"))
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(100, 200, -200));
+        engine.set_environment(EnvironmentSettings::new(0));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Test").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let expected_ydir = [13107, 26214, 39321, 52428, 65535];
+
+        for raw_ydir in expected_ydir {
+            let _ = engine.tick().expect("tick succeeds");
+            let idx = engine.find_object_index(id).expect("object exists");
+            assert_eq!(engine.objects[idx].fixed_velocity.y.val(), raw_ydir);
+        }
+    }
+
+    #[test]
+    fn spawn_landscape_friction_applies_to_fixed_velocity() -> Result<(), EngineError> {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=50
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(17);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(20, 10, Some(earth)));
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        let definition = Definition::from_script(
+            "Slider",
+            "Slider",
+            r#"
+            global func Initialize(state, random) { SetXDir(15); return nil; }
+            global func Step(state, frame, random) { return nil; }
+            "#,
+        )
+        .expect("script compiles");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id =
+            engine.spawn_object(SpawnConfig::new("Slider").with_position(Vector2::new(5, 12)))?;
+        let idx = engine.find_object_index(id).expect("object exists");
+
+        assert_eq!(engine.objects[idx].state.position.y, 10);
+        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 49152);
+        assert_eq!(engine.objects[idx].state.velocity.x, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn landscape_collision_preserves_fixed_x_and_zeroes_contact_y() {
+        let mut engine = Engine::with_seed(19);
+        engine
+            .register_definition(simple_definition("Crate"))
+            .expect("definition registers");
+        engine.set_landscape(Landscape::flat(20, 10));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(5, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].set_position(Vector2::new(5, 12));
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(
+            C4Fixed::from_raw(300),
+            C4Fixed::from_raw(70000),
+        ));
+
+        engine.apply_landscape_at_index(idx);
+
+        assert_eq!(engine.objects[idx].state.position.y, 10);
+        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 300);
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        assert_eq!(engine.objects[idx].state.velocity, Vector2::ZERO);
+    }
+
+    #[test]
+    fn per_pixel_horizontal_movement_stops_at_first_solid_column() {
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_definition(simple_definition("Crate"))
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        let mut surface = vec![20; 12];
+        surface[6] = 0;
+        engine.set_landscape(Landscape::new(12, surface).expect("landscape constructs"));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(4, 10)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(4), C4Fixed::ZERO));
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+
+        assert_eq!(object.position, Vector2::new(5, 10));
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
+        assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn spawn_initializes_vertices_from_definition_shape() {
+        let mut definition = simple_definition("Rock");
+        definition.set_shape_vertices(vec![
+            ObjectVertex::new(-1, 1)
+                .with_cnat(CNAT_BOTTOM)
+                .with_friction(80),
+            ObjectVertex::new(1, 1)
+                .with_cnat(CNAT_BOTTOM)
+                .with_friction(80),
+        ]);
+
+        let mut engine = Engine::with_seed(29);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Rock"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.object_snapshot(id).expect("snapshot exists");
+        assert_eq!(snapshot.vertices.len(), 2);
+        assert_eq!(snapshot.vertices[0].x, -1);
+        assert_eq!(snapshot.vertices[0].cnat, CNAT_BOTTOM);
+        assert_eq!(snapshot.vertices[0].friction, 80);
+    }
+
+    #[test]
+    fn sectors_index_spawned_objects_by_point_and_shape_area() {
+        let mut definition = simple_definition("Crate");
+        definition.set_shape_rect(Some(DefinitionRect::new(-10, -5, 70, 10)));
+
+        let mut engine = Engine::with_seed(31);
+        engine.set_landscape(Landscape::flat(120, 120));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(20, 20)))
+            .expect("spawn succeeds");
+
+        let sectors = engine.sectors.as_ref().expect("sectors initialized");
+        assert_eq!(
+            sectors.object_ids(sector::SectorKey::Inside { x: 0, y: 0 }),
+            &[id]
+        );
+        assert_eq!(
+            sectors.shape_ids(sector::SectorKey::Inside { x: 0, y: 0 }),
+            &[id]
+        );
+        assert_eq!(
+            sectors.shape_ids(sector::SectorKey::Inside { x: 1, y: 0 }),
+            &[id]
+        );
+        assert!(sectors
+            .shape_ids(sector::SectorKey::Inside { x: 2, y: 0 })
+            .is_empty());
+        let area = sectors.area(DefinitionRect::new(0, 0, 100, 50));
+        assert_eq!(sectors.shape_ids_in_area(&area), vec![id]);
+        assert_eq!(sectors.shape_sum(), 2);
+    }
+
+    #[test]
+    fn sectors_track_object_position_updates_across_sector_boundaries() {
+        let mut engine = Engine::with_seed(32);
+        engine.set_landscape(Landscape::flat(120, 120));
+        engine
+            .register_definition(simple_definition("Mover"))
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Mover").with_position(Vector2::new(10, 10)))
+            .expect("spawn succeeds");
+        engine
+            .apply_object_update(id, ObjectUpdate::new().with_position(Vector2::new(70, 10)))
+            .expect("update succeeds");
+
+        let sectors = engine.sectors.as_ref().expect("sectors initialized");
+        assert!(sectors
+            .object_ids(sector::SectorKey::Inside { x: 0, y: 0 })
+            .is_empty());
+        assert_eq!(
+            sectors.object_ids(sector::SectorKey::Inside { x: 1, y: 0 }),
+            &[id]
+        );
+    }
+
+    #[test]
+    fn sectors_remove_deleted_objects_from_membership_lists() {
+        let mut engine = Engine::with_seed(33);
+        engine.set_landscape(Landscape::flat(120, 120));
+        engine
+            .register_definition(simple_definition("Rock"))
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Rock").with_position(Vector2::new(10, 10)))
+            .expect("spawn succeeds");
+        engine
+            .apply_object_update(id, ObjectUpdate::new().with_status(ObjectStatus::Deleted))
+            .expect("delete succeeds");
+
+        let sectors = engine.sectors.as_ref().expect("sectors initialized");
+        assert!(sectors
+            .object_ids(sector::SectorKey::Inside { x: 0, y: 0 })
+            .is_empty());
+        assert!(sectors
+            .shape_ids(sector::SectorKey::Inside { x: 0, y: 0 })
+            .is_empty());
+    }
+
+    #[test]
+    fn at_object_uses_point_sector_and_shape_test() {
+        let mut definition = simple_definition("Target");
+        definition.set_shape_rect(Some(DefinitionRect::new(-10, -5, 20, 10)));
+        definition.set_ocf_base(ocf::GRAB);
+
+        let mut engine = Engine::with_seed(34);
+        engine.set_landscape(Landscape::flat(120, 120));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Target").with_position(Vector2::new(40, 10)))
+            .expect("spawn succeeds");
+
+        let hit = engine
+            .at_object(Vector2::new(31, 10), ocf::GRAB, None)
+            .expect("object found at point");
+        assert_eq!(hit.1, id);
+        assert_ne!(hit.2 & ocf::GRAB, 0);
+        assert!(engine
+            .at_object(Vector2::new(29, 10), ocf::GRAB, None)
+            .is_none());
+    }
+
+    #[test]
+    fn at_object_exclusive_candidate_blocks_later_matches() {
+        let mut blocker = simple_definition("Blocker");
+        blocker.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        blocker.set_ocf_base(ocf::EXCLUSIVE);
+        let mut target = simple_definition("Target");
+        target.set_shape_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        target.set_ocf_base(ocf::GRAB);
+
+        let mut engine = Engine::with_seed(35);
+        engine.set_landscape(Landscape::flat(120, 120));
+        engine
+            .register_definition(blocker)
+            .expect("blocker definition registers");
+        engine
+            .register_definition(target)
+            .expect("target definition registers");
+
+        engine
+            .spawn_object(SpawnConfig::new("Blocker").with_position(Vector2::new(20, 20)))
+            .expect("blocker spawns");
+        engine
+            .spawn_object(SpawnConfig::new("Target").with_position(Vector2::new(20, 20)))
+            .expect("target spawns");
+
+        assert!(engine
+            .at_object(Vector2::new(20, 20), ocf::GRAB, None)
+            .is_none());
+    }
+
+    #[test]
+    fn cross_check_collection_uses_sector_area_candidates() -> Result<(), EngineError> {
+        let mut engine = Engine::with_seed(36);
+        engine.set_landscape(Landscape::flat(160, 160));
+        let mut crew_definition = Definition::from_script("Crew", "Crew", BASIC_OBJECT_SCRIPT)?;
+        crew_definition.set_crew_member(true);
+        crew_definition.set_shape_rect(Some(DefinitionRect::new(-30, -10, 80, 20)));
+        crew_definition.set_collection_rect(Some(DefinitionRect::new(-30, -10, 80, 20)));
+        engine.register_definition(crew_definition)?;
+
+        let mut item_definition = Definition::from_script("Gem", "Gem", BASIC_OBJECT_SCRIPT)?;
+        item_definition.set_collectible(true);
+        engine.register_definition(item_definition)?;
+
+        let crew = engine.spawn_object(
+            SpawnConfig::new("Crew")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_position(Vector2::new(70, 20)),
+        )?;
+        let item =
+            engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(115, 20)))?;
+
+        let _ = engine.tick()?;
+
+        let item_snapshot = engine.object_snapshot(item).expect("item snapshot");
+        assert_eq!(item_snapshot.container, Some(crew));
+        Ok(())
+    }
+
+    #[test]
+    fn shape_bottom_vertex_contact_stops_before_solid_surface() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=50
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut definition = simple_definition("Crate");
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, -2, 2, 4)));
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 2)
+            .with_cnat(CNAT_BOTTOM)
+            .with_friction(100)]);
+        definition.set_contact_density(50);
+
+        let mut engine = Engine::with_seed(31);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(20, 12, Some(earth)));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(5, 8)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(4)));
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.position, Vector2::new(5, 9));
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_position.y, itofix(9));
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn shape_horizontal_contact_redirects_force_like_cpp() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut definition = simple_definition("Crate");
+        definition.set_shape_vertices(vec![ObjectVertex::new(1, 0).with_cnat(CNAT_RIGHT)]);
+        definition.set_contact_density(50);
+
+        let mut engine = Engine::with_seed(37);
+        engine.set_materials(materials);
+        let mut surface = vec![20; 12];
+        surface[6] = 0;
+        let mut landscape =
+            Landscape::new_with_material(12, surface, Some(earth)).expect("landscape constructs");
+        landscape.fill_solid_material(Some(earth));
+        engine.set_landscape(landscape);
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(4, 10)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(4), C4Fixed::ZERO));
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.position, Vector2::new(4, 10));
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(4));
+        assert_eq!(
+            engine.objects[idx].fixed_velocity.x,
+            itofix(4) - fixed100(50)
+        );
+        assert_eq!(engine.objects[idx].fixed_velocity.y, -fixed100(50));
+    }
+
+    #[test]
+    fn border_bound_sides_clamps_fixed_target_and_velocity() {
+        let mut definition = simple_definition("Bounded");
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2)));
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+        definition.set_border_bound(C4D_BORDER_SIDES);
+
+        let mut engine = Engine::with_seed(41);
+        engine.set_landscape(Landscape::flat(10, 20));
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Bounded").with_position(Vector2::new(8, 5)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(5), C4Fixed::ZERO));
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.position.x, 9);
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(9));
+        assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn border_bound_vertical_clamps_fixed_target_and_velocity() {
+        let mut definition = simple_definition("Bounded");
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2)));
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+        definition.set_border_bound(C4D_BORDER_TOP | C4D_BORDER_BOTTOM);
+
+        let mut engine = Engine::with_seed(43);
+        engine.set_landscape(Landscape::flat(10, 20));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let top_id = engine
+            .spawn_object(SpawnConfig::new("Bounded").with_position(Vector2::new(5, 2)))
+            .expect("spawn succeeds");
+        let top_idx = engine.find_object_index(top_id).expect("object exists");
+        engine.objects[top_idx].set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, -itofix(5)));
+
+        let bottom_id = engine
+            .spawn_object(SpawnConfig::new("Bounded").with_position(Vector2::new(6, 18)))
+            .expect("spawn succeeds");
+        let bottom_idx = engine.find_object_index(bottom_id).expect("object exists");
+        engine.objects[bottom_idx].set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(5)));
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let top = snapshot.object(top_id).expect("top object present");
+        let bottom = snapshot.object(bottom_id).expect("bottom object present");
+        assert_eq!(top.position.y, 1);
+        assert_eq!(bottom.position.y, 19);
+
+        let top_idx = engine.find_object_index(top_id).expect("object exists");
+        assert_eq!(engine.objects[top_idx].fixed_position.y, itofix(1));
+        assert_eq!(engine.objects[top_idx].fixed_velocity.y, C4Fixed::ZERO);
+        let bottom_idx = engine.find_object_index(bottom_id).expect("object exists");
+        assert_eq!(engine.objects[bottom_idx].fixed_position.y, itofix(19));
+        assert_eq!(engine.objects[bottom_idx].fixed_velocity.y, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn attached_shape_checks_attachment_without_momentum_and_forces_jump_on_loss() {
+        use std::sync::{Arc, Mutex};
+
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        global func OnSlideAbort(state, action) { return nil; }
+        global func OnJumpStart(state, action) { return nil; }
+        "#;
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                if name == "OnSlideAbort" || name == "OnJumpStart" {
+                    call_log.lock().unwrap().push(name.to_string());
+                }
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Climber", "Climber", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+        definition.set_contact_density(50);
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        actions.insert(
+            "Slide".to_string(),
+            ActionSpec::default()
+                .with_attach(CNAT_BOTTOM)
+                .with_abort_call("OnSlideAbort"),
+        );
+        actions.insert(
+            "Jump".to_string(),
+            ActionSpec::default().with_start_call("OnJumpStart"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(47);
+        engine.set_landscape(Landscape::flat(20, 20));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Climber")
+                    .with_position(Vector2::new(5, 5))
+                    .with_action(ActionState::new("Slide")),
+            )
+            .expect("spawn succeeds");
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Jump");
+        assert_eq!(object.velocity, Vector2::ZERO);
+
+        let calls = call_log.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec!["OnSlideAbort".to_string(), "OnJumpStart".to_string()]
+        );
+    }
+
+    #[test]
+    fn attached_shape_keeps_action_when_attachment_is_still_present_without_momentum() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut definition = simple_definition("Climber");
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+        definition.set_contact_density(50);
+        let mut actions = HashMap::new();
+        actions.insert("Idle".to_string(), ActionSpec::default());
+        actions.insert(
+            "Slide".to_string(),
+            ActionSpec::default().with_attach(CNAT_BOTTOM),
+        );
+        actions.insert("Jump".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(49);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(20, 7, Some(earth)));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Climber")
+                    .with_position(Vector2::new(5, 5))
+                    .with_action(ActionState::new("Slide")),
+            )
+            .expect("spawn succeeds");
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.action.name, "Slide");
+        assert_eq!(object.position, Vector2::new(5, 5));
+    }
+
+    #[test]
+    fn rotation_steps_rollback_on_shape_contact() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut definition = simple_definition("Wheel");
+        definition.set_rotateable(360);
+        definition.set_shape_vertices(vec![ObjectVertex::new(2, 0).with_cnat(CNAT_RIGHT)]);
+        definition.set_contact_density(50);
+
+        let mut engine = Engine::with_seed(43);
+        engine.set_materials(materials);
+        let mut surface = vec![20; 12];
+        surface[6] = 0;
+        let mut landscape =
+            Landscape::new_with_material(12, surface, Some(earth)).expect("landscape constructs");
+        landscape.fill_solid_material(Some(earth));
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Wheel").with_position(Vector2::new(4, 10)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].rotation_velocity = itofix(1);
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.rotation, 0);
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_rotation, itofix(0));
+        assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
+        assert_eq!(engine.objects[idx].state.vertices[0].x, 2);
+    }
+
+    #[test]
+    fn set_x_dir_script_applies_subpixel_velocity_end_to_end() {
+        // A script calling SetXDir(15) with the default precision (10) must set
+        // xdir = itofix(15, 10) = 1.5 px/frame (raw 16.16 value 98304), matching
+        // C++ FnSetXDir (`C4Script.cpp:697`) — NOT the pre-fix integer-mirror
+        // behaviour that treated 15 as 15 whole px/frame (a 10x desync).
+        let mut engine = Engine::with_seed(1);
+        let definition = Definition::from_script(
+            "Mover",
+            "Mover",
+            r#"
+            global func Initialize(state, random) { SetXDir(15); return nil; }
+            global func Step(state, frame, random) { return nil; }
+            "#,
+        )
+        .expect("script compiles");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 0, 0));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Mover").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+
+        // Initialize ran at spawn: the live object holds true sub-pixel velocity.
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 98304);
+
+        // One frame advances 1.5 px; fixtoi(1.5) = 2 (the old bug produced 15).
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.position.x, 2);
+        assert_eq!(object.velocity.x, 2);
+
+        // A second frame accumulates to 3.0 px; fixtoi(3.0) = 3.
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.position.x, 3);
+    }
+
+    #[test]
+    fn set_r_dir_script_rotates_object_like_cpp() {
+        // SetRDir(10) with the default precision (10) sets rdir = itofix(10, 10)
+        // = 1.0 deg/frame (`C4Script.cpp:710`). C++ applies fix_r += rdir * 5
+        // each frame (`C4Movement.cpp:376`), so the object turns 5°/frame.
+        let mut engine = Engine::with_seed(1);
+        let mut definition = Definition::from_script(
+            "Spinner",
+            "Spinner",
+            r#"
+            global func Initialize(state, random) { SetRDir(10); return nil; }
+            global func Step(state, frame, random) { return nil; }
+            "#,
+        )
+        .expect("script compiles");
+        definition.set_rotateable(1);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 0, 0));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Spinner").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+
+        // Initialize ran at spawn: rdir = itofix(10, 10) = 1.0 deg/frame (raw 65536).
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].rotation_velocity.val(), 65536);
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        assert_eq!(snapshot.object(id).expect("object present").rotation, 5);
+        let snapshot = engine.tick().expect("tick succeeds");
+        assert_eq!(snapshot.object(id).expect("object present").rotation, 10);
+    }
+
+    #[test]
+    fn set_r_dir_is_gated_by_rotateable_definition() {
+        let mut engine = Engine::with_seed(2);
+        let definition = Definition::from_script(
+            "Fixed",
+            "Fixed",
+            r#"
+            global func Initialize(state, random) { SetRDir(10); return nil; }
+            global func Step(state, frame, random) { return nil; }
+            "#,
+        )
+        .expect("script compiles");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 0, 0));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Fixed").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].rotation_velocity.val(), 65536);
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        assert_eq!(snapshot.object(id).expect("object present").rotation, 0);
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
+        assert_eq!(engine.objects[idx].fixed_rotation, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn finite_rotateable_range_clamps_fixed_rotation_and_stops_rdir() {
+        let mut engine = Engine::with_seed(3);
+        let mut definition = Definition::from_script(
+            "Limited",
+            "Limited",
+            r#"
+            global func Initialize(state, random) { SetRDir(10); return nil; }
+            global func Step(state, frame, random) { return nil; }
+            "#,
+        )
+        .expect("script compiles");
+        definition.set_rotateable(4);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 0, 0));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Limited").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        assert_eq!(snapshot.object(id).expect("object present").rotation, 4);
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_rotation, itofix(4));
+        assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn rotateable_definition_reports_ocf_rotate() {
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Wheel");
+        definition.set_rotateable(1);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Wheel").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+
+        assert_ne!(engine.object_ocf_at_index(idx) & ocf::ROTATE, 0);
     }
 
     #[test]
@@ -19848,6 +22171,7 @@ func ControlDig() { SetAction("Dig"); return true; }
         engine
             .register_definition(definition)
             .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
 
         let id = engine
             .spawn_object(
@@ -19871,12 +22195,12 @@ func ControlDig() { SetAction("Dig"); return true; }
         let snapshot = engine.tick().expect("first tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.action.name, "Jump");
-        assert_eq!(object.velocity, Vector2::new(3, -4));
-        assert_eq!(object.position, Vector2::new(3, -4));
+        assert_eq!(object.velocity, Vector2::new(3, -5));
+        assert_eq!(object.position, Vector2::new(3, -5));
 
         let snapshot = engine.tick().expect("second tick succeeds");
         let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.position, Vector2::new(6, -7));
+        assert_eq!(object.position, Vector2::new(6, -10));
     }
 
     #[test]

@@ -35,7 +35,16 @@ fn flight_procedure_applies_gravity() -> Result<(), Box<dyn std::error::Error>> 
         .object(object_id)
         .expect("object present after tick");
     assert_eq!(object.velocity.x, 0);
-    assert_eq!(object.velocity.y, -4, "flight should accumulate gravity");
+    assert_eq!(object.velocity.y, -5);
+    assert_eq!(
+        object
+            .fixed_velocity
+            .expect("sub-pixel gravity should be recorded")
+            .y
+            .val(),
+        -327549,
+        "flight should accumulate C4Fixed gravity"
+    );
 
     Ok(())
 }

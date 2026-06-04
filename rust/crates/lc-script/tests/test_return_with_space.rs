@@ -6,7 +6,12 @@ fn return_empty_parens_with_space() {
     let source = r#"func Test() { return (); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -17,7 +22,12 @@ fn return_empty_parens_with_space_in_if() {
     let source = r#"func Test() { var x; if (x == 1) return (); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -28,7 +38,12 @@ fn return_empty_parens_with_space_nested_if() {
     let source = r#"func Test() { var x; if (x) if (x == 2) return (); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -39,7 +54,12 @@ fn oilp_line_8_pattern() {
     let source = r#"func Test() { var OilCnt; if (OilCnt == -1) return (); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -50,7 +70,12 @@ fn oilp_line_9_pattern() {
     let source = r#"func Test() { var OilCnt; if (OilCnt >= 100) return (); }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -65,10 +90,20 @@ fn return_with_space_vs_without_space() {
     let result2 = lc_script::Script::compile(source2);
 
     if let Err(e) = &result1 {
-        eprintln!("Error in source1: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error in source1: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     if let Err(e) = &result2 {
-        eprintln!("Error in source2: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error in source2: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
 
     assert!(result1.is_ok());
@@ -81,7 +116,12 @@ fn return_with_space_and_expression_after() {
     let source = r#"func Test() { return (42) + 10; }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }
@@ -98,7 +138,12 @@ fn multiple_return_empty_with_space() {
     }"#;
     let result = lc_script::Script::compile(source);
     if let Err(e) = &result {
-        eprintln!("Error: line {}, col {}: {}", e.line(), e.column(), e.message());
+        eprintln!(
+            "Error: line {}, col {}: {}",
+            e.line(),
+            e.column(),
+            e.message()
+        );
     }
     assert!(result.is_ok());
 }

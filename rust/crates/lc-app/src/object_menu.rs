@@ -1122,8 +1122,6 @@ mod tests {
         CommandStackSnapshot, Definition, Engine, MovementProfile, ObjectSnapshot, ObjectStatus,
         PlayerConfig, SpawnConfig, Vector2,
     };
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha8Rng;
     use std::collections::HashMap;
 
     fn make_object(id: u64, definition: &str) -> ObjectSnapshot {
@@ -1157,6 +1155,11 @@ mod tests {
             draw_transform: None,
             command_queue: Vec::new(),
             command_stack: CommandStackSnapshot::default(),
+            local_vars: HashMap::new(),
+            fixed_position: None,
+            fixed_velocity: None,
+            rotation_velocity: None,
+            fixed_rotation: None,
         }
     }
 
@@ -1190,7 +1193,7 @@ mod tests {
             known_crew_owners: Vec::new(),
             eliminated_crew_owners: Vec::new(),
             landscape: None,
-            rng: ChaCha8Rng::seed_from_u64(42),
+            rng: lc_engine::LcgRng::seed_from_u64(42),
             surfaces: Vec::new(),
             hud: Default::default(),
             controls: Vec::new(),

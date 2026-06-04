@@ -73,7 +73,6 @@ fn check_functions_after_resolve() {
         .expect("spawn should succeed - Breeze should be found via PLM1's transitive includes");
 }
 
-
 #[test]
 fn transitive_includes_resolve_correctly() {
     let mut engine = Engine::new();
@@ -123,7 +122,7 @@ fn transitive_includes_resolve_correctly() {
 
     // Register in order that might cause issues if not handled correctly
     engine.register_definition(grandparent).unwrap();
-    engine.register_definition(child).unwrap();  // Register child before parent
+    engine.register_definition(child).unwrap(); // Register child before parent
     engine.register_definition(parent).unwrap();
 
     // Resolve includes - this should handle transitive includes correctly
@@ -203,8 +202,8 @@ fn action_callback_with_transitive_include() {
     .expect("child compiles");
 
     // Configure action with StartCall that uses the inherited function
-    use std::collections::HashMap;
     use lc_engine::{ActionSpec, ActionState};
+    use std::collections::HashMap;
 
     let mut actions = HashMap::new();
     actions.insert("Idle".to_string(), ActionSpec::default());
@@ -212,7 +211,7 @@ fn action_callback_with_transitive_include() {
         "Test".to_string(),
         ActionSpec::default()
             .with_procedure("Attach")
-            .with_start_call("ActionCallback")  // Calls function from grandparent
+            .with_start_call("ActionCallback") // Calls function from grandparent
             .with_length(1)
             .with_step(1),
     );

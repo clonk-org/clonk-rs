@@ -1,4 +1,7 @@
-use crate::ast::{AccessLevel, AppendTo, AssignmentTarget, BinaryOp, Expr, Function, Parameter, Script, Stmt, TypeAnnotation, UnaryOp, VarDecl, VarDeclKind};
+use crate::ast::{
+    AccessLevel, AppendTo, AssignmentTarget, BinaryOp, Expr, Function, Parameter, Script, Stmt,
+    TypeAnnotation, UnaryOp, VarDecl, VarDeclKind,
+};
 use crate::error::ParseError;
 use crate::lexer::Lexer;
 use crate::token::{Keyword, Symbol, Token, TokenKind};
@@ -54,7 +57,9 @@ impl<'a> Parser<'a> {
                     "#appendto" => {
                         let next = self.next()?;
                         appendto = Some(match &next.kind {
-                            TokenKind::Identifier(id) | TokenKind::C4Id(id) => AppendTo::Id(id.clone()),
+                            TokenKind::Identifier(id) | TokenKind::C4Id(id) => {
+                                AppendTo::Id(id.clone())
+                            }
                             TokenKind::Symbol(Symbol::Star) => AppendTo::Wildcard,
                             _ => {
                                 return Err(ParseError::new(
@@ -90,7 +95,7 @@ impl<'a> Parser<'a> {
             } else if self.peek()?.kind == TokenKind::Keyword(Keyword::Static) {
                 // Parse static variable declarations
                 self.consume()?; // consume 'static'
-                // Check for 'const' after 'static'
+                                 // Check for 'const' after 'static'
                 if self.consume_if_keyword(Keyword::Const)?.is_some() {
                     var_decls.extend(self.parse_var_decl_list(VarDeclKind::StaticConst)?);
                 } else {
@@ -102,7 +107,13 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(Script::with_directives(functions, var_decls, includes, appendto, strict_level))
+        Ok(Script::with_directives(
+            functions,
+            var_decls,
+            includes,
+            appendto,
+            strict_level,
+        ))
     }
 
     fn parse_function(&mut self) -> Result<Function, ParseError> {
@@ -176,11 +187,7 @@ impl<'a> Parser<'a> {
                 _ => {
                     let line = next_token.line;
                     let column = next_token.column;
-                    return Err(ParseError::new(
-                        "expected parameter name",
-                        line,
-                        column,
-                    ))
+                    return Err(ParseError::new("expected parameter name", line, column));
                 }
             };
 
@@ -202,47 +209,45 @@ impl<'a> Parser<'a> {
         let token = self.peek()?;
         let base_type = match &token.kind {
             // Type keywords are contextual - check identifier names
-            TokenKind::Identifier(name) => {
-                match name.as_str() {
-                    "int" => {
-                        self.consume()?;
-                        TypeAnnotation::Int
-                    }
-                    "bool" => {
-                        self.consume()?;
-                        TypeAnnotation::Bool
-                    }
-                    "string" => {
-                        self.consume()?;
-                        TypeAnnotation::String
-                    }
-                    "object" => {
-                        self.consume()?;
-                        TypeAnnotation::Object
-                    }
-                    "id" => {
-                        self.consume()?;
-                        TypeAnnotation::Id
-                    }
-                    "array" => {
-                        self.consume()?;
-                        TypeAnnotation::Array
-                    }
-                    "proplist" => {
-                        self.consume()?;
-                        TypeAnnotation::Proplist
-                    }
-                    "effect" => {
-                        self.consume()?;
-                        TypeAnnotation::Effect
-                    }
-                    "any" => {
-                        self.consume()?;
-                        TypeAnnotation::Any
-                    }
-                    _ => return Ok(None),
+            TokenKind::Identifier(name) => match name.as_str() {
+                "int" => {
+                    self.consume()?;
+                    TypeAnnotation::Int
                 }
-            }
+                "bool" => {
+                    self.consume()?;
+                    TypeAnnotation::Bool
+                }
+                "string" => {
+                    self.consume()?;
+                    TypeAnnotation::String
+                }
+                "object" => {
+                    self.consume()?;
+                    TypeAnnotation::Object
+                }
+                "id" => {
+                    self.consume()?;
+                    TypeAnnotation::Id
+                }
+                "array" => {
+                    self.consume()?;
+                    TypeAnnotation::Array
+                }
+                "proplist" => {
+                    self.consume()?;
+                    TypeAnnotation::Proplist
+                }
+                "effect" => {
+                    self.consume()?;
+                    TypeAnnotation::Effect
+                }
+                "any" => {
+                    self.consume()?;
+                    TypeAnnotation::Any
+                }
+                _ => return Ok(None),
+            },
             TokenKind::Keyword(Keyword::Nil) => {
                 self.consume()?;
                 TypeAnnotation::Nil
@@ -257,53 +262,51 @@ impl<'a> Parser<'a> {
                 let next_token = self.peek()?;
                 let next_type = match &next_token.kind {
                     // Type keywords are contextual - check identifier names
-                    TokenKind::Identifier(name) => {
-                        match name.as_str() {
-                            "int" => {
-                                self.consume()?;
-                                TypeAnnotation::Int
-                            }
-                            "bool" => {
-                                self.consume()?;
-                                TypeAnnotation::Bool
-                            }
-                            "string" => {
-                                self.consume()?;
-                                TypeAnnotation::String
-                            }
-                            "object" => {
-                                self.consume()?;
-                                TypeAnnotation::Object
-                            }
-                            "id" => {
-                                self.consume()?;
-                                TypeAnnotation::Id
-                            }
-                            "array" => {
-                                self.consume()?;
-                                TypeAnnotation::Array
-                            }
-                            "proplist" => {
-                                self.consume()?;
-                                TypeAnnotation::Proplist
-                            }
-                            "effect" => {
-                                self.consume()?;
-                                TypeAnnotation::Effect
-                            }
-                            "any" => {
-                                self.consume()?;
-                                TypeAnnotation::Any
-                            }
-                            _ => {
-                                return Err(ParseError::new(
-                                    "expected type name after '|' in union type".to_string(),
-                                    next_token.line,
-                                    next_token.column,
-                                ))
-                            }
+                    TokenKind::Identifier(name) => match name.as_str() {
+                        "int" => {
+                            self.consume()?;
+                            TypeAnnotation::Int
                         }
-                    }
+                        "bool" => {
+                            self.consume()?;
+                            TypeAnnotation::Bool
+                        }
+                        "string" => {
+                            self.consume()?;
+                            TypeAnnotation::String
+                        }
+                        "object" => {
+                            self.consume()?;
+                            TypeAnnotation::Object
+                        }
+                        "id" => {
+                            self.consume()?;
+                            TypeAnnotation::Id
+                        }
+                        "array" => {
+                            self.consume()?;
+                            TypeAnnotation::Array
+                        }
+                        "proplist" => {
+                            self.consume()?;
+                            TypeAnnotation::Proplist
+                        }
+                        "effect" => {
+                            self.consume()?;
+                            TypeAnnotation::Effect
+                        }
+                        "any" => {
+                            self.consume()?;
+                            TypeAnnotation::Any
+                        }
+                        _ => {
+                            return Err(ParseError::new(
+                                "expected type name after '|' in union type".to_string(),
+                                next_token.line,
+                                next_token.column,
+                            ))
+                        }
+                    },
                     TokenKind::Keyword(Keyword::Nil) => {
                         self.consume()?;
                         TypeAnnotation::Nil
@@ -775,7 +778,12 @@ impl<'a> Parser<'a> {
             }
             // Special case: Local(expr), Var(expr), and EffectVar(args...) are assignable lvalues
             // Local() and Var() without arguments default to slot 0
-            Expr::Call { callee, args, is_optional, .. } => {
+            Expr::Call {
+                callee,
+                args,
+                is_optional,
+                ..
+            } => {
                 if let Expr::Variable(ref name) = *callee {
                     if !is_optional {
                         if name == "Local" && (args.len() == 0 || args.len() == 1) {
@@ -795,7 +803,9 @@ impl<'a> Parser<'a> {
                         } else if name == "EffectVar" {
                             // EffectVar can take any number of arguments
                             return Ok(AssignmentTarget::EffectSlot(args));
-                        } else if (name == "Local" || name == "LocalN" || name == "Var") && args.len() == 2 {
+                        } else if (name == "Local" || name == "LocalN" || name == "Var")
+                            && args.len() == 2
+                        {
                             // Handle two-argument form: LocalN("key", obj), Local(index, obj), Var(index, obj)
                             // Convert to MethodSlot: obj->LocalN("key")
                             let mut args_iter = args.into_iter();
@@ -819,7 +829,11 @@ impl<'a> Parser<'a> {
                 // These are method calls that can be used as assignment targets
                 else if let Expr::Property(ref object, ref method) = *callee {
                     if !is_optional {
-                        if method == "LocalN" || method == "Local" || method == "Var" || method == "EffectVar" {
+                        if method == "LocalN"
+                            || method == "Local"
+                            || method == "Var"
+                            || method == "EffectVar"
+                        {
                             return Ok(AssignmentTarget::MethodSlot {
                                 object: object.clone(),
                                 method: method.clone(),
@@ -927,18 +941,26 @@ impl<'a> Parser<'a> {
                 Symbol::MinusEqual => Expr::Binary(Box::new(left), BinaryOp::Sub, Box::new(value)),
                 Symbol::StarEqual => Expr::Binary(Box::new(left), BinaryOp::Mul, Box::new(value)),
                 Symbol::SlashEqual => Expr::Binary(Box::new(left), BinaryOp::Div, Box::new(value)),
-                Symbol::PercentEqual => Expr::Binary(Box::new(left), BinaryOp::Mod, Box::new(value)),
+                Symbol::PercentEqual => {
+                    Expr::Binary(Box::new(left), BinaryOp::Mod, Box::new(value))
+                }
                 // Bitwise compound assignments
                 Symbol::AndEqual => Expr::Binary(Box::new(left), BinaryOp::BitAnd, Box::new(value)),
                 Symbol::OrEqual => Expr::Binary(Box::new(left), BinaryOp::BitOr, Box::new(value)),
                 Symbol::XorEqual => Expr::Binary(Box::new(left), BinaryOp::BitXor, Box::new(value)),
-                Symbol::LeftShiftEqual => Expr::Binary(Box::new(left), BinaryOp::LeftShift, Box::new(value)),
-                Symbol::RightShiftEqual => Expr::Binary(Box::new(left), BinaryOp::RightShift, Box::new(value)),
-                _ => return Err(ParseError::new(
-                    format!("unknown assignment operator {:?}", op_symbol.unwrap()),
-                    op_token.line,
-                    op_token.column,
-                )),
+                Symbol::LeftShiftEqual => {
+                    Expr::Binary(Box::new(left), BinaryOp::LeftShift, Box::new(value))
+                }
+                Symbol::RightShiftEqual => {
+                    Expr::Binary(Box::new(left), BinaryOp::RightShift, Box::new(value))
+                }
+                _ => {
+                    return Err(ParseError::new(
+                        format!("unknown assignment operator {:?}", op_symbol.unwrap()),
+                        op_token.line,
+                        op_token.column,
+                    ))
+                }
             };
 
             Ok(Expr::Assignment(target, Box::new(final_value)))
@@ -949,7 +971,9 @@ impl<'a> Parser<'a> {
 
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_and()?;
-        while self.consume_if_symbol(Symbol::OrOr)?.is_some() || self.consume_if_identifier("or")?.is_some() {
+        while self.consume_if_symbol(Symbol::OrOr)?.is_some()
+            || self.consume_if_identifier("or")?.is_some()
+        {
             let right = self.parse_and()?;
             expr = Expr::Binary(Box::new(expr), BinaryOp::Or, Box::new(right));
         }
@@ -958,7 +982,9 @@ impl<'a> Parser<'a> {
 
     fn parse_and(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_bit_or()?;
-        while self.consume_if_symbol(Symbol::AndAnd)?.is_some() || self.consume_if_identifier("and")?.is_some() {
+        while self.consume_if_symbol(Symbol::AndAnd)?.is_some()
+            || self.consume_if_identifier("and")?.is_some()
+        {
             let right = self.parse_bit_or()?;
             expr = Expr::Binary(Box::new(expr), BinaryOp::And, Box::new(right));
         }
@@ -995,10 +1021,14 @@ impl<'a> Parser<'a> {
     fn parse_equality(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_comparison()?;
         loop {
-            if self.consume_if_symbol(Symbol::EqualEqual)?.is_some() || self.consume_if_identifier("eq")?.is_some() {
+            if self.consume_if_symbol(Symbol::EqualEqual)?.is_some()
+                || self.consume_if_identifier("eq")?.is_some()
+            {
                 let right = self.parse_comparison()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Equal, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::BangEqual)?.is_some() || self.consume_if_identifier("ne")?.is_some() {
+            } else if self.consume_if_symbol(Symbol::BangEqual)?.is_some()
+                || self.consume_if_identifier("ne")?.is_some()
+            {
                 let right = self.parse_comparison()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::NotEqual, Box::new(right));
             } else if self.consume_if_symbol(Symbol::StringEqual)?.is_some() {
@@ -1017,16 +1047,24 @@ impl<'a> Parser<'a> {
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_shift()?;
         loop {
-            if self.consume_if_symbol(Symbol::Less)?.is_some() || self.consume_if_identifier("lt")?.is_some() {
+            if self.consume_if_symbol(Symbol::Less)?.is_some()
+                || self.consume_if_identifier("lt")?.is_some()
+            {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Less, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::LessEqual)?.is_some() || self.consume_if_identifier("le")?.is_some() {
+            } else if self.consume_if_symbol(Symbol::LessEqual)?.is_some()
+                || self.consume_if_identifier("le")?.is_some()
+            {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::LessEqual, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::Greater)?.is_some() || self.consume_if_identifier("gt")?.is_some() {
+            } else if self.consume_if_symbol(Symbol::Greater)?.is_some()
+                || self.consume_if_identifier("gt")?.is_some()
+            {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Greater, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::GreaterEqual)?.is_some() || self.consume_if_identifier("ge")?.is_some() {
+            } else if self.consume_if_symbol(Symbol::GreaterEqual)?.is_some()
+                || self.consume_if_identifier("ge")?.is_some()
+            {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::GreaterEqual, Box::new(right));
             } else if self.consume_if_symbol(Symbol::StringLess)?.is_some() {
@@ -1038,9 +1076,16 @@ impl<'a> Parser<'a> {
             } else if self.consume_if_symbol(Symbol::StringGreater)?.is_some() {
                 let right = self.parse_shift()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::StringGreater, Box::new(right));
-            } else if self.consume_if_symbol(Symbol::StringGreaterEqual)?.is_some() {
+            } else if self
+                .consume_if_symbol(Symbol::StringGreaterEqual)?
+                .is_some()
+            {
                 let right = self.parse_shift()?;
-                expr = Expr::Binary(Box::new(expr), BinaryOp::StringGreaterEqual, Box::new(right));
+                expr = Expr::Binary(
+                    Box::new(expr),
+                    BinaryOp::StringGreaterEqual,
+                    Box::new(right),
+                );
             } else {
                 break;
             }
@@ -1112,7 +1157,10 @@ impl<'a> Parser<'a> {
     // Speculative parsing helpers
     fn begin_speculative(&mut self) {
         // Safety check: ensure we're not already in speculative mode
-        assert!(self.speculative_tokens.is_none(), "Nested speculative parsing not supported");
+        assert!(
+            self.speculative_tokens.is_none(),
+            "Nested speculative parsing not supported"
+        );
         self.speculative_tokens = Some(Vec::new());
     }
 
@@ -1134,7 +1182,9 @@ impl<'a> Parser<'a> {
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         // Check for ! or "not" keyword
-        if self.consume_if_symbol(Symbol::Bang)?.is_some() || self.consume_if_identifier("not")?.is_some() {
+        if self.consume_if_symbol(Symbol::Bang)?.is_some()
+            || self.consume_if_identifier("not")?.is_some()
+        {
             // Only use speculative parsing if we're not already in speculative mode
             // This avoids nested speculative parsing (e.g., !!x or nested expressions)
             let already_speculative = self.speculative_tokens.is_some();
@@ -1230,7 +1280,7 @@ impl<'a> Parser<'a> {
             } else if self.consume_if_symbol(Symbol::Arrow)?.is_some() {
                 // Check for optional method call: ->~MethodName()
                 let is_optional = self.consume_if_symbol(Symbol::Tilde)?.is_some();
-                let token = self.expect_identifier("expected property/method name after '->'")? ;
+                let token = self.expect_identifier("expected property/method name after '->'")?;
                 let mut name = match token.kind {
                     TokenKind::Identifier(name) | TokenKind::C4Id(name) => name,
                     _ => unreachable!(),
@@ -1263,7 +1313,8 @@ impl<'a> Parser<'a> {
                 } else {
                     if is_optional {
                         return Err(ParseError::new(
-                            "'~' requires a method call: expected '(' after method name".to_string(),
+                            "'~' requires a method call: expected '(' after method name"
+                                .to_string(),
                             token.line,
                             token.column,
                         ));
@@ -1339,7 +1390,7 @@ impl<'a> Parser<'a> {
                 // Handle both `this` and `this()` (legacy form)
                 if self.check_symbol(Symbol::LParen)? {
                     self.consume()?; // consume '('
-                    // Must be empty argument list
+                                     // Must be empty argument list
                     if !self.check_symbol(Symbol::RParen)? {
                         return Err(ParseError::new(
                             "this does not accept arguments".to_string(),
@@ -1589,7 +1640,7 @@ impl<'a> Parser<'a> {
                     TokenKind::Symbol(Symbol::Equal)     // Key=Value
                     | TokenKind::Symbol(Symbol::Pipe)    // Key|...
                     | TokenKind::Symbol(Symbol::RBracket) // [Key] alone
-                    | TokenKind::Identifier(_)           // [Key text...] freeform annotation
+                    | TokenKind::Identifier(_) // [Key text...] freeform annotation
                 );
                 // Note: Comma means array: [Key, ...]
                 result

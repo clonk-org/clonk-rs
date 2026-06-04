@@ -1,0 +1,3 @@
+# Regenerable build inputs/artifacts produced by gen_golden.sh.
+# The committed deliverable is parity/golden/parity_golden.json.
+.gen/
