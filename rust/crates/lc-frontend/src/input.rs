@@ -12,6 +12,12 @@ pub struct InputDispatcher {
     players: HashMap<i32, PlayerInputContext>,
 }
 
+impl Default for InputDispatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InputDispatcher {
     pub fn new() -> Self {
         Self {

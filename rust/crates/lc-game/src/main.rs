@@ -229,22 +229,14 @@ fn ensure_runtime_assets(paths: &AppPaths, binary: &Path, logger: &LauncherLogge
 
     #[cfg(target_os = "macos")]
     {
-        if binary_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map_or(false, |name| name == "MacOS")
-        {
+        if binary_dir.file_name().and_then(|name| name.to_str()) == Some("MacOS") {
             if let Some(contents_dir) = binary_dir.parent() {
-                if contents_dir
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map_or(false, |name| name == "Contents")
-                {
+                if contents_dir.file_name().and_then(|name| name.to_str()) == Some("Contents") {
                     if let Some(app_dir) = contents_dir.parent() {
                         if app_dir
                             .extension()
                             .and_then(|ext| ext.to_str())
-                            .map_or(false, |ext| ext.eq_ignore_ascii_case("app"))
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
                         {
                             if let Some(bundle_root) = app_dir.parent() {
                                 if !target_roots.iter().any(|root| root == bundle_root) {
@@ -372,7 +364,7 @@ fn same_file(a: &Path, b: &Path) -> io::Result<bool> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        return Ok(a_meta.ino() == b_meta.ino() && a_meta.dev() == b_meta.dev());
+        Ok(a_meta.ino() == b_meta.ino() && a_meta.dev() == b_meta.dev())
     }
     #[cfg(windows)]
     {
@@ -1454,7 +1446,7 @@ fn collect_crash_reports(
     logger: &LauncherLogger,
 ) -> Result<Vec<PathBuf>> {
     let logs_dir = paths.logs_dir();
-    fs::create_dir_all(&logs_dir).with_context(|| {
+    fs::create_dir_all(logs_dir).with_context(|| {
         format!(
             "failed to ensure logs directory {} exists for crash artifacts",
             logs_dir.display()
@@ -1465,7 +1457,7 @@ fn collect_crash_reports(
         paths.user_data_dir().to_path_buf(),
         paths.install_root().to_path_buf(),
     ];
-    if !sources.iter().any(|dir| dir == &logs_dir) {
+    if !sources.iter().any(|dir| dir == logs_dir) {
         sources.push(logs_dir.to_path_buf());
     }
 
@@ -1503,7 +1495,7 @@ fn collect_crash_reports(
                 continue;
             }
 
-            let dest_path = if path.starts_with(&logs_dir) {
+            let dest_path = if path.starts_with(logs_dir) {
                 logger
                     .log_line(&format!(
                         "detected crash artifact already in logs dir: {}",
@@ -2103,7 +2095,7 @@ mod tests {
 
         let err = validate_update_tool(&paths, &logger).unwrap_err();
         let display = err.to_string();
-        let root = err.chain().last().unwrap().to_string();
+        let root = err.chain().next_back().unwrap().to_string();
         assert!(
             display.contains("failed to execute"),
             "context missing command failure: {display}"
@@ -2624,8 +2616,10 @@ mod tests {
             .log_line("provider report history cleared test")
             .unwrap();
 
-        let mut bulk_summary = ProviderBulkRetargetSummary::default();
-        bulk_summary.history_cleared_at = Some("2024-06-05T18:30:00Z".into());
+        let bulk_summary = ProviderBulkRetargetSummary {
+            history_cleared_at: Some("2024-06-05T18:30:00Z".into()),
+            ..Default::default()
+        };
 
         let telemetry = UpdateTelemetrySummary::default();
 

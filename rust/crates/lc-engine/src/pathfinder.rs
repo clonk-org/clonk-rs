@@ -190,10 +190,8 @@ impl Zone {
                 y_incr2 = 1;
             }
         }
-        if !found {
-            if !state.is_solid(rx, ry) {
-                found = true;
-            }
+        if !found && !state.is_solid(rx, ry) {
+            found = true;
         }
         if !found {
             return None;
@@ -628,11 +626,10 @@ impl<'a> PathFinderState<'a> {
         if !self
             .path_free(false, &mut start_x, &mut start_y, x2, y2)
             .free
+            && !self.split_ray(index, last_x, last_y)
         {
-            if !self.split_ray(index, last_x, last_y) {
-                self.rays[index].borrow_mut().status = RayStatus::Failure;
-                return;
-            }
+            self.rays[index].borrow_mut().status = RayStatus::Failure;
+            return;
         }
 
         let crawl_length = self.rays[index].borrow().crawl_length;
@@ -683,22 +680,20 @@ impl<'a> PathFinderState<'a> {
         if attach == CRAWL_NO_ATTACH {
             return false;
         }
-        if self.rays[index].borrow().crawl_length > 0 {
-            if !self.is_crawl_attach_current(index) {
-                {
-                    let mut ray = self.rays[index].borrow_mut();
-                    let (mut x, mut y) = (ray.x2, ray.y2);
-                    crawl_to_attach(&mut x, &mut y, attach);
-                    ray.x2 = x;
-                    ray.y2 = y;
-                    let new_attach = turn_attach(attach, -ray.direction);
-                    if !self.is_crawl_attach_at(ray.x2, ray.y2, new_attach) {
-                        return false;
-                    }
-                    ray.crawl_attach = new_attach;
+        if self.rays[index].borrow().crawl_length > 0 && !self.is_crawl_attach_current(index) {
+            {
+                let mut ray = self.rays[index].borrow_mut();
+                let (mut x, mut y) = (ray.x2, ray.y2);
+                crawl_to_attach(&mut x, &mut y, attach);
+                ray.x2 = x;
+                ray.y2 = y;
+                let new_attach = turn_attach(attach, -ray.direction);
+                if !self.is_crawl_attach_at(ray.x2, ray.y2, new_attach) {
+                    return false;
                 }
-                return true;
+                ray.crawl_attach = new_attach;
             }
+            return true;
         }
 
         let mut turned = 0;

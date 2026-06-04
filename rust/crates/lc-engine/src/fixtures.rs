@@ -186,6 +186,24 @@ pub fn environment_cycle_recording(frames: usize) -> Result<Recording, EngineErr
     Ok(recorder.into_recording())
 }
 
+pub const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
+    SnapshotScenario {
+        name: "basic_movement",
+        default_frames: 6,
+        generator: basic_movement_recording,
+    },
+    SnapshotScenario {
+        name: "queued_commands",
+        default_frames: 6,
+        generator: queued_command_recording,
+    },
+    SnapshotScenario {
+        name: "environment_cycle",
+        default_frames: 8,
+        generator: environment_cycle_recording,
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,21 +226,3 @@ mod tests {
         assert_eq!(recording.frames().len(), 8);
     }
 }
-
-pub const SNAPSHOT_SCENARIOS: &[SnapshotScenario] = &[
-    SnapshotScenario {
-        name: "basic_movement",
-        default_frames: 6,
-        generator: basic_movement_recording,
-    },
-    SnapshotScenario {
-        name: "queued_commands",
-        default_frames: 6,
-        generator: queued_command_recording,
-    },
-    SnapshotScenario {
-        name: "environment_cycle",
-        default_frames: 8,
-        generator: environment_cycle_recording,
-    },
-];

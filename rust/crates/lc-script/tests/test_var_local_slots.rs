@@ -24,7 +24,10 @@ fn eval(source: &str) -> Value {
 
 #[test]
 fn var_slot_round_trips() {
-    assert_eq!(eval("func Test() { Var(0) = 7; return Var(0); }"), Value::Int(7));
+    assert_eq!(
+        eval("func Test() { Var(0) = 7; return Var(0); }"),
+        Value::Int(7)
+    );
 }
 
 #[test]

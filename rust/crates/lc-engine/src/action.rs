@@ -6,7 +6,7 @@ use crate::{math::C4Fixed, ObjectId};
 const DEFAULT_ACTION_NAME: &str = "Idle";
 
 /// Configuration for how an action should advance and transition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ActionSpec {
     #[serde(default)]
     pub length: Option<u32>,
@@ -113,27 +113,9 @@ impl ActionSpec {
     }
 }
 
-impl Default for ActionSpec {
-    fn default() -> Self {
-        Self {
-            length: None,
-            next: None,
-            procedure: None,
-            delay: None,
-            step: None,
-            phase_call: None,
-            start_call: None,
-            end_call: None,
-            abort_call: None,
-            no_other_action: false,
-            dig_free: None,
-            attach: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActionProcedure {
+    #[default]
     Undefined,
     Walk,
     Float,
@@ -291,12 +273,6 @@ impl ActionProcedure {
                 | ActionProcedure::Chop
                 | ActionProcedure::Fight
         )
-    }
-}
-
-impl Default for ActionProcedure {
-    fn default() -> Self {
-        ActionProcedure::Undefined
     }
 }
 
@@ -522,9 +498,7 @@ impl ActionState {
     }
 
     pub fn advance(&mut self) {
-        if self.phase < i32::MAX {
-            self.phase += 1;
-        }
+        self.phase = self.phase.saturating_add(1);
         self.ticks = 0;
     }
 

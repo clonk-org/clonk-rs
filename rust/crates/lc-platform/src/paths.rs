@@ -136,7 +136,7 @@ fn discover_install_root() -> Result<PathBuf, PathsError> {
         return Ok(path);
     }
     if let Some(path) = env_path("CARGO_MANIFEST_DIR") {
-        if let Some(root) = find_root_starting_at(PathBuf::from(path)) {
+        if let Some(root) = find_root_starting_at(path) {
             return Ok(root);
         }
     }

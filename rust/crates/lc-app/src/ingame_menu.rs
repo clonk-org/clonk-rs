@@ -119,7 +119,7 @@ impl IngameMenuState {
         if !self
             .items
             .get(self.selected)
-            .map_or(false, |item| item.enabled)
+            .is_some_and(|item| item.enabled)
         {
             self.advance_selection(1);
         }

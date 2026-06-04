@@ -208,7 +208,7 @@ impl ControlCoordinator {
                     range.to = range.from;
                 }
             }
-            missing.retain(|range| range.len() > 0);
+            missing.retain(|range| !range.is_empty());
         }
 
         merge_adjacent_ranges(missing)
@@ -291,7 +291,7 @@ impl ControlCoordinator {
                     range.to = range.from;
                 }
             }
-            missing.retain(|range| range.len() > 0);
+            missing.retain(|range| !range.is_empty());
         }
 
         merge_adjacent_ranges(missing)
@@ -309,13 +309,13 @@ fn merge_adjacent_ranges(mut ranges: Vec<MissingRange>) -> Vec<MissingRange> {
         if range.client_id == current.client_id && range.from <= current.to {
             current.to = current.to.max(range.to);
         } else {
-            if current.len() > 0 {
+            if !current.is_empty() {
                 merged.push(current);
             }
             current = range;
         }
     }
-    if current.len() > 0 {
+    if !current.is_empty() {
         merged.push(current);
     }
     merged
@@ -399,6 +399,10 @@ impl MissingRange {
 
     pub fn len(&self) -> Tick {
         self.to.saturating_sub(self.from)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

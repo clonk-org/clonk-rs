@@ -18,6 +18,7 @@ pub enum TokenKind {
     Eof,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Keyword {
     Func,

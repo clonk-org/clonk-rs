@@ -161,6 +161,7 @@ impl From<&ProviderOverrideSource> for ProviderOverrideSourceRecord {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn write_launcher_summary(
     paths: &AppPaths,
     logger: &dyn LauncherLog,
@@ -220,7 +221,7 @@ pub fn write_launcher_summary(
 
 pub fn load_launcher_summary(paths: &AppPaths) -> Result<Option<LauncherSummaryRecord>> {
     let logs_dir = paths.logs_dir();
-    let summary_path = launcher_summary_path(&logs_dir);
+    let summary_path = launcher_summary_path(logs_dir);
     if !summary_path.exists() {
         return Ok(None);
     }

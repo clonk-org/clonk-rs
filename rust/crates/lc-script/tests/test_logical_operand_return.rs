@@ -45,5 +45,8 @@ fn logical_result_flows_into_arithmetic() {
     // (5 && 3) + 1 -> 4: only correct if && yields int 3, not bool true.
     assert_eq!(eval("func Test() { return (5 && 3) + 1; }"), Value::Int(4));
     // (0 || 10) * 2 -> 20
-    assert_eq!(eval("func Test() { return (0 || 10) * 2; }"), Value::Int(20));
+    assert_eq!(
+        eval("func Test() { return (0 || 10) * 2; }"),
+        Value::Int(20)
+    );
 }

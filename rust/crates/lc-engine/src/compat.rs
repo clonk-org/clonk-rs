@@ -471,6 +471,11 @@ impl HostWorldContext {
         self.next_object_id
     }
 
+    pub(crate) fn with_next_object_id(mut self, next_object_id: u64) -> Self {
+        self.next_object_id = next_object_id;
+        self
+    }
+
     pub(crate) fn team_home_base_rule(&self) -> bool {
         self.team_home_base_rule
     }
@@ -833,7 +838,7 @@ fn get_player_count(args: &[Value]) -> Result<Value, RuntimeError> {
             "GetPlayerCount expects at most 1 argument: type",
         ));
     }
-    let filter = parse_player_type_filter(args.get(0), "GetPlayerCount")?;
+    let filter = parse_player_type_filter(args.first(), "GetPlayerCount")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
@@ -1832,7 +1837,7 @@ impl FindObjectParams {
             ));
         }
 
-        let definition = parse_definition_argument(args.get(0), "FindObject")?;
+        let definition = parse_definition_argument(args.first(), "FindObject")?;
         let x = parse_optional_i32(args.get(1), "FindObject", "x")?.unwrap_or(0);
         let y = parse_optional_i32(args.get(2), "FindObject", "y")?.unwrap_or(0);
         let width = parse_optional_i32(args.get(3), "FindObject", "width")?.unwrap_or(0);
@@ -1974,7 +1979,7 @@ impl FindObjectParams {
             let position = object.position();
             let dx = position.x - self.x;
             let dy = position.y - self.y;
-            return dx >= 0 && dx <= self.width - 1 && dy >= 0 && dy <= self.height - 1;
+            return dx >= 0 && dx < self.width && dy >= 0 && dy < self.height;
         }
 
         false
@@ -2074,10 +2079,10 @@ fn compute_vertex_contact(
     contact
 }
 
-fn resolve_vertices<'a>(
-    context: &'a EffectHostContext,
+fn resolve_vertices(
+    context: &EffectHostContext,
     target: Option<ObjectId>,
-) -> Option<(Vector2, &'a [ObjectVertex])> {
+) -> Option<(Vector2, &[ObjectVertex])> {
     if let Some(target_id) = target {
         if let Some(object) = context.object_context() {
             if object.id() == target_id {
@@ -2853,7 +2858,7 @@ fn game_over(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_keys(args: &[Value]) -> Result<Value, RuntimeError> {
-    let map = match args.get(0) {
+    let map = match args.first() {
         Some(Value::Proplist(map)) => map,
         Some(Value::Nil) | None => {
             return Err(RuntimeError::new("GetKeys(): map expected, got 0"));
@@ -2873,7 +2878,7 @@ fn get_keys(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_values(args: &[Value]) -> Result<Value, RuntimeError> {
-    let map = match args.get(0) {
+    let map = match args.first() {
         Some(Value::Proplist(map)) => map,
         Some(Value::Nil) | None => {
             return Err(RuntimeError::new("GetValues(): map expected, got 0"));
@@ -2919,7 +2924,7 @@ fn create_array(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let size = value_to_i32(&args[0], "CreateArray", "size")?;
-    if size < 0 || size > LEGACY_MAX_ARRAY_SIZE {
+    if !(0..=LEGACY_MAX_ARRAY_SIZE).contains(&size) {
         return Err(RuntimeError::new(format!(
             "CreateArray: invalid array size ({size})"
         )));
@@ -3737,7 +3742,7 @@ where
 {
     let audio_state = AUDIO_CONTEXT
         .with(|cell| cell.borrow_mut().take())
-        .unwrap_or_else(AudioRegistry::new);
+        .unwrap_or_default();
     HOST_CONTEXT.with(|cell| {
         assert!(
             cell.borrow().is_none(),
@@ -5147,7 +5152,7 @@ fn get_energy(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let mut target_id: Option<ObjectId> = None;
-    if let Some(arg) = args.get(0) {
+    if let Some(arg) = args.first() {
         target_id = parse_object_reference_argument(arg, "GetEnergy", "target")?;
     }
 
@@ -5187,7 +5192,7 @@ fn get_con(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let mut target_id: Option<ObjectId> = None;
-    if let Some(arg) = args.get(0) {
+    if let Some(arg) = args.first() {
         target_id = parse_object_reference_argument(arg, "GetCon", "target")?;
     }
 
@@ -7270,7 +7275,7 @@ fn get_r(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let target_id =
-        parse_object_reference_argument(args.get(0).unwrap_or(&Value::Nil), "GetR", "target")?;
+        parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "GetR", "target")?;
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -7577,7 +7582,7 @@ fn get_position_component(
     }
 
     let mut target_id: Option<ObjectId> = None;
-    if let Some(arg) = args.get(0) {
+    if let Some(arg) = args.first() {
         target_id = parse_object_reference_argument(arg, component.function_name(), "target")?;
     }
 
@@ -8000,7 +8005,7 @@ fn get_id(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let mut target_id: Option<ObjectId> = None;
-    if let Some(arg) = args.get(0) {
+    if let Some(arg) = args.first() {
         target_id = parse_object_reference_argument(arg, "GetID", "target")?;
     }
 
@@ -8843,7 +8848,7 @@ fn contained(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let mut target_id: Option<ObjectId> = None;
-    if let Some(arg) = args.get(0) {
+    if let Some(arg) = args.first() {
         target_id = parse_object_reference_argument(arg, "Contained", "target")?;
     }
 
@@ -8886,7 +8891,7 @@ fn contents(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let index = match args.get(0) {
+    let index = match args.first() {
         None | Some(Value::Nil) => 0,
         Some(value) => value_to_i32(value, "Contents", "index")?,
     };
@@ -8954,7 +8959,7 @@ fn contents_count(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let definition = parse_definition_argument(args.get(0), "ContentsCount")?;
+    let definition = parse_definition_argument(args.first(), "ContentsCount")?;
     let target_id = parse_object_reference_argument(
         args.get(1).unwrap_or(&Value::Nil),
         "ContentsCount",
@@ -9116,7 +9121,7 @@ fn get_ocf(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let target_value = args.get(0).unwrap_or(&Value::Nil);
+    let target_value = args.first().unwrap_or(&Value::Nil);
     let target_id = parse_object_reference_argument(target_value, "GetOCF", "target")?;
 
     HOST_CONTEXT.with(|cell| {
@@ -9537,7 +9542,7 @@ fn get_category(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let target_value = args.get(0).unwrap_or(&Value::Nil);
+    let target_value = args.first().unwrap_or(&Value::Nil);
     let target_id = parse_object_reference_argument(target_value, "GetCategory", "target")?;
     let definition = parse_definition_argument(args.get(1), "GetCategory")?;
 
@@ -9732,7 +9737,7 @@ fn get_owner(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let mut target_id: Option<ObjectId> = None;
-    if let Some(arg) = args.get(0) {
+    if let Some(arg) = args.first() {
         target_id = parse_object_reference_argument(arg, "GetOwner", "target")?;
     }
 
@@ -9772,7 +9777,7 @@ fn get_alive(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let mut target_id: Option<ObjectId> = None;
-    if let Some(arg) = args.get(0) {
+    if let Some(arg) = args.first() {
         target_id = parse_object_reference_argument(arg, "GetAlive", "target")?;
     }
 
@@ -9812,7 +9817,7 @@ fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let mut target_id: Option<ObjectId> = None;
-    if let Some(arg) = args.get(0) {
+    if let Some(arg) = args.first() {
         target_id = parse_object_reference_argument(arg, "RemoveObject", "target")?;
     }
 
@@ -9949,7 +9954,7 @@ fn get_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let mut target_id: Option<ObjectId> = None;
-    if let Some(arg) = args.get(0) {
+    if let Some(arg) = args.first() {
         match arg {
             Value::Proplist(map) => {
                 if let Some(Value::Int(id)) = map.get("id") {
@@ -10098,11 +10103,7 @@ fn build_effect_value(effect: &EffectState) -> Value {
         map.insert("command_target_id".into(), Value::String(id.clone()));
     }
     if !effect.vars().is_empty() {
-        let vars = effect
-            .vars()
-            .iter()
-            .map(|value| effect_var_to_value(value))
-            .collect();
+        let vars = effect.vars().iter().map(effect_var_to_value).collect();
         map.insert("vars".into(), Value::Array(vars));
     }
     Value::Proplist(map)
@@ -10115,10 +10116,7 @@ fn value_to_effect_var(value: &Value) -> EffectVarValue {
         Value::String(value) => EffectVarValue::String(value.clone()),
         Value::C4Id(id) => EffectVarValue::String(id.clone()),
         Value::Array(entries) => {
-            let vars = entries
-                .iter()
-                .map(|entry| value_to_effect_var(entry))
-                .collect();
+            let vars = entries.iter().map(value_to_effect_var).collect();
             EffectVarValue::Array(vars)
         }
         Value::Proplist(map) => {
@@ -10138,10 +10136,7 @@ fn effect_var_to_value(value: &EffectVarValue) -> Value {
         EffectVarValue::Bool(value) => Value::Bool(*value),
         EffectVarValue::String(value) => Value::String(value.clone()),
         EffectVarValue::Array(entries) => {
-            let vars = entries
-                .iter()
-                .map(|entry| effect_var_to_value(entry))
-                .collect();
+            let vars = entries.iter().map(effect_var_to_value).collect();
             Value::Array(vars)
         }
         EffectVarValue::Proplist(map) => {
@@ -10214,7 +10209,7 @@ impl AudioContextGuard {
         self.consumed = true;
         AUDIO_CONTEXT
             .with(|cell| cell.borrow_mut().take())
-            .unwrap_or_else(AudioRegistry::new)
+            .unwrap_or_default()
     }
 }
 
@@ -10770,18 +10765,16 @@ impl EffectScopeContext {
                     false
                 }
             })
+        } else if self.effects.is_empty() {
+            None
+        } else if index == 0 {
+            Some(0)
         } else {
-            if self.effects.is_empty() {
-                None
-            } else if index == 0 {
-                Some(0)
+            let effect_number = index.saturating_sub(1);
+            if effect_number < self.effects.len() {
+                Some(effect_number)
             } else {
-                let effect_number = index.saturating_sub(1);
-                if effect_number < self.effects.len() {
-                    Some(effect_number)
-                } else {
-                    None
-                }
+                None
             }
         };
 

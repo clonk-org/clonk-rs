@@ -10,18 +10,14 @@ const MIN_SCORE: i32 = -100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum PlayerStatus {
+    #[default]
     Inactive,
     Active,
     Eliminated,
     TeamSelection,
     Surrendered,
-}
-
-impl Default for PlayerStatus {
-    fn default() -> Self {
-        PlayerStatus::Inactive
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

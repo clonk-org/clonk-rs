@@ -566,11 +566,7 @@ impl<'a> Lexer<'a> {
                     // Check what follows the identifier
                     let next_is_call_or_label = self
                         .peek_char()
-                        .map(|ch| {
-                            ch == '('
-                                || (ch == ':'
-                                    && self.peek_char_at(1).map_or(true, |ch2| ch2 != ':'))
-                        })
+                        .map(|ch| ch == '(' || (ch == ':' && self.peek_char_at(1) != Some(':')))
                         .unwrap_or(false);
 
                     if !next_is_call_or_label {
@@ -726,8 +722,6 @@ impl<'a> Lexer<'a> {
         column: usize,
     ) -> Result<Token, ParseError> {
         // We've already consumed the opening '$'
-        let mut end_idx = start_idx + 1; // skip the opening '$'
-
         while let Some((idx, ch, _, _)) = self.bump_char() {
             match ch {
                 '$' => {
@@ -746,9 +740,7 @@ impl<'a> Lexer<'a> {
                         column,
                     ));
                 }
-                _ => {
-                    end_idx = idx + ch.len_utf8();
-                }
+                _ => {}
             }
         }
 
@@ -822,7 +814,7 @@ mod tests {
         let source = "var x = 1;\r\nvar y = 2;\r\n";
         let tokens = lex_all(source).unwrap();
         // Should tokenize successfully despite \r\n endings
-        assert!(tokens.len() > 0);
+        assert!(!tokens.is_empty());
         // Check that the second var is on line 2
         let var_positions: Vec<_> = tokens
             .iter()
@@ -955,7 +947,7 @@ mod tests {
         let tokens = lex_all(source).unwrap();
         assert_eq!(tokens.len(), 1);
         if let TokenKind::Number(n) = tokens[0].kind {
-            assert_eq!(n, 0xAbCd12);
+            assert_eq!(n, 0xabcd12);
         } else {
             panic!("Expected hex literal to be tokenized as Number");
         }

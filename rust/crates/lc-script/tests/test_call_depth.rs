@@ -15,12 +15,18 @@ fn recurse_to(depth: i32) -> Result<Value, lc_script::ScriptError> {
 #[test]
 fn recursion_past_old_limit_of_64_now_runs() {
     // 200 deep: errored at the old 64 limit, must run under C++'s 512.
-    assert_eq!(recurse_to(200).expect("200-deep recursion runs"), Value::Int(200));
+    assert_eq!(
+        recurse_to(200).expect("200-deep recursion runs"),
+        Value::Int(200)
+    );
 }
 
 #[test]
 fn recursion_near_the_limit_runs() {
-    assert_eq!(recurse_to(500).expect("500-deep recursion runs"), Value::Int(500));
+    assert_eq!(
+        recurse_to(500).expect("500-deep recursion runs"),
+        Value::Int(500)
+    );
 }
 
 #[test]

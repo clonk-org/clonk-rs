@@ -33,7 +33,10 @@ fn concat_string_and_int() {
 #[test]
 fn concat_two_ints_is_string_not_addition() {
     // 5 .. 3 == "53" (concat), not 8 (`+` would add).
-    assert_eq!(eval("func Test() { return 5 .. 3; }"), Value::String("53".into()));
+    assert_eq!(
+        eval("func Test() { return 5 .. 3; }"),
+        Value::String("53".into())
+    );
 }
 
 #[test]

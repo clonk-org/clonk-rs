@@ -28,7 +28,7 @@ impl ControlBacklog {
     /// callers can hand it to other systems afterwards.
     pub fn record_packet(&mut self, packet: &ControlPacket) {
         let tick = packet.tick();
-        let entry = self.entries.entry(tick).or_insert_with(BTreeMap::new);
+        let entry = self.entries.entry(tick).or_default();
         entry.insert(packet.client_id(), packet.clone());
         self.trim();
     }
@@ -156,7 +156,7 @@ impl ResyncScheduler {
     {
         let mut requests = Vec::new();
         for range in missing {
-            if range.len() == 0 {
+            if range.is_empty() {
                 continue;
             }
             let client_id = range.client_id();
@@ -287,7 +287,7 @@ mod tests {
     fn scheduler_throttles_repeated_requests() {
         let mut scheduler = ResyncScheduler::new(Duration::from_millis(2000));
         let now = Instant::now();
-        let missing = vec![MissingRange::new(7, 20, 25)];
+        let missing = [MissingRange::new(7, 20, 25)];
 
         let initial = scheduler.schedule(missing.iter(), now);
         assert_eq!(initial.len(), 1);
@@ -307,12 +307,12 @@ mod tests {
         let mut scheduler = ResyncScheduler::new(Duration::from_millis(5000));
         let now = Instant::now();
 
-        let first = vec![MissingRange::new(9, 30, 31)];
+        let first = [MissingRange::new(9, 30, 31)];
         let initial = scheduler.schedule(first.iter(), now);
         assert_eq!(initial, vec![ResyncRequest::new(9, 30)]);
 
         // New range starting earlier should trigger immediately even before the interval.
-        let earlier = vec![MissingRange::new(9, 29, 30)];
+        let earlier = [MissingRange::new(9, 29, 30)];
         let sooner = scheduler.schedule(earlier.iter(), now + Duration::from_millis(100));
         assert_eq!(sooner, vec![ResyncRequest::new(9, 29)]);
     }
@@ -321,7 +321,7 @@ mod tests {
     fn scheduler_clears_state_on_remove() {
         let mut scheduler = ResyncScheduler::new(Duration::from_millis(1000));
         let now = Instant::now();
-        let missing = vec![MissingRange::new(3, 5, 6)];
+        let missing = [MissingRange::new(3, 5, 6)];
         scheduler.schedule(missing.iter(), now);
         scheduler.remove_client(3);
         let again = scheduler.schedule(missing.iter(), now);

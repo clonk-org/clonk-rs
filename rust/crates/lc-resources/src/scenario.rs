@@ -899,7 +899,7 @@ fn compare_case_insensitive(a: &str, b: &str) -> Ordering {
 }
 
 fn os_str_from_path(path: &Path) -> &std::ffi::OsStr {
-    path.file_name().unwrap_or_else(|| path.as_os_str())
+    path.file_name().unwrap_or(path.as_os_str())
 }
 
 fn group_error(path: &Path, err: GroupError) -> ScenarioDiscoveryError {

@@ -3,16 +3,12 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SkyParallaxMode {
+    #[default]
     Fixed,
     Wind,
     Parallax,
-}
-
-impl Default for SkyParallaxMode {
-    fn default() -> Self {
-        SkyParallaxMode::Fixed
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

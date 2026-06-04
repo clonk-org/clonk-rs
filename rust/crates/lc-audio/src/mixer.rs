@@ -640,10 +640,11 @@ impl AudioMixer {
                     channel.position += 1;
                     left += frame[0] * channel.left_gain;
                     right += frame[1] * channel.right_gain;
-                    if !channel.looping && channel.position >= frames_len {
-                        if !finished_channels.contains(&index) {
-                            finished_channels.push(index);
-                        }
+                    if !channel.looping
+                        && channel.position >= frames_len
+                        && !finished_channels.contains(&index)
+                    {
+                        finished_channels.push(index);
                     }
                 }
 

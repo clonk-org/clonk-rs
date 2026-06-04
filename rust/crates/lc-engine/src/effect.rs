@@ -1,20 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EffectVarValue {
     Int(i32),
     Bool(bool),
     String(String),
     Array(Vec<EffectVarValue>),
     Proplist(BTreeMap<String, EffectVarValue>),
+    #[default]
     Nil,
-}
-
-impl Default for EffectVarValue {
-    fn default() -> Self {
-        EffectVarValue::Nil
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

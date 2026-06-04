@@ -588,13 +588,13 @@ fn create_archive(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf>
 
         let metadata = entry.metadata()?;
         if metadata.is_dir() {
-            let options = dir_options.clone();
+            let options = dir_options;
             zip.add_directory(format!("{}/", zip_path_str), options)?;
             continue;
         }
 
         if metadata.is_file() {
-            let mut options = file_options.clone();
+            let mut options = file_options;
             if zip_path.components().nth(1).map(|c| c.as_os_str())
                 == Some(std::ffi::OsStr::new("bin"))
             {

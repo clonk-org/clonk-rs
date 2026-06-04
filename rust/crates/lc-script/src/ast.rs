@@ -1,17 +1,14 @@
+use std::fmt;
+
 use crate::value::Literal;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AccessLevel {
-    Public,    // Default, accessible from anywhere
+    #[default]
+    Public, // Default, accessible from anywhere
     Protected, // Accessible within definition and derived definitions
     Private,   // Only accessible within the definition
     Global,    // Global scope, accessible across all definitions
-}
-
-impl Default for AccessLevel {
-    fn default() -> Self {
-        AccessLevel::Public
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +41,7 @@ pub struct Script {
 }
 
 impl Script {
+    #[allow(dead_code)]
     pub fn new(functions: Vec<Function>) -> Self {
         Self {
             functions,
@@ -86,24 +84,27 @@ pub enum TypeAnnotation {
     Union(Vec<TypeAnnotation>),
 }
 
-impl TypeAnnotation {
-    pub fn to_string(&self) -> String {
+impl fmt::Display for TypeAnnotation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TypeAnnotation::Int => "int".to_string(),
-            TypeAnnotation::Bool => "bool".to_string(),
-            TypeAnnotation::String => "string".to_string(),
-            TypeAnnotation::Object => "object".to_string(),
-            TypeAnnotation::Id => "id".to_string(),
-            TypeAnnotation::Array => "array".to_string(),
-            TypeAnnotation::Proplist => "proplist".to_string(),
-            TypeAnnotation::Effect => "effect".to_string(),
-            TypeAnnotation::Nil => "nil".to_string(),
-            TypeAnnotation::Any => "any".to_string(),
-            TypeAnnotation::Union(types) => types
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join("|"),
+            TypeAnnotation::Int => f.write_str("int"),
+            TypeAnnotation::Bool => f.write_str("bool"),
+            TypeAnnotation::String => f.write_str("string"),
+            TypeAnnotation::Object => f.write_str("object"),
+            TypeAnnotation::Id => f.write_str("id"),
+            TypeAnnotation::Array => f.write_str("array"),
+            TypeAnnotation::Proplist => f.write_str("proplist"),
+            TypeAnnotation::Effect => f.write_str("effect"),
+            TypeAnnotation::Nil => f.write_str("nil"),
+            TypeAnnotation::Any => f.write_str("any"),
+            TypeAnnotation::Union(types) => {
+                let joined = types
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("|");
+                f.write_str(&joined)
+            }
         }
     }
 }

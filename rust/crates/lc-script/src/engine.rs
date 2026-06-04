@@ -10,25 +10,13 @@ use crate::vm::Vm;
 
 pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync>;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Script {
     functions: HashMap<String, Function>,
     includes: Vec<String>,
     appendto: Option<crate::ast::AppendTo>,
     strict_level: Option<u8>,
     var_decls: Vec<VarDecl>, // Script-level variable declarations
-}
-
-impl Default for Script {
-    fn default() -> Self {
-        Self {
-            functions: HashMap::new(),
-            includes: Vec::new(),
-            appendto: None,
-            strict_level: None,
-            var_decls: Vec::new(),
-        }
-    }
 }
 
 impl Script {

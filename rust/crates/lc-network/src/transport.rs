@@ -257,7 +257,7 @@ mod tests {
     async fn parses_control_packet() {
         let payload = [PID_CONTROL, 0x0C, 0x22, 0x00];
         let frame = expect_frame(&payload);
-        let (mut client, mut server) = duplex(64);
+        let (client, mut server) = duplex(64);
         server.write_all(&frame).await.unwrap();
         let mut transport = ControlTransport::new(client);
         match transport.read_message().await.unwrap() {
@@ -275,7 +275,7 @@ mod tests {
         // client 300 (0x12C) -> bytes [0xAC, 0x02]; tick 2000 -> [0xD0, 0x0F]
         let payload = [PID_CONTROL, 0xAC, 0x02, 0xD0, 0x0F, 0x00, 0x01, 0x02];
         let frame = expect_frame(&payload);
-        let (mut client, mut server) = duplex(64);
+        let (client, mut server) = duplex(64);
         server.write_all(&frame).await.unwrap();
         let mut transport = ControlTransport::new(client);
         match transport.read_message().await.unwrap() {
@@ -292,7 +292,7 @@ mod tests {
     async fn parses_control_request() {
         let payload = [PID_CONTROL_REQ, 0x96, 0x01]; // tick 150
         let frame = expect_frame(&payload);
-        let (mut client, mut server) = duplex(32);
+        let (client, mut server) = duplex(32);
         server.write_all(&frame).await.unwrap();
         let mut transport = ControlTransport::new(client);
         match transport.read_message().await.unwrap() {
@@ -305,7 +305,7 @@ mod tests {
     async fn parses_exec_sync() {
         let payload = [PID_EXEC_SYNC_CTRL, 0x9B, 0xFB, 0x0B]; // tick 195995
         let frame = expect_frame(&payload);
-        let (mut client, mut server) = duplex(64);
+        let (client, mut server) = duplex(64);
         server.write_all(&frame).await.unwrap();
         let mut transport = ControlTransport::new(client);
         match transport.read_message().await.unwrap() {
@@ -372,7 +372,7 @@ mod tests {
     async fn rejects_invalid_prefix() {
         let mut frame = expect_frame(&[PID_CONTROL, 0x00]);
         frame[0] = 0xAA;
-        let (mut client, mut server) = duplex(16);
+        let (client, mut server) = duplex(16);
         server.write_all(&frame).await.unwrap();
         let mut transport = ControlTransport::new(client);
         let err = transport.read_message().await.unwrap_err();

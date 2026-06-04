@@ -28,7 +28,10 @@ fn nonstrict_treats_zero_and_nil_as_equal() {
 #[test]
 fn nonstrict_treats_one_and_true_as_equal() {
     assert_eq!(eval("func Test() { return 1 == true; }"), Value::Bool(true));
-    assert_eq!(eval("func Test() { return 0 == false; }"), Value::Bool(true));
+    assert_eq!(
+        eval("func Test() { return 0 == false; }"),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -58,7 +61,10 @@ fn same_type_equality_holds_at_all_levels() {
         eval("#strict 3\nfunc Test() { return 5 == 5; }"),
         Value::Bool(true)
     );
-    assert_eq!(eval("func Test() { return nil == nil; }"), Value::Bool(true));
+    assert_eq!(
+        eval("func Test() { return nil == nil; }"),
+        Value::Bool(true)
+    );
     assert_eq!(
         eval("#strict 3\nfunc Test() { return 7 != 8; }"),
         Value::Bool(true)

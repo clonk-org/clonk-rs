@@ -7,7 +7,7 @@
 
 /// Angle scale: `iAngle` is in 1/100-degrees; C++ uses `iAngle * -pi/18000`
 /// (note the reversed sign — see `CBltTransform::SetRotate`).
-const ANGLE_TO_RAD: f32 = -1.7453292519943295769236907684886e-4;
+const ANGLE_TO_RAD: f32 = -1.745_329_2e-4;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transform {

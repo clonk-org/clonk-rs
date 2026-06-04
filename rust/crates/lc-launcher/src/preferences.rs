@@ -22,15 +22,11 @@ pub struct LauncherPreferences {
 
 impl LauncherPreferences {
     pub fn bundle_destination_path(&self) -> Option<PathBuf> {
-        self.last_bundle_destination
-            .as_ref()
-            .map(|path| PathBuf::from(path))
+        self.last_bundle_destination.as_ref().map(PathBuf::from)
     }
 
     pub fn upload_destination_path(&self) -> Option<PathBuf> {
-        self.last_upload_destination
-            .as_ref()
-            .map(|path| PathBuf::from(path))
+        self.last_upload_destination.as_ref().map(PathBuf::from)
     }
 
     pub fn set_bundle_destination(&mut self, path: &Path) {
@@ -44,7 +40,7 @@ impl LauncherPreferences {
     pub fn provider_override_path(&self, role: &str, name: &str) -> Option<PathBuf> {
         self.provider_overrides
             .get(&override_key(role, name))
-            .map(|path| PathBuf::from(path))
+            .map(PathBuf::from)
     }
 
     pub fn set_provider_override(&mut self, role: &str, name: &str, path: &Path) {
@@ -192,9 +188,11 @@ mod tests {
         let initial = load_launcher_preferences(&paths).expect("load default");
         assert_eq!(initial, LauncherPreferences::default());
 
-        let mut updated = LauncherPreferences::default();
-        updated.last_bundle_destination = Some("/tmp/support-bundle".into());
-        updated.last_upload_destination = Some("/tmp/upload-target".into());
+        let mut updated = LauncherPreferences {
+            last_bundle_destination: Some("/tmp/support-bundle".into()),
+            last_upload_destination: Some("/tmp/upload-target".into()),
+            ..Default::default()
+        };
         updated.set_provider_override("share", "Support Share Drop", Path::new("/tmp/share"));
         updated.set_provider_override("upload", "Support Upload Drop", Path::new("/tmp/upload"));
         updated.set_report_search(Some(ReportSearchPreferences {

@@ -201,8 +201,7 @@ impl MessageManager {
 
     #[allow(dead_code)]
     pub fn clear_for_object(&mut self, id: ObjectId) {
-        self.messages
-            .retain(|message| message.target.map_or(true, |target| target != id));
+        self.messages.retain(|message| message.target != Some(id));
     }
 
     pub fn tick(&mut self, existing_objects: &HashSet<ObjectId>) {
@@ -261,9 +260,8 @@ impl MessageManager {
         match spec.kind {
             MessageKind::Target | MessageKind::TargetPlayer => {
                 if let Some(target) = spec.target {
-                    self.messages.retain(|message| {
-                        message.target.map_or(true, |existing| existing != target)
-                    });
+                    self.messages
+                        .retain(|message| message.target != Some(target));
                 }
             }
             MessageKind::Global | MessageKind::GlobalPlayer => {

@@ -199,7 +199,7 @@ impl PackedGroup {
             entries.push(entry);
         }
 
-        let data_offset = reader.seek(SeekFrom::Current(0))?;
+        let data_offset = reader.stream_position()?;
         let index = entries
             .iter()
             .enumerate()
@@ -301,12 +301,10 @@ fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
             continue;
         }
         let metadata = entry.metadata().map_err(convert_walkdir_error)?;
-        let rel = entry.path().strip_prefix(root).map_err(|_| {
-            GroupError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                "failed to strip prefix",
-            ))
-        })?;
+        let rel = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(|_| GroupError::Io(io::Error::other("failed to strip prefix")))?;
         let rel = normalize_path(rel);
         entries.push(GroupEntry {
             relative_path: rel,
@@ -410,7 +408,7 @@ fn convert_walkdir_error(err: WalkDirError) -> GroupError {
     if let Some(io_err) = err.io_error() {
         GroupError::Io(io::Error::new(io_err.kind(), io_err.to_string()))
     } else {
-        GroupError::Io(io::Error::new(io::ErrorKind::Other, err.to_string()))
+        GroupError::Io(io::Error::other(err.to_string()))
     }
 }
 

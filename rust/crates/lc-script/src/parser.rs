@@ -76,7 +76,7 @@ impl<'a> Parser<'a> {
                         // Check if there's a number following
                         if let Ok(token) = self.peek() {
                             if let TokenKind::Number(n) = token.kind {
-                                if n >= 1 && n <= 3 {
+                                if (1..=3).contains(&n) {
                                     level = n as u8;
                                     self.next()?; // consume the number
                                 }
@@ -464,7 +464,7 @@ impl<'a> Parser<'a> {
 
         // Only intercept return(...) forms with NO space between return and (
         if lparen_immediately_follows {
-            let lparen = self.consume()?; // consume '('
+            self.consume()?; // consume '('
 
             // Handle: return(); (empty parentheses)
             if self.check_symbol(Symbol::RParen)? {
@@ -763,19 +763,18 @@ impl<'a> Parser<'a> {
     }
 
     fn expression_to_assignment_target(
-        &self,
         expr: Expr,
         eq_token: &Token,
     ) -> Result<AssignmentTarget, ParseError> {
         match expr {
             Expr::Variable(name) => Ok(AssignmentTarget::Variable(name)),
             Expr::Property(base, name) => {
-                let base_target = self.expression_to_assignment_target(*base, eq_token)?;
+                let base_target = Self::expression_to_assignment_target(*base, eq_token)?;
                 Ok(AssignmentTarget::Property(Box::new(base_target), name))
             }
             // Array/proplist indexing is assignable: arr[i] = value
             Expr::Index(base, index) => {
-                let base_target = self.expression_to_assignment_target(*base, eq_token)?;
+                let base_target = Self::expression_to_assignment_target(*base, eq_token)?;
                 Ok(AssignmentTarget::Index(Box::new(base_target), index))
             }
             // Special case: Local(expr), Var(expr), and EffectVar(args...) are assignable lvalues
@@ -788,14 +787,14 @@ impl<'a> Parser<'a> {
             } => {
                 if let Expr::Variable(ref name) = *callee {
                     if !is_optional {
-                        if name == "Local" && (args.len() == 0 || args.len() == 1) {
+                        if name == "Local" && (args.is_empty() || args.len() == 1) {
                             let index = if args.is_empty() {
                                 Box::new(Expr::Literal(Literal::Int(0)))
                             } else {
                                 Box::new(args.into_iter().next().unwrap())
                             };
                             return Ok(AssignmentTarget::LocalSlot(index));
-                        } else if name == "Var" && (args.len() == 0 || args.len() == 1) {
+                        } else if name == "Var" && (args.is_empty() || args.len() == 1) {
                             let index = if args.is_empty() {
                                 Box::new(Expr::Literal(Literal::Int(0)))
                             } else {
@@ -830,18 +829,14 @@ impl<'a> Parser<'a> {
                 // NEW: Handle obj->LocalN("key"), obj->Local(index), obj->Var(index)
                 // These are method calls that can be used as assignment targets
                 else if let Expr::Property(ref object, ref method) = *callee {
-                    if !is_optional {
-                        if method == "LocalN"
-                            || method == "Local"
-                            || method == "Var"
-                            || method == "EffectVar"
-                        {
-                            return Ok(AssignmentTarget::MethodSlot {
-                                object: object.clone(),
-                                method: method.clone(),
-                                args,
-                            });
-                        }
+                    if !is_optional
+                        && matches!(method.as_str(), "LocalN" | "Local" | "Var" | "EffectVar")
+                    {
+                        return Ok(AssignmentTarget::MethodSlot {
+                            object: object.clone(),
+                            method: method.clone(),
+                            args,
+                        });
                     }
                 }
                 Err(ParseError::new(
@@ -932,7 +927,7 @@ impl<'a> Parser<'a> {
         if is_assign {
             let op_token = self.consume()?;
             // Validate the left side is a legal assignment target
-            let target = self.expression_to_assignment_target(left.clone(), &op_token)?;
+            let target = Self::expression_to_assignment_target(left.clone(), &op_token)?;
 
             // Right-associative: a = b = c parses as a = (b = c)
             let value = self.parse_assignment()?;

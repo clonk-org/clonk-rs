@@ -6462,7 +6462,7 @@ impl ExitState {
     }
 
     fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> ObjectUpdate {
-        self.update_to_stop(ctx).unwrap_or_else(ObjectUpdate::new)
+        self.update_to_stop(ctx).unwrap_or_default()
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -6824,7 +6824,7 @@ impl ConstructState {
             ctx.object.action_procedure,
             ActionProcedure::Build | ActionProcedure::Chop | ActionProcedure::Dig
         ) {
-            let mut update = update_to_stop.unwrap_or_else(ObjectUpdate::new);
+            let mut update = update_to_stop.unwrap_or_default();
             let idle_action = ActionUpdate::default().with_name("Idle").with_force(true);
             update = update.with_action_update(idle_action);
             return CommandStepResult::running(Some(update));
@@ -7134,7 +7134,7 @@ impl ChopState {
             ctx.object.action_procedure,
             ActionProcedure::Chop | ActionProcedure::Build | ActionProcedure::Dig
         ) {
-            let mut update = self.update_to_stop(ctx).unwrap_or_else(ObjectUpdate::new);
+            let mut update = self.update_to_stop(ctx).unwrap_or_default();
             let idle_action = ActionUpdate::default().with_name("Idle").with_force(true);
             update = update.with_action_update(idle_action);
             return CommandStepResult::running(Some(update));
@@ -7242,7 +7242,7 @@ impl DigState {
         if ctx.object.command_direction == CommandDirection::Stop {
             update
         } else {
-            let update = update.unwrap_or_else(ObjectUpdate::new);
+            let update = update.unwrap_or_default();
             Some(update.with_command_direction(CommandDirection::Stop))
         }
     }
@@ -7252,9 +7252,7 @@ impl DigState {
         ctx: &CommandRuntimeContext<'_>,
         update: Option<ObjectUpdate>,
     ) -> Option<ObjectUpdate> {
-        let update = self
-            .ensure_stop(ctx, update)
-            .unwrap_or_else(ObjectUpdate::new);
+        let update = self.ensure_stop(ctx, update).unwrap_or_default();
         Some(
             update.with_action_update(
                 ActionUpdate::default()
@@ -7363,9 +7361,7 @@ impl DigState {
             if ctx.object.action_procedure != ActionProcedure::Walk {
                 return CommandStepResult::running(pending_update);
             }
-            let mut update = self
-                .ensure_stop(ctx, pending_update)
-                .unwrap_or_else(ObjectUpdate::new);
+            let mut update = self.ensure_stop(ctx, pending_update).unwrap_or_default();
             let mut action_update = ActionUpdate::default()
                 .with_name("Dig")
                 .with_force(true)
@@ -7384,7 +7380,7 @@ impl DigState {
         }
 
         if ctx.object.command_direction != direction {
-            let mut update = pending_update.unwrap_or_else(ObjectUpdate::new);
+            let mut update = pending_update.unwrap_or_default();
             update = update.with_command_direction(direction);
             pending_update = Some(update);
         }
@@ -7476,7 +7472,7 @@ impl GrabState {
                 | ActionProcedure::Scale
         ) {
             let idle_action = ActionUpdate::default().with_name("Idle").with_force(true);
-            let update = pending_update.take().unwrap_or_else(ObjectUpdate::new);
+            let update = pending_update.take().unwrap_or_default();
             pending_update = Some(update.with_action_update(idle_action));
         }
 
@@ -7509,7 +7505,7 @@ impl GrabState {
             && (target_snapshot.ocf & ocf::GRAB) != 0;
 
         if can_grab_here {
-            let mut update = pending_update.unwrap_or_else(ObjectUpdate::new);
+            let mut update = pending_update.unwrap_or_default();
             let action_update = ActionUpdate::default()
                 .with_name("Push")
                 .with_target(Some(self.target))
@@ -8060,13 +8056,13 @@ impl JumpState {
         let mut update: Option<ObjectUpdate> = None;
 
         if let Some(direction) = self.desired_direction(ctx) {
-            let mut object_update = update.unwrap_or_else(ObjectUpdate::new);
+            let mut object_update = update.unwrap_or_default();
             object_update.direction = Some(direction);
             update = Some(object_update);
         }
 
         if ctx.object.action_procedure == ActionProcedure::Walk {
-            let mut object_update = update.unwrap_or_else(ObjectUpdate::new);
+            let mut object_update = update.unwrap_or_default();
             let action_update = ActionUpdate::default()
                 .with_name("Jump")
                 .with_phase(0)
@@ -8587,7 +8583,7 @@ impl GetState {
         if ctx.object.command_direction == CommandDirection::Stop {
             return update;
         }
-        let mut update = update.unwrap_or_else(ObjectUpdate::new);
+        let mut update = update.unwrap_or_default();
         update.command_direction = Some(CommandDirection::Stop);
         Some(update)
     }
@@ -8595,7 +8591,7 @@ impl GetState {
     fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
         let mut update = self.ensure_stop(ctx, None);
         if ctx.object.action_procedure == ActionProcedure::Dig {
-            let mut object_update = update.unwrap_or_else(ObjectUpdate::new);
+            let mut object_update = update.unwrap_or_default();
             let action_update = ActionUpdate::default()
                 .with_name("Idle")
                 .with_force(true)
@@ -9121,7 +9117,7 @@ impl ThrowState {
 
         if ctx.object.action_procedure == ActionProcedure::Dig {
             let idle_action = ActionUpdate::default().with_name("Idle").with_force(true);
-            let update = pending_update.take().unwrap_or_else(ObjectUpdate::new);
+            let update = pending_update.take().unwrap_or_default();
             pending_update = Some(update.with_action_update(idle_action));
         }
 
@@ -9193,7 +9189,7 @@ impl ThrowState {
             }
         }
 
-        let mut update = pending_update.unwrap_or_else(ObjectUpdate::new);
+        let mut update = pending_update.unwrap_or_default();
         update.command_direction = Some(CommandDirection::Stop);
 
         if let Some(position) = self.throw_position() {
@@ -9687,7 +9683,7 @@ impl AcquireState {
                 continue;
             }
             let distance = dx.abs() + dy.abs();
-            if best.map_or(true, |(_, best_dist)| distance < best_dist) {
+            if best.is_none_or(|(_, best_dist)| distance < best_dist) {
                 best = Some((*id, distance));
             }
         }
@@ -10088,7 +10084,7 @@ impl BuyState {
 
         if let Some(container_id) = ctx.object.container {
             if container_id != target_id {
-                let mut update = update_to_stop.unwrap_or_else(ObjectUpdate::new);
+                let mut update = update_to_stop.unwrap_or_default();
                 if let Some(snapshot) = ctx.resolve(container_id) {
                     update.position = Some(snapshot.position);
                 } else {
@@ -10109,7 +10105,7 @@ impl BuyState {
                 if (target_snapshot.ocf & (ocf::ENTRANCE | ocf::GRAB)) == 0 {
                     return None;
                 }
-                let mut update = update_to_stop.unwrap_or_else(ObjectUpdate::new);
+                let mut update = update_to_stop.unwrap_or_default();
                 update.position = Some(target_snapshot.position);
                 update.velocity = Some(Vector2::ZERO);
                 update.container = Some(Some(target_id));
@@ -10142,10 +10138,7 @@ impl BuyState {
             }
         }
 
-        let item_id = match candidate {
-            Some(id) => id,
-            None => return None,
-        };
+        let item_id = candidate?;
 
         let buyer_owner = ctx.object.owner;
         let player = match ctx.player(buyer_owner) {

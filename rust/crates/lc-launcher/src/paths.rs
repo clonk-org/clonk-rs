@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub fn ensure_logs_dir(paths: &AppPaths) -> Result<PathBuf> {
     let logs_dir = paths.logs_dir();
-    fs::create_dir_all(&logs_dir).with_context(|| {
+    fs::create_dir_all(logs_dir).with_context(|| {
         format!(
             "failed to ensure logs directory {} exists",
             logs_dir.display()

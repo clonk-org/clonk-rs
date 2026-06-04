@@ -1,4 +1,4 @@
-use lc_engine::{ActionState, Engine, SpawnConfig};
+use lc_engine::{Engine, SpawnConfig};
 
 #[test]
 fn get_id_returns_current_object_definition() {

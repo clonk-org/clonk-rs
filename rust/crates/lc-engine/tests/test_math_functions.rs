@@ -21,7 +21,7 @@ fn abs_function_should_work() {
     .expect("script compiles");
 
     engine.register_definition(script).unwrap();
-    let obj = engine
+    let _obj = engine
         .spawn_object(SpawnConfig::new("TEST".to_string()))
         .unwrap();
 
@@ -47,7 +47,7 @@ fn max_function_should_work() {
     .expect("script compiles");
 
     engine.register_definition(script).unwrap();
-    let obj = engine
+    let _obj = engine
         .spawn_object(SpawnConfig::new("TEST".to_string()))
         .unwrap();
 
@@ -73,7 +73,7 @@ fn min_function_should_work() {
     .expect("script compiles");
 
     engine.register_definition(script).unwrap();
-    let obj = engine
+    let _obj = engine
         .spawn_object(SpawnConfig::new("TEST".to_string()))
         .unwrap();
 
@@ -102,7 +102,7 @@ fn tree_still_callback_should_use_abs() {
     .expect("script compiles");
 
     engine.register_definition(script).unwrap();
-    let obj = engine
+    let _obj = engine
         .spawn_object(SpawnConfig::new("TREE".to_string()))
         .unwrap();
 

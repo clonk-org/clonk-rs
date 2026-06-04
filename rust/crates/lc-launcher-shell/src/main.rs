@@ -1410,7 +1410,7 @@ impl LauncherApp {
         let mut dialog = FileDialog::new()
             .set_title("Save support bundle report")
             .add_filter("Text files", &["txt"])
-            .set_file_name(&format!(
+            .set_file_name(format!(
                 "support-bundle-report-{}.txt",
                 timestamp_for_filename()
             ));
@@ -1611,7 +1611,7 @@ impl LauncherApp {
             .provider_override_path(role.as_str(), &provider_name);
 
         let mut dialog =
-            FileDialog::new().set_title(&format!("Select directory for {}", provider_name));
+            FileDialog::new().set_title(format!("Select directory for {}", provider_name));
         dialog = self.configure_dialog_directory(
             dialog,
             saved_override,
@@ -3088,19 +3088,14 @@ fn resolve_snapshot_path(logs_dir: &Path, entry: &str) -> PathBuf {
     }
 }
 
-fn find_state_mut<'a, F>(
-    states: &'a mut [ProviderTargetState],
+fn find_state_mut<F>(
+    states: &mut [ProviderTargetState],
     mut predicate: F,
-) -> Option<&'a mut ProviderTargetState>
+) -> Option<&mut ProviderTargetState>
 where
     F: FnMut(&ProviderTargetState) -> bool,
 {
-    for state in states {
-        if predicate(state) {
-            return Some(state);
-        }
-    }
-    None
+    states.iter_mut().find(|state| predicate(state))
 }
 
 fn paths_equivalent(a: &Path, b: &Path) -> bool {
@@ -3334,6 +3329,96 @@ fn draw_text(
     let origin_y = rect.origin.y + padding;
     let font = BitmapFont::new();
     font.draw_text(surface, origin_x, origin_y, text, font_size.max(1.0), color);
+}
+
+fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
+    match code {
+        VirtualKeyCode::Return => Some(KeyCode::Enter),
+        VirtualKeyCode::Escape => Some(KeyCode::Escape),
+        VirtualKeyCode::Space => Some(KeyCode::Space),
+        VirtualKeyCode::Tab => Some(KeyCode::Tab),
+        VirtualKeyCode::Up => Some(KeyCode::Up),
+        VirtualKeyCode::Down => Some(KeyCode::Down),
+        VirtualKeyCode::Left => Some(KeyCode::Left),
+        VirtualKeyCode::Right => Some(KeyCode::Right),
+        _ => None,
+    }
+}
+
+struct ShellLogger {
+    inner: Mutex<LoggerInner>,
+}
+
+struct LoggerInner {
+    writer: LineWriter<File>,
+    path: PathBuf,
+}
+
+impl ShellLogger {
+    fn new(path: PathBuf) -> Result<Self> {
+        ensure_parent(&path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("failed to open launcher log {}", path.display()))?;
+        Ok(Self {
+            inner: Mutex::new(LoggerInner {
+                writer: LineWriter::new(file),
+                path,
+            }),
+        })
+    }
+
+    fn set_target(&self, path: PathBuf) -> Result<()> {
+        {
+            let guard = self
+                .inner
+                .lock()
+                .map_err(|_| anyhow!("launcher log mutex poisoned"))?;
+            if guard.path == path {
+                return Ok(());
+            }
+        }
+
+        ensure_parent(&path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("failed to open launcher log {}", path.display()))?;
+
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("launcher log mutex poisoned"))?;
+        guard.writer = LineWriter::new(file);
+        guard.path = path.clone();
+        drop(guard);
+
+        self.log_line(&format!("launcher log redirected to {}", path.display()))?;
+        Ok(())
+    }
+}
+
+impl LauncherLog for ShellLogger {
+    fn log_line(&self, message: &str) -> Result<()> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("launcher log mutex poisoned"))?;
+        writeln!(guard.writer, "[{}] {}", timestamp_for_log(), message)
+            .context("failed to write launcher log entry")?;
+        guard.writer.flush().context("failed to flush launcher log")
+    }
+}
+
+fn ensure_parent(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -4071,94 +4156,4 @@ mod tests {
             ProviderOverrideSource::Retargeted { .. }
         ));
     }
-}
-
-fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
-    match code {
-        VirtualKeyCode::Return => Some(KeyCode::Enter),
-        VirtualKeyCode::Escape => Some(KeyCode::Escape),
-        VirtualKeyCode::Space => Some(KeyCode::Space),
-        VirtualKeyCode::Tab => Some(KeyCode::Tab),
-        VirtualKeyCode::Up => Some(KeyCode::Up),
-        VirtualKeyCode::Down => Some(KeyCode::Down),
-        VirtualKeyCode::Left => Some(KeyCode::Left),
-        VirtualKeyCode::Right => Some(KeyCode::Right),
-        _ => None,
-    }
-}
-
-struct ShellLogger {
-    inner: Mutex<LoggerInner>,
-}
-
-struct LoggerInner {
-    writer: LineWriter<File>,
-    path: PathBuf,
-}
-
-impl ShellLogger {
-    fn new(path: PathBuf) -> Result<Self> {
-        ensure_parent(&path)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("failed to open launcher log {}", path.display()))?;
-        Ok(Self {
-            inner: Mutex::new(LoggerInner {
-                writer: LineWriter::new(file),
-                path,
-            }),
-        })
-    }
-
-    fn set_target(&self, path: PathBuf) -> Result<()> {
-        {
-            let guard = self
-                .inner
-                .lock()
-                .map_err(|_| anyhow!("launcher log mutex poisoned"))?;
-            if guard.path == path {
-                return Ok(());
-            }
-        }
-
-        ensure_parent(&path)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("failed to open launcher log {}", path.display()))?;
-
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow!("launcher log mutex poisoned"))?;
-        guard.writer = LineWriter::new(file);
-        guard.path = path.clone();
-        drop(guard);
-
-        self.log_line(&format!("launcher log redirected to {}", path.display()))?;
-        Ok(())
-    }
-}
-
-impl LauncherLog for ShellLogger {
-    fn log_line(&self, message: &str) -> Result<()> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow!("launcher log mutex poisoned"))?;
-        writeln!(guard.writer, "[{}] {}", timestamp_for_log(), message)
-            .context("failed to write launcher log entry")?;
-        guard.writer.flush().context("failed to flush launcher log")
-    }
-}
-
-fn ensure_parent(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    Ok(())
 }

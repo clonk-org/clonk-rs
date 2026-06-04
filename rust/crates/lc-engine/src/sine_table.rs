@@ -1,4 +1,4 @@
-pub(crate) const SINE_TABLE: [i32; 9001] = [
+pub(crate) static SINE_TABLE: [i32; 9001] = [
     0,
     11,
     22,

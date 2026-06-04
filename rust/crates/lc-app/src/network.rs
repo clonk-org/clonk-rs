@@ -116,7 +116,7 @@ impl ControlFrameAccumulator {
     }
 
     fn record_control(&mut self, tick: Tick, control: lc_engine::ControlPacket, timestamp: u64) {
-        if self.last_sent_tick.map_or(false, |last| tick <= last) {
+        if self.last_sent_tick.is_some_and(|last| tick <= last) {
             return;
         }
         if self.current_tick != Some(tick) {
@@ -128,7 +128,7 @@ impl ControlFrameAccumulator {
     }
 
     fn finalize_tick(&mut self, tick: Tick) -> Option<LegacyControlFrame> {
-        if self.last_sent_tick.map_or(false, |last| tick <= last) {
+        if self.last_sent_tick.is_some_and(|last| tick <= last) {
             return None;
         }
 

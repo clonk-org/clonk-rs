@@ -156,9 +156,7 @@ impl Unblocker {
                     io::ErrorKind::WouldBlock => return Ok(()),
                     _ => return Err(err),
                 }
-            } else if read == 0 {
-                return Ok(());
-            } else if read < buffer.len() as isize {
+            } else if read == 0 || read < buffer.len() as isize {
                 return Ok(());
             }
         }
@@ -265,9 +263,11 @@ impl Unblocker {
     }
 }
 
+type SchedulerErrorHook = Box<dyn Fn(&dyn StdSchedulerProc) + Send + Sync>;
+
 pub struct StdScheduler {
     procs: Vec<ProcEntry>,
-    on_error: Option<Box<dyn Fn(&dyn StdSchedulerProc) + Send + Sync>>,
+    on_error: Option<SchedulerErrorHook>,
     unblocker: Arc<Unblocker>,
 }
 

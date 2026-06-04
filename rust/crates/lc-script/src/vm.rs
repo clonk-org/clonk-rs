@@ -546,9 +546,9 @@ impl<'a> Vm<'a> {
                         }
                         _ => {
                             // Optional calls only make sense for property access
-                            return Err(RuntimeError::new(
+                            Err(RuntimeError::new(
                                 "optional call (~) can only be used with property access (->~Method())".to_string(),
-                            ));
+                            ))
                         }
                     }
                 } else {
@@ -636,7 +636,7 @@ impl<'a> Vm<'a> {
                 Ok(result)
             }
             Expr::PreIncrement(expr) => {
-                let target = self.expr_to_assignment_target(expr)?;
+                let target = Self::expr_to_assignment_target(expr)?;
                 let old_value = self.get_target_value(env, &target)?;
                 let new_value = match old_value {
                     Value::Int(i) => Value::Int(i + 1),
@@ -651,7 +651,7 @@ impl<'a> Vm<'a> {
                 Ok(new_value)
             }
             Expr::PreDecrement(expr) => {
-                let target = self.expr_to_assignment_target(expr)?;
+                let target = Self::expr_to_assignment_target(expr)?;
                 let old_value = self.get_target_value(env, &target)?;
                 let new_value = match old_value {
                     Value::Int(i) => Value::Int(i - 1),
@@ -666,7 +666,7 @@ impl<'a> Vm<'a> {
                 Ok(new_value)
             }
             Expr::PostIncrement(expr) => {
-                let target = self.expr_to_assignment_target(expr)?;
+                let target = Self::expr_to_assignment_target(expr)?;
                 let old_value = self.get_target_value(env, &target)?;
                 let new_value = match &old_value {
                     Value::Int(i) => Value::Int(i + 1),
@@ -681,7 +681,7 @@ impl<'a> Vm<'a> {
                 Ok(old_value)
             }
             Expr::PostDecrement(expr) => {
-                let target = self.expr_to_assignment_target(expr)?;
+                let target = Self::expr_to_assignment_target(expr)?;
                 let old_value = self.get_target_value(env, &target)?;
                 let new_value = match &old_value {
                     Value::Int(i) => Value::Int(i - 1),
@@ -720,12 +720,9 @@ impl<'a> Vm<'a> {
                 }),
             UnaryOp::Not => Ok(Value::Bool(!value.as_bool())),
             // C4AulExec.cpp:460-462 AB_BitNot: SetInt(~_getInt()).
-            UnaryOp::BitwiseNot => value
-                .as_c4_int()
-                .map(|i| Value::Int(!i))
-                .ok_or_else(|| {
-                    RuntimeError::new(format!("cannot apply unary '~' to {}", value.type_name()))
-                }),
+            UnaryOp::BitwiseNot => value.as_c4_int().map(|i| Value::Int(!i)).ok_or_else(|| {
+                RuntimeError::new(format!("cannot apply unary '~' to {}", value.type_name()))
+            }),
         }
     }
 
@@ -1312,11 +1309,11 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn expr_to_assignment_target(&self, expr: &Expr) -> Result<AssignmentTarget, RuntimeError> {
+    fn expr_to_assignment_target(expr: &Expr) -> Result<AssignmentTarget, RuntimeError> {
         match expr {
             Expr::Variable(name) => Ok(AssignmentTarget::Variable(name.clone())),
             Expr::Property(base, name) => {
-                let base_target = self.expr_to_assignment_target(base)?;
+                let base_target = Self::expr_to_assignment_target(base)?;
                 Ok(AssignmentTarget::Property(
                     Box::new(base_target),
                     name.clone(),
@@ -1356,18 +1353,14 @@ impl<'a> Vm<'a> {
                 }
                 // Handle obj->LocalN("key"), obj->Local(index), etc.
                 else if let Expr::Property(ref object, ref method) = **callee {
-                    if !is_optional {
-                        if method == "LocalN"
-                            || method == "Local"
-                            || method == "Var"
-                            || method == "EffectVar"
-                        {
-                            return Ok(AssignmentTarget::MethodSlot {
-                                object: object.clone(),
-                                method: method.clone(),
-                                args: args.clone(),
-                            });
-                        }
+                    if !is_optional
+                        && matches!(method.as_str(), "LocalN" | "Local" | "Var" | "EffectVar")
+                    {
+                        return Ok(AssignmentTarget::MethodSlot {
+                            object: object.clone(),
+                            method: method.clone(),
+                            args: args.clone(),
+                        });
                     }
                 }
                 Err(RuntimeError::new(format!(
@@ -1432,7 +1425,10 @@ impl Environment {
     }
 
     fn get_var_slot(&self, index: i32) -> Value {
-        self.var_slots.get(&index.max(0)).cloned().unwrap_or(Value::Nil)
+        self.var_slots
+            .get(&index.max(0))
+            .cloned()
+            .unwrap_or(Value::Nil)
     }
 
     fn set_local_slot(&mut self, index: i32, value: Value) {

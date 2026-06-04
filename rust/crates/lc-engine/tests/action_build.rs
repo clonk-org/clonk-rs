@@ -57,7 +57,7 @@ fn build_procedure_advances_construction_and_stops_when_complete(
     let target_snapshot = first_tick
         .object(target_id)
         .expect("target exists after first tick");
-    let expected_delta = ((10 * 100 * 150) / 100) as i32;
+    let expected_delta = (10 * 100 * 150) / 100;
     assert_eq!(target_snapshot.construction, expected_delta);
 
     let mut built = false;

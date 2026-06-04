@@ -2,10 +2,13 @@ use std::sync::Arc;
 
 use crate::value::Value;
 
+type CallHook = Arc<dyn Fn(&str, &[Value]) + Send + Sync>;
+type ReturnHook = Arc<dyn Fn(&str, &Value) + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct DebuggerHooks {
-    on_call: Option<Arc<dyn Fn(&str, &[Value]) + Send + Sync>>,
-    on_return: Option<Arc<dyn Fn(&str, &Value) + Send + Sync>>,
+    on_call: Option<CallHook>,
+    on_return: Option<ReturnHook>,
 }
 
 impl DebuggerHooks {
@@ -51,11 +54,11 @@ impl DebuggerHooks {
         self.on_return = None;
     }
 
-    pub fn on_call(&self) -> Option<&Arc<dyn Fn(&str, &[Value]) + Send + Sync>> {
+    pub fn on_call(&self) -> Option<&CallHook> {
         self.on_call.as_ref()
     }
 
-    pub fn on_return(&self) -> Option<&Arc<dyn Fn(&str, &Value) + Send + Sync>> {
+    pub fn on_return(&self) -> Option<&ReturnHook> {
         self.on_return.as_ref()
     }
 

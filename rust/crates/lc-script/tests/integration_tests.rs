@@ -106,7 +106,7 @@ fn reports_unknown_function() {
 fn host_function_can_be_called_directly() {
     let mut engine = Engine::new();
     engine.register_host_function("HostAdd", |args| {
-        let lhs = match args.get(0) {
+        let lhs = match args.first() {
             Some(Value::Int(value)) => *value,
             _ => {
                 return Err(RuntimeError::new(
@@ -135,7 +135,7 @@ fn host_function_can_be_called_directly() {
 fn script_can_call_host_function() {
     let mut engine = Engine::new();
     engine.register_host_function("HostMul", |args| {
-        let lhs = match args.get(0) {
+        let lhs = match args.first() {
             Some(Value::Int(value)) => *value,
             _ => {
                 return Err(RuntimeError::new(

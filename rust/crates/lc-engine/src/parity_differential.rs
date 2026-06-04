@@ -18,6 +18,7 @@
 
 use serde_json::Value;
 
+use crate::material::{consume_corrosion_effect_rng, evaluate_corrosion};
 use crate::math::{fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed};
 use crate::rng::LcgRng;
 
@@ -190,7 +191,99 @@ fn parity_differential_matches_cpp_golden() {
         }
     }
 
-    // 7. Movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 7. Material corrosion execution RNG ordering.
+    for (idx, e) in golden["material_corrode_rng"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let seed = i(e, "seed") as u32;
+        let custom = i(e, "custom") != 0;
+        let mut rng = LcgRng::new(seed);
+        let success = if custom {
+            evaluate_corrosion(0, 0, Some(i(e, "rate") as i32), &mut rng)
+        } else {
+            evaluate_corrosion(
+                i(e, "corrosive") as i32,
+                i(e, "corrode") as i32,
+                None,
+                &mut rng,
+            )
+        };
+        if success {
+            consume_corrosion_effect_rng(&mut rng);
+        }
+        expect_eq(
+            "material_corrode_rng",
+            idx,
+            "success",
+            i(e, "success"),
+            success as i64,
+        );
+        expect_eq(
+            "material_corrode_rng",
+            idx,
+            "count",
+            i(e, "count"),
+            rng.count as i64,
+        );
+        expect_eq(
+            "material_corrode_rng",
+            idx,
+            "hold",
+            i(e, "hold"),
+            rng.hold as i64,
+        );
+    }
+
+    // 8. Mass-mover transfer RNG ordering: Random(10) before Rnd3().
+    for (case_idx, e) in golden["mass_mover_transfer_rng"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let seed = i(e, "seed") as u32;
+        let mut rng = LcgRng::new(seed);
+        rng.randomize3();
+        for (idx, call) in e["calls"].as_array().unwrap().iter().enumerate() {
+            let random10 = rng.random(10);
+            let rnd3 = rng.rnd3();
+            let label = format!("mass_mover_transfer_rng[{case_idx}]");
+            expect_eq(
+                &label,
+                idx,
+                "random10",
+                i(call, "random10"),
+                random10 as i64,
+            );
+            expect_eq(&label, idx, "rnd3", i(call, "rnd3"), rnd3 as i64);
+            expect_eq(
+                &label,
+                idx,
+                "execute_immediately",
+                i(call, "execute_immediately"),
+                (rnd3 == 0) as i64,
+            );
+        }
+        expect_eq(
+            "mass_mover_transfer_rng",
+            case_idx,
+            "count",
+            i(e, "count"),
+            rng.count as i64,
+        );
+        expect_eq(
+            "mass_mover_transfer_rng",
+            case_idx,
+            "hold",
+            i(e, "hold"),
+            rng.hold as i64,
+        );
+    }
+
+    // 9. Movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    fix_x += xdir; fix_y += (ydir += gravity); matching C4Movement.cpp.
     for scn in golden["movement"].as_array().unwrap() {
         let name = scn["name"].as_str().unwrap_or("?");

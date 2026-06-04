@@ -644,8 +644,10 @@ mod tests {
 
         let telemetry = UpdateTelemetrySummary::default();
 
-        let mut summary = ProviderBulkRetargetSummary::default();
-        summary.history_cleared_at = Some("2024-06-05T08:15:00Z".into());
+        let summary = ProviderBulkRetargetSummary {
+            history_cleared_at: Some("2024-06-05T08:15:00Z".into()),
+            ..Default::default()
+        };
 
         write_launcher_summary(
             &paths,

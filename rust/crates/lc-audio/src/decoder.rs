@@ -140,7 +140,7 @@ fn decode_mp3(data: &[u8]) -> Result<DecodedAudio, AudioDecodeError> {
     let mut sample_rate: Option<u32> = None;
     while let Ok(frame) = decoder.next_frame() {
         sample_rate.get_or_insert(frame.sample_rate as u32);
-        let channel_count = frame.channels as usize;
+        let channel_count = frame.channels;
         let packet_frames = convert_interleaved_i16_to_stereo(&frame.data, channel_count)?;
         frames.extend(packet_frames);
     }

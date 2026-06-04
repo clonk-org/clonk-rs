@@ -157,7 +157,7 @@ pub fn interpret_player_control_command(command: i32) -> Option<ControlEvent> {
         return None;
     }
     let mut raw = command as u8;
-    if raw >= COM_RELEASE_FIRST && raw <= COM_RELEASE_LAST {
+    if (COM_RELEASE_FIRST..=COM_RELEASE_LAST).contains(&raw) {
         let base = raw.saturating_sub(COM_RELEASE_OFFSET);
         return interpret_base_command(base, CommandKind::Release);
     }

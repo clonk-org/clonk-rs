@@ -5,10 +5,13 @@ use lc_resources::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::landscape::Landscape;
+use crate::rng::LcgRng;
+
 const C4M_SOLID: i32 = 50;
 const C4M_LIQUID: i32 = 25;
 const SKY_KEY: &str = "sky";
-const MATERIAL_EXEC_PXS_MOVE_MASK: u32 = 1 << 1;
+const MATERIAL_EVENT_COUNT: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemperatureDirection {
@@ -121,6 +124,39 @@ pub enum MaterialReactionKind {
     Insert,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum MaterialInteractionEvent {
+    PxsPos = 0,
+    PxsMove = 1,
+    MassMove = 2,
+}
+
+impl MaterialInteractionEvent {
+    const ALL: [Self; MATERIAL_EVENT_COUNT] = [Self::PxsPos, Self::PxsMove, Self::MassMove];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn mask(self) -> u32 {
+        1u32 << (self as u32)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterialReactionExecution {
+    Unhandled,
+    Consumed,
+    Converted(MaterialId),
+}
+
+impl MaterialReactionExecution {
+    pub fn consumes_material(self) -> bool {
+        !matches!(self, MaterialReactionExecution::Unhandled)
+    }
+}
+
 fn normalize_key(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
@@ -163,7 +199,7 @@ fn parse_blast_shift_to(value: Option<&str>) -> (Option<String>, bool) {
     }
 
     let material_part = trimmed
-        .split(|c| matches!(c, '-' | '+' | '\\' | '/' | '.'))
+        .split(['-', '+', '\\', '/', '.'])
         .next()
         .unwrap_or(trimmed)
         .trim();
@@ -191,7 +227,7 @@ fn density_is_semi_solid(density: i32) -> bool {
 
 #[inline]
 fn density_is_liquid(density: i32) -> bool {
-    density >= C4M_LIQUID && density < C4M_SOLID
+    (C4M_LIQUID..C4M_SOLID).contains(&density)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -608,7 +644,7 @@ impl Material {
 pub struct MaterialSet {
     materials: Vec<Material>,
     by_name: HashMap<String, MaterialId>,
-    custom_reactions: Vec<Option<MaterialReactionKind>>,
+    custom_reactions_by_event: [Vec<Option<MaterialReactionKind>>; MATERIAL_EVENT_COUNT],
 }
 
 impl MaterialSet {
@@ -635,11 +671,11 @@ impl MaterialSet {
         for material in &mut materials {
             material.resolve_relations(&by_name);
         }
-        let custom_reactions = build_custom_reactions(&materials, &by_name);
+        let custom_reactions_by_event = build_custom_reactions(&materials, &by_name);
         Self {
             materials,
             by_name,
-            custom_reactions,
+            custom_reactions_by_event,
         }
     }
 
@@ -658,7 +694,7 @@ impl MaterialSet {
     }
 
     fn rebuild_custom_reactions(&mut self) {
-        self.custom_reactions = build_custom_reactions(&self.materials, &self.by_name);
+        self.custom_reactions_by_event = build_custom_reactions(&self.materials, &self.by_name);
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Material> {
@@ -706,14 +742,16 @@ impl MaterialSet {
         &self,
         pxs_material: Option<MaterialId>,
         landscape_material: Option<MaterialId>,
+        event: MaterialInteractionEvent,
     ) -> Option<MaterialReactionKind> {
-        if self.custom_reactions.is_empty() {
+        let custom_reactions = &self.custom_reactions_by_event[event.index()];
+        if custom_reactions.is_empty() {
             return None;
         }
         let width = self.materials.len() + 1;
         let pxs_index = option_to_index(pxs_material);
         let landscape_index = option_to_index(landscape_material);
-        self.custom_reactions
+        custom_reactions
             .get(landscape_index * width + pxs_index)
             .copied()
             .flatten()
@@ -724,7 +762,20 @@ impl MaterialSet {
         pxs_material: Option<MaterialId>,
         landscape_material: Option<MaterialId>,
     ) -> MaterialReactionKind {
-        if let Some(custom) = self.custom_reaction(pxs_material, landscape_material) {
+        self.reaction_for_event(
+            pxs_material,
+            landscape_material,
+            MaterialInteractionEvent::PxsMove,
+        )
+    }
+
+    pub fn reaction_for_event(
+        &self,
+        pxs_material: Option<MaterialId>,
+        landscape_material: Option<MaterialId>,
+        event: MaterialInteractionEvent,
+    ) -> MaterialReactionKind {
+        if let Some(custom) = self.custom_reaction(pxs_material, landscape_material, event) {
             return custom;
         }
         let Some(pxs_id) = pxs_material else {
@@ -766,6 +817,34 @@ impl MaterialSet {
         MaterialReactionKind::Insert
     }
 
+    pub fn execute_mass_move_reaction(
+        &self,
+        landscape: &mut Landscape,
+        pxs_material: MaterialId,
+        pxs_x: i32,
+        pxs_y: i32,
+        landscape_x: i32,
+        landscape_y: i32,
+        rng: &mut LcgRng,
+    ) -> MaterialReactionExecution {
+        let landscape_material = landscape.material_at(landscape_x, landscape_y);
+        let reaction = self.reaction_for_event(
+            Some(pxs_material),
+            landscape_material,
+            MaterialInteractionEvent::MassMove,
+        );
+        execute_mass_move_reaction_kind(
+            reaction,
+            landscape,
+            self,
+            pxs_x,
+            pxs_y,
+            landscape_x,
+            landscape_y,
+            rng,
+        )
+    }
+
     pub fn evaluate_temperature_conversion(
         &self,
         material: MaterialId,
@@ -784,6 +863,79 @@ impl MaterialSet {
     }
 }
 
+pub fn evaluate_corrosion(
+    corrosive_strength: i32,
+    corrode_resistance: i32,
+    corrosion_probability: Option<i32>,
+    rng: &mut LcgRng,
+) -> bool {
+    if let Some(probability) = corrosion_probability {
+        return rng.random(100) < probability;
+    }
+
+    rng.random(100) < corrosive_strength && rng.random(100) < corrode_resistance
+}
+
+pub fn consume_corrosion_effect_rng(rng: &mut LcgRng) {
+    if rng.random(5) == 0 {
+        let _ = rng.random(3);
+    }
+    let _ = rng.random(20);
+}
+
+fn execute_mass_move_reaction_kind(
+    reaction: MaterialReactionKind,
+    landscape: &mut Landscape,
+    materials: &MaterialSet,
+    pxs_x: i32,
+    pxs_y: i32,
+    landscape_x: i32,
+    landscape_y: i32,
+    rng: &mut LcgRng,
+) -> MaterialReactionExecution {
+    match reaction {
+        MaterialReactionKind::None | MaterialReactionKind::Insert => {
+            MaterialReactionExecution::Unhandled
+        }
+        MaterialReactionKind::Convert {
+            target: Some(target),
+            ..
+        } => MaterialReactionExecution::Converted(target),
+        MaterialReactionKind::Convert { target: None, .. } => MaterialReactionExecution::Consumed,
+        MaterialReactionKind::Poof => {
+            let _ = landscape.extract_material_at(landscape_x, landscape_y);
+            let _ = rng.rnd3();
+            let _ = rng.rnd3();
+            MaterialReactionExecution::Consumed
+        }
+        MaterialReactionKind::Incinerate => {
+            if landscape.incinerate_at(pxs_x, pxs_y, materials) {
+                MaterialReactionExecution::Consumed
+            } else {
+                MaterialReactionExecution::Unhandled
+            }
+        }
+        MaterialReactionKind::Corrode {
+            corrosive_strength,
+            corrode_resistance,
+            corrosion_probability,
+        } => {
+            if evaluate_corrosion(
+                corrosive_strength,
+                corrode_resistance,
+                corrosion_probability,
+                rng,
+            ) {
+                let _ = landscape.extract_material_at(landscape_x, landscape_y);
+                consume_corrosion_effect_rng(rng);
+                MaterialReactionExecution::Consumed
+            } else {
+                MaterialReactionExecution::Unhandled
+            }
+        }
+    }
+}
+
 fn option_to_index(material: Option<MaterialId>) -> usize {
     material.map(|id| id.index() + 1).unwrap_or(0)
 }
@@ -791,9 +943,9 @@ fn option_to_index(material: Option<MaterialId>) -> usize {
 fn build_custom_reactions(
     materials: &[Material],
     by_name: &HashMap<String, MaterialId>,
-) -> Vec<Option<MaterialReactionKind>> {
+) -> [Vec<Option<MaterialReactionKind>>; MATERIAL_EVENT_COUNT] {
     let width = materials.len() + 1;
-    let mut entries = vec![None; width * width];
+    let mut entries = std::array::from_fn(|_| vec![None; width * width]);
     if materials.is_empty() {
         return entries;
     }
@@ -805,9 +957,6 @@ fn build_custom_reactions(
                 .int("execmask")
                 .map(|value| value as u32)
                 .unwrap_or(u32::MAX);
-            if exec_mask & MATERIAL_EXEC_PXS_MOVE_MASK == 0 {
-                continue;
-            }
 
             let Some(kind) = parse_custom_reaction_kind(reaction_def, by_name) else {
                 continue;
@@ -830,7 +979,19 @@ fn build_custom_reactions(
             }
 
             for target in targets {
-                set_custom_reaction(&mut entries, width, Some(pxs_id), target, kind, reverse);
+                for event in MaterialInteractionEvent::ALL {
+                    if exec_mask & event.mask() == 0 {
+                        continue;
+                    }
+                    set_custom_reaction(
+                        &mut entries[event.index()],
+                        width,
+                        Some(pxs_id),
+                        target,
+                        kind,
+                        reverse,
+                    );
+                }
             }
         }
     }
@@ -850,7 +1011,7 @@ fn parse_custom_reaction_kind(
                 .value("convertmat")
                 .map(|value| value.trim())
                 .filter(|value| !value.is_empty())
-                .map(|raw| normalize_key(raw))
+                .map(normalize_key)
                 .and_then(|name| {
                     if name == SKY_KEY {
                         Some(None)
@@ -1265,6 +1426,33 @@ mod tests {
             set.reaction(Some(mist), None),
             MaterialReactionKind::None,
             "reaction without PXSMove bit should not apply to particle movement",
+        );
+    }
+
+    #[test]
+    fn custom_reaction_exec_mask_applies_to_mass_move() {
+        let set = build_material_set(
+            r#"
+            [Material Mist]
+            Name=Mist
+            Density=25
+
+            [Reaction]
+            Type=Poof
+            TargetSpec=Sky
+            ExecMask=4
+            "#,
+        );
+        let mist = set.id_of("Mist").expect("mist material");
+        assert_eq!(
+            set.reaction(Some(mist), None),
+            MaterialReactionKind::None,
+            "mass-move-only reaction should not affect PXSMove lookups",
+        );
+        assert_eq!(
+            set.reaction_for_event(Some(mist), None, MaterialInteractionEvent::MassMove),
+            MaterialReactionKind::Poof,
+            "mass-move exec mask should be available to mass movers",
         );
     }
 }

@@ -8,6 +8,9 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
+const C4M_VEHICLE: i32 = 100;
+const C4M_BACKGROUND: i32 = 0;
+
 #[derive(Debug, Error)]
 pub enum LandscapeError {
     #[error("height map length {found} does not match width {width}")]
@@ -550,18 +553,18 @@ impl Landscape {
     }
 
     pub fn density_at(&self, x: i32, y: i32, materials: &MaterialSet) -> i32 {
-        if x < 0 || x as u32 >= self.width {
-            return i32::MAX;
-        }
         if y < 0 {
-            return 0;
+            return C4M_BACKGROUND;
+        }
+        if x < 0 || x as u32 >= self.width {
+            return C4M_VEHICLE;
         }
         match self.material_at(x, y) {
             Some(material_id) => materials
                 .get_by_id(material_id)
                 .map(|material| material.density())
-                .unwrap_or(i32::MAX),
-            None => 0,
+                .unwrap_or(C4M_BACKGROUND),
+            None => C4M_BACKGROUND,
         }
     }
 
@@ -899,6 +902,33 @@ impl Landscape {
         self.solid_materials[index] = Some(material);
         self.mark_mass_mover_dirty();
         true
+    }
+
+    pub fn insert_material_pixel_at(
+        &mut self,
+        x: i32,
+        y: i32,
+        material: MaterialId,
+        materials: &MaterialSet,
+    ) -> bool {
+        let Some(definition) = materials.get_by_id(material) else {
+            return false;
+        };
+        if definition.is_liquid() {
+            self.insert_liquid_at(x, y, Some(material))
+        } else {
+            self.insert_material_at(x, y, material)
+        }
+    }
+
+    pub fn extract_material_at(&mut self, x: i32, y: i32) -> Option<MaterialId> {
+        if self.is_liquid_at(x, y) {
+            self.remove_liquid_at(x, y)
+        } else {
+            self.material_at(x, y)
+                .filter(|_| self.is_solid_at(x, y))
+                .filter(|&material| self.remove_material_at(x, y))
+        }
     }
 
     pub fn remove_material_at(&mut self, x: i32, _y: i32) -> bool {

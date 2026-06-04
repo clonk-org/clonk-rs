@@ -2,6 +2,7 @@
 
 use lc_engine::{Definition, Engine, ObjectId, SpawnConfig};
 
+#[allow(dead_code)]
 fn simple_definition(id: &str) -> Definition {
     Definition::from_script(
         id,

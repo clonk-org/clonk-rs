@@ -1,3 +1,5 @@
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use crate::{
     DrawCommand, Gui, GuiAction, GuiEvent, GuiEventResult, KeyCode, LayoutConstraints, Point, Rect,
     Size, WidgetId,
@@ -388,10 +390,9 @@ pub extern "C" fn lc_gui_reset(handle: *mut GuiHandle) {
 
 #[no_mangle]
 pub extern "C" fn lc_gui_root(handle: *const GuiHandle) -> u32 {
-    match handle_ref(handle).and_then(|handle| to_u32(handle.gui.root())) {
-        Some(id) => id,
-        None => 0,
-    }
+    handle_ref(handle)
+        .and_then(|handle| to_u32(handle.gui.root()))
+        .unwrap_or_default()
 }
 
 #[no_mangle]
@@ -408,10 +409,7 @@ pub extern "C" fn lc_gui_add_column(
         Some(parent) => parent,
         None => return 0,
     };
-    match to_u32(handle.gui.add_column(parent, expand_width)) {
-        Some(id) => id,
-        None => 0,
-    }
+    to_u32(handle.gui.add_column(parent, expand_width)).unwrap_or_default()
 }
 
 #[no_mangle]
@@ -432,10 +430,7 @@ pub extern "C" fn lc_gui_add_label(
         Some(text) => text,
         None => return 0,
     };
-    match to_u32(handle.gui.add_label(parent, text)) {
-        Some(id) => id,
-        None => 0,
-    }
+    to_u32(handle.gui.add_label(parent, text)).unwrap_or_default()
 }
 
 #[no_mangle]
@@ -456,10 +451,7 @@ pub extern "C" fn lc_gui_add_button(
         Some(text) => text,
         None => return 0,
     };
-    match to_u32(handle.gui.add_button(parent, text)) {
-        Some(id) => id,
-        None => 0,
-    }
+    to_u32(handle.gui.add_button(parent, text)).unwrap_or_default()
 }
 
 #[no_mangle]

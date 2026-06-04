@@ -83,7 +83,7 @@ impl StdBuf {
     }
 
     pub fn is_null(&self) -> bool {
-        matches!(self.storage, Storage::Empty) || self.len() == 0
+        matches!(self.storage, Storage::Empty) || self.is_empty()
     }
 
     pub fn is_ref(&self) -> bool {
@@ -96,6 +96,10 @@ impl StdBuf {
             Storage::Owned(o) => o.len,
             Storage::Borrowed(b) => b.len,
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn data(&self) -> &[u8] {
@@ -536,6 +540,10 @@ impl StdStrBuf {
 
     pub fn len(&self) -> usize {
         self.trimmed_bytes().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn size(&self) -> usize {

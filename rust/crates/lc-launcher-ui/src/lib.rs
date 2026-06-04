@@ -98,7 +98,7 @@ pub enum ActionFeedbackKind {
 }
 
 impl ActionFeedbackKind {
-    fn label<'a>(self, localization: &'a Localization) -> &'a str {
+    fn label(self, localization: &Localization) -> &str {
         match self {
             ActionFeedbackKind::Info => localization.text("IDS_LAUNCHER_UI_FEEDBACK_INFO"),
             ActionFeedbackKind::Success => localization.text("IDS_LAUNCHER_UI_FEEDBACK_SUCCESS"),
@@ -139,7 +139,7 @@ impl ReportSearchHighlight {
         }
     }
 
-    pub fn label<'a>(self, localization: &'a Localization) -> &'a str {
+    pub fn label(self, localization: &Localization) -> &str {
         match self {
             ReportSearchHighlight::Generic => {
                 localization.text("IDS_LAUNCHER_UI_SEARCH_HIGHLIGHT_GENERIC")
@@ -298,10 +298,7 @@ impl LauncherShellUi {
     }
 
     pub fn report_line_range_text(&self) -> Option<&str> {
-        self.layout
-            .report_line_range
-            .as_ref()
-            .map(|text| text.as_str())
+        self.layout.report_line_range.as_deref()
     }
 
     pub fn state(&self) -> Option<&LauncherShellState> {
@@ -394,10 +391,7 @@ impl LauncherShellUi {
     }
 
     pub fn report_search_status_text(&self) -> Option<&str> {
-        self.layout
-            .report_search_status
-            .as_ref()
-            .map(|text| text.as_str())
+        self.layout.report_search_status.as_deref()
     }
 
     fn rebuild(&mut self) -> GuiResult<()> {
@@ -988,12 +982,10 @@ fn build_gui(
                         button,
                         WidgetAction::Reveal {
                             path: artifact.path.clone(),
-                            label: localization
-                                .format(
-                                    "IDS_LAUNCHER_UI_ARTIFACT_PATH_LABEL",
-                                    [("label", role_text)],
-                                )
-                                .into(),
+                            label: localization.format(
+                                "IDS_LAUNCHER_UI_ARTIFACT_PATH_LABEL",
+                                [("label", role_text)],
+                            ),
                         },
                     );
                 }
@@ -1503,10 +1495,9 @@ fn add_bulk_retarget_records(
 
 fn resolve_logs_entry(logs_dir: Option<&Path>, entry: &str) -> PathBuf {
     let candidate = Path::new(entry);
-    if candidate.is_absolute() || logs_dir.is_none() {
-        candidate.to_path_buf()
-    } else {
-        logs_dir.unwrap().join(candidate)
+    match logs_dir {
+        Some(logs_dir) if !candidate.is_absolute() => logs_dir.join(candidate),
+        _ => candidate.to_path_buf(),
     }
 }
 
@@ -2026,8 +2017,10 @@ mod tests {
     fn bulk_retarget_history_cleared_annotation_is_rendered() {
         let temp = TempDir::new().unwrap();
         let mut state = sample_state(temp.path());
-        let mut summary = ProviderBulkRetargetSummary::default();
-        summary.history_cleared_at = Some("2024-06-05T18:30:00Z".into());
+        let summary = ProviderBulkRetargetSummary {
+            history_cleared_at: Some("2024-06-05T18:30:00Z".into()),
+            ..Default::default()
+        };
         state.summary.provider_bulk_retarget = Some(summary);
 
         let mut ui = build_ui(Some(state));

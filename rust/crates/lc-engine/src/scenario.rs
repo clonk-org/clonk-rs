@@ -156,6 +156,7 @@ pub struct Scenario {
     structures_need_energy: bool,
     base_buy_enabled: bool,
     base_sell_enabled: bool,
+    landscape_insert_thrust: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -349,6 +350,7 @@ impl Scenario {
             structures_need_energy: manifest.core.game.realism.structures_need_energy,
             base_buy_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_BUY) != 0,
             base_sell_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_SELL) != 0,
+            landscape_insert_thrust: manifest.core.game.realism.landscape_insert_thrust != 0,
         })
     }
 
@@ -423,6 +425,7 @@ impl Scenario {
         engine.set_structures_need_energy(self.structures_need_energy);
         engine.set_base_buy_enabled(self.base_buy_enabled);
         engine.set_base_sell_enabled(self.base_sell_enabled);
+        engine.set_landscape_insert_thrust(self.landscape_insert_thrust);
 
         for definition in &self.definitions {
             let name = definition.name.as_deref().unwrap_or(&definition.id);
@@ -812,6 +815,7 @@ impl Scenario {
             structures_need_energy: false,
             base_buy_enabled: false,
             base_sell_enabled: false,
+            landscape_insert_thrust: false,
         })
     }
 }
@@ -851,7 +855,7 @@ struct LegacyNameEntry {
 
 type LegacyNameList = Vec<LegacyNameEntry>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct LegacyScenarioCore {
     head: LegacyHead,
     definitions: LegacyDefinitions,
@@ -862,22 +866,6 @@ struct LegacyScenarioCore {
     disasters: LegacyDisasters,
     animals: LegacyAnimals,
     environment: LegacyEnvironment,
-}
-
-impl Default for LegacyScenarioCore {
-    fn default() -> Self {
-        Self {
-            head: LegacyHead::default(),
-            definitions: LegacyDefinitions::default(),
-            game: LegacyGame::default(),
-            players: Vec::new(),
-            landscape: LegacyLandscape::default(),
-            weather: LegacyWeather::default(),
-            disasters: LegacyDisasters::default(),
-            animals: LegacyAnimals::default(),
-            environment: LegacyEnvironment::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -941,23 +929,12 @@ impl Default for LegacyHead {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct LegacyDefinitions {
     local_only: bool,
     allow_user_change: bool,
     definitions: Vec<String>,
     skip_defs: LegacyIdList,
-}
-
-impl Default for LegacyDefinitions {
-    fn default() -> Self {
-        Self {
-            local_only: false,
-            allow_user_change: false,
-            definitions: Vec::new(),
-            skip_defs: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1176,32 +1153,15 @@ impl Default for LegacyDisasters {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct LegacyAnimals {
     free_life: LegacyIdList,
     earth_nest: LegacyIdList,
 }
 
-impl Default for LegacyAnimals {
-    fn default() -> Self {
-        Self {
-            free_life: Vec::new(),
-            earth_nest: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct LegacyEnvironment {
     objects: LegacyIdList,
-}
-
-impl Default for LegacyEnvironment {
-    fn default() -> Self {
-        Self {
-            objects: Vec::new(),
-        }
-    }
 }
 
 fn parse_bool_field(field: &str, raw: &str) -> Result<bool, ScenarioError> {
@@ -1319,7 +1279,7 @@ fn parse_base_functionality(field: &str, raw: &str) -> Result<i32, ScenarioError
         return Ok(value);
     }
     let mut value = 0;
-    for token in trimmed.split(|ch| matches!(ch, '|' | ',' | '&')) {
+    for token in trimmed.split(['|', ',', '&']) {
         let entry = token.trim();
         if entry.is_empty() {
             continue;
@@ -1353,7 +1313,7 @@ fn parse_base_functionality(field: &str, raw: &str) -> Result<i32, ScenarioError
 
 fn parse_i32_array<const N: usize>(field: &str, raw: &str) -> Result<[i32; N], ScenarioError> {
     let mut result = [0; N];
-    for (index, fragment) in raw.split(|ch| ch == ',' || ch == ';').enumerate() {
+    for (index, fragment) in raw.split([',', ';']).enumerate() {
         if index >= N {
             break;
         }
@@ -1552,7 +1512,7 @@ impl LegacyDefinitions {
                     self.allow_user_change = parse_bool_field(key, raw)?;
                 }
                 "definitions" => {
-                    for fragment in raw.split(|ch| ch == ';' || ch == ',') {
+                    for fragment in raw.split([';', ',']) {
                         let trimmed = fragment.trim();
                         if trimmed.is_empty() {
                             continue;
@@ -1561,7 +1521,7 @@ impl LegacyDefinitions {
                     }
                 }
                 _ if key_lower.starts_with("definition") => {
-                    for fragment in raw.split(|ch| ch == ';' || ch == ',') {
+                    for fragment in raw.split([';', ',']) {
                         let trimmed = fragment.trim();
                         if trimmed.is_empty() {
                             continue;
@@ -2378,9 +2338,7 @@ fn load_legacy_landscape(
                 .or_else(|| map_height_hint.map(|value| value.saturating_mul(map_zoom_i32).max(0)))
                 .unwrap_or((height as i32).saturating_mul(map_zoom_i32).max(0));
             if fallback > 0 {
-                for value in &mut heights {
-                    *value = fallback;
-                }
+                heights.fill(fallback);
             }
         }
 
@@ -3119,7 +3077,7 @@ fn parse_crew_entries(value: &str) -> Vec<(String, i32)> {
                 return None;
             }
             let count = parts
-                .last()
+                .next_back()
                 .and_then(|raw| raw.parse::<i32>().ok())
                 .filter(|count| *count > 0)
                 .unwrap_or(1);
@@ -5117,6 +5075,7 @@ global func Step(state, frame, random)
             structures_need_energy: false,
             base_buy_enabled: true,
             base_sell_enabled: true,
+            landscape_insert_thrust: false,
         };
 
         let mut engine = Engine::with_seed(11);
@@ -5197,6 +5156,7 @@ global func Step(state, frame, random)
             structures_need_energy: false,
             base_buy_enabled: true,
             base_sell_enabled: true,
+            landscape_insert_thrust: false,
         };
 
         let mut engine = Engine::with_seed(7);

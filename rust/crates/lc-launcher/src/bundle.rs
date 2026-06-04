@@ -127,7 +127,7 @@ pub fn regenerate_support_bundle(
     let record = load_launcher_summary(paths)?.ok_or_else(|| {
         anyhow!(
             "no launcher summary found at {}; launch lc-game normally first",
-            launcher_summary_path(&paths.logs_dir()).display()
+            launcher_summary_path(paths.logs_dir()).display()
         )
     })?;
 

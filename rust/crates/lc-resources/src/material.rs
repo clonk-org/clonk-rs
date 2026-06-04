@@ -413,14 +413,12 @@ fn parse_i32(value: &str) -> Option<i32> {
 
 fn parse_int_list(value: &str) -> Option<Vec<i32>> {
     let mut result = Vec::new();
-    for segment in value.split(|c| c == ',' || c == ';') {
+    for segment in value.split([',', ';']) {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let Some(parsed) = parse_i32(trimmed) else {
-            return None;
-        };
+        let parsed = parse_i32(trimmed)?;
         result.push(parsed);
     }
     Some(result)
@@ -455,17 +453,12 @@ fn normalize_components(path: &Path) -> PathBuf {
 }
 
 fn is_group_container(path: &Path) -> bool {
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some(ext)
-            if matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "c4g" | "c4d" | "ocg" | "c4f" | "c4p"
-            ) =>
-        {
-            true
-        }
-        _ => false,
-    }
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase()),
+        Some(ext) if matches!(ext.as_str(), "c4g" | "c4d" | "ocg" | "c4f" | "c4p")
+    )
 }
 
 #[cfg(test)]

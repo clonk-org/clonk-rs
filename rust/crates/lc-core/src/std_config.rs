@@ -166,7 +166,6 @@ impl Config {
     }
 
     #[allow(dead_code)]
-
     pub(crate) fn entry_map(&self) -> &IndexMap<(Option<String>, String), Entry> {
         &self.entries
     }
@@ -189,7 +188,7 @@ impl Config {
         }
     }
 
-    fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()>
+    fn write_to<W>(&self, writer: &mut W) -> io::Result<()>
     where
         W: Write,
     {
