@@ -15,6 +15,10 @@ pub struct Vm<'a> {
     host_functions: &'a HashMap<String, HostFunction>,
     var_decls: &'a [VarDecl], // Script-level variable declarations
     debugger: Option<DebuggerHooks>,
+    /// The object context the call runs on, returned by `Expr::This`. Host-opaque
+    /// (in lc-engine an object reference is `Proplist {"id": <number>}`). Nil when
+    /// the call has no object context (e.g. global functions).
+    this_value: Value,
 }
 
 impl<'a> Vm<'a> {
@@ -29,7 +33,15 @@ impl<'a> Vm<'a> {
             host_functions,
             var_decls,
             debugger,
+            this_value: Value::Nil,
         }
+    }
+
+    /// Set the `this` object context for this call session. Nested plain calls
+    /// share it (they run on the same object).
+    pub fn with_this(mut self, this: Value) -> Self {
+        self.this_value = this;
+        self
     }
 
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeError> {
@@ -429,11 +441,9 @@ impl<'a> Vm<'a> {
     ) -> Result<Value, RuntimeError> {
         match expr {
             Expr::Literal(literal) => Ok(self.literal_value(literal)),
-            Expr::This => {
-                // TODO: Return the actual current object context
-                // For now, return nil as a placeholder
-                Ok(Value::Nil)
-            }
+            // `this` yields the object context the call runs on (host-provided),
+            // mirroring C4Script's `this` (C4V_C4Object); Nil for global calls.
+            Expr::This => Ok(self.this_value.clone()),
             Expr::Variable(name) => env
                 .get(name)
                 .cloned()

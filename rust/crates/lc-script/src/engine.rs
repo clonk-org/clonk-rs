@@ -180,6 +180,27 @@ impl Engine {
             .map_err(ScriptError::from)
     }
 
+    /// Like [`call_with_locals`], but also provides the `this` object context
+    /// returned by `Expr::This`. The value is host-opaque (lc-engine passes an
+    /// object reference proplist); pass `Value::Nil` for no context.
+    pub fn call_with_locals_and_this(
+        &self,
+        name: &str,
+        args: &[Value],
+        local_vars: &std::collections::HashMap<String, Value>,
+        this: Value,
+    ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            &self.var_decls,
+            self.debugger_hooks.clone(),
+        )
+        .with_this(this);
+        vm.call_with_locals(name, args, local_vars)
+            .map_err(ScriptError::from)
+    }
+
     pub fn has_function(&self, name: &str) -> bool {
         self.functions.contains_key(name)
     }

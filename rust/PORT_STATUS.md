@@ -83,6 +83,7 @@ pass + the documented flaky `lc-network` smoke test), `parity verify` and
 | `&&` / `\|\|` return the **operand** value, not a bool | `C4AulExec.cpp:999-1021` (`AB_JUMPAND`/`AB_JUMPOR` leave the operand on the stack) | returned `Bool(...)` → wrong when result flows into arithmetic | returns the surviving operand unchanged | `test_logical_operand_return.rs` |
 | binary int ops coerce `nil→0`, `bool→0/1` | every op reads operands via `_getInt()` under `CheckOpPars<C4V_Any,...>`; `C4Value.h:170` (Int/Bool share `Data.Int`, nil's data is 0) | required both operands to be `Int`, else type error | `Value::as_c4_int()` coerces nil/bool; `+`,`-`,`*`,`/`,`%`,`&`,`\|`,`^`,`<<`,`>>`,`<`,`<=`,`>`,`>=` all use it | `test_int_coercion.rs` |
 | unary `-` / `~` coerce `nil`/`bool` | `C4AulExec.cpp:460-470` (`SetInt(-_getInt())`, `SetInt(~_getInt())`) | required `Int`, else type error | coerce via `as_c4_int()`; `-` uses `wrapping_neg` (C++-faithful on `i32::MIN`) | `test_int_coercion.rs` |
+| `this` yields the current object | C4Script `this` → `C4V_C4Object` (the object the function runs on) | `Expr::This` hardcoded `Nil` → scripts branching on `this` took the wrong path | VM threads a host `this` value (`Vm::with_this`); engine passes `object_reference_value(object_id)` at all 8 object-context call sites | `test_this_context.rs` (lc-script), `object_function_this_is_the_current_object_not_nil` (lc-engine) |
 
 `Value::as_c4_int()` (in `lc-script/src/value.rs`) is the shared `_getInt()` mirror:
 `Int→i`, `Bool→0/1`, `Nil→0`, and `None` for String/Array/Proplist (which have no
@@ -705,14 +706,17 @@ Determinism-critical first; each blocks lockstep until done. Foundational items 
 
 8. **PARTIAL 2026-06-04 — C4Script VM operator parity + `Expr::This`.** DONE this
    session (see "Session 2026-06-04 (cont.)" above): div/mod-by-zero → 0, `&&`/`||`
-   operand-return, and `nil`/`bool`→int coercion across all binary/unary integer
-   operators. STILL OPEN: fix `Expr::This` to return the actual object context
-   (`vm.rs:432`, hardcoded `Nil` — note object-relative *host calls* already work via
-   the thread-local `HostObjectContext`, so this only breaks explicit `this`-as-value
-   uses, not "all object-relative scripts" as previously stated); replace
-   string-mangled slot access (`vm.rs:1072-1158`) with array-indexed Local/Var
-   storage; raise the stack limit (`vm.rs:9`) to C++ 512/1024; thread `#strict` level
-   for strict-correct `==`/`!=` (see deferred list above).
+   operand-return, `nil`/`bool`→int coercion across all binary/unary integer
+   operators, and **`Expr::This` now returns the current object context** — the VM
+   carries a host-provided `this` value (`Vm::with_this`, `Engine::call_with_locals_and_this`),
+   and all 8 object-context call sites in `lib.rs` pass `compat::object_reference_value(object_id)`
+   so a script reading `this` gets the object reference `Proplist{"id"}` (was hardcoded
+   `Nil`). STILL OPEN: replace string-mangled slot access (`vm.rs:1072-1158`) with
+   array-indexed Local/Var storage; raise the stack limit (`vm.rs:11`, currently 64)
+   toward C++'s `MAX_CONTEXT_STACK=512` — but the Rust VM is a native-recursion
+   tree-walker, so a naive bump risks a thread-stack overflow (a hard crash, worse
+   than the current clean error); needs a larger script thread stack or an explicit
+   value stack first. Thread `#strict` level for strict-correct `==`/`!=` (deferred list above).
 
 9. **Implement the material reaction execution layer.** Write the `mrf*` handlers behind `MaterialReactionKind` (`material.rs:110-121, 722-767`): `mrfInsertCheck` splash (8× damping) + slide physics (`C4Material.cpp:570-604`), `mrfCorrode` with its two `Random(100)` calls (`:701,724` — RNG-sequence-critical), `mrfPoof`. Wire `ExtractMaterial`/`InsertMaterial` landscape mutations.
 

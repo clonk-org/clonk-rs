@@ -4686,7 +4686,7 @@ impl Definition {
             game_over_triggered,
             || {
                 self.script
-                    .call_with_locals("Initialize", &args, &state.local_vars)
+                    .call_with_locals_and_this("Initialize", &args, &state.local_vars, compat::object_reference_value(object_id))
             },
         );
         let rng = guard.finish();
@@ -4842,7 +4842,7 @@ impl Definition {
             game_over_triggered,
             || {
                 self.script
-                    .call_with_locals("Construction", &args, &state.local_vars)
+                    .call_with_locals_and_this("Construction", &args, &state.local_vars, compat::object_reference_value(object_id))
             },
         );
         let rng = guard.finish();
@@ -4990,7 +4990,7 @@ impl Definition {
             game_over_triggered,
             || {
                 self.script
-                    .call_with_locals("Step", &args, &state.local_vars)
+                    .call_with_locals_and_this("Step", &args, &state.local_vars, compat::object_reference_value(object_id))
             },
         );
         let rng = guard.finish();
@@ -5152,7 +5152,7 @@ impl Definition {
             game_over_triggered,
             || {
                 self.script
-                    .call_with_locals(function, &args, &state.local_vars)
+                    .call_with_locals_and_this(function, &args, &state.local_vars, compat::object_reference_value(object_id))
             },
         );
         let rng = guard.finish();
@@ -5258,7 +5258,7 @@ impl Definition {
             game_over_triggered,
             || {
                 self.script
-                    .call_with_locals("MenuEntries", &args, &state.local_vars)
+                    .call_with_locals_and_this("MenuEntries", &args, &state.local_vars, compat::object_reference_value(object_id))
             },
         );
         let rng = guard.finish();
@@ -5379,7 +5379,7 @@ impl Definition {
             game_over_triggered,
             || {
                 self.script
-                    .call_with_locals("MenuCommand", &args, &state.local_vars)
+                    .call_with_locals_and_this("MenuCommand", &args, &state.local_vars, compat::object_reference_value(object_id))
             },
         );
         let rng = guard.finish();
@@ -5492,7 +5492,7 @@ impl Definition {
             game_over_triggered,
             || {
                 self.script
-                    .call_with_locals(function, &args, &state.local_vars)
+                    .call_with_locals_and_this(function, &args, &state.local_vars, compat::object_reference_value(object_id))
             },
         );
         let rng = guard.finish();
@@ -5608,8 +5608,12 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
-                self.script
-                    .call_with_locals(function, &arg_values, &state.local_vars)
+                self.script.call_with_locals_and_this(
+                    function,
+                    &arg_values,
+                    &state.local_vars,
+                    compat::object_reference_value(object_id),
+                )
             },
         );
         let rng = guard.finish();
@@ -5722,7 +5726,7 @@ impl Definition {
             game_over_triggered,
             move || {
                 self.script
-                    .call_with_locals(&function_call, &args_call, &local_vars_call)
+                    .call_with_locals_and_this(&function_call, &args_call, &local_vars_call, compat::object_reference_value(object_id))
             },
         );
         let rng = guard.finish();
@@ -18157,6 +18161,57 @@ func ControlDig() { SetAction("Dig"); return true; }
         let snapshot = engine.snapshot();
         let object = snapshot.object(object_id).expect("object present");
         assert_eq!(object.action.name, "Dig");
+        Ok(())
+    }
+
+    #[test]
+    fn object_function_this_is_the_current_object_not_nil() -> Result<(), EngineError> {
+        // `this` used to evaluate to nil (vm.rs hardcoded Expr::This => Nil), so a
+        // script that branches on `this` took the wrong path. Here SetAction is
+        // gated on `this` being truthy: before the fix `this` was nil (falsy) and
+        // the action stayed "Idle"; now `this` is the object reference so the
+        // action becomes "Dig".
+        let script = r#"
+global func Initialize(state, random) { return nil; }
+func ControlDig() { if (this) { SetAction("Dig"); } return true; }
+"#;
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", script).expect("control script compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        actions.insert(
+            "Dig".to_string(),
+            ActionSpec::default().with_procedure("dig"),
+        );
+        definition.configure_actions(Some("Idle".to_string()), actions);
+        definition.set_movement_profile(MovementProfile::default());
+
+        let mut engine = Engine::new();
+        engine.register_definition(definition)?;
+        engine.register_player(PlayerConfig::new(1, "Test"))?;
+
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(1)
+                    .with_crew_member(true)
+                    .with_action(ActionState::new("Idle")),
+            )
+            .expect("spawn succeeds");
+
+        engine.set_crew_cursor(1, Some(object_id))?;
+        let handled = engine.handle_control_command(1, ControlCommand::Dig, CommandKind::Press)?;
+        assert!(handled, "control command should report handled");
+
+        let snapshot = engine.snapshot();
+        let object = snapshot.object(object_id).expect("object present");
+        assert_eq!(
+            object.action.name, "Dig",
+            "`this` should be truthy (the current object), so the gated SetAction runs"
+        );
         Ok(())
     }
 
