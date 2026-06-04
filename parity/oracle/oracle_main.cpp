@@ -49,6 +49,12 @@ static void arr_begin(const char *name) { printf("\"%s\":[", name); g_first_in_a
 static void arr_end() { printf("]"); }
 static void sep() { if (!g_first_in_array) printf(","); g_first_in_array = false; }
 
+static void consume_corrode_effect_rng()
+{
+    if (!Random(5)) Random(3);
+    if (!Random(20)) { /* sound effect decision only; payload has no RNG */ }
+}
+
 int main()
 {
     printf("{\n");
@@ -149,7 +155,66 @@ int main()
         printf(",\n");
     }
 
-    // 7. movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 7. Material corrosion execution RNG ordering (C4Material.cpp:701-711).
+    //    Default corrosion short-circuits the second Random(100); user-defined
+    //    corrosion performs one Random(100). Successful corrosion then consumes
+    //    the smoke/sound effect Random() calls even in this side-effect-free
+    //    oracle.
+    arr_begin("material_corrode_rng");
+    struct CorrodeCase { const char *name; uint32_t seed; bool custom; int corrosive, corrode, rate; };
+    const CorrodeCase corrode_cases[] = {
+        {"default_fail_first", 101, false, 0, 100, 0},
+        {"default_success", 202, false, 100, 100, 0},
+        {"default_maybe_resist", 303, false, 100, 35, 0},
+        {"custom_success", 404, true, 0, 0, 100},
+        {"custom_fail", 505, true, 0, 0, 0},
+    };
+    for (auto c : corrode_cases)
+    {
+        FixedRandom(c.seed);
+        bool success;
+        if (c.custom)
+            success = Random(100) < c.rate;
+        else
+            success = (Random(100) < c.corrosive) && (Random(100) < c.corrode);
+        if (success) consume_corrode_effect_rng();
+        sep();
+        printf("{\"name\":\"%s\",\"seed\":%u,\"custom\":%d,\"corrosive\":%d,\"corrode\":%d,\"rate\":%d,\"success\":%d,\"count\":%d,\"hold\":%u}",
+               c.name, c.seed, c.custom ? 1 : 0, c.corrosive, c.corrode, c.rate,
+               success ? 1 : 0, RandomCount, RandomHold);
+    }
+    arr_end();
+    printf(",\n");
+
+    // 8. Mass-mover transfer RNG ordering (C4MassMover.cpp:144,151).
+    //    Every successful transfer consumes Random(10) for pixel-vs-material
+    //    insertion before the Rnd3() immediate-execution decision.
+    arr_begin("mass_mover_transfer_rng");
+    struct TransferCase { const char *name; uint32_t seed; int iterations; };
+    const TransferCase transfer_cases[] = {
+        {"two_transfers_no_immediate", 2, 2},
+        {"four_transfers_mixed_immediate", 9876, 4},
+    };
+    for (auto c : transfer_cases)
+    {
+        FixedRandom(c.seed);
+        Randomize3();
+        sep();
+        printf("{\"name\":\"%s\",\"seed\":%u,\"iterations\":%d,\"calls\":[", c.name, c.seed, c.iterations);
+        for (int i = 0; i < c.iterations; i++)
+        {
+            int random10 = Random(10);
+            int rnd3 = Rnd3();
+            if (i) printf(",");
+            printf("{\"random10\":%d,\"rnd3\":%d,\"execute_immediately\":%d}",
+                   random10, rnd3, !rnd3 ? 1 : 0);
+        }
+        printf("],\"count\":%d,\"hold\":%u}", RandomCount, RandomHold);
+    }
+    arr_end();
+    printf(",\n");
+
+    // 9. movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    Mirrors C4Movement.cpp:260-261 (fix += dir) and :627 (ydir += gravity),
     //    WITHOUT landscape collision/contact (that is the per-pixel loop, item 4).
     arr_begin("movement");

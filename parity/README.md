@@ -22,6 +22,8 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `trig` | `src/Fixed.h` + `src/Fixed.cpp` `SineTable` | rotation, `SimFlight` |
 | `rng_random` | `src/C4Random.h` LCG | network sync (`RandomHold`/`RandomCount`, incl. range-0) |
 | `rng_randomize3` | `src/C4Random.cpp` `FRndBuf3` | mass-mover / `Rnd3` |
+| `material_corrode_rng` | `src/C4Material.cpp` corrosion branches | material reaction execution RNG ordering |
+| `mass_mover_transfer_rng` | `src/C4MassMover.cpp` transfer calls | `Random(10)` before `Rnd3()` immediate-execution decision |
 | `movement` | `src/C4Movement.cpp:260,627` accumulation | the Theme-C core: `fix += dir`, `ydir += gravity` |
 
 **Out of scope (Phase 2):** the C++ per-pixel collision/contact loop
@@ -42,6 +44,10 @@ see "Phase 2" below.
   is `#ifdef DEBUGREC`, which the oracle does not define).
 - `Randomize3`/`Rnd3` are reproduced verbatim from `src/C4Random.cpp` (10 trivial
   lines around the real `Random()`).
+- Material corrosion and mass-mover transfer sections are small source-aligned
+  RNG traces copied from the branch order in `src/C4Material.cpp` and
+  `src/C4MassMover.cpp`; they intentionally avoid full engine setup while still
+  pinning sync-critical `Random()` call order.
 
 If a divergence is ever a *bug in the golden* rather than the Rust port, fix the
 C++ source and regenerate.
