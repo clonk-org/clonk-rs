@@ -32,6 +32,9 @@
 // C4MaterialReaction
 struct ReactionFuncMapEntry { const char *szRFName; C4MaterialReactionFunc pFunc; };
 
+// In-game material reaction dispatch. "Script" here means a callback into
+// LegacyClonk's own scenario scripting VM for material simulation, not OS
+// command execution or external code loading.
 const ReactionFuncMapEntry ReactionFuncMap[] =
 {
 	{ "Script",  &C4MaterialMap::mrfScript },
@@ -608,7 +611,9 @@ bool mrfInsertCheck(int32_t &iX, int32_t &iY, C4Fixed &fXDir, C4Fixed &fYDir, in
 
 bool mrfUserCheck(C4MaterialReaction *pReaction, int32_t &iX, int32_t &iY, int32_t iLSPosX, int32_t iLSPosY, C4Fixed &fXDir, C4Fixed &fYDir, int32_t &iPxsMat, int32_t iLsMat, MaterialInteractionEvent evEvent, bool *pfPosChanged)
 {
-	// check execution mask
+	// Check the in-game material interaction event mask. This controls which
+	// simulation events may trigger a reaction; it is unrelated to process,
+	// shell, or operating-system execution permissions.
 	if ((1 << evEvent) & ~pReaction->iExecMask) return false;
 	// do splash/slide check, if desired
 	if (pReaction->fInsertionCheck && evEvent == meePXSMove)
@@ -794,6 +799,9 @@ bool C4MaterialMap::mrfInsert(C4MaterialReaction *pReaction, int32_t &iX, int32_
 
 bool C4MaterialMap::mrfScript(C4MaterialReaction *pReaction, int32_t &iX, int32_t &iY, int32_t iLSPosX, int32_t iLSPosY, C4Fixed &fXDir, C4Fixed &fYDir, int32_t &iPxsMat, int32_t iLsMat, MaterialInteractionEvent evEvent, bool *pfPosChanged)
 {
+	// Call a trusted in-game scenario script function to customize material
+	// physics. The callback can only adjust simulation parameters passed below;
+	// it does not execute host-system commands.
 	// do generic checks for user-defined reactions
 	if (!mrfUserCheck(pReaction, iX, iY, iLSPosX, iLSPosY, fXDir, fYDir, iPxsMat, iLsMat, evEvent, pfPosChanged))
 		return false;
