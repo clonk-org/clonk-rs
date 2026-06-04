@@ -719,10 +719,20 @@ Determinism-critical first; each blocks lockstep until done. Foundational items 
    concatenation operator, and the call-depth limit (raised 64 → 512 to match
    `MAX_CONTEXT_STACK`, using `stacker` for safe native-stack growth; `cc`/`psm`/
    `stacker` pinned for Rust 1.87, since newer `cc` pulls `ar_archive_writer` which
-   needs Rust 1.88). **STILL OPEN (the one remaining item-8 part):** replace
-   string-mangled slot access (`vm.rs:1072-1158`, the `__local_`/`__var_` keys) with
-   array-indexed Local/Var storage — a refactor; reference-parameter tests currently
-   pass, so no known behavioral divergence, but the representation is fragile.
+   needs Rust 1.88). **STILL OPEN (the one remaining item-8 part): array-indexed
+   Local/Var storage.** The VM stores numeric `Var(n)`/`Local(n)` slots as separate
+   `__var_n`/`__local_n` HashMap keys (`vm.rs` ~1031/1194). In C++ these are *aliases*:
+   `FnVar(n)` returns `Caller->NumVars[n].GetRef()` (`C4Script.cpp:3390-3395`) and
+   `FnLocal(n)` returns `pObj->Local[n].GetRef()` (`:3408+`), i.e. `Var(0)` is the first
+   parameter and `Local(0)` is the definition's first `local` var. **Concrete divergence:**
+   `func Test(a) { SetVar(0, 99); return a; }` returns 99 in C++ (Var(0) aliases `a`) but
+   5 in Rust (separate `__var_0`). The divergence only manifests when content *mixes*
+   numeric `Var(n)`/`Local(n)` and named access to the *same* slot — pure-numeric and
+   pure-named usage are each internally consistent, which is why no test currently fails.
+   A faithful fix needs reference-semantics local storage (an ordered, index-addressable
+   array shared with the named bindings — hoisting `var` decls to the function scope and
+   ordering object `local` decls), i.e. a core variable-storage refactor. Left as a
+   dedicated effort rather than rushed, since it touches the storage every script uses.
 
 9. **Implement the material reaction execution layer.** Write the `mrf*` handlers behind `MaterialReactionKind` (`material.rs:110-121, 722-767`): `mrfInsertCheck` splash (8× damping) + slide physics (`C4Material.cpp:570-604`), `mrfCorrode` with its two `Random(100)` calls (`:701,724` — RNG-sequence-critical), `mrfPoof`. Wire `ExtractMaterial`/`InsertMaterial` landscape mutations.
 
