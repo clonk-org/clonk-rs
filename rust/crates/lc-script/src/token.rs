@@ -81,7 +81,9 @@ pub enum Symbol {
     Slash,
     Percent,
     Dot,
-    Ellipsis, // ... (varargs forwarder)
+    Ellipsis,    // ... (varargs forwarder)
+    Concat,      // .. (string/array/map concatenation, C4Script AB_Concat)
+    ConcatEqual, // ..= (concat assignment, AB_ConcatIt)
     Equal,
     EqualEqual,
     Bang,

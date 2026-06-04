@@ -10,6 +10,15 @@ use crate::value::{Literal, Value};
 
 const MAX_CALL_DEPTH: usize = 64;
 
+/// String form of a value for `..` concatenation: the raw text for strings (the
+/// `Display` form quotes them), and the `Display` form for everything else.
+fn concat_string(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 pub struct Vm<'a> {
     functions: &'a HashMap<String, Function>,
     host_functions: &'a HashMap<String, HostFunction>,
@@ -678,6 +687,7 @@ impl<'a> Vm<'a> {
         use BinaryOp::*;
         match op {
             Add => self.eval_add(left, right),
+            Concat => self.eval_concat(left, right),
             Sub => self.eval_int_op(left, right, |a, b| a - b, "-"),
             Mul => self.eval_int_op(left, right, |a, b| a * b, "*"),
             Div => match (left.as_c4_int(), right.as_c4_int()) {
@@ -741,6 +751,40 @@ impl<'a> Vm<'a> {
             StringLessEqual => self.eval_string_cmp(left, right, |a, b| a <= b, "S<="),
             StringGreater => self.eval_string_cmp(left, right, |a, b| a > b, "S>"),
             StringGreaterEqual => self.eval_string_cmp(left, right, |a, b| a >= b, "S>="),
+        }
+    }
+
+    /// `..` concatenation (C4Script AB_Concat, C4AulExec.cpp:594-657): array .. array
+    /// appends, map .. map merges (right wins on key collision), otherwise both
+    /// operands are converted to strings and joined. Unlike `+`, `..` never does
+    /// integer arithmetic — `5 .. 3` is the string "53".
+    fn eval_concat(&self, left: Value, right: Value) -> Result<Value, RuntimeError> {
+        match left {
+            Value::Array(mut a) => match right {
+                Value::Array(b) => {
+                    a.extend(b);
+                    Ok(Value::Array(a))
+                }
+                other => Err(RuntimeError::new(format!(
+                    "operator '..' right side: cannot concatenate array with {}",
+                    other.type_name()
+                ))),
+            },
+            Value::Proplist(mut a) => match right {
+                Value::Proplist(b) => {
+                    a.extend(b);
+                    Ok(Value::Proplist(a))
+                }
+                other => Err(RuntimeError::new(format!(
+                    "operator '..' right side: cannot concatenate proplist with {}",
+                    other.type_name()
+                ))),
+            },
+            left => {
+                let mut s = concat_string(&left);
+                s.push_str(&concat_string(&right));
+                Ok(Value::String(s))
+            }
         }
     }
 

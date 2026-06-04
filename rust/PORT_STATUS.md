@@ -86,6 +86,7 @@ pass + the documented flaky `lc-network` smoke test), `parity verify` and
 | `this` yields the current object | C4Script `this` → `C4V_C4Object` (the object the function runs on) | `Expr::This` hardcoded `Nil` → scripts branching on `this` took the wrong path | VM threads a host `this` value (`Vm::with_this`); engine passes `object_reference_value(object_id)` at all 8 object-context call sites | `test_this_context.rs` (lc-script), `object_function_this_is_the_current_object_not_nil` (lc-engine) |
 | non-nil string/array/proplist are **truthy** even when empty | `C4Value.h:185`→`:76` (`operator bool` is raw-pointer-nonzero) | `as_bool` used `!is_empty()` → empty `""`/`[]`/`{}` were falsy | `as_bool` returns `true` for any String/Array/Proplist; nil and int/bool 0 stay falsy | `test_truthiness.rs` |
 | `==`/`!=` honor the script's `#strict` level | `C4Value::Equals` `C4Value.cpp:823` (NONSTRICT/STRICT1 raw, STRICT2 cross-type numeric, STRICT3 type-checked) | VM ignored `#strict`, always type-checked | `Function` carries its `#strict` level (threaded via `Environment`); `<strict 3` compares Int/Bool/nil by integer value (`0==nil`, `1==true`) | `test_strict_equality.rs` |
+| `..` / `..=` concatenation operator | `AB_Concat`/`AB_ConcatIt` `C4AulExec.cpp:594-657`, priority 10 | lexer rejected `..` as an error → content using it failed to parse | lexer emits `Concat`/`ConcatEqual`; parser adds a precedence level between equality and comparison; VM joins string forms (`5..3`=="53"), appends arrays, merges maps | `test_concat_operator.rs` |
 
 `Value::as_c4_int()` (in `lc-script/src/value.rs`) is the shared `_getInt()` mirror:
 `Int→i`, `Bool→0/1`, `Nil→0`, and `None` for String/Array/Proplist (which have no
@@ -107,11 +108,11 @@ panicking in debug builds.
   one "lenient" rule; the only unreachable case is NONSTRICT array/map *identity*
   comparison. Full suite green, no regressions. (Also fixed a latent bug: `C4Id ==
   C4Id` previously fell through to `false`.)
-- **`..` string-concat operator is unsupported.** C++ concatenation is `..`
-  (`AB_Concat`, `C4AulExec.cpp:594`); `+` (`AB_Sum`) is integer-only. The Rust lexer
-  does not tokenize `..`, and `+` is repurposed for string concat as a stand-in.
-  Content using `..` will fail to parse. Parser-feature gap, tracked under
-  `script-vm-aul`.
+- ~~**`..` string-concat operator is unsupported.**~~ **FIXED 2026-06-04** (see
+  fixes table above): `..`/`..=` now lex, parse (priority 10, between equality and
+  comparison), and evaluate (string-join / array-append / map-merge). `+` still also
+  concatenates strings as a lenient extension (C++'s `+` is integer-only); that
+  residual `+`-leniency is harmless for valid content (which uses `..`) and left as-is.
 - **Particle host functions / physics (from the port-fidelity workflow).**
   `CastParticles`/`CastBackParticles`/`PushParticles` are unregistered (calling them
   errors) — C++ creates `iAmount` particles and consumes RNG draws (`C4Particles.cpp:421-443`,

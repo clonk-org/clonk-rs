@@ -925,6 +925,7 @@ impl<'a> Parser<'a> {
             TokenKind::Symbol(Symbol::XorEqual) => (true, Some(Symbol::XorEqual)),
             TokenKind::Symbol(Symbol::LeftShiftEqual) => (true, Some(Symbol::LeftShiftEqual)),
             TokenKind::Symbol(Symbol::RightShiftEqual) => (true, Some(Symbol::RightShiftEqual)),
+            TokenKind::Symbol(Symbol::ConcatEqual) => (true, Some(Symbol::ConcatEqual)),
             _ => (false, None),
         };
 
@@ -945,6 +946,9 @@ impl<'a> Parser<'a> {
                 Symbol::SlashEqual => Expr::Binary(Box::new(left), BinaryOp::Div, Box::new(value)),
                 Symbol::PercentEqual => {
                     Expr::Binary(Box::new(left), BinaryOp::Mod, Box::new(value))
+                }
+                Symbol::ConcatEqual => {
+                    Expr::Binary(Box::new(left), BinaryOp::Concat, Box::new(value))
                 }
                 // Bitwise compound assignments
                 Symbol::AndEqual => Expr::Binary(Box::new(left), BinaryOp::BitAnd, Box::new(value)),
@@ -1021,27 +1025,39 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_equality(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_comparison()?;
+        let mut expr = self.parse_concat()?;
         loop {
             if self.consume_if_symbol(Symbol::EqualEqual)?.is_some()
                 || self.consume_if_identifier("eq")?.is_some()
             {
-                let right = self.parse_comparison()?;
+                let right = self.parse_concat()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::Equal, Box::new(right));
             } else if self.consume_if_symbol(Symbol::BangEqual)?.is_some()
                 || self.consume_if_identifier("ne")?.is_some()
             {
-                let right = self.parse_comparison()?;
+                let right = self.parse_concat()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::NotEqual, Box::new(right));
             } else if self.consume_if_symbol(Symbol::StringEqual)?.is_some() {
-                let right = self.parse_comparison()?;
+                let right = self.parse_concat()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::StringEqual, Box::new(right));
             } else if self.consume_if_symbol(Symbol::StringNotEqual)?.is_some() {
-                let right = self.parse_comparison()?;
+                let right = self.parse_concat()?;
                 expr = Expr::Binary(Box::new(expr), BinaryOp::StringNotEqual, Box::new(right));
             } else {
                 break;
             }
+        }
+        Ok(expr)
+    }
+
+    /// `..` string/array/map concatenation. C4Script priority 10: looser than
+    /// comparison (11), tighter than equality (9), so it sits between
+    /// parse_equality and parse_comparison.
+    fn parse_concat(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_comparison()?;
+        while self.consume_if_symbol(Symbol::Concat)?.is_some() {
+            let right = self.parse_comparison()?;
+            expr = Expr::Binary(Box::new(expr), BinaryOp::Concat, Box::new(right));
         }
         Ok(expr)
     }

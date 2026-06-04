@@ -170,24 +170,22 @@ impl<'a> Lexer<'a> {
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Colon), line, column));
                 }
                 '.' => {
-                    // Check for ... (ellipsis)
+                    // `.` -> Dot (property access); `...` -> Ellipsis (varargs);
+                    // `..=` -> ConcatEqual; `..` -> Concat (C4Script AB_Concat).
                     if self.peek_char() == Some('.') {
                         self.bump_char();
-                        if self.peek_char() == Some('.') {
-                            self.bump_char();
-                            return Ok(Token::new(
-                                TokenKind::Symbol(Symbol::Ellipsis),
-                                line,
-                                column,
-                            ));
-                        } else {
-                            // Two dots is an error - not valid in C4Script
-                            return Err(ParseError::new(
-                                "unexpected '..' - use '...' for varargs forwarding or '.' for property access".to_string(),
-                                line,
-                                column,
-                            ));
-                        }
+                        let symbol = match self.peek_char() {
+                            Some('.') => {
+                                self.bump_char();
+                                Symbol::Ellipsis
+                            }
+                            Some('=') => {
+                                self.bump_char();
+                                Symbol::ConcatEqual
+                            }
+                            _ => Symbol::Concat,
+                        };
+                        return Ok(Token::new(TokenKind::Symbol(symbol), line, column));
                     }
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Dot), line, column));
                 }

@@ -264,6 +264,7 @@ pub enum UnaryOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinaryOp {
     Add,
+    Concat, // .. (string/array/map concatenation, C4Script AB_Concat)
     Sub,
     Mul,
     Div,
