@@ -1,3 +1,19 @@
+#![allow(dead_code, unreachable_patterns, unused_variables)]
+#![allow(
+    clippy::doc_lazy_continuation,
+    clippy::field_reassign_with_default,
+    clippy::if_same_then_else,
+    clippy::large_enum_variant,
+    clippy::manual_clamp,
+    clippy::match_like_matches_macro,
+    clippy::needless_range_loop,
+    clippy::question_mark,
+    clippy::should_implement_trait,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::vec_init_then_push
+)]
+
 mod action;
 mod command;
 mod compat;
@@ -98,7 +114,7 @@ use compat::{
     PlayerCommand,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
-use material::MaterialReactionKind;
+use material::{consume_corrosion_effect_rng, evaluate_corrosion, MaterialReactionKind};
 use message::{MessageCommand, MessageManager, MessageSpec, PersistedMessage};
 use ocf::NORMAL as OCF_NORMAL;
 use sector::{SectorMap, SectorObject};
@@ -111,9 +127,11 @@ use std::ops::AddAssign;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::math::{fixed100, fixtoi, itofix, C4Fixed, FixedVec2};
+use crate::math::{fixed100, fixtoi, fixtoi_prec, itofix, C4Fixed, FixedVec2};
 pub use crate::rng::LcgRng;
-use lc_resources::definition::ActionFacet as ResourceActionFacet;
+use lc_resources::definition::{
+    ActionFacet as ResourceActionFacet, TargetRect as ResourceTargetRect,
+};
 use lc_resources::{
     ActionDefinition as ResourceActionDefinition, PictureRect as ResourcePictureRect,
     ResourceDefinition as ResourceDefinitionData,
@@ -307,7 +325,9 @@ const CNAT_FLAGS: u32 = CNAT_MULTI_ATTACH | CNAT_NO_COLLISION;
 const C4D_BORDER_SIDES: i32 = 1;
 const C4D_BORDER_TOP: i32 = 2;
 const C4D_BORDER_BOTTOM: i32 = 4;
+const C4D_BORDER_LAYER: i32 = 8;
 const CONTACT_DENSITY_SOLID: i32 = 50;
+const C4M_VEHICLE: i32 = 100;
 const ATTACH_RANGE: i32 = 5;
 const FIX_FULL_CIRCLE: i32 = 360;
 const FIX_HALF_CIRCLE: i32 = 180;
@@ -389,8 +409,10 @@ impl fmt::Display for ObjectId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ObjectStatus {
     Deleted,
+    #[default]
     Normal,
     Inactive,
 }
@@ -418,14 +440,9 @@ impl ObjectStatus {
     }
 }
 
-impl Default for ObjectStatus {
-    fn default() -> Self {
-        ObjectStatus::Normal
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
+    #[default]
     Left,
     Right,
 }
@@ -444,12 +461,6 @@ impl Direction {
             1 => Some(Direction::Right),
             _ => None,
         }
-    }
-}
-
-impl Default for Direction {
-    fn default() -> Self {
-        Direction::Left
     }
 }
 
@@ -472,8 +483,9 @@ impl<'de> Deserialize<'de> for Direction {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommandDirection {
+    #[default]
     Stop,
     Up,
     UpRight,
@@ -527,12 +539,6 @@ impl CommandDirection {
             CommandDirection::Left => (-1, 0),
             CommandDirection::UpLeft => (-1, -1),
         }
-    }
-}
-
-impl Default for CommandDirection {
-    fn default() -> Self {
-        CommandDirection::Stop
     }
 }
 
@@ -1152,7 +1158,7 @@ struct BridgeParameters {
 impl BridgeParameters {
     fn from_action_data(data: i32) -> Self {
         let raw = data as u32;
-        let duration_raw = ((raw >> 16) & 0xFFFF) as u32;
+        let duration_raw = (raw >> 16) & 0xFFFF;
         let duration = if duration_raw == 0 { 100 } else { duration_raw };
         let move_clonk = (raw & 0x100) != 0;
         let wall = (raw & 0x200) != 0;
@@ -1733,7 +1739,7 @@ impl Default for EnvironmentSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct EnvironmentFrame {
     pub settings: EnvironmentSettings,
     pub wind_force: i32,
@@ -1742,18 +1748,6 @@ pub struct EnvironmentFrame {
     pub precipitation: i32,
     #[serde(default)]
     pub sky_color: Option<RgbColor>,
-}
-
-impl Default for EnvironmentFrame {
-    fn default() -> Self {
-        Self {
-            settings: EnvironmentSettings::default(),
-            wind_force: 0,
-            ambient_temperature: 0,
-            precipitation: 0,
-            sky_color: None,
-        }
-    }
 }
 
 fn default_owner() -> i32 {
@@ -1793,6 +1787,8 @@ pub struct ObjectState {
     pub vertices: Vec<ObjectVertex>,
     #[serde(default)]
     pub container: Option<ObjectId>,
+    #[serde(default)]
+    pub layer: Option<ObjectId>,
     #[serde(default)]
     pub contents: Vec<ObjectId>,
     #[serde(default)]
@@ -1892,7 +1888,7 @@ impl ObjectState {
             self.graphics_overlays = overlays.clone();
         }
         if let Some(transform) = &delta.draw_transform {
-            self.draw_transform = transform.clone();
+            self.draw_transform = *transform;
         }
         if let Some(base_graphics) = &delta.base_graphics {
             self.base_graphics = base_graphics.clone();
@@ -1993,6 +1989,9 @@ impl ObjectDelta {
         }
         if let Some(energy) = update.energy {
             self.energy = Some(energy);
+        }
+        if let Some(construction) = update.construction {
+            self.construction = Some(construction);
         }
         if let Some(damage) = update.damage {
             self.damage = Some(damage);
@@ -2499,6 +2498,8 @@ struct Object {
     commands: CommandStack,
     pending_action_events: VecDeque<ActionTransitionEvent>,
     material_contents: Vec<i32>,
+    shape_template: ObjectShapeTemplate,
+    own_shape_vertices: Option<Vec<ObjectVertex>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2518,6 +2519,30 @@ struct ContainerUpdateRecord {
     object_id: ObjectId,
     previous: Option<ObjectId>,
     new: Option<ObjectId>,
+}
+
+#[derive(Debug, Clone)]
+struct ObjectShapeTemplate {
+    vertices: Vec<ObjectVertex>,
+    rect: Option<DefinitionRect>,
+    stretch_growth: bool,
+    rotateable: i32,
+}
+
+impl ObjectShapeTemplate {
+    fn new(
+        vertices: Vec<ObjectVertex>,
+        rect: Option<DefinitionRect>,
+        stretch_growth: bool,
+        rotateable: i32,
+    ) -> Self {
+        Self {
+            vertices,
+            rect,
+            stretch_growth,
+            rotateable,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2543,7 +2568,13 @@ fn subpixel_or_none(fixed: FixedVec2, pixels: Vector2) -> Option<FixedVec2> {
 }
 
 impl Object {
-    fn new(id: ObjectId, definition_id: DefinitionId, state: ObjectState) -> Self {
+    fn new(
+        id: ObjectId,
+        definition_id: DefinitionId,
+        state: ObjectState,
+        shape_template: ObjectShapeTemplate,
+        own_shape_vertices: Option<Vec<ObjectVertex>>,
+    ) -> Self {
         let fixed_position = FixedVec2::from_ints(state.position.x, state.position.y);
         let fixed_velocity = FixedVec2::from_ints(state.velocity.x, state.velocity.y);
         let fixed_rotation = itofix(state.rotation);
@@ -2560,6 +2591,8 @@ impl Object {
             commands: CommandStack::new(),
             pending_action_events: VecDeque::new(),
             material_contents: Vec::new(),
+            shape_template,
+            own_shape_vertices,
         }
     }
 
@@ -2616,6 +2649,99 @@ impl Object {
         self.state.velocity = self.velocity_pixels();
     }
 
+    fn shape_base_vertices(&self) -> &[ObjectVertex] {
+        self.own_shape_vertices
+            .as_deref()
+            .unwrap_or(&self.shape_template.vertices)
+    }
+
+    fn unrotated_shape_vertices(&self) -> Vec<ObjectVertex> {
+        transformed_shape_vertices(
+            self.shape_base_vertices(),
+            self.state.construction,
+            self.shape_template.stretch_growth,
+            0,
+            0,
+        )
+    }
+
+    fn current_shape_rect(&self) -> Option<DefinitionRect> {
+        transformed_shape_rect(
+            self.shape_template.rect,
+            self.state.construction,
+            self.shape_template.stretch_growth,
+            self.shape_template.rotateable,
+            self.state.rotation,
+        )
+    }
+
+    fn refresh_shape_after_state_change(
+        &mut self,
+        previous_construction: i32,
+        previous_rect: Option<DefinitionRect>,
+        preserve_bottom: bool,
+    ) {
+        self.state.vertices = transformed_shape_vertices(
+            self.shape_base_vertices(),
+            self.state.construction,
+            self.shape_template.stretch_growth,
+            self.shape_template.rotateable,
+            self.state.rotation,
+        );
+
+        let new_rect = self.current_shape_rect();
+        if preserve_bottom && self.state.rotation.rem_euclid(360) == 0 {
+            if let (Some(previous), Some(current)) = (previous_rect, new_rect) {
+                if previous.height != current.height || previous.y != current.y {
+                    let bottom = self
+                        .state
+                        .position
+                        .y
+                        .saturating_add(previous.y)
+                        .saturating_add(previous.height);
+                    self.set_position(Vector2::new(
+                        self.state.position.x,
+                        bottom
+                            .saturating_sub(current.height)
+                            .saturating_sub(current.y),
+                    ));
+                }
+            }
+        } else if self.state.category & CATEGORY_STRUCTURE != 0 {
+            let step_size = FULL_CON / 100;
+            let previous_step = previous_construction / step_size;
+            let current_step = self.state.construction / step_size;
+            let step_diff = current_step - previous_step;
+            if step_diff > 0 {
+                if let Some(rect) = self.shape_template.rect {
+                    let previous_lift = previous_step * rect.height / 100;
+                    let current_lift = current_step * rect.height / 100;
+                    let lift = current_lift - previous_lift;
+                    if lift != 0 {
+                        self.set_position(Vector2::new(
+                            self.state.position.x,
+                            self.state.position.y.saturating_sub(lift),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    fn set_owned_shape_vertices(&mut self, vertices: Vec<ObjectVertex>) {
+        self.own_shape_vertices = Some(vertices);
+        let previous_rect = self.current_shape_rect();
+        let previous_construction = self.state.construction;
+        self.refresh_shape_after_state_change(previous_construction, previous_rect, false);
+    }
+
+    fn set_construction(&mut self, construction: i32) {
+        let previous_rect = self.current_shape_rect();
+        let previous_construction = self.state.construction;
+        self.state.construction = construction.clamp(0, FULL_CON);
+        self.refresh_shape_after_state_change(previous_construction, previous_rect, true);
+    }
+
     #[cfg(test)]
     fn set_fixed_velocity(&mut self, velocity: FixedVec2) {
         self.fixed_velocity = velocity;
@@ -2632,6 +2758,10 @@ impl Object {
         delta: &ObjectDelta,
         action_library: &ActionLibrary,
     ) -> ApplyDeltaOutcome {
+        let previous_rect = self.current_shape_rect();
+        let previous_construction = self.state.construction;
+        let shape_changed =
+            delta.construction.is_some() || delta.rotation.is_some() || delta.vertices.is_some();
         let outcome = self.state.apply_delta(delta, action_library);
         if let Some(position) = delta.position {
             self.fixed_position = FixedVec2::from_ints(position.x, position.y);
@@ -2657,6 +2787,16 @@ impl Object {
         if let Some(rotation_velocity) = delta.rotation_velocity {
             self.rotation_velocity = rotation_velocity;
         }
+        if let Some(vertices) = &delta.vertices {
+            self.own_shape_vertices = Some(vertices.clone());
+        }
+        if shape_changed {
+            self.refresh_shape_after_state_change(
+                previous_construction,
+                previous_rect,
+                delta.construction.is_some(),
+            );
+        }
         outcome
     }
 
@@ -2671,57 +2811,81 @@ impl Object {
         landscape: Option<&Landscape>,
         materials: &MaterialSet,
         movement: MovementContactConfig<'_>,
-    ) -> bool {
+        mut on_contact: impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+    ) -> Result<MovementStepOutcome, EngineError> {
         let Some(landscape) = landscape else {
+            let previous_position = self.state.position;
             self.advance_fixed_position();
-            return false;
+            return Ok(MovementStepOutcome {
+                no_attach: false,
+                any_contact: false,
+                solid_mask_removed: self.state.position != previous_position,
+            });
         };
 
         if self.state.vertices.is_empty() {
             self.advance_fixed_position_heightmap(landscape, materials);
-            return false;
+            return Ok(MovementStepOutcome::default());
         }
 
         if movement.attach != 0 {
-            return self.advance_attached_shape_position(landscape, materials, movement);
+            return self.advance_attached_shape_position(
+                landscape,
+                materials,
+                movement,
+                &mut on_contact,
+            );
         }
 
+        let mut outcome = MovementStepOutcome::default();
+        let mut solid_mask_removed = false;
         self.fixed_position.x += self.fixed_velocity.x;
         let mut target_x = fixtoi(self.fixed_position.x);
-        self.apply_side_bounds(&mut target_x, landscape, movement);
+        self.apply_side_bounds(&mut target_x, landscape, movement, &mut on_contact)?;
         while self.state.position.x != target_x {
             let next_x = self.state.position.x + sign_i32(target_x - self.state.position.x);
             let candidate = Vector2::new(next_x, self.state.position.y);
+            let excluded_solid_mask = solid_mask_removed.then_some(movement.object_id);
             let contact = shape_contact_check(
                 &self.state.vertices,
                 candidate,
                 landscape,
                 materials,
+                movement.solid_masks,
+                excluded_solid_mask,
                 movement.contact_density,
             );
             if contact.is_contact() {
+                outcome.any_contact = true;
+                on_contact(self, contact.contact_cnat)?;
                 self.fixed_position.x = itofix(self.state.position.x);
                 redirect_force(&mut self.fixed_velocity.x, &mut self.fixed_velocity.y, -1);
                 apply_contact_friction(&mut self.fixed_velocity.y, contact.first_friction());
                 break;
             }
             self.state.position.x = next_x;
+            solid_mask_removed = true;
         }
 
         self.fixed_position.y += self.fixed_velocity.y;
         let mut target_y = fixtoi(self.fixed_position.y);
-        self.apply_vertical_bounds(&mut target_y, landscape, movement);
+        self.apply_vertical_bounds(&mut target_y, landscape, movement, &mut on_contact)?;
         while self.state.position.y != target_y {
             let next_y = self.state.position.y + sign_i32(target_y - self.state.position.y);
             let candidate = Vector2::new(self.state.position.x, next_y);
+            let excluded_solid_mask = solid_mask_removed.then_some(movement.object_id);
             let contact = shape_contact_check(
                 &self.state.vertices,
                 candidate,
                 landscape,
                 materials,
+                movement.solid_masks,
+                excluded_solid_mask,
                 movement.contact_density,
             );
             if contact.is_contact() {
+                outcome.any_contact = true;
+                on_contact(self, contact.contact_cnat)?;
                 self.fixed_position.y = itofix(self.state.position.y);
                 apply_contact_friction(&mut self.fixed_velocity.x, contact.first_friction());
                 if !contact.has_vertex_cnat(CNAT_LEFT) {
@@ -2741,10 +2905,12 @@ impl Object {
                 break;
             }
             self.state.position.y = next_y;
+            solid_mask_removed = true;
         }
 
         self.state.velocity = self.velocity_pixels();
-        false
+        outcome.solid_mask_removed = solid_mask_removed;
+        Ok(outcome)
     }
 
     fn advance_fixed_position_heightmap(&mut self, landscape: &Landscape, materials: &MaterialSet) {
@@ -2790,14 +2956,17 @@ impl Object {
         landscape: &Landscape,
         materials: &MaterialSet,
         movement: MovementContactConfig<'_>,
-    ) -> bool {
+        on_contact: &mut impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+    ) -> Result<MovementStepOutcome, EngineError> {
         self.fixed_position += self.fixed_velocity;
         let mut target_x = fixtoi(self.fixed_position.x);
         let mut target_y = fixtoi(self.fixed_position.y);
-        self.apply_side_bounds(&mut target_x, landscape, movement);
-        self.apply_vertical_bounds(&mut target_y, landscape, movement);
+        self.apply_side_bounds(&mut target_x, landscape, movement, on_contact)?;
+        self.apply_vertical_bounds(&mut target_y, landscape, movement, on_contact)?;
 
         let mut no_attach = false;
+        let mut any_contact = false;
+        let mut solid_mask_removed = false;
         let mut first_step = true;
         while first_step || self.state.position.x != target_x || self.state.position.y != target_y {
             first_step = false;
@@ -2812,6 +2981,8 @@ impl Object {
                 movement.attach,
                 landscape,
                 materials,
+                movement.solid_masks,
+                solid_mask_removed.then_some(movement.object_id),
                 movement.contact_density,
             ) {
                 no_attach = true;
@@ -2822,9 +2993,13 @@ impl Object {
                 candidate,
                 landscape,
                 materials,
+                movement.solid_masks,
+                solid_mask_removed.then_some(movement.object_id),
                 movement.contact_density,
             );
             if contact.is_contact() {
+                any_contact = true;
+                on_contact(self, contact.contact_cnat)?;
                 self.fixed_position =
                     FixedVec2::from_ints(self.state.position.x, self.state.position.y);
                 break;
@@ -2848,10 +3023,15 @@ impl Object {
                 self.fixed_velocity.y = C4Fixed::ZERO;
                 self.fixed_position.y = itofix(self.state.position.y);
             }
+            solid_mask_removed = true;
         }
 
         self.state.velocity = self.velocity_pixels();
-        no_attach
+        Ok(MovementStepOutcome {
+            no_attach,
+            any_contact,
+            solid_mask_removed,
+        })
     }
 
     fn apply_side_bounds(
@@ -2859,22 +3039,50 @@ impl Object {
         target_x: &mut i32,
         landscape: &Landscape,
         movement: MovementContactConfig<'_>,
-    ) {
+        on_contact: &mut impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        if let Some(layer) = movement.layer_bounds {
+            if layer.border_bound & C4D_BORDER_LAYER != 0
+                && !matches!(movement.action_procedure, ActionProcedure::Attach)
+            {
+                let shape_x = movement.shape_rect.map(|shape| shape.x).unwrap_or(0);
+                let (low, high) = if self.state.category & CATEGORY_STATIC_BACK != 0 {
+                    (
+                        layer.position.x + layer.shape_rect.x,
+                        layer.position.x + layer.shape_rect.x + layer.shape_rect.width,
+                    )
+                } else {
+                    (
+                        layer.position.x + layer.shape_rect.x - shape_x,
+                        layer.position.x + layer.shape_rect.x + layer.shape_rect.width + shape_x,
+                    )
+                };
+                if let Some(bound) = target_bounds(&mut self.fixed_position.x, low, high) {
+                    *target_x = fixtoi(self.fixed_position.x);
+                    self.fixed_velocity.x = C4Fixed::ZERO;
+                    self.state.velocity = self.velocity_pixels();
+                    let cnat = if bound < 0 { CNAT_LEFT } else { CNAT_RIGHT };
+                    on_contact(self, cnat)?;
+                }
+            }
+        }
+
         if movement.border_bound & C4D_BORDER_SIDES == 0 {
-            return;
+            return Ok(());
         }
         let shape_x = movement.shape_rect.map(|shape| shape.x).unwrap_or(0);
-        if target_bounds(
+        if let Some(bound) = target_bounds(
             &mut self.fixed_position.x,
             -shape_x,
             landscape.width() as i32 + shape_x,
-        )
-        .is_some()
-        {
+        ) {
             *target_x = fixtoi(self.fixed_position.x);
             self.fixed_velocity.x = C4Fixed::ZERO;
             self.state.velocity = self.velocity_pixels();
+            let cnat = if bound < 0 { CNAT_LEFT } else { CNAT_RIGHT };
+            on_contact(self, cnat)?;
         }
+        Ok(())
     }
 
     fn apply_vertical_bounds(
@@ -2882,12 +3090,40 @@ impl Object {
         target_y: &mut i32,
         landscape: &Landscape,
         movement: MovementContactConfig<'_>,
-    ) {
+        on_contact: &mut impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
         let shape_y = movement.shape_rect.map(|shape| shape.y).unwrap_or(0);
+        if let Some(layer) = movement.layer_bounds {
+            if layer.border_bound & C4D_BORDER_LAYER != 0
+                && !matches!(movement.action_procedure, ActionProcedure::Attach)
+            {
+                let (low, high) = if self.state.category & CATEGORY_STATIC_BACK != 0 {
+                    (
+                        layer.position.y + layer.shape_rect.y,
+                        layer.position.y + layer.shape_rect.y + layer.shape_rect.height,
+                    )
+                } else {
+                    (
+                        layer.position.y + layer.shape_rect.y - shape_y,
+                        layer.position.y + layer.shape_rect.y + layer.shape_rect.height + shape_y,
+                    )
+                };
+                if let Some(bound) = target_bounds(&mut self.fixed_position.y, low, high) {
+                    *target_y = fixtoi(self.fixed_position.y);
+                    self.fixed_velocity.y = C4Fixed::ZERO;
+                    self.state.velocity = self.velocity_pixels();
+                    let cnat = if bound < 0 { CNAT_TOP } else { CNAT_BOTTOM };
+                    on_contact(self, cnat)?;
+                }
+            }
+        }
+
         if movement.border_bound & C4D_BORDER_TOP != 0 && self.fixed_position.y < itofix(-shape_y) {
             self.fixed_position.y = itofix(-shape_y);
             *target_y = fixtoi(self.fixed_position.y);
             self.fixed_velocity.y = C4Fixed::ZERO;
+            self.state.velocity = self.velocity_pixels();
+            on_contact(self, CNAT_TOP)?;
         }
         if movement.border_bound & C4D_BORDER_BOTTOM != 0 {
             let bottom = landscape.estimated_height() + shape_y;
@@ -2895,9 +3131,12 @@ impl Object {
                 self.fixed_position.y = itofix(bottom);
                 *target_y = fixtoi(self.fixed_position.y);
                 self.fixed_velocity.y = C4Fixed::ZERO;
+                self.state.velocity = self.velocity_pixels();
+                on_contact(self, CNAT_BOTTOM)?;
             }
         }
         self.state.velocity = self.velocity_pixels();
+        Ok(())
     }
 
     fn apply_landscape_contact_material(
@@ -2924,15 +3163,17 @@ impl Object {
         materials: &MaterialSet,
         movement: MovementContactConfig<'_>,
         no_attach: bool,
-    ) {
+        solid_mask_removed: bool,
+        mut on_contact: impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+    ) -> Result<bool, EngineError> {
         if movement.rotateable <= 0 {
             self.fixed_rotation = C4Fixed::ZERO;
             self.rotation_velocity = C4Fixed::ZERO;
             self.state.rotation = 0;
-            return;
+            return Ok(false);
         }
         if !self.rotation_velocity.is_nonzero() {
-            return;
+            return Ok(false);
         }
         self.fixed_rotation += self.rotation_velocity * 5;
         if movement.rotateable > 1 {
@@ -2948,15 +3189,18 @@ impl Object {
         }
 
         let target_rotation = fixtoi(self.fixed_rotation);
+        let mut any_contact = false;
         if let Some(landscape) = landscape {
             if !self.state.vertices.is_empty() {
-                self.advance_fixed_rotation_with_contact(
+                any_contact = self.advance_fixed_rotation_with_contact(
                     target_rotation,
                     landscape,
                     materials,
                     movement,
                     no_attach,
-                );
+                    solid_mask_removed,
+                    &mut on_contact,
+                )?;
             } else {
                 self.state.rotation = target_rotation;
             }
@@ -2975,6 +3219,7 @@ impl Object {
             self.fixed_rotation -= full_circle;
             self.state.rotation = fixtoi(self.fixed_rotation);
         }
+        Ok(any_contact)
     }
 
     fn advance_fixed_rotation_with_contact(
@@ -2984,7 +3229,9 @@ impl Object {
         materials: &MaterialSet,
         movement: MovementContactConfig<'_>,
         no_attach: bool,
-    ) {
+        solid_mask_removed: bool,
+        on_contact: &mut impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
+    ) -> Result<bool, EngineError> {
         let fallback_base;
         let base_vertices = if movement.definition_vertices.is_empty() {
             fallback_base = self.state.vertices.clone();
@@ -2993,6 +3240,7 @@ impl Object {
             movement.definition_vertices
         };
 
+        let mut any_contact = false;
         while self.state.rotation != target_rotation {
             let previous_rotation = self.state.rotation;
             let previous_vertices = self.state.vertices.clone();
@@ -3009,6 +3257,8 @@ impl Object {
                     movement.attach,
                     landscape,
                     materials,
+                    movement.solid_masks,
+                    solid_mask_removed.then_some(movement.object_id),
                     movement.contact_density,
                 );
             }
@@ -3018,9 +3268,13 @@ impl Object {
                 candidate_position,
                 landscape,
                 materials,
+                movement.solid_masks,
+                solid_mask_removed.then_some(movement.object_id),
                 movement.contact_density,
             );
             if contact.is_contact() {
+                any_contact = true;
+                on_contact(self, contact.contact_cnat)?;
                 self.state.rotation = previous_rotation;
                 self.state.vertices = previous_vertices;
                 self.state.position = previous_position;
@@ -3038,6 +3292,7 @@ impl Object {
             self.state.position = candidate_position;
             self.fixed_position = FixedVec2::from_ints(candidate_position.x, candidate_position.y);
         }
+        Ok(any_contact)
     }
 
     fn apply_command_operations<I>(&mut self, operations: I)
@@ -3100,6 +3355,7 @@ impl Object {
             action_procedure: procedure,
             effects: self.state.effects.clone(),
             vertices: self.state.vertices.clone(),
+            own_vertices: self.own_shape_vertices.clone(),
             container: self.state.container,
             contents: self.state.contents.clone(),
             components: self.state.components.clone(),
@@ -3345,7 +3601,7 @@ impl Object {
             }
             if let Some(landscape_ref) = &mut landscape {
                 for op in command.landscape.iter() {
-                    op.apply(&mut **landscape_ref);
+                    op.apply(landscape_ref);
                 }
             }
             if let Some(landscape_ref) = &mut landscape {
@@ -3442,6 +3698,8 @@ pub struct SpawnConfig {
     #[serde(default)]
     pub container: Option<ObjectId>,
     #[serde(default)]
+    pub layer: Option<ObjectId>,
+    #[serde(default)]
     pub alive: Option<bool>,
     #[serde(default)]
     pub category: Option<i32>,
@@ -3466,6 +3724,7 @@ impl SpawnConfig {
             crew_member: None,
             status: None,
             container: None,
+            layer: None,
             alive: None,
             category: None,
         }
@@ -3565,6 +3824,11 @@ impl SpawnConfig {
         self.container = Some(container);
         self
     }
+
+    pub fn with_layer(mut self, layer: ObjectId) -> Self {
+        self.layer = Some(layer);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3596,6 +3860,8 @@ pub struct ObjectSnapshot {
     pub effects: Vec<EffectState>,
     #[serde(default)]
     pub vertices: Vec<ObjectVertex>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_vertices: Option<Vec<ObjectVertex>>,
     #[serde(default)]
     pub container: Option<ObjectId>,
     #[serde(default)]
@@ -3742,6 +4008,8 @@ pub struct EngineState {
     pub pending_menu_requests: Vec<MenuRequest>,
     #[serde(default)]
     pub game_over: bool,
+    #[serde(default)]
+    pub landscape_insert_thrust: bool,
     pub rng: LcgRng,
 }
 
@@ -3781,7 +4049,7 @@ impl EngineState {
 
     /// Builds an engine state snapshot from a simulation frame.
     pub fn from_snapshot(snapshot: &SimulationSnapshot) -> Self {
-        let physics = snapshot.physics.unwrap_or_else(PhysicsSettings::default);
+        let physics = snapshot.physics.unwrap_or_default();
 
         let mut objects = Vec::with_capacity(snapshot.objects.len());
         for object in &snapshot.objects {
@@ -3826,6 +4094,7 @@ impl EngineState {
             pending_menu_requests: snapshot.menu_requests.clone(),
             messages: Vec::new(),
             game_over: snapshot.game_over,
+            landscape_insert_thrust: false,
             rng: snapshot.rng.clone(),
         }
     }
@@ -3908,6 +4177,53 @@ impl DefinitionRect {
             && i64::from(other.x) < self_right
             && i64::from(self.y) < other_bottom
             && i64::from(other.y) < self_bottom
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefinitionTargetRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub target_x: i32,
+    pub target_y: i32,
+}
+
+impl DefinitionTargetRect {
+    pub const fn new(
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        target_x: i32,
+        target_y: i32,
+    ) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            target_x,
+            target_y,
+        }
+    }
+
+    pub fn is_positive(&self) -> bool {
+        self.width > 0 && self.height > 0
+    }
+}
+
+impl From<ResourceTargetRect> for DefinitionTargetRect {
+    fn from(rect: ResourceTargetRect) -> Self {
+        Self::new(
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            rect.target_x,
+            rect.target_y,
+        )
     }
 }
 
@@ -4071,13 +4387,16 @@ pub struct Definition {
     sprite_image: Option<DefinitionSpriteImage>,
     sprite_variants: HashMap<String, DefinitionSpriteImage>,
     shape: Option<DefinitionRect>,
+    solid_mask: Option<DefinitionTargetRect>,
     shape_vertices: Vec<ObjectVertex>,
     contact_density: i32,
+    contact_function_calls: bool,
     collection_rect: Option<DefinitionRect>,
     collection_limit: Option<u32>,
     collectible: bool,
     constructable: bool,
     construction_offset: i32,
+    stretch_growth: bool,
     basement: i32,
     rotateable: i32,
     border_bound: i32,
@@ -4151,13 +4470,16 @@ impl Definition {
             sprite_image: None,
             sprite_variants: HashMap::new(),
             shape: None,
+            solid_mask: None,
             shape_vertices: Vec::new(),
             contact_density: CONTACT_DENSITY_SOLID,
+            contact_function_calls: false,
             collection_rect: None,
             collection_limit: None,
             collectible: false,
             constructable: false,
             construction_offset: 0,
+            stretch_growth: false,
             basement: 0,
             rotateable: 0,
             border_bound: 0,
@@ -4228,6 +4550,7 @@ impl Definition {
         definition.set_value(resource.core.value);
         definition.set_mass(resource.core.mass);
         definition.set_picture(resource.core.picture.map(DefinitionPicture::from));
+        definition.set_solid_mask(resource.core.solid_mask.map(DefinitionTargetRect::from));
         if let Some(image) = resource.picture_image.as_ref() {
             definition.set_picture_image(Some(DefinitionPictureImage::from_resource(image)));
         }
@@ -4260,11 +4583,13 @@ impl Definition {
                 .collect(),
         );
         definition.set_contact_density(resource.core.contact_density);
+        definition.set_contact_function_calls(resource.core.contact_function_calls);
         definition.set_collection_rect(resource.core.collection.map(DefinitionRect::from));
         definition.set_collection_limit(resource.core.collection_limit);
         definition.set_collectible(resource.core.collectible);
         definition.set_constructable(resource.core.constructable);
         definition.set_construction_offset(resource.core.con_size_off);
+        definition.set_stretch_growth(resource.core.stretch_growth);
         definition.set_basement(resource.core.basement);
         definition.set_rotateable(resource.core.rotateable);
         definition.set_border_bound(resource.core.border_bound);
@@ -4522,6 +4847,14 @@ impl Definition {
         self.shape = rect;
     }
 
+    pub fn solid_mask(&self) -> Option<DefinitionTargetRect> {
+        self.solid_mask
+    }
+
+    pub fn set_solid_mask(&mut self, rect: Option<DefinitionTargetRect>) {
+        self.solid_mask = rect.filter(DefinitionTargetRect::is_positive);
+    }
+
     pub fn shape_vertices(&self) -> &[ObjectVertex] {
         &self.shape_vertices
     }
@@ -4536,6 +4869,14 @@ impl Definition {
 
     pub fn set_contact_density(&mut self, contact_density: i32) {
         self.contact_density = contact_density;
+    }
+
+    pub fn contact_function_calls(&self) -> bool {
+        self.contact_function_calls
+    }
+
+    pub fn set_contact_function_calls(&mut self, contact_function_calls: bool) {
+        self.contact_function_calls = contact_function_calls;
     }
 
     pub fn border_bound(&self) -> i32 {
@@ -4592,6 +4933,14 @@ impl Definition {
 
     pub fn set_construction_offset(&mut self, offset: i32) {
         self.construction_offset = offset.max(0);
+    }
+
+    pub fn stretch_growth(&self) -> bool {
+        self.stretch_growth
+    }
+
+    pub fn set_stretch_growth(&mut self, stretch_growth: bool) {
+        self.stretch_growth = stretch_growth;
     }
 
     pub fn basement(&self) -> i32 {
@@ -4685,8 +5034,12 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
-                self.script
-                    .call_with_locals_and_this("Initialize", &args, &state.local_vars, compat::object_reference_value(object_id))
+                self.script.call_with_locals_and_this(
+                    "Initialize",
+                    &args,
+                    &state.local_vars,
+                    compat::object_reference_value(object_id),
+                )
             },
         );
         let rng = guard.finish();
@@ -4841,8 +5194,12 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
-                self.script
-                    .call_with_locals_and_this("Construction", &args, &state.local_vars, compat::object_reference_value(object_id))
+                self.script.call_with_locals_and_this(
+                    "Construction",
+                    &args,
+                    &state.local_vars,
+                    compat::object_reference_value(object_id),
+                )
             },
         );
         let rng = guard.finish();
@@ -4989,8 +5346,12 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
-                self.script
-                    .call_with_locals_and_this("Step", &args, &state.local_vars, compat::object_reference_value(object_id))
+                self.script.call_with_locals_and_this(
+                    "Step",
+                    &args,
+                    &state.local_vars,
+                    compat::object_reference_value(object_id),
+                )
             },
         );
         let rng = guard.finish();
@@ -5151,8 +5512,12 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
-                self.script
-                    .call_with_locals_and_this(function, &args, &state.local_vars, compat::object_reference_value(object_id))
+                self.script.call_with_locals_and_this(
+                    function,
+                    &args,
+                    &state.local_vars,
+                    compat::object_reference_value(object_id),
+                )
             },
         );
         let rng = guard.finish();
@@ -5257,8 +5622,12 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
-                self.script
-                    .call_with_locals_and_this("MenuEntries", &args, &state.local_vars, compat::object_reference_value(object_id))
+                self.script.call_with_locals_and_this(
+                    "MenuEntries",
+                    &args,
+                    &state.local_vars,
+                    compat::object_reference_value(object_id),
+                )
             },
         );
         let rng = guard.finish();
@@ -5378,8 +5747,12 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
-                self.script
-                    .call_with_locals_and_this("MenuCommand", &args, &state.local_vars, compat::object_reference_value(object_id))
+                self.script.call_with_locals_and_this(
+                    "MenuCommand",
+                    &args,
+                    &state.local_vars,
+                    compat::object_reference_value(object_id),
+                )
             },
         );
         let rng = guard.finish();
@@ -5491,8 +5864,12 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             || {
-                self.script
-                    .call_with_locals_and_this(function, &args, &state.local_vars, compat::object_reference_value(object_id))
+                self.script.call_with_locals_and_this(
+                    function,
+                    &args,
+                    &state.local_vars,
+                    compat::object_reference_value(object_id),
+                )
             },
         );
         let rng = guard.finish();
@@ -5562,7 +5939,7 @@ impl Definition {
             ));
         }
 
-        let arg_values: Vec<Value> = args.iter().cloned().collect();
+        let arg_values: Vec<Value> = args.to_vec();
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
@@ -5725,8 +6102,12 @@ impl Definition {
             next_object_id,
             game_over_triggered,
             move || {
-                self.script
-                    .call_with_locals_and_this(&function_call, &args_call, &local_vars_call, compat::object_reference_value(object_id))
+                self.script.call_with_locals_and_this(
+                    &function_call,
+                    &args_call,
+                    &local_vars_call,
+                    compat::object_reference_value(object_id),
+                )
             },
         );
         let rng = guard.finish();
@@ -6368,6 +6749,7 @@ pub struct Engine {
     structures_need_energy: bool,
     base_buy_enabled: bool,
     base_sell_enabled: bool,
+    landscape_insert_thrust: bool,
     known_crew_owners: HashSet<i32>,
     eliminated_crew_owners: HashSet<i32>,
     transfer_zones: TransferZoneTable,
@@ -6510,13 +6892,64 @@ fn apply_horizontal_friction_fixed(value: C4Fixed, friction: i32) -> C4Fixed {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct LayerMovementBounds {
+    position: Vector2,
+    shape_rect: DefinitionRect,
+    border_bound: i32,
+}
+
+#[derive(Debug, Clone)]
+struct SolidMaskRect {
+    object_id: ObjectId,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    pixels: Option<Vec<u8>>,
+}
+
+impl SolidMaskRect {
+    fn contains(&self, x: i32, y: i32) -> bool {
+        if self.width <= 0 || self.height <= 0 {
+            return false;
+        }
+        let local_x = i64::from(x) - i64::from(self.x);
+        let local_y = i64::from(y) - i64::from(self.y);
+        local_x >= 0
+            && local_y >= 0
+            && local_x < i64::from(self.width)
+            && local_y < i64::from(self.height)
+            && self
+                .pixels
+                .as_ref()
+                .map(|pixels| {
+                    let index = local_y as usize * self.width as usize + local_x as usize;
+                    pixels.get(index).copied().unwrap_or(0) != 0
+                })
+                .unwrap_or(true)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct MovementStepOutcome {
+    no_attach: bool,
+    any_contact: bool,
+    solid_mask_removed: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct MovementContactConfig<'a> {
     definition_vertices: &'a [ObjectVertex],
     contact_density: i32,
+    contact_function_calls: bool,
     border_bound: i32,
     shape_rect: Option<DefinitionRect>,
     attach: u32,
     rotateable: i32,
+    action_procedure: ActionProcedure,
+    layer_bounds: Option<LayerMovementBounds>,
+    solid_masks: &'a [SolidMaskRect],
+    object_id: ObjectId,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -6589,6 +7022,106 @@ fn apply_contact_friction(value: &mut C4Fixed, percent: i32) {
     }
 }
 
+fn contact_callback_name(cnat: u32) -> Option<&'static str> {
+    match cnat {
+        CNAT_LEFT => Some("ContactLeft"),
+        CNAT_RIGHT => Some("ContactRight"),
+        CNAT_TOP => Some("ContactTop"),
+        CNAT_BOTTOM => Some("ContactBottom"),
+        _ => None,
+    }
+}
+
+fn movement_hit_speed_flags(velocity: FixedVec2) -> u32 {
+    let speed = i64::from(velocity.x.val()).abs() + i64::from(velocity.y.val()).abs();
+    let mut flags = 0;
+    if speed >= i64::from(fixed100(150).val()) {
+        flags |= crate::ocf::HIT_SPEED1;
+    }
+    if speed >= i64::from(itofix(2).val()) {
+        flags |= crate::ocf::HIT_SPEED2;
+    }
+    if speed >= i64::from(itofix(6).val()) {
+        flags |= crate::ocf::HIT_SPEED3;
+    }
+    if speed >= i64::from(itofix(8).val()) {
+        flags |= crate::ocf::HIT_SPEED4;
+    }
+    flags
+}
+
+fn construction_percent(construction: i32) -> i32 {
+    construction.clamp(0, FULL_CON) * 100 / FULL_CON
+}
+
+fn construction_scaled_vertices(
+    vertices: &[ObjectVertex],
+    construction: i32,
+    stretch_growth: bool,
+) -> Vec<ObjectVertex> {
+    let percent = construction_percent(construction);
+    vertices
+        .iter()
+        .map(|vertex| {
+            let mut scaled = *vertex;
+            if stretch_growth {
+                scaled.x = scaled.x * percent / 100;
+            }
+            scaled.y = scaled.y * percent / 100;
+            scaled
+        })
+        .collect()
+}
+
+fn transformed_shape_vertices(
+    vertices: &[ObjectVertex],
+    construction: i32,
+    stretch_growth: bool,
+    rotateable: i32,
+    rotation: i32,
+) -> Vec<ObjectVertex> {
+    let scaled = if construction.clamp(0, FULL_CON) == FULL_CON {
+        vertices.to_vec()
+    } else {
+        construction_scaled_vertices(vertices, construction, stretch_growth)
+    };
+    if rotateable > 0 && rotation.rem_euclid(360) != 0 {
+        rotated_vertices(&scaled, rotation)
+    } else {
+        scaled
+    }
+}
+
+fn transformed_shape_rect(
+    rect: Option<DefinitionRect>,
+    construction: i32,
+    stretch_growth: bool,
+    rotateable: i32,
+    rotation: i32,
+) -> Option<DefinitionRect> {
+    let mut rect = rect?;
+    if construction.clamp(0, FULL_CON) != FULL_CON {
+        let percent = construction_percent(construction);
+        if stretch_growth {
+            rect.x = rect.x * percent / 100;
+            rect.width = rect.width * percent / 100;
+        }
+        rect.y = rect.y * percent / 100;
+        rect.height = rect.height * percent / 100;
+    }
+    if rotateable > 0 && rotation.rem_euclid(360) != 0 {
+        let radius = ((i64::from(rect.x) * i64::from(rect.x)
+            + i64::from(rect.y) * i64::from(rect.y)) as f64)
+            .sqrt() as i32
+            + 2;
+        rect.x = -radius;
+        rect.y = -radius;
+        rect.width = 2 * radius;
+        rect.height = 2 * radius;
+    }
+    Some(rect)
+}
+
 fn rotated_vertices(vertices: &[ObjectVertex], rotation: i32) -> Vec<ObjectVertex> {
     if rotation.rem_euclid(360) == 0 {
         return vertices.to_vec();
@@ -6611,11 +7144,30 @@ fn rotated_vertices(vertices: &[ObjectVertex], rotation: i32) -> Vec<ObjectVerte
         .collect()
 }
 
+fn movement_density_at(
+    landscape: &Landscape,
+    materials: &MaterialSet,
+    solid_masks: &[SolidMaskRect],
+    excluded_solid_mask: Option<ObjectId>,
+    x: i32,
+    y: i32,
+) -> i32 {
+    if solid_masks
+        .iter()
+        .any(|mask| Some(mask.object_id) != excluded_solid_mask && mask.contains(x, y))
+    {
+        return C4M_VEHICLE;
+    }
+    landscape.density_at(x, y, materials)
+}
+
 fn shape_contact_check(
     vertices: &[ObjectVertex],
     position: Vector2,
     landscape: &Landscape,
     materials: &MaterialSet,
+    solid_masks: &[SolidMaskRect],
+    excluded_solid_mask: Option<ObjectId>,
     contact_density: i32,
 ) -> ShapeContact {
     let mut contact = ShapeContact::default();
@@ -6625,22 +7177,56 @@ fn shape_contact_check(
         }
         let x = position.x + vertex.x;
         let y = position.y + vertex.y;
-        if landscape.density_at(x, y, materials) < contact_density {
+        if movement_density_at(landscape, materials, solid_masks, excluded_solid_mask, x, y)
+            < contact_density
+        {
             continue;
         }
 
         contact.contact_cnat |= vertex.cnat;
         let mut vertex_contact = CNAT_CENTER;
-        if landscape.density_at(x, y - 1, materials) >= contact_density {
+        if movement_density_at(
+            landscape,
+            materials,
+            solid_masks,
+            excluded_solid_mask,
+            x,
+            y - 1,
+        ) >= contact_density
+        {
             vertex_contact |= CNAT_TOP;
         }
-        if landscape.density_at(x, y + 1, materials) >= contact_density {
+        if movement_density_at(
+            landscape,
+            materials,
+            solid_masks,
+            excluded_solid_mask,
+            x,
+            y + 1,
+        ) >= contact_density
+        {
             vertex_contact |= CNAT_BOTTOM;
         }
-        if landscape.density_at(x - 1, y, materials) >= contact_density {
+        if movement_density_at(
+            landscape,
+            materials,
+            solid_masks,
+            excluded_solid_mask,
+            x - 1,
+            y,
+        ) >= contact_density
+        {
             vertex_contact |= CNAT_LEFT;
         }
-        if landscape.density_at(x + 1, y, materials) >= contact_density {
+        if movement_density_at(
+            landscape,
+            materials,
+            solid_masks,
+            excluded_solid_mask,
+            x + 1,
+            y,
+        ) >= contact_density
+        {
             vertex_contact |= CNAT_RIGHT;
         }
         contact.vertices.push(ContactVertexInfo {
@@ -6668,14 +7254,16 @@ fn shape_attach(
     attach: u32,
     landscape: &Landscape,
     materials: &MaterialSet,
+    solid_masks: &[SolidMaskRect],
+    excluded_solid_mask: Option<ObjectId>,
     contact_density: i32,
 ) -> bool {
     let (xcd, ycd) = attach_direction(attach);
     if xcd == 0 && ycd == 0 {
         return false;
     }
-    let xcrng = ATTACH_RANGE * xcd * -1;
-    let ycrng = ATTACH_RANGE * ycd * -1;
+    let xcrng = -(ATTACH_RANGE * xcd);
+    let ycrng = -(ATTACH_RANGE * ycd);
     let mut attached = false;
 
     if attach & CNAT_MULTI_ATTACH == 0 {
@@ -6690,7 +7278,14 @@ fn shape_attach(
                 let ay = position.y + vertex.y + ycnt + ycd;
                 if ax >= 0
                     && ax < landscape.width() as i32
-                    && landscape.density_at(ax, ay, materials) >= contact_density
+                    && movement_density_at(
+                        landscape,
+                        materials,
+                        solid_masks,
+                        excluded_solid_mask,
+                        ax,
+                        ay,
+                    ) >= contact_density
                 {
                     position.x += xcnt;
                     position.y += ycnt;
@@ -6990,6 +7585,12 @@ fn apply_dig_command_movement(
     }
 }
 
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Engine {
     pub fn new() -> Self {
         Self::with_seed(0)
@@ -7026,6 +7627,7 @@ impl Engine {
             structures_need_energy: false,
             base_buy_enabled: true,
             base_sell_enabled: true,
+            landscape_insert_thrust: false,
             known_crew_owners: HashSet::new(),
             eliminated_crew_owners: HashSet::new(),
             transfer_zones: TransferZoneTable::default(),
@@ -7082,6 +7684,11 @@ impl Engine {
 
     pub fn set_base_sell_enabled(&mut self, enabled: bool) {
         self.base_sell_enabled = enabled;
+    }
+
+    pub fn set_landscape_insert_thrust(&mut self, enabled: bool) {
+        self.landscape_insert_thrust = enabled;
+        self.mass_movers.set_landscape_insert_thrust(enabled);
     }
 
     pub fn register_player(&mut self, config: PlayerConfig) -> Result<(), EngineError> {
@@ -7469,9 +8076,8 @@ impl Engine {
 
     fn object_shape_rect(&self, object: &Object) -> DefinitionRect {
         let position = object.state.position;
-        self.definitions
-            .get(&object.definition_id)
-            .and_then(|definition| definition.shape_rect())
+        object
+            .current_shape_rect()
             .map(|rect| {
                 DefinitionRect::new(
                     position.x.saturating_add(rect.x),
@@ -8343,6 +8949,88 @@ impl Engine {
             &definition_id,
         )?;
         Ok(value)
+    }
+
+    fn call_movement_object_function(
+        &mut self,
+        index: usize,
+        function: &str,
+        args: &[Value],
+        action_library: &ActionLibrary,
+        object_id: ObjectId,
+        definition_id: &str,
+    ) -> Result<Value, EngineError> {
+        let state_snapshot = self
+            .objects
+            .get(index)
+            .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?
+            .state
+            .clone();
+        let definition = self
+            .definitions
+            .get(definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.to_string()))?;
+        let rng_state = self.rng.clone();
+        let global_view = self.global_effects.clone();
+        let world = self.host_world_context();
+        let (value, outcome, audio_state, new_rng) = definition.call_object_function(
+            &state_snapshot,
+            object_id,
+            function,
+            args,
+            rng_state,
+            &global_view,
+            self.physics,
+            self.environment,
+            self.frame,
+            world,
+            self.game_over_triggered,
+            self.audio_registry.clone(),
+        )?;
+        self.rng = new_rng;
+        self.audio_registry = audio_state;
+        self.apply_callback_outcome(
+            index,
+            outcome,
+            action_library,
+            object_id,
+            definition_id,
+            false,
+        )?;
+        Ok(value)
+    }
+
+    fn invoke_movement_hit_callbacks(
+        &mut self,
+        index: usize,
+        old_velocity: FixedVec2,
+        hit_speed_flags: u32,
+        action_library: &ActionLibrary,
+        object_id: ObjectId,
+        definition_id: &str,
+    ) -> Result<(), EngineError> {
+        let args = [
+            Value::Int(fixtoi_prec(old_velocity.x, 100)),
+            Value::Int(fixtoi_prec(old_velocity.y, 100)),
+        ];
+        for (flag, function) in [
+            (crate::ocf::HIT_SPEED1, "Hit"),
+            (crate::ocf::HIT_SPEED2, "Hit2"),
+            (crate::ocf::HIT_SPEED3, "Hit3"),
+        ] {
+            if hit_speed_flags & flag == 0 {
+                continue;
+            }
+            self.call_movement_object_function(
+                index,
+                function,
+                &args,
+                action_library,
+                object_id,
+                definition_id,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn handle_control_command(
@@ -9321,57 +10009,223 @@ impl Engine {
             }
 
             self.apply_physics_at_index(idx);
+            let old_movement_velocity = self.objects[idx].fixed_velocity;
+            let old_movement_hit_flags = movement_hit_speed_flags(old_movement_velocity);
             let action_name = self.objects[idx].state.action.name.clone();
             let (
-                definition_vertices,
                 contact_density,
+                contact_function_calls,
                 border_bound,
-                shape_rect,
                 rotateable,
                 attach,
+                action_procedure,
             ) = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
                 .map(|definition| {
                     (
-                        definition.shape_vertices().to_vec(),
                         definition.contact_density(),
+                        definition.contact_function_calls(),
                         definition.border_bound(),
-                        definition.shape_rect(),
                         definition.rotateable(),
                         action_library.attach_for_action(&action_name),
+                        definition
+                            .action_library()
+                            .procedure_for_action(&action_name),
                     )
                 })
                 .unwrap_or_else(|| {
                     (
-                        Vec::new(),
                         CONTACT_DENSITY_SOLID,
+                        false,
                         0,
-                        None,
                         0,
                         action_library.attach_for_action(&action_name),
+                        action_library.procedure_for_action(&action_name),
                     )
                 });
+            let rotation_base_vertices = self.objects[idx].unrotated_shape_vertices();
+            let shape_rect = self.objects[idx].current_shape_rect();
+            let layer_bounds = self.layer_movement_bounds_for(idx);
+            let solid_masks = self.solid_masks_for_movement();
+            let object_id = self.objects[idx].id;
             let movement = MovementContactConfig {
-                definition_vertices: &definition_vertices,
+                definition_vertices: &rotation_base_vertices,
                 contact_density,
+                contact_function_calls,
                 border_bound,
                 shape_rect,
                 attach,
                 rotateable,
+                action_procedure,
+                layer_bounds,
+                solid_masks: &solid_masks,
+                object_id,
             };
-            let no_attach = {
+            let definition_for_contact = self.definitions.get(&definition_id).cloned();
+            let mut contact_rng = self.rng.clone();
+            let mut contact_audio = self.audio_registry.clone();
+            let mut contact_next_object_id = self.next_object_id;
+            let contact_global_effects = self.global_effects.clone();
+            let contact_world = self.host_world_context();
+            let contact_physics = self.physics;
+            let contact_environment = self.environment;
+            let contact_frame = self.frame;
+            let contact_game_over_triggered = self.game_over_triggered;
+            let mut contact_outcomes = Vec::new();
+            let mut contact_container_changes = Vec::new();
+            let mut contact_selection_changes = Vec::new();
+            let contact_function_calls_enabled = movement.contact_function_calls;
+            let movement_outcome = {
+                let definition_for_contact = definition_for_contact.as_ref();
+                let mut run_contact_callback =
+                    |object: &mut Object, contact_cnat: u32| -> Result<(), EngineError> {
+                        if !contact_function_calls_enabled {
+                            return Ok(());
+                        }
+                        let Some(definition) = definition_for_contact else {
+                            return Ok(());
+                        };
+                        for cnat in [CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, CNAT_BOTTOM] {
+                            if contact_cnat & cnat == 0 {
+                                continue;
+                            }
+                            let Some(function_name) = contact_callback_name(cnat) else {
+                                continue;
+                            };
+                            let state_snapshot = object.state.clone();
+                            let world = contact_world
+                                .clone()
+                                .with_next_object_id(contact_next_object_id);
+                            let (value, mut outcome, audio_state, new_rng) = definition
+                                .call_object_function(
+                                    &state_snapshot,
+                                    object.id,
+                                    function_name,
+                                    &[],
+                                    contact_rng.clone(),
+                                    &contact_global_effects,
+                                    contact_physics,
+                                    contact_environment,
+                                    contact_frame,
+                                    world,
+                                    contact_game_over_triggered,
+                                    contact_audio.clone(),
+                                )?;
+                            contact_rng = new_rng;
+                            contact_audio = audio_state;
+                            contact_next_object_id = outcome.next_object_id;
+
+                            if let Some(update) = outcome.object_update.take() {
+                                let previous_owner = object.state.owner;
+                                let previous_crew_member = object.state.crew_member;
+                                let previous_position = object.state.position;
+                                let preserves_position = update.position.is_none();
+                                let delta: ObjectDelta = update.into();
+                                let apply_outcome = object.apply_delta(&delta, &action_library);
+                                if preserves_position {
+                                    object.state.position = previous_position;
+                                }
+                                if let Some(change) = apply_outcome.action_change {
+                                    object.record_action_event(
+                                        change.previous,
+                                        ActionTransitionKind::Forced,
+                                    );
+                                }
+                                if let Some((previous, new)) = apply_outcome.container_change {
+                                    contact_container_changes.push((object.id, previous, new));
+                                }
+                                let new_owner = object.state.owner;
+                                let new_crew_member = object.state.crew_member;
+                                if previous_owner != new_owner
+                                    || previous_crew_member != new_crew_member
+                                {
+                                    contact_selection_changes.push((
+                                        object.id,
+                                        previous_owner,
+                                        new_owner,
+                                        new_crew_member,
+                                    ));
+                                }
+                            } else {
+                                object.state.action.reconcile_with_library(&action_library);
+                            }
+
+                            contact_outcomes.push(outcome);
+                            if value.as_bool() {
+                                break;
+                            }
+                        }
+                        Ok(())
+                    };
                 let landscape = self.landscape.as_ref();
                 let materials = &self.materials;
                 let object = &mut self.objects[idx];
-                let no_attach =
-                    object.advance_fixed_position_per_pixel(landscape, materials, movement);
-                object.advance_fixed_rotation(landscape, materials, movement, no_attach);
-                no_attach
+                let mut outcome = object.advance_fixed_position_per_pixel(
+                    landscape,
+                    materials,
+                    movement,
+                    &mut run_contact_callback,
+                )?;
+                outcome.any_contact |= object.advance_fixed_rotation(
+                    landscape,
+                    materials,
+                    movement,
+                    outcome.no_attach,
+                    outcome.solid_mask_removed,
+                    &mut run_contact_callback,
+                )?;
+                outcome
             };
+            self.rng = contact_rng;
+            self.audio_registry = contact_audio;
+            self.next_object_id = contact_next_object_id;
+            for (changed_object_id, previous_owner, new_owner, new_crew_member) in
+                contact_selection_changes
+            {
+                self.update_selection_for_state_change(
+                    changed_object_id,
+                    previous_owner,
+                    new_owner,
+                    new_crew_member,
+                );
+            }
+            for (changed_object_id, previous, new) in contact_container_changes {
+                self.apply_container_change(changed_object_id, previous, new)?;
+            }
+            for outcome in contact_outcomes {
+                self.apply_callback_outcome(
+                    idx,
+                    outcome,
+                    &action_library,
+                    object_id,
+                    &definition_id,
+                    false,
+                )?;
+            }
+            if self.objects[idx].destroyed
+                || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
+            {
+                continue;
+            }
             self.update_sector_for_index(idx);
-            if no_attach {
+            if movement_outcome.no_attach {
                 self.apply_no_attach_action(idx, &action_library);
+            }
+            if movement_outcome.any_contact {
+                self.invoke_movement_hit_callbacks(
+                    idx,
+                    old_movement_velocity,
+                    old_movement_hit_flags,
+                    &action_library,
+                    object_id,
+                    &definition_id,
+                )?;
+            }
+            if self.objects[idx].destroyed
+                || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
+            {
+                continue;
             }
 
             self.apply_landscape_at_index(idx);
@@ -9677,7 +10531,14 @@ impl Engine {
         let ObjectUpdate {
             position,
             velocity,
+            fixed_velocity,
+            rotation,
+            rotation_velocity,
             energy,
+            construction,
+            damage,
+            magic_energy,
+            magic_capacity,
             direction,
             command_direction,
             action,
@@ -9713,8 +10574,35 @@ impl Engine {
             if let Some(velocity) = velocity {
                 object.set_velocity(velocity);
             }
+            if let Some(fixed_velocity) = fixed_velocity {
+                object.fixed_velocity = fixed_velocity;
+                object.state.velocity = object.velocity_pixels();
+            }
+            if let Some(rotation) = rotation {
+                let previous_rect = object.current_shape_rect();
+                let previous_construction = object.state.construction;
+                object.state.rotation = rotation.rem_euclid(360);
+                object.fixed_rotation = itofix(object.state.rotation);
+                object.refresh_shape_after_state_change(
+                    previous_construction,
+                    previous_rect,
+                    false,
+                );
+            }
+            if let Some(rotation_velocity) = rotation_velocity {
+                object.rotation_velocity = rotation_velocity;
+            }
             if let Some(energy) = energy {
                 object.state.energy = energy;
+            }
+            if let Some(damage) = damage {
+                object.state.damage = damage.max(0);
+            }
+            if let Some(magic_energy) = magic_energy {
+                object.state.magic_energy = magic_energy.max(0);
+            }
+            if let Some(magic_capacity) = magic_capacity {
+                object.state.magic_capacity = magic_capacity.max(0);
             }
             if let Some(direction) = direction {
                 object.state.direction = direction;
@@ -9756,7 +10644,10 @@ impl Engine {
                 }
             }
             if let Some(vertices) = vertices {
-                object.state.vertices = vertices;
+                object.set_owned_shape_vertices(vertices);
+            }
+            if let Some(construction) = construction {
+                object.set_construction(construction);
             }
             if let Some(overlays) = graphics_overlays {
                 object.state.graphics_overlays = overlays;
@@ -9938,6 +10829,25 @@ impl Engine {
         object_id: ObjectId,
         definition_id: &str,
     ) -> Result<(), EngineError> {
+        self.apply_callback_outcome(
+            index,
+            outcome,
+            action_library,
+            object_id,
+            definition_id,
+            true,
+        )
+    }
+
+    fn apply_callback_outcome(
+        &mut self,
+        index: usize,
+        outcome: compat::EffectContextOutcome,
+        action_library: &ActionLibrary,
+        object_id: ObjectId,
+        definition_id: &str,
+        clamp_velocity: bool,
+    ) -> Result<(), EngineError> {
         let compat::EffectContextOutcome {
             object: object_effects,
             global: global_effects,
@@ -10026,7 +10936,7 @@ impl Engine {
             }
 
             if !command_operations.is_empty() {
-                let operations: Vec<_> = command_operations.drain(..).collect();
+                let operations: Vec<_> = std::mem::take(&mut command_operations);
                 object.apply_command_operations(operations);
             }
 
@@ -10039,7 +10949,9 @@ impl Engine {
                 effect_events.append(&mut applied);
             }
 
-            object.clamp_velocity(&self.physics);
+            if clamp_velocity {
+                object.clamp_velocity(&self.physics);
+            }
         }
         self.update_sector_for_index(index);
 
@@ -10435,6 +11347,7 @@ impl Engine {
             messages: self.messages.persisted(),
             pending_menu_requests: self.pending_menu_requests.clone(),
             game_over: self.game_over_triggered,
+            landscape_insert_thrust: self.landscape_insert_thrust,
             rng: self.rng.clone(),
         }
     }
@@ -10455,6 +11368,9 @@ impl Engine {
         self.physics = state.physics;
         self.environment = state.environment;
         self.environment.refresh_runtime_fields();
+        self.landscape_insert_thrust = state.landscape_insert_thrust;
+        self.mass_movers
+            .set_landscape_insert_thrust(self.landscape_insert_thrust);
         self.landscape = state.landscape.clone();
         if let Some(landscape) = self.landscape.as_ref() {
             self.mass_movers
@@ -10496,6 +11412,20 @@ impl Engine {
         let mut container_assignments = Vec::new();
         for persisted in &state.objects {
             let snapshot = &persisted.snapshot;
+            let shape_template = {
+                let definition =
+                    self.definitions
+                        .get(&snapshot.definition_id)
+                        .ok_or_else(|| {
+                            EngineError::UnknownDefinition(snapshot.definition_id.clone())
+                        })?;
+                ObjectShapeTemplate::new(
+                    definition.shape_vertices().to_vec(),
+                    definition.shape_rect(),
+                    definition.stretch_growth(),
+                    definition.rotateable(),
+                )
+            };
             let mut object = Object::new(
                 snapshot.id,
                 snapshot.definition_id.clone(),
@@ -10514,6 +11444,7 @@ impl Engine {
                     effects: snapshot.effects.clone(),
                     vertices: snapshot.vertices.clone(),
                     container: None,
+                    layer: None,
                     contents: Vec::new(),
                     components: snapshot.components.clone(),
                     status: snapshot.status,
@@ -10526,6 +11457,8 @@ impl Engine {
                     draw_transform: snapshot.draw_transform,
                     local_vars: snapshot.local_vars.clone(),
                 },
+                shape_template,
+                snapshot.own_vertices.clone(),
             );
             // Restore authoritative sub-pixel state when the snapshot carried it
             // (whole-pixel objects fall back to the `itofix` set by `Object::new`).
@@ -11143,28 +12076,28 @@ impl Engine {
             self.apply_dig_procedure(idx, &definition_id);
         }
 
-        if matches!(procedure, ActionProcedure::Bridge) {
-            if !self.apply_bridge_procedure(idx, command_direction, &definition_id) {
-                return;
-            }
+        if matches!(procedure, ActionProcedure::Bridge)
+            && !self.apply_bridge_procedure(idx, command_direction, &definition_id)
+        {
+            return;
         }
 
-        if matches!(procedure, ActionProcedure::Build) {
-            if !self.apply_build_procedure(idx, &definition_id) {
-                return;
-            }
+        if matches!(procedure, ActionProcedure::Build)
+            && !self.apply_build_procedure(idx, &definition_id)
+        {
+            return;
         }
 
-        if matches!(procedure, ActionProcedure::Fight) {
-            if !self.apply_fight_procedure(idx, movement_profile, &definition_id) {
-                return;
-            }
+        if matches!(procedure, ActionProcedure::Fight)
+            && !self.apply_fight_procedure(idx, movement_profile, &definition_id)
+        {
+            return;
         }
 
-        if matches!(procedure, ActionProcedure::Attach) {
-            if !self.apply_attach_procedure(idx, &definition_id) {
-                return;
-            }
+        if matches!(procedure, ActionProcedure::Attach)
+            && !self.apply_attach_procedure(idx, &definition_id)
+        {
+            return;
         }
 
         let mut push_handled = false;
@@ -11312,10 +12245,10 @@ impl Engine {
             }
         }
 
-        if matches!(procedure, ActionProcedure::Lift) {
-            if !self.apply_lift_to_target(idx, command_direction, action_target) {
-                self.reset_lift_action(idx, &definition_id);
-            }
+        if matches!(procedure, ActionProcedure::Lift)
+            && !self.apply_lift_to_target(idx, command_direction, action_target)
+        {
+            self.reset_lift_action(idx, &definition_id);
         }
     }
 
@@ -11642,7 +12575,7 @@ impl Engine {
 
         {
             let target = &mut self.objects[target_idx];
-            target.state.construction = desired_construction;
+            target.set_construction(desired_construction);
         }
 
         if self.objects[target_idx].state.construction >= FULL_CON {
@@ -11888,14 +12821,13 @@ impl Engine {
             )
         };
 
-        if previous_container != target_container {
-            if self
+        if previous_container != target_container
+            && self
                 .apply_container_change(object_id, previous_container, target_container)
                 .is_err()
-            {
-                self.reset_action_to_default(idx, definition_id, true);
-                return false;
-            }
+        {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
         }
 
         let self_vertex_index = ((action_data >> 8) & 0xFF) as usize;
@@ -12580,6 +13512,76 @@ impl Engine {
         self.objects.iter().position(|object| object.id == id)
     }
 
+    fn layer_movement_bounds_for(&self, index: usize) -> Option<LayerMovementBounds> {
+        let layer_id = self.objects.get(index)?.state.layer?;
+        let layer = self.objects.iter().find(|object| object.id == layer_id)?;
+        let definition = self.definitions.get(&layer.definition_id)?;
+        Some(LayerMovementBounds {
+            position: layer.position_pixels(),
+            shape_rect: definition.shape_rect()?,
+            border_bound: definition.border_bound(),
+        })
+    }
+
+    fn solid_masks_for_movement(&self) -> Vec<SolidMaskRect> {
+        let mut masks = Vec::new();
+        for object in &self.objects {
+            if object.destroyed
+                || matches!(object.state.status, ObjectStatus::Deleted)
+                || object.state.container.is_some()
+                || object.state.construction < FULL_CON
+                || object.state.rotation != 0
+            {
+                continue;
+            }
+            let Some(definition) = self.definitions.get(&object.definition_id) else {
+                continue;
+            };
+            let Some(mask) = definition.solid_mask() else {
+                continue;
+            };
+            let mask_pixels = if let Some(image) = definition.sprite_image.as_ref() {
+                let image_width = image.width as i32;
+                let image_height = image.height as i32;
+                if mask.x < 0
+                    || mask.y < 0
+                    || mask.x.saturating_add(mask.width) > image_width
+                    || mask.y.saturating_add(mask.height) > image_height
+                {
+                    continue;
+                }
+                let source = image.pixels.as_ref();
+                let stride = image.width as usize * 4;
+                let mut pixels = Vec::with_capacity((mask.width * mask.height) as usize);
+                for y in 0..mask.height {
+                    let source_y = (mask.y + y) as usize;
+                    for x in 0..mask.width {
+                        let source_x = (mask.x + x) as usize;
+                        let alpha_index = source_y * stride + source_x * 4 + 3;
+                        pixels.push(u8::from(source.get(alpha_index).copied().unwrap_or(0) != 0));
+                    }
+                }
+                Some(pixels)
+            } else {
+                None
+            };
+            let shape_offset = definition
+                .shape_rect()
+                .map(|shape| Vector2::new(shape.x, shape.y))
+                .unwrap_or(Vector2::ZERO);
+            let position = object.position_pixels();
+            masks.push(SolidMaskRect {
+                object_id: object.id,
+                x: position.x + shape_offset.x + mask.target_x,
+                y: position.y + shape_offset.y + mask.target_y,
+                width: mask.width,
+                height: mask.height,
+                pixels: mask_pixels,
+            });
+        }
+        masks
+    }
+
     fn is_container_cycle(&self, object_id: ObjectId, container_id: ObjectId) -> bool {
         let mut current = Some(container_id);
         while let Some(id) = current {
@@ -12834,7 +13836,7 @@ impl Engine {
         let object = self
             .objects
             .get_mut(index)
-            .ok_or_else(|| EngineError::UnknownObject(object_id))?;
+            .ok_or(EngineError::UnknownObject(object_id))?;
         object.commands.complete_front_if(command);
         Ok(())
     }
@@ -13497,10 +14499,8 @@ impl Engine {
                 true
             };
 
-            if keep {
-                if self.handle_particle_object_collisions(&particle) {
-                    survivors.push(particle);
-                }
+            if keep && self.handle_particle_object_collisions(&particle) {
+                survivors.push(particle);
             }
         }
 
@@ -13568,8 +14568,10 @@ impl Engine {
             MaterialReactionKind::Convert { target: None, .. } => false,
             MaterialReactionKind::Poof => {
                 if let Some(landscape) = self.landscape.as_mut() {
-                    landscape.remove_material_at(hit.x, hit.y);
+                    let _ = landscape.extract_material_at(hit.x, hit.y);
                 }
+                let _ = self.rng.rnd3();
+                let _ = self.rng.rnd3();
                 false
             }
             MaterialReactionKind::Incinerate => {
@@ -13595,18 +14597,19 @@ impl Engine {
                 corrode_resistance,
                 corrosion_probability,
             } => {
-                // C4Material.cpp:701,724 – two Random() calls for corrosion check
-                let success = if let Some(probability) = corrosion_probability {
-                    let clamped = probability.clamp(0, 100);
-                    self.rng.random(100) < clamped
-                } else {
-                    let resistance = corrode_resistance.max(1);
-                    self.rng.random(resistance + 1) < corrosive_strength.max(1)
-                };
+                // C4Material.cpp:701,724: default corrosion uses short-circuited
+                // Random(100) checks for corrosive strength and target resistance.
+                let success = evaluate_corrosion(
+                    corrosive_strength,
+                    corrode_resistance,
+                    corrosion_probability,
+                    &mut self.rng,
+                );
                 if success {
                     if let Some(landscape) = self.landscape.as_mut() {
-                        landscape.remove_material_at(hit.x, hit.y);
+                        let _ = landscape.extract_material_at(hit.x, hit.y);
                     }
+                    consume_corrosion_effect_rng(&mut self.rng);
                 } else if let Some(landscape) = self.landscape.as_mut() {
                     landscape.insert_material_at(hit.x, hit.y, particle.material);
                 }
@@ -13791,6 +14794,7 @@ impl Engine {
             crew_member,
             status,
             container,
+            layer,
             alive,
             category,
         } = config;
@@ -13801,6 +14805,9 @@ impl Engine {
             default_action_state,
             default_crew_member,
             definition_vertices,
+            definition_shape_rect,
+            definition_stretch_growth,
+            definition_rotateable,
         ) = {
             let definition_ref = self
                 .definitions
@@ -13812,6 +14819,9 @@ impl Engine {
                 definition_ref.default_action_state(),
                 definition_ref.is_crew(),
                 definition_ref.shape_vertices().to_vec(),
+                definition_ref.shape_rect(),
+                definition_ref.stretch_growth(),
+                definition_ref.rotateable(),
             )
         };
         let mut initial_action = match action {
@@ -13838,11 +14848,26 @@ impl Engine {
             .map(|value| normalize_category(value, definition_category))
             .unwrap_or(definition_category);
 
-        let initial_vertices = if vertices.is_empty() {
-            definition_vertices
+        let owns_vertices = !vertices.is_empty();
+        let shape_template = ObjectShapeTemplate::new(
+            definition_vertices.clone(),
+            definition_shape_rect,
+            definition_stretch_growth,
+            definition_rotateable,
+        );
+        let shape_base_vertices = if owns_vertices {
+            vertices.clone()
         } else {
-            vertices
+            definition_vertices
         };
+        let initial_vertices = transformed_shape_vertices(
+            &shape_base_vertices,
+            construction,
+            shape_template.stretch_growth,
+            shape_template.rotateable,
+            rotation,
+        );
+        let own_shape_vertices = owns_vertices.then_some(shape_base_vertices);
 
         let mut object = Object::new(
             id,
@@ -13862,6 +14887,7 @@ impl Engine {
                 effects: Vec::new(),
                 vertices: initial_vertices,
                 container: None,
+                layer,
                 contents: Vec::new(),
                 components: HashMap::new(),
                 status: status.unwrap_or_default(),
@@ -13874,6 +14900,8 @@ impl Engine {
                 draw_transform: None,
                 local_vars: HashMap::new(),
             },
+            shape_template,
+            own_shape_vertices,
         );
         object.ensure_material_capacity(self.materials.len());
         let mut container_changes = Vec::new();
@@ -14561,10 +15589,7 @@ fn environment_frame_to_map(frame: &EnvironmentFrame) -> HashMap<String, Value> 
     );
     map.insert(
         "sky_color".into(),
-        frame
-            .sky_color
-            .map(|color| rgb_to_value(color))
-            .unwrap_or(Value::Nil),
+        frame.sky_color.map(rgb_to_value).unwrap_or(Value::Nil),
     );
     map
 }
@@ -18235,7 +19260,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         "#;
         let library =
             lc_resources::MaterialLibrary::parse(material_source).expect("material parses");
-        let mut materials = MaterialSet::from_resource_library(&library);
+        let materials = MaterialSet::from_resource_library(&library);
         let earth = materials.id_of("Earth").expect("earth exists");
 
         let mut engine = Engine::with_seed(7);
@@ -18288,7 +19313,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         "#;
         let library =
             lc_resources::MaterialLibrary::parse(material_source).expect("material parses");
-        let mut materials = MaterialSet::from_resource_library(&library);
+        let materials = MaterialSet::from_resource_library(&library);
         let earth = materials.id_of("Earth").expect("earth exists");
 
         let mut engine = Engine::with_seed(13);
@@ -18357,7 +19382,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         "#;
         let library =
             lc_resources::MaterialLibrary::parse(material_source).expect("material parses");
-        let mut materials = MaterialSet::from_resource_library(&library);
+        let materials = MaterialSet::from_resource_library(&library);
         let earth = materials.id_of("Earth").expect("earth exists");
 
         let mut engine = Engine::with_seed(11);
@@ -18423,7 +19448,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         "#;
         let library =
             lc_resources::MaterialLibrary::parse(material_source).expect("material parses");
-        let mut materials = MaterialSet::from_resource_library(&library);
+        let materials = MaterialSet::from_resource_library(&library);
         let earth = materials.id_of("Earth").expect("earth exists");
 
         let mut engine = Engine::with_seed(13);
@@ -20214,7 +21239,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             let call_log = Arc::clone(&call_log);
             hooks.set_on_call(move |name, args| {
                 if name == "OnIdleAbort" || name == "OnWalkStart" {
-                    if let Some(Value::Proplist(state)) = args.get(0) {
+                    if let Some(Value::Proplist(state)) = args.first() {
                         if let Some(Value::Int(id)) = state.get("id") {
                             call_log.lock().unwrap().push((name.to_string(), *id));
                         }
@@ -21783,6 +22808,48 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn vehicle_density_boundary_below_contact_density_allows_motion_like_cpp() {
+        // Mirrors src/C4Movement.cpp:260-281 horizontal per-pixel loop:
+        // `ContactCheck(ctx, y)` gates `DoMotion(ctx - x, 0)`. Contact is
+        // `GBackDensity >= ContactDensity` through src/C4Movement.cpp:166-182
+        // and src/C4Shape.cpp:389.
+        //
+        // Hand-derived golden: src/C4Landscape.h:144-150 returns MCVehic for a
+        // closed left border, and src/C4Material.h:200 defines C4M_Vehicle = 100.
+        // With ContactDensity = 101, 100 >= 101 is false, so C++ takes DoMotion
+        // at src/C4Movement.cpp:281 and moves x from 0 to -1 without redirecting.
+        let mut definition = simple_definition("Probe");
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_LEFT)]);
+        definition.set_contact_density(101);
+
+        let mut engine = Engine::with_seed(53);
+        engine.set_landscape(Landscape::flat(8, 20));
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Probe").with_position(Vector2::new(0, 5)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(-itofix(1), C4Fixed::ZERO));
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        assert_eq!(object.position, Vector2::new(-1, 5));
+
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_position.x, -itofix(1));
+        assert_eq!(engine.objects[idx].fixed_velocity.x, -itofix(1));
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+    }
+
+    #[test]
     fn border_bound_sides_clamps_fixed_target_and_velocity() {
         let mut definition = simple_definition("Bounded");
         definition.set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2)));
@@ -21812,6 +22879,466 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let idx = engine.find_object_index(id).expect("object exists");
         assert_eq!(engine.objects[idx].fixed_position.x, itofix(9));
         assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn layer_border_bound_clamps_horizontal_target_like_cpp() {
+        // Mirrors src/C4Movement.cpp:185-196. For a non-static object, C++ applies
+        // layer-side TargetBounds when `pLayer->Def->BorderBound & C4D_Border_Layer`:
+        // low  = layer.x + layer.Shape.x - object.Shape.x
+        // high = layer.x + layer.Shape.x + layer.Shape.Wdt + object.Shape.x
+        //
+        // Hand-derived golden for this setup: layer.x=20, layer.Shape.x=-1,
+        // layer.Shape.Wdt=10, object.Shape.x=0, so high=29. `fix_x += xdir`
+        // targets x=33, SideBounds clamps ctcox to 29 and zeroes xdir via
+        // TargetBounds at src/C4Movement.cpp:147-155, then the per-pixel loop
+        // moves from x=28 to x=29.
+        let mut layer_definition = simple_definition("Layer");
+        layer_definition.set_shape_rect(Some(DefinitionRect::new(-1, -1, 10, 10)));
+        layer_definition.set_border_bound(C4D_BORDER_LAYER);
+
+        let mut mover_definition = simple_definition("Mover");
+        mover_definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        mover_definition.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+
+        let mut engine = Engine::with_seed(57);
+        engine.set_landscape(Landscape::flat(100, 100));
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine
+            .register_definition(layer_definition)
+            .expect("layer definition registers");
+        engine
+            .register_definition(mover_definition)
+            .expect("mover definition registers");
+
+        let layer_id = engine
+            .spawn_object(SpawnConfig::new("Layer").with_position(Vector2::new(20, 10)))
+            .expect("layer spawns");
+        let mover_id = engine
+            .spawn_object(
+                SpawnConfig::new("Mover")
+                    .with_position(Vector2::new(28, 10))
+                    .with_layer(layer_id),
+            )
+            .expect("mover spawns");
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(5), C4Fixed::ZERO));
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(mover_id).expect("object present");
+        assert_eq!(object.position.x, 29);
+
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(29));
+        assert_eq!(engine.objects[idx].fixed_velocity.x, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn solid_mask_vehicle_density_blocks_per_pixel_contact_like_cpp() {
+        // Mirrors src/C4Movement.cpp:260-282: the horizontal per-pixel loop
+        // aborts before `DoMotion` when `ContactCheck(ctx, y)` reports contact.
+        // `C4SolidMask::Put` writes solid-mask pixels as MCVehic at
+        // src/C4SolidMask.cpp:66-104, and C4Material.h:200 defines vehicle
+        // density as 100.
+        //
+        // Hand-derived golden: blocker.x=5, blocker.Shape.x=0, SolidMask.tx=0,
+        // so its one-pixel mask is put at world (5,5). The mover tests candidate
+        // (5,5), and 100 >= ContactDensity 50 is contact, so C++ keeps x=4,
+        // rewinds fix_x to itofix(4), and RedirectForce moves FIXED100(50) from
+        // xdir to ydir at C4Movement.cpp:277.
+        let mut blocker_definition =
+            Definition::from_script("Blocker", "Blocker", "").expect("script compiles");
+        blocker_definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        blocker_definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+
+        let mut mover_definition = simple_definition("Mover");
+        mover_definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_RIGHT)]);
+        mover_definition.set_contact_density(50);
+
+        let mut engine = Engine::with_seed(59);
+        engine.set_landscape(Landscape::flat(20, 20));
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine
+            .register_definition(blocker_definition)
+            .expect("blocker definition registers");
+        engine
+            .register_definition(mover_definition)
+            .expect("mover definition registers");
+
+        let mover_id = engine
+            .spawn_object(SpawnConfig::new("Mover").with_position(Vector2::new(4, 5)))
+            .expect("mover spawns");
+        engine
+            .spawn_object(SpawnConfig::new("Blocker").with_position(Vector2::new(5, 5)))
+            .expect("blocker spawns");
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(mover_id).expect("object present");
+        assert_eq!(object.position, Vector2::new(4, 5));
+
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(4));
+        assert_eq!(engine.objects[idx].fixed_velocity.x, fixed100(50));
+        assert_eq!(engine.objects[idx].fixed_velocity.y, -fixed100(50));
+    }
+
+    #[test]
+    fn solid_mask_transparent_bitmap_pixel_allows_motion_like_cpp() -> Result<(), EngineError> {
+        // Mirrors src/C4SolidMask.cpp:401-411: the object solid-mask bitmap is
+        // copied from definition graphics transparency, and src/C4SolidMask.cpp:
+        // 80-104 only writes MCVehic for non-transparent mask pixels. The
+        // movement loop at src/C4Movement.cpp:260-282 therefore takes `DoMotion`
+        // when `ContactCheck(ctx, y)` probes a transparent source pixel.
+        //
+        // Hand-derived golden: Blocker's SolidMask=0,0,2,1,0,0 at object (5,5)
+        // covers world x=5..6, but graphics pixel 0 is transparent and pixel 1
+        // is opaque. The mover's one-step candidate vertex probes (5,5), so
+        // C++ sees background density 0 < ContactDensity 50 and moves to x=5
+        // without redirecting xdir into ydir.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Blocker.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=BLCK\nName=Blocker\nCategory=C4D_Object\nShape=0,0,2,1\nSolidMask=0,0,2,1,0,0\n",
+        )
+        .expect("write defcore");
+        let mut image = image::RgbaImage::new(2, 1);
+        image.put_pixel(0, 0, image::Rgba([0, 0, 0, 0]));
+        image.put_pixel(1, 0, image::Rgba([255, 255, 255, 255]));
+        image
+            .save(def_dir.join("Graphics.png"))
+            .expect("write graphics");
+
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let blocker_definition = Definition::from_resource(&resource)?;
+
+        let mut mover_definition = simple_definition("Mover");
+        mover_definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_RIGHT)]);
+        mover_definition.set_contact_density(50);
+
+        let mut engine = Engine::with_seed(69);
+        engine.set_landscape(Landscape::flat(20, 20));
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine.register_definition(blocker_definition)?;
+        engine.register_definition(mover_definition)?;
+
+        let mover_id =
+            engine.spawn_object(SpawnConfig::new("Mover").with_position(Vector2::new(4, 5)))?;
+        engine.spawn_object(SpawnConfig::new("BLCK").with_position(Vector2::new(5, 5)))?;
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
+
+        let snapshot = engine.tick()?;
+        let object = snapshot.object(mover_id).expect("object present");
+        assert_eq!(object.position, Vector2::new(5, 5));
+
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
+        assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        Ok(())
+    }
+
+    #[test]
+    fn contact_right_callback_runs_before_redirect_and_next_rng_consumer_like_cpp() {
+        // Mirrors src/C4Movement.cpp:271-278: horizontal contact calls
+        // ContactCheck before RedirectForce. ContactCheck runs shape contact and
+        // then contact callbacks in src/C4Movement.cpp:166-182 via
+        // C4Object::Contact at src/C4Movement.cpp:112-119.
+        //
+        // Hand-derived golden for seed 61: Engine startup does Randomize3(), i.e.
+        // 500 calls to Random(3). ContactRight then consumes Random(100) = 13.
+        // The following Step random argument is therefore the next
+        // Random(i32::MAX) = 30827. ContactRight's SetXDir(40) runs before
+        // RedirectForce, so xdir is itofix(4) - FIXED100(50), not the old xdir
+        // redirect result.
+        let script = r#"
+            global func ContactRight()
+            {
+                SetXDir(40);
+                return Random(100);
+            }
+
+            global func Step(state, frame, random)
+            {
+                return { energy = random };
+            }
+        "#;
+
+        let mut blocker_definition =
+            Definition::from_script("Blocker", "Blocker", "").expect("script compiles");
+        blocker_definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        blocker_definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+
+        let mut mover_definition =
+            Definition::from_script("Mover", "Mover", script).expect("script compiles");
+        mover_definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_RIGHT)]);
+        mover_definition.set_contact_density(50);
+        mover_definition.set_contact_function_calls(true);
+
+        let mut engine = Engine::with_seed(61);
+        engine.set_landscape(Landscape::flat(20, 20));
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine
+            .register_definition(blocker_definition)
+            .expect("blocker definition registers");
+        engine
+            .register_definition(mover_definition)
+            .expect("mover definition registers");
+
+        let mover_id = engine
+            .spawn_object(SpawnConfig::new("Mover").with_position(Vector2::new(4, 5)))
+            .expect("mover spawns");
+        engine
+            .spawn_object(SpawnConfig::new("Blocker").with_position(Vector2::new(5, 5)))
+            .expect("blocker spawns");
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(mover_id).expect("object present");
+        assert_eq!(object.position, Vector2::new(4, 5));
+        assert_eq!(object.energy, 30827);
+
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(4));
+        assert_eq!(
+            engine.objects[idx].fixed_velocity.x,
+            itofix(4) - fixed100(50)
+        );
+        assert_eq!(engine.objects[idx].fixed_velocity.y, -fixed100(50));
+    }
+
+    #[test]
+    fn hit_callbacks_run_after_contact_with_old_velocity_args_like_cpp() {
+        // Mirrors src/C4Movement.cpp:247-252,468-478: movement stores oldxdir,
+        // oldydir, and old_ocf before stepping; after contact and NoAttachAction,
+        // it calls Hit/Hit2/Hit3 in that order based on the old OCF hit-speed
+        // bits, passing fixtoi(oldxdir, 100), fixtoi(oldydir, 100). The hit-speed
+        // thresholds are src/C4Movement.cpp:35-38; the flags are set from
+        // C4Object::GetSpeed() = abs(xdir)+abs(ydir) at src/C4Object.cpp:588-592.
+        //
+        // Hand-derived golden for seed 63: Engine startup does Randomize3(), i.e.
+        // 500 calls to Random(3). No contact callback consumes RNG here, so the
+        // following Step random argument is Random(i32::MAX) = 36328. With
+        // oldxdir = itofix(2), oldydir = 0, C++ sets HitSpeed1 and HitSpeed2 but
+        // not HitSpeed3. The callback arguments are (200, 0), so Hit subtracts
+        // 210 energy and Hit2 subtracts 220; Step encodes the total callback
+        // delta plus RNG as 430 + 36328 = 36758.
+        let script = r#"
+            global func Hit(x, y)
+            {
+                DoEnergy(0 - (10 + x + y), nil, true);
+                return nil;
+            }
+
+            global func Hit2(x, y)
+            {
+                DoEnergy(0 - (20 + x + y), nil, true);
+                return nil;
+            }
+
+            global func Hit3(x, y)
+            {
+                DoEnergy(0 - (40 + x + y), nil, true);
+                return nil;
+            }
+
+            global func Step(state, frame, random)
+            {
+                return { energy = 1000000 - state.energy + random };
+            }
+        "#;
+
+        let mut blocker_definition =
+            Definition::from_script("Blocker", "Blocker", "").expect("script compiles");
+        blocker_definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        blocker_definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+
+        let mut mover_definition =
+            Definition::from_script("Mover", "Mover", script).expect("script compiles");
+        mover_definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_RIGHT)]);
+        mover_definition.set_contact_density(50);
+
+        let mut engine = Engine::with_seed(63);
+        engine.set_landscape(Landscape::flat(20, 20));
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+        engine
+            .register_definition(blocker_definition)
+            .expect("blocker definition registers");
+        engine
+            .register_definition(mover_definition)
+            .expect("mover definition registers");
+
+        let mover_id = engine
+            .spawn_object(
+                SpawnConfig::new("Mover")
+                    .with_position(Vector2::new(4, 5))
+                    .with_energy(1000000),
+            )
+            .expect("mover spawns");
+        engine
+            .spawn_object(SpawnConfig::new("Blocker").with_position(Vector2::new(5, 5)))
+            .expect("blocker spawns");
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO));
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(mover_id).expect("object present");
+        assert_eq!(object.position, Vector2::new(4, 5));
+        assert_eq!(object.energy, 36758);
+
+        let idx = engine.find_object_index(mover_id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(4));
+        assert_eq!(
+            engine.objects[idx].fixed_velocity.x,
+            itofix(2) - fixed100(50)
+        );
+        assert_eq!(engine.objects[idx].fixed_velocity.y, -fixed100(50));
+    }
+
+    #[test]
+    fn construction_jolt_updates_vertices_and_preserves_bottom_like_cpp() -> Result<(), EngineError>
+    {
+        // Mirrors src/C4Object.cpp:1401-1428: DoCon stores the old shape bottom,
+        // changes Con, then calls UpdateFace(true) -> UpdateShape(true).
+        // UpdateShape copies definition vertices at src/C4Object.cpp:320-333 and
+        // non-stretch construction growth calls C4Shape::Jolt, whose vertex path
+        // scales only VtxY at src/C4Shape.cpp:121-127. Finally DoCon preserves
+        // the old bottom edge for straight objects at src/C4Object.cpp:1462-1468.
+        //
+        // Hand-derived golden: full shape y=0,h=4 and object y=8 gives old bottom
+        // 12. Changing Con from FullCon to FullCon/2 jolts Hgt 4->2 and VtxY 4->2,
+        // then bottom preservation moves y to 12 - 2 - 0 = 10.
+        let mut definition = simple_definition("Structure");
+        definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 2, 4)));
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 4).with_cnat(CNAT_BOTTOM)]);
+
+        let mut engine = Engine::with_seed(65);
+        engine.register_definition(definition)?;
+        let id = engine.spawn_object(
+            SpawnConfig::new("Structure")
+                .with_position(Vector2::new(3, 8))
+                .with_construction(FULL_CON),
+        )?;
+
+        engine.apply_object_update(id, ObjectUpdate::new().with_construction(FULL_CON / 2))?;
+
+        let object = engine.object_snapshot(id).expect("object present");
+        assert_eq!(object.construction, FULL_CON / 2);
+        assert_eq!(object.position, Vector2::new(3, 10));
+        assert_eq!(object.vertices[0].y, 2);
+        assert_eq!(object.vertices[0].cnat, CNAT_BOTTOM);
+        Ok(())
+    }
+
+    #[test]
+    fn construction_owned_vertices_survive_restore_like_cpp() -> Result<(), EngineError> {
+        // Mirrors src/C4Object.cpp:2769 and src/C4Shape.cpp:486-494: saved
+        // objects persist the `OwnVertices` flag, and own original vertices are
+        // stored separately from the active shape. UpdateShape then copies from
+        // that own base at src/C4Object.cpp:326 before non-stretch construction
+        // calls C4Shape::Jolt at src/C4Shape.cpp:121-127.
+        //
+        // Hand-derived golden: the definition base vertex is y=4, but the owned
+        // base vertex is y=8. After restore, changing Con from FullCon to
+        // FullCon/2 must jolt the owned base to y=4, not the definition base to
+        // y=2. The full shape y=8,h=4 has old bottom 12, so the straight-object
+        // bottom preserve also moves y to 12 - 2 - 0 = 10.
+        let mut definition = simple_definition("OwnedShape");
+        definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 2, 4)));
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 4).with_cnat(CNAT_BOTTOM)]);
+
+        let mut engine = Engine::with_seed(66);
+        engine.register_definition(definition.clone())?;
+        let id = engine.spawn_object(
+            SpawnConfig::new("OwnedShape")
+                .with_position(Vector2::new(3, 8))
+                .with_construction(FULL_CON)
+                .with_vertices(vec![ObjectVertex::new(0, 8).with_cnat(CNAT_BOTTOM)]),
+        )?;
+
+        let state = engine.capture_state();
+        let mut restored = Engine::with_seed(67);
+        restored.register_definition(definition)?;
+        restored.restore_state(&state)?;
+
+        restored.apply_object_update(id, ObjectUpdate::new().with_construction(FULL_CON / 2))?;
+
+        let object = restored.object_snapshot(id).expect("object present");
+        assert_eq!(object.construction, FULL_CON / 2);
+        assert_eq!(object.position, Vector2::new(3, 10));
+        assert_eq!(object.vertices[0].y, 4);
+        assert_eq!(object.vertices[0].cnat, CNAT_BOTTOM);
+        Ok(())
+    }
+
+    #[test]
+    fn construction_stretch_growth_scales_x_axis_like_cpp() -> Result<(), EngineError> {
+        // Mirrors src/C4Def.cpp:387 and src/C4Object.cpp:329-333: DefCore
+        // `StretchGrowth` sets `Def->GrowthType`, so UpdateShape calls
+        // C4Shape::Stretch instead of Jolt. Stretch scales x/y/w/h and VtxX/VtxY
+        // at src/C4Shape.cpp:105-116, then DoCon preserves the straight-object
+        // bottom at src/C4Object.cpp:1462-1468.
+        //
+        // Hand-derived golden: shape x=2,w=6,h=4 and vertex (8,4) at 50%
+        // construction stretch to shape x=1,w=3,h=2 and vertex (4,2). The old
+        // bottom is y 8 + shape.y 0 + h 4 = 12, so bottom preservation moves y
+        // to 12 - 2 - 0 = 10.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Stretch.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=STRG\nName=Stretch\nCategory=C4D_Object\nShape=2,0,6,4\nVertices=1\nVertexX=8\nVertexY=4\nVertexCNAT=8\nStretchGrowth=1\n",
+        )
+        .expect("write defcore");
+
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let definition = Definition::from_resource(&resource)?;
+
+        let mut engine = Engine::with_seed(68);
+        engine.register_definition(definition)?;
+        let id = engine.spawn_object(
+            SpawnConfig::new("STRG")
+                .with_position(Vector2::new(3, 8))
+                .with_construction(FULL_CON),
+        )?;
+
+        engine.apply_object_update(id, ObjectUpdate::new().with_construction(FULL_CON / 2))?;
+
+        let object = engine.object_snapshot(id).expect("object present");
+        assert_eq!(object.construction, FULL_CON / 2);
+        assert_eq!(object.position, Vector2::new(3, 10));
+        assert_eq!(object.vertices[0].x, 4);
+        assert_eq!(object.vertices[0].y, 2);
+        assert_eq!(object.vertices[0].cnat, CNAT_BOTTOM);
+        Ok(())
     }
 
     #[test]

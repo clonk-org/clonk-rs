@@ -109,7 +109,7 @@ impl Playback {
         &mut self,
         snapshot: &SimulationSnapshot,
     ) -> Result<(), PlaybackError> {
-        let expected = self.recording.frames.get(self.cursor).ok_or_else(|| {
+        let expected = self.recording.frames.get(self.cursor).ok_or({
             PlaybackError::UnexpectedFrame {
                 frame: snapshot.frame,
             }
@@ -350,6 +350,7 @@ mod tests {
                 action_procedure: None,
                 effects: Vec::new(),
                 vertices: Vec::new(),
+                own_vertices: None,
                 container: None,
                 contents: Vec::new(),
                 components: HashMap::new(),

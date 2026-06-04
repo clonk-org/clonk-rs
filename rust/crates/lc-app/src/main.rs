@@ -1,3 +1,13 @@
+#![allow(dead_code)]
+#![allow(
+    clippy::explicit_counter_loop,
+    clippy::large_enum_variant,
+    clippy::manual_clamp,
+    clippy::manual_strip,
+    clippy::match_like_matches_macro,
+    clippy::too_many_arguments
+)]
+
 mod control_options;
 mod game_over;
 mod gamepad;
@@ -42,15 +52,14 @@ use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_core::std_config::Config;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
-    ActionSpec, ActionState, AudioCommand, CommandKind, CommandStackSnapshot, ControlButton,
-    ControlCommand, ControlEvent, Definition, Engine, EngineError, EngineState,
-    EnvironmentSettings, FloatVector2, Landscape, MaterialSet, MenuCommandKind,
-    MenuCommandSelection, MenuRequestKind, MessageKind, MovementProfile, ObjectId, ObjectSnapshot,
-    ObjectUpdate, PlayerConfig, PlayerStatus, Recorder, Recording, RgbColor, Scenario,
-    ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2,
-    FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT,
-    FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL,
-    OWNER_NONE,
+    ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
+    ControlEvent, Definition, Engine, EngineError, EngineState, EnvironmentSettings, FloatVector2,
+    Landscape, MaterialSet, MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind,
+    MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerConfig, PlayerStatus, Recorder,
+    Recording, RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig,
+    SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM,
+    FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL,
+    FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
     default_owner_color, draw_image, AboutAction, ColorByOwnerMask, CrewOverlay, CursorAtlas,
@@ -603,7 +612,7 @@ fn test_scenario_load(path: &std::path::Path, app_paths: Option<&Arc<AppPaths>>)
         if app_paths.is_some() { "yes" } else { "no" }
     );
 
-    let resolver = InstallDefinitionResolver::new(app_paths.map(|p| p.clone()));
+    let resolver = InstallDefinitionResolver::new(app_paths.cloned());
     let start = Instant::now();
 
     match Scenario::load_from_path_with(path, &resolver) {
@@ -1397,12 +1406,7 @@ impl SoundResolver {
 
     fn configure_scenario(&mut self, path: Option<&Path>) -> bool {
         let new_root = path.map(|p| p.to_path_buf());
-        if self
-            .scenario_root
-            .as_ref()
-            .map(|existing| existing.as_path())
-            == new_root.as_ref().map(|p| p.as_path())
-        {
+        if self.scenario_root.as_deref() == new_root.as_deref() {
             return false;
         }
 
@@ -1934,13 +1938,11 @@ fn parse_message_spans(line: &str, base_color: Color) -> Vec<MessageTextSpan> {
             }
         }
 
-        if rest.starts_with("{{") {
-            if rest.len() > 2 && !rest[2..].starts_with('{') {
-                if let Some(end) = rest[2..].find("}}") {
-                    current.push(' ');
-                    pos += 2 + end + 2;
-                    continue;
-                }
+        if rest.starts_with("{{") && rest.len() > 2 && !rest[2..].starts_with('{') {
+            if let Some(end) = rest[2..].find("}}") {
+                current.push(' ');
+                pos += 2 + end + 2;
+                continue;
             }
         }
 
@@ -2206,7 +2208,7 @@ impl RecordingSession {
             .scenario_path
             .as_ref()
             .and_then(|path| path.file_stem().and_then(|stem| stem.to_str()))
-            .unwrap_or_else(|| self.scenario_identifier.as_str());
+            .unwrap_or(self.scenario_identifier.as_str());
         sanitize_record_name(raw)
     }
 }
@@ -2711,10 +2713,7 @@ impl NetworkLobbyState {
     }
 
     fn hit_test_button(&self, point: GuiPoint) -> Option<LobbyButton> {
-        let layout = match self.layout.as_ref() {
-            Some(layout) => layout,
-            None => return None,
-        };
+        let layout = self.layout.as_ref()?;
         if point_in_rect(point, &layout.ready_button) {
             return Some(LobbyButton::Ready);
         }
@@ -3911,10 +3910,7 @@ fn any_saved_games_exist() -> bool {
 }
 
 fn load_install_material_library(paths: Option<&AppPaths>) -> Option<Arc<MaterialSet>> {
-    let paths = match paths {
-        Some(paths) => paths,
-        None => return None,
-    };
+    let paths = paths?;
 
     let mut seen = HashSet::new();
     for candidate in candidate_material_paths(paths) {
@@ -4043,11 +4039,12 @@ fn sanitize_save_label(label: &str) -> String {
         if ch.is_ascii_alphanumeric() {
             result.push(ch);
             last_was_separator = false;
-        } else if ch.is_ascii_whitespace() || matches!(ch, '-' | '_') {
-            if !last_was_separator && !result.is_empty() {
-                result.push('_');
-                last_was_separator = true;
-            }
+        } else if (ch.is_ascii_whitespace() || matches!(ch, '-' | '_'))
+            && !last_was_separator
+            && !result.is_empty()
+        {
+            result.push('_');
+            last_was_separator = true;
         }
     }
     let trimmed = result.trim_matches('_');
@@ -4349,7 +4346,7 @@ impl GameApp {
 
         // Start async material loading
         let (tx, rx) = std::sync::mpsc::channel();
-        let paths_clone = paths.map(|p| p.clone());
+        let paths_clone = paths.cloned();
         std::thread::spawn(move || {
             let material_library = load_install_material_library(paths_clone.as_ref());
             let _ = tx.send(BootLoadingEvent::Finished(material_library));
@@ -4360,7 +4357,7 @@ impl GameApp {
         let sprite_cache = Arc::new(base_sprites.clone());
 
         // Engine starts with default materials; will be updated when boot loading finishes
-        let mut engine = Engine::new();
+        let engine = Engine::new();
         let snapshot = engine.snapshot();
 
         let scenarios = load_frontend_scenarios();
@@ -4940,7 +4937,7 @@ impl GameApp {
                 kind,
                 CommandKind::Press | CommandKind::Single | CommandKind::Double
             ) {
-                if let Some(_) = self.save_browser.take() {
+                if self.save_browser.take().is_some() {
                     let reopen = self.save_browser_return_to_menu;
                     self.save_browser_return_to_menu = false;
                     if reopen {
@@ -5749,15 +5746,15 @@ impl GameApp {
         state: ElementState,
     ) -> Result<(), EngineError> {
         if matches!(self.mode, AppMode::Menu) && self.game_over_dialog.is_some() {
-            if state == ElementState::Pressed {
-                if matches!(
+            if state == ElementState::Pressed
+                && matches!(
                     action,
                     GamepadActionType::Select
                         | GamepadActionType::Cancel
                         | GamepadActionType::MenuToggle
-                ) {
-                    self.dismiss_game_over_dialog();
-                }
+                )
+            {
+                self.dismiss_game_over_dialog();
             }
             return Ok(());
         }
@@ -9367,9 +9364,9 @@ mod tests {
     use super::*;
     use lc_audio::decode_audio;
     use lc_engine::{
-        ActionState, CommandDirection, Direction, EnvironmentFrame, HudPlayerSnapshot, HudSnapshot,
-        ObjectId, ObjectSnapshot, ObjectStatus, PlayerState, PlayerStatus, SimulationSnapshot,
-        Vector2, DEFAULT_CATEGORY,
+        ActionState, CommandDirection, CommandStackSnapshot, Direction, EnvironmentFrame,
+        HudPlayerSnapshot, HudSnapshot, ObjectId, ObjectSnapshot, ObjectStatus, PlayerState,
+        PlayerStatus, SimulationSnapshot, Vector2, DEFAULT_CATEGORY,
     };
     use parking_lot::ReentrantMutex;
     use std::collections::HashMap;
@@ -9455,6 +9452,7 @@ mod tests {
             action_procedure: None,
             effects: Vec::new(),
             vertices: Vec::new(),
+            own_vertices: None,
             container: None,
             contents: Vec::new(),
             components: HashMap::new(),
@@ -9779,6 +9777,7 @@ mod tests {
                 action_procedure: None,
                 effects: Vec::new(),
                 vertices: Vec::new(),
+                own_vertices: None,
                 container: None,
                 contents: Vec::new(),
                 components: HashMap::new(),
@@ -9815,6 +9814,7 @@ mod tests {
                 action_procedure: None,
                 effects: Vec::new(),
                 vertices: Vec::new(),
+                own_vertices: None,
                 container: None,
                 contents: Vec::new(),
                 components: HashMap::new(),

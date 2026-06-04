@@ -1,3 +1,11 @@
+#![allow(dead_code)]
+#![allow(
+    clippy::manual_clamp,
+    clippy::op_ref,
+    clippy::question_mark,
+    clippy::too_many_arguments
+)]
+
 mod input;
 mod startup_about;
 mod startup_main_menu;
@@ -1147,7 +1155,7 @@ impl GraphicsSystem {
             _ => (count as f32).sqrt().ceil() as usize,
         }
         .max(1);
-        let rows = ((count + columns - 1) / columns).max(1);
+        let rows = count.div_ceil(columns).max(1);
 
         let available_width = self.surface_width;
         let base_width = available_width / columns as u32;
@@ -1492,9 +1500,9 @@ impl GraphicsSystem {
     fn overlay_lightning_flash(&mut self) {
         let pixels = self.surface.pixels_mut();
         for chunk in pixels.chunks_exact_mut(4) {
-            chunk[0] = chunk[0].saturating_add(96).min(255);
-            chunk[1] = chunk[1].saturating_add(96).min(255);
-            chunk[2] = chunk[2].saturating_add(144).min(255);
+            chunk[0] = chunk[0].saturating_add(96);
+            chunk[1] = chunk[1].saturating_add(96);
+            chunk[2] = chunk[2].saturating_add(144);
         }
     }
 
@@ -1768,13 +1776,11 @@ impl GraphicsSystem {
                 base_graphics_name.as_deref(),
             ))
             .cloned();
-        if sprite.is_none() {
-            if base_graphics_name.is_some() {
-                sprite = self
-                    .object_sprites
-                    .get(&sprite_map_key(&base_definition_id, None))
-                    .cloned();
-            }
+        if sprite.is_none() && base_graphics_name.is_some() {
+            sprite = self
+                .object_sprites
+                .get(&sprite_map_key(&base_definition_id, None))
+                .cloned();
         }
         if sprite.is_none() && base_definition_id != object.definition_id {
             sprite = self
@@ -2153,7 +2159,7 @@ impl GraphicsSystem {
         let action_name = overlay
             .action
             .as_deref()
-            .unwrap_or_else(|| object.action.name.as_str());
+            .unwrap_or(object.action.name.as_str());
         let phase = if overlay.phase != 0 {
             overlay.phase
         } else {
@@ -3046,7 +3052,7 @@ fn draw_image_region(
                 continue;
             }
 
-            let idx = ((src_y as usize * image.width() as usize + src_x as usize) * 4) as usize;
+            let idx = (src_y as usize * image.width() as usize + src_x as usize) * 4;
             if idx + 3 >= pixels.len() {
                 continue;
             }
@@ -3172,8 +3178,7 @@ fn draw_image_region_rotated(
             let normalized_x = (local_x + half_w) / dest_width;
             let normalized_y = (local_y + half_h) / dest_height;
 
-            if normalized_x < 0.0 || normalized_x > 1.0 || normalized_y < 0.0 || normalized_y > 1.0
-            {
+            if !(0.0..=1.0).contains(&normalized_x) || !(0.0..=1.0).contains(&normalized_y) {
                 continue;
             }
 
@@ -3199,8 +3204,7 @@ fn draw_image_region_rotated(
                 continue;
             }
 
-            let idx =
-                ((sample_y as usize * image.width() as usize + sample_x as usize) * 4) as usize;
+            let idx = (sample_y as usize * image.width() as usize + sample_x as usize) * 4;
             if idx + 3 >= pixels.len() {
                 continue;
             }
@@ -3408,6 +3412,7 @@ mod tests {
                 action_procedure: None,
                 effects: Vec::new(),
                 vertices: Vec::new(),
+                own_vertices: None,
                 container: None,
                 contents: Vec::new(),
                 components: HashMap::new(),

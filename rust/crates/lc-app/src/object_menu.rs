@@ -1142,6 +1142,7 @@ mod tests {
             action_procedure: None,
             effects: Vec::new(),
             vertices: Vec::new(),
+            own_vertices: None,
             container: None,
             contents: Vec::new(),
             components: HashMap::new(),

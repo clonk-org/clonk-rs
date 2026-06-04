@@ -81,13 +81,16 @@ pub struct DefCore {
     pub picture: Option<PictureRect>,
     pub color_by_owner: bool,
     pub shape: Option<PictureRect>,
+    pub solid_mask: Option<TargetRect>,
     pub vertices: Vec<DefVertex>,
     pub contact_density: i32,
+    pub contact_function_calls: bool,
     pub collection: Option<PictureRect>,
     pub collection_limit: Option<u32>,
     pub collectible: bool,
     pub constructable: bool,
     pub con_size_off: i32,
+    pub stretch_growth: bool,
     pub basement: i32,
     pub rotateable: i32,
     pub border_bound: i32,
@@ -102,6 +105,16 @@ pub struct DefVertex {
     pub y: i32,
     pub cnat: u32,
     pub friction: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub target_x: i32,
+    pub target_y: i32,
 }
 
 impl DefCore {
@@ -230,17 +243,20 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut picture: Option<PictureRect> = None;
     let mut color_by_owner = false;
     let mut shape: Option<PictureRect> = None;
+    let mut solid_mask: Option<TargetRect> = None;
     let mut vertex_count: usize = 0;
     let mut vertex_x = [0i32; C4D_MAX_VERTEX];
     let mut vertex_y = [0i32; C4D_MAX_VERTEX];
     let mut vertex_cnat = [0u32; C4D_MAX_VERTEX];
     let mut vertex_friction = [0i32; C4D_MAX_VERTEX];
     let mut contact_density: i32 = C4M_SOLID;
+    let mut contact_function_calls = false;
     let mut collection: Option<PictureRect> = None;
     let mut collection_limit: Option<u32> = None;
     let mut collectible = false;
     let mut constructable = false;
     let mut con_size_off: i32 = 0;
+    let mut stretch_growth = false;
     let mut basement: i32 = 0;
     let mut rotateable: i32 = 0;
     let mut border_bound: i32 = 0;
@@ -269,7 +285,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         let key = raw_key.trim();
         let value = raw_value.trim();
 
-        let section = current_section.as_deref().unwrap_or_else(|| "defcore");
+        let section = current_section.as_deref().unwrap_or("defcore");
 
         if section != "defcore" {
             continue;
@@ -310,6 +326,10 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "shape" => {
                 shape = parse_rect(value);
             }
+            "solidmask" => {
+                solid_mask =
+                    parse_target_rect(value).filter(|rect| rect.width > 0 && rect.height > 0);
+            }
             "vertices" => {
                 vertex_count = parse_i32(value)
                     .unwrap_or(0)
@@ -330,6 +350,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "contactdensity" => {
                 contact_density = parse_i32(value).unwrap_or(C4M_SOLID);
             }
+            "contactcalls" => {
+                contact_function_calls = parse_bool(value);
+            }
             "collection" => {
                 collection = parse_rect(value).filter(|rect| rect.width > 0 && rect.height > 0);
             }
@@ -347,6 +370,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "consizeoff" => {
                 con_size_off = parse_i32(value).unwrap_or(0).max(0);
+            }
+            "stretchgrowth" => {
+                stretch_growth = parse_bool(value);
             }
             "basement" => {
                 basement = parse_i32(value).unwrap_or(0).max(0);
@@ -395,13 +421,16 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         picture,
         color_by_owner,
         shape,
+        solid_mask,
         vertices,
         contact_density,
+        contact_function_calls,
         collection,
         collection_limit,
         collectible,
         constructable,
         con_size_off,
+        stretch_growth,
         basement,
         rotateable,
         border_bound,
@@ -413,7 +442,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
 
 fn parse_components(value: &str) -> Vec<DefComponent> {
     value
-        .split(|ch| ch == ';' || ch == ',' || ch == ' ')
+        .split([';', ',', ' '])
         .filter_map(|entry| {
             let trimmed = entry.trim();
             if trimmed.is_empty() {
@@ -441,16 +470,12 @@ fn parse_components(value: &str) -> Vec<DefComponent> {
 }
 
 fn normalize_line_connect_token(token: &str) -> String {
-    token
-        .trim()
-        .replace(' ', "")
-        .replace('_', "")
-        .to_ascii_lowercase()
+    token.trim().replace([' ', '_'], "").to_ascii_lowercase()
 }
 
 fn parse_line_connect(value: &str) -> Result<u32, DefinitionError> {
     let mut flags = 0u32;
-    for token in value.split(|ch| ch == '|' || ch == ',' || ch == ';') {
+    for token in value.split(['|', ',', ';']) {
         let normalized = normalize_line_connect_token(token);
         if normalized.is_empty() {
             continue;
@@ -757,10 +782,7 @@ fn load_definition_graphics(
     Option<ColorByOwnerMask>,
     HashMap<String, DefinitionGraphicsVariant>,
 ) {
-    let mut candidates = match collect_graphics_entries(group) {
-        Ok(entries) => entries,
-        Err(_) => Vec::new(),
-    };
+    let mut candidates = collect_graphics_entries(group).unwrap_or_default();
     if candidates.is_empty() {
         return (None, None, HashMap::new());
     }
@@ -901,7 +923,7 @@ fn load_graphics_entry(
     Some((GraphicsImage::new(width, height, image.into_raw()), mask))
 }
 
-fn strip_graphics_prefix<'a>(name: &'a str) -> Option<&'a str> {
+fn strip_graphics_prefix(name: &str) -> Option<&str> {
     let lower = name.to_ascii_lowercase();
     if let Some(stripped) = lower.strip_prefix("graphics") {
         let prefix_len = name.len() - stripped.len();
@@ -1234,7 +1256,7 @@ fn parse_int_array(value: &str) -> impl Iterator<Item = i32> + '_ {
 
 fn parse_rect(value: &str) -> Option<PictureRect> {
     let mut parts = value
-        .split(|c: char| c == ',' || c == ';')
+        .split([',', ';'])
         .map(|part| part.trim())
         .filter(|part| !part.is_empty());
     let x = parse_i32(parts.next()?)?;
@@ -1246,6 +1268,27 @@ fn parse_rect(value: &str) -> Option<PictureRect> {
         y,
         width,
         height,
+    })
+}
+
+fn parse_target_rect(value: &str) -> Option<TargetRect> {
+    let mut parts = value
+        .split([',', ';'])
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty());
+    let x = parse_i32(parts.next()?)?;
+    let y = parse_i32(parts.next()?)?;
+    let width = parse_i32(parts.next()?)?;
+    let height = parse_i32(parts.next()?)?;
+    let target_x = parse_i32(parts.next()?)?;
+    let target_y = parse_i32(parts.next()?)?;
+    Some(TargetRect {
+        x,
+        y,
+        width,
+        height,
+        target_x,
+        target_y,
     })
 }
 
@@ -1271,7 +1314,7 @@ fn parse_i64(value: &str) -> Option<i64> {
 
 fn parse_action_facet(value: &str) -> Option<ActionFacet> {
     let parts: Vec<_> = value
-        .split(|c: char| c == ',' || c == ';')
+        .split([',', ';'])
         .map(|part| part.trim())
         .filter(|part| !part.is_empty())
         .collect();
@@ -1495,6 +1538,28 @@ Attach=1
     }
 
     #[test]
+    fn parse_def_core_solid_mask_target_rect() {
+        let data = br#"
+            [DefCore]
+            id=BASE
+            Shape=-4,-6,12,18
+            SolidMask=2,3,8,9,-1,4
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert_eq!(
+            parsed.solid_mask,
+            Some(TargetRect {
+                x: 2,
+                y: 3,
+                width: 8,
+                height: 9,
+                target_x: -1,
+                target_y: 4,
+            })
+        );
+    }
+
+    #[test]
     fn parse_def_core_rotate_field() {
         let data = br#"
             [DefCore]
@@ -1503,6 +1568,23 @@ Attach=1
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
         assert_eq!(parsed.rotateable, 12);
+    }
+
+    #[test]
+    fn parse_def_core_stretch_growth_field_like_cpp() {
+        // Mirrors src/C4Def.cpp:387: DefCore `StretchGrowth` compiles into
+        // `GrowthType` with default 0. Hand-derived golden: explicit value 1 is
+        // true, and an omitted field is false.
+        let data = br#"
+            [DefCore]
+            id=GROW
+            StretchGrowth=1
+        "#;
+        let parsed = parse_def_core(data).expect("defcore parsed");
+        assert!(parsed.stretch_growth);
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=JOLT\n").expect("defcore parsed");
+        assert!(!defaulted.stretch_growth);
     }
 
     #[test]
@@ -1517,6 +1599,7 @@ Attach=1
             VertexCNAT=8,1,2
             VertexFriction=100,300,300
             ContactDensity=25
+            ContactCalls=1
             BorderBound=7
             UprightAttach=8
         "#;
@@ -1541,6 +1624,7 @@ Attach=1
             }
         );
         assert_eq!(parsed.contact_density, 25);
+        assert!(parsed.contact_function_calls);
         assert_eq!(parsed.border_bound, 7);
         assert_eq!(parsed.upright_attach, 8);
     }

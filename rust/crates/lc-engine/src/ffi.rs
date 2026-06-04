@@ -875,6 +875,7 @@ unsafe fn make_snapshot(
             action_procedure: None,
             effects,
             vertices,
+            own_vertices: None,
             container,
             contents,
             components: HashMap::new(),
