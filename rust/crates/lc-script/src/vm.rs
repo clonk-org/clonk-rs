@@ -162,6 +162,18 @@ impl<'a> Vm<'a> {
             env.define(&var_decl.name, value);
         }
 
+        // Restore the object's numeric Local(n) slots, which persist across calls
+        // like named locals (C++ pObj->Local). They round-trip through local_vars
+        // under "__local_{n}" keys.
+        for (key, value) in local_vars {
+            if let Some(idx) = key
+                .strip_prefix("__local_")
+                .and_then(|s| s.parse::<i32>().ok())
+            {
+                env.local_slots.insert(idx, value.clone());
+            }
+        }
+
         let result = self.execute_statements(&function.body, &mut env, depth)?;
         let value = match result {
             ControlFlow::Return(v) => v,
@@ -190,6 +202,10 @@ impl<'a> Vm<'a> {
             if let Some(val) = env.get(&var_decl.name) {
                 updated_locals.insert(var_decl.name.clone(), val.clone());
             }
+        }
+        // Persist the object's numeric Local(n) slots back to local_vars.
+        for (idx, slot_value) in &env.local_slots {
+            updated_locals.insert(format!("__local_{idx}"), slot_value.clone());
         }
 
         Ok((value, updated_locals))
@@ -536,6 +552,25 @@ impl<'a> Vm<'a> {
                         }
                     }
                 } else {
+                    // `Var(n)` / `Local(n)` are engine builtins that read numeric
+                    // scratch slots (C++ NumVars / object Local), not user
+                    // functions — route reads to the same slot accessor as the
+                    // lvalue path (lc-engine registers neither as a host function).
+                    if let Expr::Variable(name) = callee.as_ref() {
+                        if (name == "Var" || name == "Local")
+                            && args.len() == 1
+                            && !self.functions.contains_key(name)
+                            && !self.host_functions.contains_key(name)
+                        {
+                            let index = Box::new(args[0].clone());
+                            let target = if name == "Var" {
+                                AssignmentTarget::VarSlot(index)
+                            } else {
+                                AssignmentTarget::LocalSlot(index)
+                            };
+                            return self.get_target_value(env, &target);
+                        }
+                    }
                     // Normal call - evaluate args first, then invoke
                     let mut evaluated_args = Vec::with_capacity(args.len());
                     for arg in args {
@@ -1026,10 +1061,9 @@ impl<'a> Vm<'a> {
                         )))
                     }
                 };
-                // Store in environment with special naming scheme
-                // TODO: Replace with proper local slot storage
-                let slot_name = format!("__local_{}", index);
-                env.define(&slot_name, value);
+                // Object numeric local slot (C++ pObj->Local[n]), persisted via
+                // local_vars; function-scoped, negative index clamped to 0.
+                env.set_local_slot(index, value);
                 Ok(())
             }
             AssignmentTarget::VarSlot(index_expr) => {
@@ -1044,10 +1078,9 @@ impl<'a> Vm<'a> {
                         )))
                     }
                 };
-                // Store in environment with special naming scheme
-                // TODO: Replace with proper function-local slot storage
-                let slot_name = format!("__var_{}", index);
-                env.define(&slot_name, value);
+                // Per-call numeric scratch slot (C++ NumVars[n]); function-scoped,
+                // negative index clamped to 0.
+                env.set_var_slot(index, value);
                 Ok(())
             }
             AssignmentTarget::EffectSlot(args) => {
@@ -1189,10 +1222,7 @@ impl<'a> Vm<'a> {
                         )))
                     }
                 };
-                // Retrieve from environment with special naming scheme
-                // TODO: Replace with proper local slot storage
-                let slot_name = format!("__local_{}", index);
-                Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
+                Ok(env.get_local_slot(index))
             }
             AssignmentTarget::VarSlot(index_expr) => {
                 // Evaluate the index expression
@@ -1206,10 +1236,7 @@ impl<'a> Vm<'a> {
                         )))
                     }
                 };
-                // Retrieve from environment with special naming scheme
-                // TODO: Replace with proper function-local slot storage
-                let slot_name = format!("__var_{}", index);
-                Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
+                Ok(env.get_var_slot(index))
             }
             AssignmentTarget::EffectSlot(args) => {
                 // Evaluate all arguments to create the slot identifier
@@ -1375,6 +1402,14 @@ struct Environment {
     scopes: Vec<HashMap<String, Value>>,
     /// `#strict` level of the executing function, for level-correct `==`/`!=`.
     strict_level: Option<u8>,
+    /// C4Script numeric scratch slots, addressed by `Var(n)` / `Local(n)`. These
+    /// are SEPARATE from named variables (C++ `NumVars` and the object `Local`
+    /// array, not `Vars`/`LocalNamed`) and are function-scoped, not block-scoped,
+    /// so a `Local(0) = x` inside a block stays visible after it. Unset reads as
+    /// nil and the index is clamped to >= 0 (C4ValueList::GetItem). `var_slots`
+    /// are per-call; `local_slots` round-trip through the object's `local_vars`.
+    var_slots: HashMap<i32, Value>,
+    local_slots: HashMap<i32, Value>,
 }
 
 impl Environment {
@@ -1387,7 +1422,28 @@ impl Environment {
         Self {
             scopes,
             strict_level,
+            var_slots: HashMap::new(),
+            local_slots: HashMap::new(),
         }
+    }
+
+    fn set_var_slot(&mut self, index: i32, value: Value) {
+        self.var_slots.insert(index.max(0), value);
+    }
+
+    fn get_var_slot(&self, index: i32) -> Value {
+        self.var_slots.get(&index.max(0)).cloned().unwrap_or(Value::Nil)
+    }
+
+    fn set_local_slot(&mut self, index: i32, value: Value) {
+        self.local_slots.insert(index.max(0), value);
+    }
+
+    fn get_local_slot(&self, index: i32) -> Value {
+        self.local_slots
+            .get(&index.max(0))
+            .cloned()
+            .unwrap_or(Value::Nil)
     }
 
     fn push_scope(&mut self) {

@@ -88,6 +88,7 @@ pass + the documented flaky `lc-network` smoke test), `parity verify` and
 | `==`/`!=` honor the script's `#strict` level | `C4Value::Equals` `C4Value.cpp:823` (NONSTRICT/STRICT1 raw, STRICT2 cross-type numeric, STRICT3 type-checked) | VM ignored `#strict`, always type-checked | `Function` carries its `#strict` level (threaded via `Environment`); `<strict 3` compares Int/Bool/nil by integer value (`0==nil`, `1==true`) | `test_strict_equality.rs` |
 | `..` / `..=` concatenation operator | `AB_Concat`/`AB_ConcatIt` `C4AulExec.cpp:594-657`, priority 10 | lexer rejected `..` as an error → content using it failed to parse | lexer emits `Concat`/`ConcatEqual`; parser adds a precedence level between equality and comparison; VM joins string forms (`5..3`=="53"), appends arrays, merges maps | `test_concat_operator.rs` |
 | call-depth limit raised 64 → **512** | `MAX_CONTEXT_STACK=512` `C4AulExec.cpp:62` | Rust limit was 64 → scripts recursing 65-511 deep errored where C++ runs them | `MAX_CALL_DEPTH=512`; `stacker::maybe_grow` grows the native stack on demand (this tree-walker uses ~10 KiB/level, overflowing a 2 MiB thread at ~200 without it) | `test_call_depth.rs` |
+| `Var(n)`/`Local(n)` numeric slots | `FnVar`→`NumVars[n]` `C4Script.cpp:3390`, `FnLocal`→`pObj->Local[n]` `:3408`, `C4ValueList::GetItem` clamp | reads unwired ("unknown function 'Var'"), no negative clamp, block-scoped, `Local` not persisted | dedicated function-scoped `var_slots`/`local_slots`; reads wired; negative index clamped to 0; `Local(n)` persists via `local_vars`, `Var(n)` per-call | `test_var_local_slots.rs` |
 
 `Value::as_c4_int()` (in `lc-script/src/value.rs`) is the shared `_getInt()` mirror:
 `Int→i`, `Bool→0/1`, `Nil→0`, and `None` for String/Array/Proplist (which have no
@@ -719,20 +720,22 @@ Determinism-critical first; each blocks lockstep until done. Foundational items 
    concatenation operator, and the call-depth limit (raised 64 → 512 to match
    `MAX_CONTEXT_STACK`, using `stacker` for safe native-stack growth; `cc`/`psm`/
    `stacker` pinned for Rust 1.87, since newer `cc` pulls `ar_archive_writer` which
-   needs Rust 1.88). **STILL OPEN (the one remaining item-8 part): array-indexed
-   Local/Var storage.** The VM stores numeric `Var(n)`/`Local(n)` slots as separate
-   `__var_n`/`__local_n` HashMap keys (`vm.rs` ~1031/1194). In C++ these are *aliases*:
-   `FnVar(n)` returns `Caller->NumVars[n].GetRef()` (`C4Script.cpp:3390-3395`) and
-   `FnLocal(n)` returns `pObj->Local[n].GetRef()` (`:3408+`), i.e. `Var(0)` is the first
-   parameter and `Local(0)` is the definition's first `local` var. **Concrete divergence:**
-   `func Test(a) { SetVar(0, 99); return a; }` returns 99 in C++ (Var(0) aliases `a`) but
-   5 in Rust (separate `__var_0`). The divergence only manifests when content *mixes*
-   numeric `Var(n)`/`Local(n)` and named access to the *same* slot — pure-numeric and
-   pure-named usage are each internally consistent, which is why no test currently fails.
-   A faithful fix needs reference-semantics local storage (an ordered, index-addressable
-   array shared with the named bindings — hoisting `var` decls to the function scope and
-   ordering object `local` decls), i.e. a core variable-storage refactor. Left as a
-   dedicated effort rather than rushed, since it touches the storage every script uses.
+   needs Rust 1.88). **`Var`/`Local` slot storage — DONE 2026-06-04, and the earlier
+   "aliasing" analysis here was a MISREAD of the C++.** Re-reading the engine: `Var(n)`
+   (`FnVar`→`Caller->NumVars[n]`, `C4Script.cpp:3390`) and `Local(n)`
+   (`FnLocal`→`pObj->Local[n]`, `:3408`) are **separate scratch arrays**, NOT aliases of
+   the named storage — named `var x` lives in `ctx.Vars` (the value stack,
+   `C4AulExec.cpp:411`) and named `local x` in `pObj->LocalNamed`, both distinct from
+   `NumVars`/`Local`. So Rust's separate slots were conceptually right; the *real* bugs
+   were: (1) `Var(n)`/`Local(n)` **reads weren't wired** at all (`return Var(0)` →
+   "unknown function 'Var'") — only writes worked; (2) no **negative-index clamp**
+   (C4ValueList::GetItem clamps `<0`→0); (3) slots lived in block-scoped env keys, so a
+   write inside a block was lost; (4) `Local(n)` didn't **persist** on the object. Fixed
+   with dedicated function-scoped `var_slots`/`local_slots` on the `Environment`: reads
+   routed through the slot accessor, negative indices clamped, `local_slots` round-trip
+   through the object's `local_vars` (`"__local_{n}"` keys) like `pObj->Local` while
+   `var_slots` stay per-call like `NumVars`. Tests: `test_var_local_slots.rs` (8).
+   **Item 8 is now complete** — no remaining sub-parts.
 
 9. **Implement the material reaction execution layer.** Write the `mrf*` handlers behind `MaterialReactionKind` (`material.rs:110-121, 722-767`): `mrfInsertCheck` splash (8× damping) + slide physics (`C4Material.cpp:570-604`), `mrfCorrode` with its two `Random(100)` calls (`:701,724` — RNG-sequence-critical), `mrfPoof`. Wire `ExtractMaterial`/`InsertMaterial` landscape mutations.
 
