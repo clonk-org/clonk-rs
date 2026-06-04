@@ -153,6 +153,8 @@ impl<'a> Parser<'a> {
             body,
             access,
             returns_reference,
+            // Stamped with the script's #strict level in Script::from_ast.
+            strict_level: None,
         })
     }
 

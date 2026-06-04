@@ -124,7 +124,7 @@ impl<'a> Vm<'a> {
             }
         }
 
-        let mut env = Environment::new_with_params(&function.params, args);
+        let mut env = Environment::new_with_params(&function.params, args, function.strict_level);
 
         // Initialize script-level local variables from the per-object storage
         // Use passed-in values instead of always initializing to nil
@@ -192,7 +192,7 @@ impl<'a> Vm<'a> {
             }
         }
 
-        let mut env = Environment::new_with_params(&function.params, args);
+        let mut env = Environment::new_with_params(&function.params, args, function.strict_level);
 
         // Initialize script-level local variables to nil
         // This matches C++ engine behavior where local variables default to nil
@@ -470,7 +470,7 @@ impl<'a> Vm<'a> {
                     return self.evaluate(rhs, env, depth);
                 }
                 let right = self.evaluate(rhs, env, depth)?;
-                self.eval_binary(left, op, right)
+                self.eval_binary(left, op, right, env.strict_level)
             }
             Expr::Call {
                 callee,
@@ -668,7 +668,13 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn eval_binary(&self, left: Value, op: &BinaryOp, right: Value) -> Result<Value, RuntimeError> {
+    fn eval_binary(
+        &self,
+        left: Value,
+        op: &BinaryOp,
+        right: Value,
+        strict: Option<u8>,
+    ) -> Result<Value, RuntimeError> {
         use BinaryOp::*;
         match op {
             Add => self.eval_add(left, right),
@@ -716,8 +722,8 @@ impl<'a> Vm<'a> {
                     ))),
                 }
             }
-            Equal => Ok(Value::Bool(self.values_equal(&left, &right))),
-            NotEqual => Ok(Value::Bool(!self.values_equal(&left, &right))),
+            Equal => Ok(Value::Bool(self.values_equal(&left, &right, strict))),
+            NotEqual => Ok(Value::Bool(!self.values_equal(&left, &right, strict))),
             Less => self.eval_int_cmp(left, right, |a, b| a < b, "<"),
             LessEqual => self.eval_int_cmp(left, right, |a, b| a <= b, "<="),
             Greater => self.eval_int_cmp(left, right, |a, b| a > b, ">"),
@@ -831,11 +837,28 @@ impl<'a> Vm<'a> {
         Ok(Value::Bool(cmp(&left_str, &right_str)))
     }
 
-    fn values_equal(&self, left: &Value, right: &Value) -> bool {
+    /// `==` per the script's #strict level (C4Value::Equals, C4Value.cpp:823).
+    /// `#strict 3` is type-checked (Int and Bool are distinct types); lower
+    /// levels (NONSTRICT/STRICT1 raw-bits, STRICT2 cross-type numeric) collapse,
+    /// for a value-typed Value, to: compare Int/Bool/nil by integer value
+    /// (so 0==nil, 1==true, 0==false), everything else by type+content.
+    fn values_equal(&self, left: &Value, right: &Value, strict: Option<u8>) -> bool {
+        if strict < Some(3) {
+            if let (Some(a), Some(b)) = (left.as_c4_int(), right.as_c4_int()) {
+                return a == b;
+            }
+        }
+        self.values_equal_typed(left, right)
+    }
+
+    /// Type-checked equality (`#strict 3`, C4Value.cpp:835-849): different types
+    /// are never equal, same type compares by content.
+    fn values_equal_typed(&self, left: &Value, right: &Value) -> bool {
         match (left, right) {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
+            (Value::C4Id(a), Value::C4Id(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Proplist(a), Value::Proplist(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
@@ -1289,16 +1312,21 @@ enum ControlFlow {
 
 struct Environment {
     scopes: Vec<HashMap<String, Value>>,
+    /// `#strict` level of the executing function, for level-correct `==`/`!=`.
+    strict_level: Option<u8>,
 }
 
 impl Environment {
-    fn new_with_params(params: &[Parameter], args: &[Value]) -> Self {
+    fn new_with_params(params: &[Parameter], args: &[Value], strict_level: Option<u8>) -> Self {
         let mut scopes = vec![HashMap::new()];
         let base = scopes.last_mut().unwrap();
         for (param, value) in params.iter().zip(args.iter()) {
             base.insert(param.name.clone(), value.clone());
         }
-        Self { scopes }
+        Self {
+            scopes,
+            strict_level,
+        }
     }
 
     fn push_scope(&mut self) {

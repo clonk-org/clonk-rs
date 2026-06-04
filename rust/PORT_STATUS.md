@@ -85,6 +85,7 @@ pass + the documented flaky `lc-network` smoke test), `parity verify` and
 | unary `-` / `~` coerce `nil`/`bool` | `C4AulExec.cpp:460-470` (`SetInt(-_getInt())`, `SetInt(~_getInt())`) | required `Int`, else type error | coerce via `as_c4_int()`; `-` uses `wrapping_neg` (C++-faithful on `i32::MIN`) | `test_int_coercion.rs` |
 | `this` yields the current object | C4Script `this` → `C4V_C4Object` (the object the function runs on) | `Expr::This` hardcoded `Nil` → scripts branching on `this` took the wrong path | VM threads a host `this` value (`Vm::with_this`); engine passes `object_reference_value(object_id)` at all 8 object-context call sites | `test_this_context.rs` (lc-script), `object_function_this_is_the_current_object_not_nil` (lc-engine) |
 | non-nil string/array/proplist are **truthy** even when empty | `C4Value.h:185`→`:76` (`operator bool` is raw-pointer-nonzero) | `as_bool` used `!is_empty()` → empty `""`/`[]`/`{}` were falsy | `as_bool` returns `true` for any String/Array/Proplist; nil and int/bool 0 stay falsy | `test_truthiness.rs` |
+| `==`/`!=` honor the script's `#strict` level | `C4Value::Equals` `C4Value.cpp:823` (NONSTRICT/STRICT1 raw, STRICT2 cross-type numeric, STRICT3 type-checked) | VM ignored `#strict`, always type-checked | `Function` carries its `#strict` level (threaded via `Environment`); `<strict 3` compares Int/Bool/nil by integer value (`0==nil`, `1==true`) | `test_strict_equality.rs` |
 
 `Value::as_c4_int()` (in `lc-script/src/value.rs`) is the shared `_getInt()` mirror:
 `Int→i`, `Bool→0/1`, `Nil→0`, and `None` for String/Array/Proplist (which have no
@@ -97,12 +98,15 @@ panicking in debug builds.
   table above): `as_bool` now returns `true` for any non-nil String/Array/Proplist,
   matching C++ `operator bool` (`C4Value.h:185`→`:76`). All 9 `as_bool` call sites are
   C4Script value-truthiness checks; full suite green, no regressions.
-- **`==`/`!=` are strict-level-dependent in C++.** `C4Value::Equals`
-  (`C4Value.cpp:823`): NONSTRICT/STRICT1 compare raw `Data` bits (`0==nil` true,
-  `1==true` true); STRICT3 is type-checked (`0==nil` false). Rust `values_equal`
-  (`vm.rs:833`) is type-sensitive — it roughly matches **STRICT3** (modern content)
-  but ignores the script's strict level entirely. Full fix needs the VM to thread
-  each function's `#strict` level (already exposed via `Script::strict_level()`).
+- ~~**`==`/`!=` are strict-level-dependent in C++.**~~ **FIXED 2026-06-04** (see
+  fixes table above): each `Function` now carries its script's `#strict` level
+  (stamped in `Script::from_ast`, threaded through the `Environment`), and
+  `values_equal` applies it — `#strict 3` is type-checked, lower levels compare
+  Int/Bool/nil by integer value (`0==nil`, `1==true`, `0==false`). The Rust `Value`
+  is a value type with no pointer identity, so NONSTRICT/STRICT1/STRICT2 collapse to
+  one "lenient" rule; the only unreachable case is NONSTRICT array/map *identity*
+  comparison. Full suite green, no regressions. (Also fixed a latent bug: `C4Id ==
+  C4Id` previously fell through to `false`.)
 - **`..` string-concat operator is unsupported.** C++ concatenation is `..`
   (`AB_Concat`, `C4AulExec.cpp:594`); `+` (`AB_Sum`) is integer-only. The Rust lexer
   does not tokenize `..`, and `+` is repurposed for string concat as a stand-in.

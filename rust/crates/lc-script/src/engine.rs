@@ -40,7 +40,10 @@ impl Script {
 
     fn from_ast(ast: AstScript) -> Self {
         let mut functions = HashMap::new();
-        for function in ast.functions {
+        for mut function in ast.functions {
+            // Each function carries its owning script's #strict level so the VM
+            // can apply level-correct `==`/`!=` (C++ uses Fn->pOrgScript->Strict).
+            function.strict_level = ast.strict_level;
             functions.insert(function.name.clone(), function);
         }
         Self {

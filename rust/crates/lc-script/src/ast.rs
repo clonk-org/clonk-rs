@@ -152,6 +152,10 @@ pub struct Function {
     pub body: Vec<Stmt>,
     pub access: AccessLevel,
     pub returns_reference: bool,
+    /// The `#strict` level of the script this function came from (C++ uses the
+    /// owning script's strict level for `==`/`!=`, `Fn->pOrgScript->Strict`).
+    /// `None` = no `#strict` directive (NONSTRICT). Stamped in `Script::from_ast`.
+    pub strict_level: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
