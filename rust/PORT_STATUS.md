@@ -87,6 +87,7 @@ pass + the documented flaky `lc-network` smoke test), `parity verify` and
 | non-nil string/array/proplist are **truthy** even when empty | `C4Value.h:185`→`:76` (`operator bool` is raw-pointer-nonzero) | `as_bool` used `!is_empty()` → empty `""`/`[]`/`{}` were falsy | `as_bool` returns `true` for any String/Array/Proplist; nil and int/bool 0 stay falsy | `test_truthiness.rs` |
 | `==`/`!=` honor the script's `#strict` level | `C4Value::Equals` `C4Value.cpp:823` (NONSTRICT/STRICT1 raw, STRICT2 cross-type numeric, STRICT3 type-checked) | VM ignored `#strict`, always type-checked | `Function` carries its `#strict` level (threaded via `Environment`); `<strict 3` compares Int/Bool/nil by integer value (`0==nil`, `1==true`) | `test_strict_equality.rs` |
 | `..` / `..=` concatenation operator | `AB_Concat`/`AB_ConcatIt` `C4AulExec.cpp:594-657`, priority 10 | lexer rejected `..` as an error → content using it failed to parse | lexer emits `Concat`/`ConcatEqual`; parser adds a precedence level between equality and comparison; VM joins string forms (`5..3`=="53"), appends arrays, merges maps | `test_concat_operator.rs` |
+| call-depth limit raised 64 → **512** | `MAX_CONTEXT_STACK=512` `C4AulExec.cpp:62` | Rust limit was 64 → scripts recursing 65-511 deep errored where C++ runs them | `MAX_CALL_DEPTH=512`; `stacker::maybe_grow` grows the native stack on demand (this tree-walker uses ~10 KiB/level, overflowing a 2 MiB thread at ~200 without it) | `test_call_depth.rs` |
 
 `Value::as_c4_int()` (in `lc-script/src/value.rs`) is the shared `_getInt()` mirror:
 `Int→i`, `Bool→0/1`, `Nil→0`, and `None` for String/Array/Proplist (which have no
@@ -714,12 +715,14 @@ Determinism-critical first; each blocks lockstep until done. Foundational items 
    carries a host-provided `this` value (`Vm::with_this`, `Engine::call_with_locals_and_this`),
    and all 8 object-context call sites in `lib.rs` pass `compat::object_reference_value(object_id)`
    so a script reading `this` gets the object reference `Proplist{"id"}` (was hardcoded
-   `Nil`). STILL OPEN: replace string-mangled slot access (`vm.rs:1072-1158`) with
-   array-indexed Local/Var storage; raise the stack limit (`vm.rs:11`, currently 64)
-   toward C++'s `MAX_CONTEXT_STACK=512` — but the Rust VM is a native-recursion
-   tree-walker, so a naive bump risks a thread-stack overflow (a hard crash, worse
-   than the current clean error); needs a larger script thread stack or an explicit
-   value stack first. Thread `#strict` level for strict-correct `==`/`!=` (deferred list above).
+   `Nil`). Also DONE 2026-06-04: strict-level-correct `==`/`!=`, the `..`/`..=`
+   concatenation operator, and the call-depth limit (raised 64 → 512 to match
+   `MAX_CONTEXT_STACK`, using `stacker` for safe native-stack growth; `cc`/`psm`/
+   `stacker` pinned for Rust 1.87, since newer `cc` pulls `ar_archive_writer` which
+   needs Rust 1.88). **STILL OPEN (the one remaining item-8 part):** replace
+   string-mangled slot access (`vm.rs:1072-1158`, the `__local_`/`__var_` keys) with
+   array-indexed Local/Var storage — a refactor; reference-parameter tests currently
+   pass, so no known behavioral divergence, but the representation is fragile.
 
 9. **Implement the material reaction execution layer.** Write the `mrf*` handlers behind `MaterialReactionKind` (`material.rs:110-121, 722-767`): `mrfInsertCheck` splash (8× damping) + slide physics (`C4Material.cpp:570-604`), `mrfCorrode` with its two `Random(100)` calls (`:701,724` — RNG-sequence-critical), `mrfPoof`. Wire `ExtractMaterial`/`InsertMaterial` landscape mutations.
 

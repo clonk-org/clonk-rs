@@ -13,6 +13,9 @@ ffi = []
 [dependencies]
 thiserror = "1"
 serde = { version = "1.0", features = ["derive"] }
+# Grows the native stack on demand so deep (but C++-legal, <=512) script
+# recursion doesn't overflow the thread stack in this tree-walking interpreter.
+stacker = "0.1"
 
 [dev-dependencies]
 criterion = "0.5"

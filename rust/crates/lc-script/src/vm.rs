@@ -8,7 +8,18 @@ use crate::engine::HostFunction;
 use crate::error::RuntimeError;
 use crate::value::{Literal, Value};
 
-const MAX_CALL_DEPTH: usize = 64;
+/// Maximum script call-stack depth, matching C++ `MAX_CONTEXT_STACK`
+/// (C4AulExec.cpp:62). A script recursing within this bound runs; beyond it the
+/// VM returns a clean error (C++ throws "call stack overflow", :143-145).
+const MAX_CALL_DEPTH: usize = 512;
+
+/// Run `f` with native-stack headroom, growing the stack when it runs low. Each
+/// script-call level of this tree-walking interpreter uses several KiB of native
+/// stack, so deep (but C++-legal, <=512) recursion would otherwise overflow the
+/// thread stack. Same thread, so thread-local host context stays visible.
+fn maybe_grow<R>(f: impl FnOnce() -> R) -> R {
+    stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, f)
+}
 
 /// String form of a value for `..` concatenation: the raw text for strings (the
 /// `Display` form quotes them), and the `Display` form for everything else.
@@ -79,18 +90,22 @@ impl<'a> Vm<'a> {
             return Err(RuntimeError::new("maximum call depth exceeded"));
         }
 
-        if let Some(function) = self.functions.get(name) {
-            return self
-                .invoke_script_function_with_locals(name, function, args, local_vars, depth);
-        }
+        // Grow the native stack on demand so deep (but C++-legal) recursion in
+        // this tree-walking interpreter doesn't overflow the thread stack.
+        maybe_grow(|| {
+            if let Some(function) = self.functions.get(name) {
+                return self
+                    .invoke_script_function_with_locals(name, function, args, local_vars, depth);
+            }
 
-        if let Some(function) = self.host_functions.get(name) {
-            // Host functions don't modify local variables
-            let result = self.invoke_host_function(name, function, args)?;
-            return Ok((result, local_vars.clone()));
-        }
+            if let Some(function) = self.host_functions.get(name) {
+                // Host functions don't modify local variables
+                let result = self.invoke_host_function(name, function, args)?;
+                return Ok((result, local_vars.clone()));
+            }
 
-        Err(RuntimeError::new(format!("unknown function '{name}'")))
+            Err(RuntimeError::new(format!("unknown function '{name}'")))
+        })
     }
 
     fn invoke(&self, name: &str, args: &[Value], depth: usize) -> Result<Value, RuntimeError> {
@@ -98,15 +113,17 @@ impl<'a> Vm<'a> {
             return Err(RuntimeError::new("maximum call depth exceeded"));
         }
 
-        if let Some(function) = self.functions.get(name) {
-            return self.invoke_script_function(name, function, args, depth);
-        }
+        maybe_grow(|| {
+            if let Some(function) = self.functions.get(name) {
+                return self.invoke_script_function(name, function, args, depth);
+            }
 
-        if let Some(function) = self.host_functions.get(name) {
-            return self.invoke_host_function(name, function, args);
-        }
+            if let Some(function) = self.host_functions.get(name) {
+                return self.invoke_host_function(name, function, args);
+            }
 
-        Err(RuntimeError::new(format!("unknown function '{name}'")))
+            Err(RuntimeError::new(format!("unknown function '{name}'")))
+        })
     }
 
     fn invoke_script_function_with_locals(
@@ -1490,8 +1507,8 @@ mod tests {
                 return Recursive(n - 1);
             }
         "#;
-        // Should fail with MAX_CALL_DEPTH (64) exceeded
-        let error = execute_script(source, "Recursive", &[Value::Int(100)]).unwrap_err();
+        // Should fail past MAX_CALL_DEPTH (512, matching C++ MAX_CONTEXT_STACK).
+        let error = execute_script(source, "Recursive", &[Value::Int(1000)]).unwrap_err();
         assert!(error.message().contains("maximum call depth exceeded"));
     }
 
