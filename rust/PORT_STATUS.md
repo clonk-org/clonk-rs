@@ -709,7 +709,7 @@ Determinism-critical first; each blocks lockstep until done. Foundational items 
 
 7. **Rebuild `script-values` with reference semantics, conversion table, and correct hashing.** Add `FirstRef/NextRef/AddDataRef/DelRef` reference chaining, the `C4ScriptCnvMap` conversion table (`C4Value.cpp:488-598`), and boost-style `hashCombine` (`C4Value.cpp:965-1029`) replacing the derived `Hash` in `value.rs`. Marshal Array/Proplist in `rust_value_to_lc()` (`ffi.rs:157-158`) instead of silently dropping. Save/load + map keys depend on this.
 
-8. **PARTIAL 2026-06-04 — C4Script VM operator parity + `Expr::This`.** DONE this
+8. **DONE 2026-06-04 — C4Script VM operator parity + `Expr::This` + slots.** DONE this
    session (see "Session 2026-06-04 (cont.)" above): div/mod-by-zero → 0, `&&`/`||`
    operand-return, `nil`/`bool`→int coercion across all binary/unary integer
    operators, and **`Expr::This` now returns the current object context** — the VM
