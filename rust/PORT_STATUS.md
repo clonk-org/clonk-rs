@@ -84,6 +84,7 @@ pass + the documented flaky `lc-network` smoke test), `parity verify` and
 | binary int ops coerce `nil→0`, `bool→0/1` | every op reads operands via `_getInt()` under `CheckOpPars<C4V_Any,...>`; `C4Value.h:170` (Int/Bool share `Data.Int`, nil's data is 0) | required both operands to be `Int`, else type error | `Value::as_c4_int()` coerces nil/bool; `+`,`-`,`*`,`/`,`%`,`&`,`\|`,`^`,`<<`,`>>`,`<`,`<=`,`>`,`>=` all use it | `test_int_coercion.rs` |
 | unary `-` / `~` coerce `nil`/`bool` | `C4AulExec.cpp:460-470` (`SetInt(-_getInt())`, `SetInt(~_getInt())`) | required `Int`, else type error | coerce via `as_c4_int()`; `-` uses `wrapping_neg` (C++-faithful on `i32::MIN`) | `test_int_coercion.rs` |
 | `this` yields the current object | C4Script `this` → `C4V_C4Object` (the object the function runs on) | `Expr::This` hardcoded `Nil` → scripts branching on `this` took the wrong path | VM threads a host `this` value (`Vm::with_this`); engine passes `object_reference_value(object_id)` at all 8 object-context call sites | `test_this_context.rs` (lc-script), `object_function_this_is_the_current_object_not_nil` (lc-engine) |
+| non-nil string/array/proplist are **truthy** even when empty | `C4Value.h:185`→`:76` (`operator bool` is raw-pointer-nonzero) | `as_bool` used `!is_empty()` → empty `""`/`[]`/`{}` were falsy | `as_bool` returns `true` for any String/Array/Proplist; nil and int/bool 0 stay falsy | `test_truthiness.rs` |
 
 `Value::as_c4_int()` (in `lc-script/src/value.rs`) is the shared `_getInt()` mirror:
 `Int→i`, `Bool→0/1`, `Nil→0`, and `None` for String/Array/Proplist (which have no
@@ -92,13 +93,10 @@ now uses `wrapping_div`/`wrapping_rem` to match C++ 2's-complement wrap instead 
 panicking in debug builds.
 
 **Found but deferred (logged, not yet fixed):**
-- **Truthiness of empty containers diverges.** C++ `C4Value::operator bool`
-  (`C4Value.h:185` → `C4V_Data::operator bool`, `:76`) is pointer/raw-nonzero based,
-  so a non-nil string/array/proplist is **truthy even when empty**. Rust
-  `Value::as_bool` (`value.rs:16`) treats empty string/array/proplist as falsy
-  (`!is_empty()`). Affects `if`/`while`/`!`/`&&`/`||` on empty containers. Higher
-  regression risk (many engine tests assume emptiness-falsiness); real-content
-  frequency is low. Needs its own RED→GREEN cycle + full-suite review.
+- ~~**Truthiness of empty containers diverges.**~~ **FIXED 2026-06-04** (see fixes
+  table above): `as_bool` now returns `true` for any non-nil String/Array/Proplist,
+  matching C++ `operator bool` (`C4Value.h:185`→`:76`). All 9 `as_bool` call sites are
+  C4Script value-truthiness checks; full suite green, no regressions.
 - **`==`/`!=` are strict-level-dependent in C++.** `C4Value::Equals`
   (`C4Value.cpp:823`): NONSTRICT/STRICT1 compare raw `Data` bits (`0==nil` true,
   `1==true` true); STRICT3 is type-checked (`0==nil` false). Rust `values_equal`

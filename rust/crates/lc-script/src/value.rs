@@ -13,14 +13,18 @@ pub enum Value {
 }
 
 impl Value {
+    /// C4Script truthiness, matching C++ `C4Value::operator bool` (C4Value.h:185
+    /// → `C4V_Data::operator bool`, :76): raw-nonzero on the `Data` union. For
+    /// strings/arrays/proplists that is a *pointer*, so a non-nil one is truthy
+    /// even when empty; only nil and integer/bool zero are falsy.
     pub fn as_bool(&self) -> bool {
         match self {
             Value::Bool(b) => *b,
             Value::Int(i) => *i != 0,
-            Value::String(s) => !s.is_empty(),
+            Value::String(_) => true,
             Value::C4Id(id) => !id.is_empty(),
-            Value::Array(values) => !values.is_empty(),
-            Value::Proplist(entries) => !entries.is_empty(),
+            Value::Array(_) => true,
+            Value::Proplist(_) => true,
             Value::Nil => false,
         }
     }
