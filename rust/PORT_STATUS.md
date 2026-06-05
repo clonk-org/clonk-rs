@@ -42,9 +42,11 @@ per-pixel contact-loop slices.
 - **`cargo xtask parity verify`** (also `cargo test -p lc-engine
   parity_differential_matches_cpp_golden`) — the **real C++↔Rust differential**:
   diffs `C4Fixed` math, LCG (`Random`/`RandomCount` incl. range-0, `Randomize3`/
-  `Rnd3`), `Sin`/`Cos`, and per-frame sub-pixel accumulation (`fix += dir`,
-  `ydir += gravity`) byte-for-byte against a golden from the real engine
-  (`src/Fixed.{h,cpp}`, `src/C4Random.h`). Reports first mismatch; negative
+  `Rnd3`), `Sin`/`Cos`, per-frame sub-pixel accumulation (`fix += dir`,
+  `ydir += gravity`), the `C4Value` map-key hash (`script_value_hash`), and the
+  `C4ScriptCnvMap` conversion table + `ConvertTo` dispatch (`script_value_convert`)
+  byte-for-byte against a golden from the real engine
+  (`src/Fixed.{h,cpp}`, `src/C4Random.h`, `src/C4Value.cpp`). Reports first mismatch; negative
   control confirms it fails on a corrupted golden. **Gates Theme C.** Regenerate:
   `cargo xtask parity record`. See `parity/README.md`.
 - **`cargo xtask engine-snapshots verify`** — Rust-vs-Rust determinism
@@ -95,7 +97,7 @@ audited subsystems are determinism-critical.
 
 | Subsystem | Coverage | Key Parity Risk | Rust Location |
 |---|---|---|---|
-| **script-values** | **stub (98 vs 2907 LOC)** | No reference semantics (`FirstRef/NextRef/AddDataRef`), no `C4ScriptCnvMap` 81-element conversion table, naive hash instead of boost `hashCombine` (breaks map keys), no `GuessType()`, no string interning. FFI silently drops Array/Proplist (`ffi.rs:157-158`). Save/load + net sync broken. | `lc-script/src/value.rs` |
+| **script-values** | partial | **Done:** `C4ScriptCnvMap` 81-cell conversion table + `ConvertTo` dispatch (differential-locked `script_value_convert`); boost `hashCombine` + libc++ `std::hash<C4Value>` map-key hash (`script_value_hash`). **Open:** reference semantics (`FirstRef/NextRef/AddDataRef`), `GuessType()` data-nonzero path (unreachable in the eager Rust value model — types are always known), string interning. FFI still silently drops Array/Proplist (`ffi.rs:157-158`). Save/load + net sync still incomplete. | `lc-script/src/value.rs` |
 | **particles** | **stub (420 vs 808)** | `ActiveParticle::tick()` is `pos+=vel; life-=1` only — no gravity, wind, collision, alpha fade, animation, or `SafeRandom` variation. `Cast()`, `Push()`, all `fx*` procs, `C4ParticleDef::Load()` absent. Any particle scenario desyncs RNG + state. | `lib.rs:669-860,12136-12547`; `compat.rs:8355-8539` |
 | **findobject-ocf** | **stub (35%, 280 vs 956)** | No `CreateByValue()` condition-tree factory (nested `C4FO_And/Or/Not` fail silently), no `C4SortObject` (`Random/Speed/Mass/Value` unsorted → desync), no `C4FO_AtRect`/`UseShapes()` beyond the legacy rectangle path. | `compat.rs:1667-1835,6784-6931`; `ocf.rs` |
 | **movement-physics** | partial | Central motion accumulates sub-pixel fixed velocity, steps x/y per pixel, consumes DefCore/current owned vertices and `StretchGrowth`/Jolt construction shape updates, runs shape/vertex `ContactCheck`, dispatches ContactLeft/Right/Top/Bottom and Hit/Hit2/Hit3 in C++ order, applies redirect/friction, clamps landscape and layer `TargetBounds`, overlays active DefCore solid masks as `MCVehic` contact density with sprite-alpha bitmap transparency, supports `Shape.Attach`, forces Jump/default on attach loss, rolls back per-degree rotation, and uses C++ density levels for background/material/vehicle contact checks (`C4M_Background=0`, material `Density`, closed side bounds and solid masks `C4M_Vehicle=100`). **Missing:** rotated solid-mask put-buffer semantics, `SetSolidMask`/solid-mask update lifetime, attached-object pushback. | `lib.rs`, `landscape.rs` |
@@ -140,10 +142,11 @@ array indices/dispatch; `forward_rest` variadic TODO (`vm.rs:464,484`);
 (`:493-496`) by-name, no inheritance/overload chain. (`Expr::This`, div-by-zero,
 slots, stack limit — fixed; see Completed.)
 
-**script-values** — `Value` enum (`value.rs:5-13`) no `GetRefVal()`; `type_name()`
-(`:28-38`) "proplist" not "map", missing object types; `LcScriptValue` FFI
-(`ffi.rs:10-17`) only Nil/Int/Bool/String; `rust_value_to_lc()` (`:157-158`)
-drops Array/Proplist.
+**script-values** — `C4ScriptCnvMap`/`ConvertTo` and the map-key hash are no
+longer stubs (ported + differential-locked). Still stubbed: `Value` enum has no
+`GetRefVal()`/reference type; `type_name()` reports "proplist" not "map" and
+lacks object types; `LcScriptValue` FFI only Nil/Int/Bool/String;
+`rust_value_to_lc()` (`ffi.rs:157-158`) drops Array/Proplist.
 
 **objects-core** — `reset_action_to_default` (`lib.rs:10629`) no `SetActionByName`
 enforcement; `apply_*_procedure` (`:10244+`) no ObjectCom transitions;
@@ -266,9 +269,12 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
 6. **TODO** — Remaining `CrossCheck()` inter-object loop (919 LOC): Tick3/5/10/35
    scheduling, `RejectFight`/`CatchBlow`, hit energy/fling, contained-object fight,
    contact incineration, exact post-callback recheck.
-7. **TODO** — Rebuild `script-values`: `FirstRef/NextRef/AddDataRef/DelRef`,
-   `C4ScriptCnvMap` (`C4Value.cpp:488-598`), boost `hashCombine` (`:965-1029`),
-   marshal Array/Proplist in `rust_value_to_lc()` (`ffi.rs:157-158`).
+7. **PARTIAL** — `script-values`. **Done:** `C4ScriptCnvMap` 81-cell table +
+   `ConvertTo` dispatch (`C4Value.cpp:431-598`; differential-locked
+   `script_value_convert` — 81-cell grid + per-(value,target,#strict) result);
+   boost `hashCombine` + `std::hash<C4Value>` (`:923-1029`; `script_value_hash`).
+   **TODO:** reference semantics (`FirstRef/NextRef/AddDataRef/DelRef`), marshal
+   Array/Proplist in `rust_value_to_lc()` (`ffi.rs:157-158`).
 8. **DONE** — C4Script VM operator parity + `Expr::This` + Var/Local slots (see
    Completed).
 9. **PARTIAL** — Material reaction execution. Mass-mover path runs
@@ -299,6 +305,26 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
 ---
 
 ## Completed (changelog)
+
+**`C4ScriptCnvMap` conversion table — item 7 (partial) (2026-06-04).** Ported the
+9×9 type-conversion table and `ConvertTo` dispatch from `C4Value.cpp:431-598`:
+- `C4VType` (the `C4V_Type` tag, C4Value.h:37-54), `CnvFn` (the six converter
+  classes from the C4Value.cpp:481-486 macros; `Warn` derived since it is a pure
+  function of the class), and the table transcribed cell-for-cell into
+  `value.rs` (`C4_SCRIPT_CNV_MAP`).
+- `Value::c4v_type()` (the eager Rust model only maps `Nil`→`C4V_Any`; no
+  `C4V_C4Object`/`C4V_pC4Value` *value* yet) and `Value::convert_to(to, strict)`
+  mirroring `ConvertTo`: `CnvOK`→true, `FnCnvError`→false,
+  `FnCnvDirectOld`→`!strict`, `FnCnvInt2Id`→int in `0..=9999`, `FnCnvGuess`→true
+  (nil "is every type except a reference"; the Game-dependent `GuessType`
+  data-nonzero path is unreachable because types are always known),
+  `FnCnvDeref`→unreachable (no Rust reference value).
+- Locked by a new differential section `script_value_convert` (oracle
+  `oracle_main.cpp` transcribes the table independently; golden regenerated):
+  the full 81-cell classification grid + 216 per-(value, target type, #strict)
+  `ConvertTo` results. Negative control verified (corrupting one cell fails with
+  `cell [1][3]`). RED→GREEN per increment; `cargo test --workspace` +
+  `cargo clippy -p lc-script -p lc-engine` green.
 
 **Theme C — fixed precision through physics (2026-06-04).** All ported physics
 paths write authoritative `fixed_velocity`, integer mirror derived via `fixtoi`;

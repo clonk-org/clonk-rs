@@ -24,6 +24,8 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `rng_randomize3` | `src/C4Random.cpp` `FRndBuf3` | mass-mover / `Rnd3` |
 | `material_corrode_rng` | `src/C4Material.cpp` corrosion branches | material reaction execution RNG ordering |
 | `mass_mover_transfer_rng` | `src/C4MassMover.cpp` transfer calls | `Random(10)` before `Rnd3()` immediate-execution decision |
+| `script_value_hash` | `src/C4Value.cpp` `hashCombine` / `std::hash<C4Value>` | map-key lookup for nested script values |
+| `script_value_convert` | `src/C4Value.cpp:488-598` `C4ScriptCnvMap` + `ConvertTo` | type-coercion rules for `getInt`/`getStr`/… and parameter marshaling |
 | `movement` | `src/C4Movement.cpp:260,627` accumulation | the Theme-C core: `fix += dir`, `ydir += gravity` |
 
 **Out of scope (Phase 2):** the C++ per-pixel collision/contact loop
@@ -48,6 +50,15 @@ see "Phase 2" below.
   RNG traces copied from the branch order in `src/C4Material.cpp` and
   `src/C4MassMover.cpp`; they intentionally avoid full engine setup while still
   pinning sync-critical `Random()` call order.
+- `script_value_hash` is a source-aligned standalone copy of the small
+  `hashCombine` / recursive `std::hash<C4Value>` path in `src/C4Value.cpp`.
+- `script_value_convert` transcribes the 9×9 `C4ScriptCnvMap` table and the
+  `ConvertTo` dispatch (`src/C4Value.cpp:431-598`) cell-for-cell — the real table
+  is a private static of function pointers that cannot be linked without all of
+  Game/C4Object. The oracle's copy and the Rust port's are *independent*, so a
+  transcription slip on either side surfaces as a divergence. The Game-dependent
+  `FnCnvGuess`/`GuessType` branch only runs for a non-zero `C4V_Any`; every input
+  is a concrete type or nil, so no engine setup is needed.
 
 If a divergence is ever a *bug in the golden* rather than the Rust port, fix the
 C++ source and regenerate.

@@ -16,6 +16,7 @@
 //! On any divergence the test panics with the first mismatch (section, index,
 //! field, C++ value vs Rust value).
 
+use lc_script::{c4_hash_combine, cnv_fn, C4VType, Value as ScriptValue};
 use serde_json::Value;
 
 use crate::material::{consume_corrosion_effect_rng, evaluate_corrosion};
@@ -43,6 +44,12 @@ fn i(v: &Value, key: &str) -> i64 {
         .unwrap_or_else(|| panic!("golden entry missing integer field `{key}`: {v}"))
 }
 
+fn u(v: &Value, key: &str) -> u64 {
+    v.get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("golden entry missing unsigned field `{key}`: {v}"))
+}
+
 /// Assert two values are equal, panicking with a precise first-divergence report.
 fn expect_eq(section: &str, index: usize, field: &str, cpp: i64, rust: i64) {
     assert_eq!(
@@ -50,6 +57,34 @@ fn expect_eq(section: &str, index: usize, field: &str, cpp: i64, rust: i64) {
         "PARITY DIVERGENCE in `{section}` entry {index} field `{field}`: \
          C++ golden = {cpp}, Rust = {rust}"
     );
+}
+
+fn expect_eq_u64(section: &str, index: usize, field: &str, cpp: u64, rust: u64) {
+    assert_eq!(
+        cpp, rust,
+        "PARITY DIVERGENCE in `{section}` entry {index} field `{field}`: \
+         C++ golden = {cpp}, Rust = {rust}"
+    );
+}
+
+/// Reconstruct the `script_value_convert` source value the oracle emitted for a
+/// given case name (must stay in sync with `conv_cases` in oracle_main.cpp).
+fn convert_case_value(name: &str) -> ScriptValue {
+    match name {
+        "nil" => ScriptValue::Nil,
+        "int_0" => ScriptValue::Int(0),
+        "int_5000" => ScriptValue::Int(5000),
+        "int_9999" => ScriptValue::Int(9999),
+        "int_10000" => ScriptValue::Int(10000),
+        "int_neg1" => ScriptValue::Int(-1),
+        "bool_true" => ScriptValue::Bool(true),
+        "bool_false" => ScriptValue::Bool(false),
+        "id_CLNK" => ScriptValue::C4Id("CLNK".to_string()),
+        "string" => ScriptValue::String("x".to_string()),
+        "array" => ScriptValue::Array(Vec::new()),
+        "map" => ScriptValue::Proplist(std::collections::HashMap::new()),
+        other => panic!("unknown script_value_convert case `{other}`"),
+    }
 }
 
 #[test]
@@ -283,7 +318,151 @@ fn parity_differential_matches_cpp_golden() {
         );
     }
 
-    // 9. Movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 9. C4Value map-key hash: C4Value.cpp:923-1029.
+    {
+        let section = &golden["script_value_hash"];
+        expect_eq_u64(
+            "script_value_hash",
+            0,
+            "sizeof_size_t",
+            u(section, "sizeof_size_t"),
+            std::mem::size_of::<usize>() as u64,
+        );
+
+        for (idx, e) in section["hash_combine"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let seed = u(e, "seed") as usize;
+            let next = u(e, "next") as usize;
+            expect_eq_u64(
+                "script_value_hash.hash_combine",
+                idx,
+                "hash",
+                u(e, "hash"),
+                c4_hash_combine(seed, next) as u64,
+            );
+        }
+
+        let mut map = std::collections::HashMap::new();
+        map.insert("a".to_string(), ScriptValue::Int(1));
+        map.insert(
+            "b".to_string(),
+            ScriptValue::Array(vec![ScriptValue::Int(2), ScriptValue::Int(3)]),
+        );
+        let mut reversed = std::collections::HashMap::new();
+        reversed.insert(
+            "b".to_string(),
+            ScriptValue::Array(vec![ScriptValue::Int(2), ScriptValue::Int(3)]),
+        );
+        reversed.insert("a".to_string(), ScriptValue::Int(1));
+
+        let cases = [
+            ("nil", ScriptValue::Nil),
+            ("int_zero", ScriptValue::Int(0)),
+            ("int_42", ScriptValue::Int(42)),
+            ("int_minus_one", ScriptValue::Int(-1)),
+            ("bool_false", ScriptValue::Bool(false)),
+            ("bool_true", ScriptValue::Bool(true)),
+            ("id_CLNK", ScriptValue::C4Id("CLNK".to_string())),
+            ("id_1337", ScriptValue::C4Id("1337".to_string())),
+            ("string_empty", ScriptValue::String(String::new())),
+            ("string_alpha", ScriptValue::String("alpha".to_string())),
+            (
+                "string_16",
+                ScriptValue::String("abcdefghijklmnop".to_string()),
+            ),
+            (
+                "string_24",
+                ScriptValue::String("abcdefghijklmnopqrstuvwx".to_string()),
+            ),
+            (
+                "string_40",
+                ScriptValue::String("abcdefghijklmnopqrstuvwxyz0123456789ABCD".to_string()),
+            ),
+            (
+                "string_80",
+                ScriptValue::String(
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_string(),
+                ),
+            ),
+            (
+                "array_1_true_x",
+                ScriptValue::Array(vec![
+                    ScriptValue::Int(1),
+                    ScriptValue::Bool(true),
+                    ScriptValue::String("x".to_string()),
+                ]),
+            ),
+            ("map_a1_b23", ScriptValue::Proplist(map)),
+            ("map_b23_a1", ScriptValue::Proplist(reversed)),
+        ];
+        for (idx, (name, value)) in cases.iter().enumerate() {
+            let entry = section["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| candidate["name"].as_str() == Some(*name))
+                .unwrap_or_else(|| panic!("missing script_value_hash case `{name}`"));
+            expect_eq_u64(
+                "script_value_hash.values",
+                idx,
+                "hash",
+                u(entry, "hash"),
+                value.c4_value_hash() as u64,
+            );
+        }
+    }
+
+    // 9b. C4ScriptCnvMap conversion table + ConvertTo dispatch: C4Value.cpp:488-598.
+    {
+        let section = &golden["script_value_convert"];
+        expect_eq(
+            "script_value_convert",
+            0,
+            "type_count",
+            i(section, "type_count"),
+            C4VType::ALL.len() as i64,
+        );
+
+        // The 81-cell classification grid, source row × destination column.
+        for (row, row_str) in section["table"].as_array().unwrap().iter().enumerate() {
+            for (col, code) in row_str.as_str().unwrap().chars().enumerate() {
+                let rust = cnv_fn(C4VType::ALL[row], C4VType::ALL[col]).code();
+                assert_eq!(
+                    code, rust,
+                    "PARITY DIVERGENCE in `script_value_convert.table` cell [{row}][{col}]: \
+                     C++ golden = {code}, Rust = {rust}"
+                );
+            }
+        }
+
+        // Per-(value, target type, #strict) ConvertTo results.
+        for (idx, e) in section["convert"].as_array().unwrap().iter().enumerate() {
+            let value = convert_case_value(e["name"].as_str().unwrap());
+            expect_eq(
+                "script_value_convert.convert",
+                idx,
+                "from",
+                i(e, "from"),
+                value.c4v_type().index() as i64,
+            );
+            let to = C4VType::ALL[i(e, "to") as usize];
+            let strict = i(e, "strict") != 0;
+            expect_eq(
+                "script_value_convert.convert",
+                idx,
+                "result",
+                i(e, "result"),
+                value.convert_to(to, strict) as i64,
+            );
+        }
+    }
+
+    // 10. Movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    fix_x += xdir; fix_y += (ydir += gravity); matching C4Movement.cpp.
     for scn in golden["movement"].as_array().unwrap() {
         let name = scn["name"].as_str().unwrap_or("?");

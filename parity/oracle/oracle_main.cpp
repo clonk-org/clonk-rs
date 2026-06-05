@@ -22,6 +22,10 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <functional>
+#include <initializer_list>
+#include <string_view>
+#include <utility>
 
 #include "oracle_fixed.h" // generated from src/Fixed.h by gen_golden.sh
 #include <C4Random.h>     // real engine header (no DEBUGREC)
@@ -53,6 +57,196 @@ static void consume_corrode_effect_rng()
 {
     if (!Random(5)) Random(3);
     if (!Random(20)) { /* sound effect decision only; payload has no RNG */ }
+}
+
+// --- C4Value hash: mirrors src/C4Value.cpp:923-1029 --------------------------
+// based on boost container_hash's hashCombine
+static constexpr void hashCombine(std::size_t &hash, std::size_t nextHash)
+{
+    if constexpr (sizeof(std::size_t) == 4)
+    {
+#define rotateLeft32(x, r) (x << r) | (x >> (32 - r))
+        constexpr std::size_t c1 = 0xcc9e2d51;
+        constexpr std::size_t c2 = 0x1b873593;
+
+        nextHash *= c1;
+        nextHash = rotateLeft32(nextHash, 15);
+        nextHash *= c2;
+
+        hash ^= nextHash;
+        hash = rotateLeft32(hash, 13);
+        hash = hash * 5 + 0xe6546b64;
+#undef rotateLeft32
+    }
+    else if constexpr (sizeof(std::size_t) == 8)
+    {
+        constexpr std::size_t m = 0xc6a4a7935bd1e995;
+        constexpr int r = 47;
+
+        nextHash *= m;
+        nextHash ^= nextHash >> r;
+        nextHash *= m;
+
+        hash ^= nextHash;
+        hash *= m;
+
+        // Completely arbitrary number, to prevent 0's
+        // from hashing to 0.
+        hash += 0xe6546b64;
+    }
+    else
+    {
+        hash ^= nextHash + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    }
+}
+
+enum C4V_Type_Oracle
+{
+    C4V_Any_Oracle = 0,
+    C4V_Int_Oracle = 1,
+    C4V_Bool_Oracle = 2,
+    C4V_C4ID_Oracle = 3,
+    C4V_String_Oracle = 5,
+    C4V_Array_Oracle = 6,
+    C4V_Map_Oracle = 7,
+};
+
+static std::size_t oracleC4Id(std::string_view str)
+{
+    if (str.size() < 4 || str == "NONE") return 0;
+
+    std::size_t id = 0;
+    bool numeric = true;
+    for (const auto c : str)
+    {
+        if (c < '0' || c > '9') { numeric = false; break; }
+        id *= 10;
+        id += c - '0';
+    }
+    if (numeric) return id;
+
+    id = 0;
+    for (std::size_t i = 4; i > 0; --i)
+    {
+        id <<= 8;
+        id |= static_cast<unsigned char>(str[i - 1]);
+    }
+    return id;
+}
+
+static std::size_t hashInt(int32_t value)
+{
+    std::size_t hash = std::hash<C4V_Type_Oracle>{}(C4V_Int_Oracle);
+    hashCombine(hash, std::hash<int32_t>{}(value));
+    return hash;
+}
+
+static std::size_t hashBool(bool value)
+{
+    std::size_t hash = std::hash<C4V_Type_Oracle>{}(C4V_Bool_Oracle);
+    hashCombine(hash, std::hash<bool>{}(value));
+    return hash;
+}
+
+static std::size_t hashId(std::string_view value)
+{
+    std::size_t hash = std::hash<C4V_Type_Oracle>{}(C4V_C4ID_Oracle);
+    hashCombine(hash, std::hash<int32_t>{}(static_cast<int32_t>(oracleC4Id(value))));
+    return hash;
+}
+
+static std::size_t hashString(std::string_view value)
+{
+    std::size_t hash = std::hash<C4V_Type_Oracle>{}(C4V_String_Oracle);
+    hashCombine(hash, std::hash<std::string_view>{}(value));
+    return hash;
+}
+
+static std::size_t hashArray(std::initializer_list<std::size_t> values)
+{
+    std::size_t hash = std::hash<C4V_Type_Oracle>{}(C4V_Array_Oracle);
+    for (auto value : values) hashCombine(hash, value);
+    return hash;
+}
+
+static std::size_t hashMap(std::initializer_list<std::pair<std::size_t, std::size_t>> entries)
+{
+    std::size_t hash = std::hash<C4V_Type_Oracle>{}(C4V_Map_Oracle);
+    std::size_t contentHash = 0;
+    for (auto [key, value] : entries)
+    {
+        std::size_t itemHash = key;
+        hashCombine(itemHash, value);
+        contentHash ^= itemHash; // order mustn't matter
+    }
+    hashCombine(hash, contentHash);
+    return hash;
+}
+
+static void printHashCombineCase(const char *name, std::size_t seed, std::size_t nextHash)
+{
+    std::size_t hash = seed;
+    hashCombine(hash, nextHash);
+    printf("{\"name\":\"%s\",\"seed\":%zu,\"next\":%zu,\"hash\":%zu}", name, seed, nextHash, hash);
+}
+
+static void printHashValueCase(const char *name, std::size_t hash)
+{
+    printf("{\"name\":\"%s\",\"hash\":%zu}", name, hash);
+}
+
+// --- C4ScriptCnvMap: transcribed from src/C4Value.cpp:481-598 ----------------
+// The 9x9 type-conversion table and its six converter classes. The real table
+// is a private static member of function pointers that cannot be linked here
+// without pulling in all of Game/C4Object, so it is transcribed cell-for-cell.
+// This is an INDEPENDENT copy from the Rust port's (lc-script/src/value.rs); a
+// transcription error on either side surfaces as a divergence below. The
+// Game-dependent FnCnvGuess/GuessType branch (C4Value.cpp:299-331) runs only for
+// a non-zero C4V_Any value; every oracle input is a concrete type or nil
+// (Data==0), so it is never exercised and no engine setup is required.
+enum CnvClass { CNV_OK, CNV_ERROR, CNV_GUESS, CNV_INT2ID, CNV_DIRECTOLD, CNV_DEREF };
+
+static const CnvClass C4ScriptCnvMapOracle[9][9] = {
+    //   any            int            bool       c4id           object     string     array      map        ref
+    { CNV_OK,        CNV_GUESS,     CNV_GUESS, CNV_GUESS,     CNV_GUESS, CNV_GUESS, CNV_GUESS, CNV_GUESS, CNV_ERROR },  // C4V_Any      (:490-501)
+    { CNV_OK,        CNV_OK,        CNV_OK,    CNV_INT2ID,    CNV_ERROR, CNV_ERROR, CNV_ERROR, CNV_ERROR, CNV_ERROR },  // C4V_Int      (:502-513)
+    { CNV_OK,        CNV_OK,        CNV_OK,    CNV_DIRECTOLD, CNV_ERROR, CNV_ERROR, CNV_ERROR, CNV_ERROR, CNV_ERROR },  // C4V_Bool     (:514-525)
+    { CNV_OK,        CNV_DIRECTOLD, CNV_OK,    CNV_OK,        CNV_ERROR, CNV_ERROR, CNV_ERROR, CNV_ERROR, CNV_ERROR },  // C4V_C4ID     (:526-537)
+    { CNV_OK,        CNV_DIRECTOLD, CNV_OK,    CNV_ERROR,     CNV_OK,    CNV_ERROR, CNV_ERROR, CNV_ERROR, CNV_ERROR },  // C4V_C4Object (:538-549)
+    { CNV_OK,        CNV_DIRECTOLD, CNV_OK,    CNV_ERROR,     CNV_ERROR, CNV_OK,    CNV_ERROR, CNV_ERROR, CNV_ERROR },  // C4V_String   (:550-561)
+    { CNV_OK,        CNV_ERROR,     CNV_OK,    CNV_ERROR,     CNV_ERROR, CNV_ERROR, CNV_OK,    CNV_ERROR, CNV_ERROR },  // C4V_Array    (:562-573)
+    { CNV_OK,        CNV_ERROR,     CNV_OK,    CNV_ERROR,     CNV_ERROR, CNV_ERROR, CNV_ERROR, CNV_OK,    CNV_ERROR },  // C4V_Map      (:574-585)
+    { CNV_DEREF,     CNV_DEREF,     CNV_DEREF, CNV_DEREF,     CNV_DEREF, CNV_DEREF, CNV_DEREF, CNV_DEREF, CNV_OK },     // C4V_pC4Value (:586-597)
+};
+
+static char cnvCode(CnvClass c)
+{
+    switch (c)
+    {
+    case CNV_OK: return 'O';
+    case CNV_ERROR: return 'E';
+    case CNV_GUESS: return 'G';
+    case CNV_INT2ID: return '2';
+    case CNV_DIRECTOLD: return 'D';
+    case CNV_DEREF: return 'R';
+    }
+    return '?';
+}
+
+// Mirror C4Value::ConvertTo (C4Value.h:248-254): dispatch the cell's converter.
+// `intData` is the value's Data.Int (used by Int2Id and the nil/Guess test).
+static bool oracleConvertTo(int fromType, int toType, int32_t intData, bool fStrict)
+{
+    switch (C4ScriptCnvMapOracle[fromType][toType])
+    {
+    case CNV_OK: return true;                                 // null fn -> true
+    case CNV_ERROR: return false;                            // FnCnvError
+    case CNV_DIRECTOLD: return !fStrict;                     // FnCnvDirectOld
+    case CNV_INT2ID: return intData >= 0 && intData <= 9999; // FnCnvInt2Id
+    case CNV_GUESS: return intData == 0;                     // FnCnvGuess: nil (Data==0) is every type
+    case CNV_DEREF: return false;                           // FnCnvDeref: no refs among oracle inputs
+    }
+    return false;
 }
 
 int main()
@@ -214,7 +408,100 @@ int main()
     arr_end();
     printf(",\n");
 
-    // 9. movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 9. C4Value map-key hashing. `std::hash<C4Value>` seeds with the C4V_Type,
+    //    then combines recursively with Boost's current hashCombine. C4ValueHash
+    //    lookup correctness depends on this for nested array/map keys.
+    printf("\"script_value_hash\":{\"sizeof_size_t\":%zu,\"hash_combine\":[", sizeof(std::size_t));
+    printHashCombineCase("zero_zero", 0, 0);
+    printf(",");
+    printHashCombineCase("one_zero", 1, 0);
+    printf(",");
+    printHashCombineCase("zero_one", 0, 1);
+    printf(",");
+    printHashCombineCase("mixed", static_cast<std::size_t>(0x0123456789abcdefULL), static_cast<std::size_t>(0xfedcba9876543210ULL));
+    printf("],\"values\":[");
+    printHashValueCase("nil", std::hash<C4V_Type_Oracle>{}(C4V_Any_Oracle));
+    printf(",");
+    printHashValueCase("int_zero", hashInt(0));
+    printf(",");
+    printHashValueCase("int_42", hashInt(42));
+    printf(",");
+    printHashValueCase("int_minus_one", hashInt(-1));
+    printf(",");
+    printHashValueCase("bool_false", hashBool(false));
+    printf(",");
+    printHashValueCase("bool_true", hashBool(true));
+    printf(",");
+    printHashValueCase("id_CLNK", hashId("CLNK"));
+    printf(",");
+    printHashValueCase("id_1337", hashId("1337"));
+    printf(",");
+    printHashValueCase("string_empty", hashString(""));
+    printf(",");
+    printHashValueCase("string_alpha", hashString("alpha"));
+    printf(",");
+    printHashValueCase("string_16", hashString("abcdefghijklmnop"));
+    printf(",");
+    printHashValueCase("string_24", hashString("abcdefghijklmnopqrstuvwx"));
+    printf(",");
+    printHashValueCase("string_40", hashString("abcdefghijklmnopqrstuvwxyz0123456789ABCD"));
+    printf(",");
+    printHashValueCase("string_80", hashString("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+    printf(",");
+    printHashValueCase("array_1_true_x", hashArray({hashInt(1), hashBool(true), hashString("x")}));
+    printf(",");
+    const auto array23 = hashArray({hashInt(2), hashInt(3)});
+    printHashValueCase("map_a1_b23", hashMap({{hashString("a"), hashInt(1)}, {hashString("b"), array23}}));
+    printf(",");
+    printHashValueCase("map_b23_a1", hashMap({{hashString("b"), array23}, {hashString("a"), hashInt(1)}}));
+    printf("]}");
+    printf(",\n");
+
+    // 9b. C4ScriptCnvMap type-conversion table (src/C4Value.cpp:488-598) +
+    //     ConvertTo dispatch (src/C4Value.h:248-254). Locks BOTH the 81-cell
+    //     table classification (a 9x9 grid of one-char codes, source row x
+    //     destination column) and the per-(value, target, #strict) conversion
+    //     result that drives getInt/getStr/... and parameter marshaling.
+    printf("\"script_value_convert\":{\"type_count\":9,\"table\":[");
+    for (int from = 0; from < 9; from++)
+    {
+        if (from) printf(",");
+        printf("\"");
+        for (int to = 0; to < 9; to++) printf("%c", cnvCode(C4ScriptCnvMapOracle[from][to]));
+        printf("\"");
+    }
+    printf("],\"convert\":[");
+    struct ConvCase { const char *name; int type; int32_t intData; };
+    const ConvCase conv_cases[] = {
+        {"nil",        C4V_Any_Oracle,    0},
+        {"int_0",      C4V_Int_Oracle,    0},
+        {"int_5000",   C4V_Int_Oracle,    5000},
+        {"int_9999",   C4V_Int_Oracle,    9999},
+        {"int_10000",  C4V_Int_Oracle,    10000},
+        {"int_neg1",   C4V_Int_Oracle,    -1},
+        {"bool_true",  C4V_Bool_Oracle,   1},
+        {"bool_false", C4V_Bool_Oracle,   0},
+        {"id_CLNK",    C4V_C4ID_Oracle,   0},
+        {"string",     C4V_String_Oracle, 0},
+        {"array",      C4V_Array_Oracle,  0},
+        {"map",        C4V_Map_Oracle,    0},
+    };
+    bool firstConv = true;
+    for (auto cc : conv_cases)
+        for (int to = 0; to < 9; to++)
+            for (int s = 1; s >= 0; s--)
+            {
+                if (!firstConv) printf(",");
+                firstConv = false;
+                bool strict = (s != 0);
+                printf("{\"name\":\"%s\",\"from\":%d,\"to\":%d,\"strict\":%d,\"result\":%d}",
+                       cc.name, cc.type, to, strict ? 1 : 0,
+                       oracleConvertTo(cc.type, to, cc.intData, strict) ? 1 : 0);
+            }
+    printf("]}");
+    printf(",\n");
+
+    // 10. movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    Mirrors C4Movement.cpp:260-261 (fix += dir) and :627 (ydir += gravity),
     //    WITHOUT landscape collision/contact (that is the per-pixel loop, item 4).
     arr_begin("movement");
