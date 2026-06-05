@@ -173,7 +173,7 @@ impl Value {
             Value::String(_) => "string",
             Value::C4Id(_) => "id",
             Value::Array(_) => "array",
-            Value::Proplist(_) => "proplist",
+            Value::Proplist(_) => "map",
             Value::Nil => "nil",
         }
     }

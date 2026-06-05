@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::ast::{
     AssignmentTarget, BinaryOp, Expr, ForInit, Function, Parameter, Stmt, UnaryOp, VarDecl,
@@ -27,6 +29,328 @@ fn concat_string(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+type ValueCell = Rc<RefCell<Value>>;
+type SlotMap = Rc<RefCell<HashMap<i32, ValueCell>>>;
+type NamedLocalMap = Rc<RefCell<HashMap<String, ValueCell>>>;
+
+fn value_cell(value: Value) -> ValueCell {
+    Rc::new(RefCell::new(value))
+}
+
+#[derive(Clone, Default)]
+struct ObjectState {
+    named_locals: NamedLocalMap,
+    local_slots: SlotMap,
+}
+
+impl ObjectState {
+    fn from_local_vars(local_vars: &HashMap<String, Value>) -> Self {
+        let state = Self::default();
+        for (key, value) in local_vars {
+            if let Some(idx) = key
+                .strip_prefix("__local_")
+                .and_then(|s| s.parse::<i32>().ok())
+            {
+                state
+                    .local_slots
+                    .borrow_mut()
+                    .insert(idx.max(0), value_cell(value.clone()));
+            } else {
+                state
+                    .named_locals
+                    .borrow_mut()
+                    .insert(key.clone(), value_cell(value.clone()));
+            }
+        }
+        state
+    }
+
+    fn named_local_cell(&self, name: &str) -> ValueCell {
+        self.named_locals
+            .borrow_mut()
+            .entry(name.to_string())
+            .or_insert_with(|| value_cell(Value::Nil))
+            .clone()
+    }
+
+    fn local_slot_cell(&self, index: i32) -> ValueCell {
+        slot_cell(&self.local_slots, index)
+    }
+
+    fn to_local_vars(&self, var_decls: &[VarDecl]) -> HashMap<String, Value> {
+        let mut updated_locals = HashMap::new();
+        let named_locals = self.named_locals.borrow();
+        for var_decl in var_decls {
+            if let Some(cell) = named_locals.get(&var_decl.name) {
+                updated_locals.insert(var_decl.name.clone(), cell.borrow().clone());
+            }
+        }
+        drop(named_locals);
+
+        for (idx, slot_value) in self.local_slots.borrow().iter() {
+            updated_locals.insert(format!("__local_{idx}"), slot_value.borrow().clone());
+        }
+        updated_locals
+    }
+}
+
+fn slot_cell(slots: &SlotMap, index: i32) -> ValueCell {
+    slots
+        .borrow_mut()
+        .entry(index.max(0))
+        .or_insert_with(|| value_cell(Value::Nil))
+        .clone()
+}
+
+#[derive(Clone)]
+enum Binding {
+    Direct(ValueCell),
+    Reference(LValueRef),
+}
+
+impl Binding {
+    fn direct(value: Value) -> Self {
+        Binding::Direct(value_cell(value))
+    }
+
+    fn read(&self) -> Result<Value, RuntimeError> {
+        match self {
+            Binding::Direct(cell) => Ok(cell.borrow().clone()),
+            Binding::Reference(reference) => reference.read(),
+        }
+    }
+
+    fn write(&self, value: Value) -> Result<(), RuntimeError> {
+        match self {
+            Binding::Direct(cell) => {
+                *cell.borrow_mut() = value;
+                Ok(())
+            }
+            Binding::Reference(reference) => reference.write(value),
+        }
+    }
+
+    fn lvalue(&self) -> LValueRef {
+        match self {
+            Binding::Direct(cell) => LValueRef::Cell(cell.clone()),
+            Binding::Reference(reference) => reference.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum LValueRef {
+    Cell(ValueCell),
+    Path {
+        root: ValueCell,
+        segments: Vec<PathSegment>,
+    },
+}
+
+impl LValueRef {
+    fn read(&self) -> Result<Value, RuntimeError> {
+        match self {
+            LValueRef::Cell(cell) => Ok(cell.borrow().clone()),
+            LValueRef::Path { root, segments } => read_path(&root.borrow(), segments),
+        }
+    }
+
+    fn write(&self, value: Value) -> Result<(), RuntimeError> {
+        match self {
+            LValueRef::Cell(cell) => {
+                *cell.borrow_mut() = value;
+                Ok(())
+            }
+            LValueRef::Path { root, segments } => {
+                write_path(&mut root.borrow_mut(), segments, value)
+            }
+        }
+    }
+
+    fn append(&self, segment: PathSegment) -> Self {
+        match self {
+            LValueRef::Cell(root) => LValueRef::Path {
+                root: root.clone(),
+                segments: vec![segment],
+            },
+            LValueRef::Path { root, segments } => {
+                let mut segments = segments.clone();
+                segments.push(segment);
+                LValueRef::Path {
+                    root: root.clone(),
+                    segments,
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum PathSegment {
+    Property(String),
+    Index(Value),
+}
+
+fn read_path(value: &Value, segments: &[PathSegment]) -> Result<Value, RuntimeError> {
+    let mut current = value.clone();
+    for segment in segments {
+        current = match (segment, current) {
+            (PathSegment::Property(property), Value::Proplist(entries)) => {
+                entries.get(property).cloned().unwrap_or(Value::Nil)
+            }
+            (PathSegment::Property(property), other) => {
+                return Err(RuntimeError::new(format!(
+                    "cannot access property '{property}' on value of type {}",
+                    other.type_name()
+                )))
+            }
+            (PathSegment::Index(Value::Int(raw_index)), Value::Array(elements)) => {
+                if *raw_index < 0 {
+                    return Err(RuntimeError::new("array index cannot be negative"));
+                }
+                elements
+                    .get(*raw_index as usize)
+                    .cloned()
+                    .unwrap_or(Value::Nil)
+            }
+            (PathSegment::Index(Value::String(key)), Value::Proplist(entries)) => {
+                entries.get(key).cloned().unwrap_or(Value::Nil)
+            }
+            (PathSegment::Index(index), Value::Proplist(_)) => {
+                return Err(RuntimeError::new(format!(
+                    "proplist keys must be strings, got {}",
+                    index.type_name()
+                )))
+            }
+            (PathSegment::Index(index), Value::Array(_)) => {
+                return Err(RuntimeError::new(format!(
+                    "array index must be an integer, got {}",
+                    index.type_name()
+                )))
+            }
+            (PathSegment::Index(_), other) => {
+                return Err(RuntimeError::new(format!(
+                    "cannot index into value of type {}",
+                    other.type_name()
+                )))
+            }
+        };
+    }
+    Ok(current)
+}
+
+fn write_path(
+    value: &mut Value,
+    segments: &[PathSegment],
+    new_value: Value,
+) -> Result<(), RuntimeError> {
+    let Some((segment, rest)) = segments.split_first() else {
+        *value = new_value;
+        return Ok(());
+    };
+
+    match segment {
+        PathSegment::Property(property) => {
+            let Value::Proplist(entries) = value else {
+                return Err(RuntimeError::new(format!(
+                    "cannot assign property '{property}' on value of type {}",
+                    value.type_name()
+                )));
+            };
+            if rest.is_empty() {
+                entries.insert(property.clone(), new_value);
+                Ok(())
+            } else {
+                let Some(next) = entries.get_mut(property) else {
+                    return Err(RuntimeError::new(format!(
+                        "cannot access property '{property}' on nil"
+                    )));
+                };
+                write_path(next, rest, new_value)
+            }
+        }
+        PathSegment::Index(Value::Int(raw_index)) => {
+            if *raw_index < 0 {
+                return Err(RuntimeError::new("array index cannot be negative"));
+            }
+            let Value::Array(elements) = value else {
+                return Err(RuntimeError::new(format!(
+                    "cannot index into value of type {}",
+                    value.type_name()
+                )));
+            };
+            let index = *raw_index as usize;
+            if index >= elements.len() {
+                elements.resize(index + 1, Value::Nil);
+            }
+            if rest.is_empty() {
+                elements[index] = new_value;
+                Ok(())
+            } else {
+                write_path(&mut elements[index], rest, new_value)
+            }
+        }
+        PathSegment::Index(Value::String(key)) => {
+            let Value::Proplist(entries) = value else {
+                return Err(RuntimeError::new(format!(
+                    "cannot index into value of type {}",
+                    value.type_name()
+                )));
+            };
+            if rest.is_empty() {
+                entries.insert(key.clone(), new_value);
+                Ok(())
+            } else {
+                let Some(next) = entries.get_mut(key) else {
+                    return Err(RuntimeError::new(format!(
+                        "cannot access property '{key}' on nil"
+                    )));
+                };
+                write_path(next, rest, new_value)
+            }
+        }
+        PathSegment::Index(index) => Err(RuntimeError::new(format!(
+            "array index must be an integer, got {}",
+            index.type_name()
+        ))),
+    }
+}
+
+enum CallArg {
+    Value(Value),
+    Reference(LValueRef),
+}
+
+impl CallArg {
+    fn read(&self) -> Result<Value, RuntimeError> {
+        match self {
+            CallArg::Value(value) => Ok(value.clone()),
+            CallArg::Reference(reference) => reference.read(),
+        }
+    }
+}
+
+enum ReturnValue {
+    Value(Value),
+    Reference(LValueRef),
+}
+
+impl ReturnValue {
+    fn into_value(self) -> Result<Value, RuntimeError> {
+        match self {
+            ReturnValue::Value(value) => Ok(value),
+            ReturnValue::Reference(reference) => reference.read(),
+        }
+    }
+
+    fn as_value(&self) -> Result<Value, RuntimeError> {
+        match self {
+            ReturnValue::Value(value) => Ok(value.clone()),
+            ReturnValue::Reference(reference) => reference.read(),
+        }
     }
 }
 
@@ -65,7 +389,8 @@ impl<'a> Vm<'a> {
     }
 
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeError> {
-        self.invoke(name, args, 0)
+        let args = args.iter().cloned().map(CallArg::Value).collect();
+        self.invoke_value(name, args, 0, ObjectState::default())
     }
 
     /// Call a function with per-object local variable context
@@ -76,148 +401,73 @@ impl<'a> Vm<'a> {
         args: &[Value],
         local_vars: &HashMap<String, Value>,
     ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
-        self.invoke_with_locals(name, args, local_vars, 0)
+        let object_state = ObjectState::from_local_vars(local_vars);
+        let args = args.iter().cloned().map(CallArg::Value).collect();
+        let value = self.invoke_value(name, args, 0, object_state.clone())?;
+        Ok((value, object_state.to_local_vars(self.var_decls)))
     }
 
-    fn invoke_with_locals(
+    fn invoke_value(
         &self,
         name: &str,
-        args: &[Value],
-        local_vars: &HashMap<String, Value>,
+        args: Vec<CallArg>,
         depth: usize,
-    ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
+        object_state: ObjectState,
+    ) -> Result<Value, RuntimeError> {
+        self.invoke_raw(name, args, depth, object_state)?
+            .into_value()
+    }
+
+    fn invoke_reference(
+        &self,
+        name: &str,
+        args: Vec<CallArg>,
+        depth: usize,
+        object_state: ObjectState,
+    ) -> Result<LValueRef, RuntimeError> {
+        match self.invoke_raw(name, args, depth, object_state)? {
+            ReturnValue::Reference(reference) => Ok(reference),
+            ReturnValue::Value(_) => Err(RuntimeError::new(format!(
+                "function '{name}' does not return a reference"
+            ))),
+        }
+    }
+
+    fn invoke_raw(
+        &self,
+        name: &str,
+        args: Vec<CallArg>,
+        depth: usize,
+        object_state: ObjectState,
+    ) -> Result<ReturnValue, RuntimeError> {
         if depth >= MAX_CALL_DEPTH {
             return Err(RuntimeError::new("maximum call depth exceeded"));
         }
 
-        // Grow the native stack on demand so deep (but C++-legal) recursion in
-        // this tree-walking interpreter doesn't overflow the thread stack.
         maybe_grow(|| {
             if let Some(function) = self.functions.get(name) {
+                return self.invoke_script_function(name, function, args, depth, object_state);
+            }
+
+            if let Some(function) = self.host_functions.get(name) {
+                let values = self.call_args_to_values(&args)?;
                 return self
-                    .invoke_script_function_with_locals(name, function, args, local_vars, depth);
-            }
-
-            if let Some(function) = self.host_functions.get(name) {
-                // Host functions don't modify local variables
-                let result = self.invoke_host_function(name, function, args)?;
-                return Ok((result, local_vars.clone()));
+                    .invoke_host_function(name, function, &values)
+                    .map(ReturnValue::Value);
             }
 
             Err(RuntimeError::new(format!("unknown function '{name}'")))
         })
-    }
-
-    fn invoke(&self, name: &str, args: &[Value], depth: usize) -> Result<Value, RuntimeError> {
-        if depth >= MAX_CALL_DEPTH {
-            return Err(RuntimeError::new("maximum call depth exceeded"));
-        }
-
-        maybe_grow(|| {
-            if let Some(function) = self.functions.get(name) {
-                return self.invoke_script_function(name, function, args, depth);
-            }
-
-            if let Some(function) = self.host_functions.get(name) {
-                return self.invoke_host_function(name, function, args);
-            }
-
-            Err(RuntimeError::new(format!("unknown function '{name}'")))
-        })
-    }
-
-    fn invoke_script_function_with_locals(
-        &self,
-        name: &str,
-        function: &Function,
-        args: &[Value],
-        local_vars: &HashMap<String, Value>,
-        depth: usize,
-    ) -> Result<(Value, HashMap<String, Value>), RuntimeError> {
-        // Allow calling with MORE arguments than declared (extras ignored)
-        // This matches C++ OpenClonk behavior for action callbacks
-        if args.len() < function.params.len() {
-            return Err(RuntimeError::new(format!(
-                "function '{name}' expects {} arguments but received {}",
-                function.params.len(),
-                args.len()
-            )));
-        }
-
-        if let Some(debugger) = &self.debugger {
-            if let Some(callback) = debugger.on_call() {
-                callback(name, args);
-            }
-        }
-
-        let mut env = Environment::new_with_params(&function.params, args, function.strict_level);
-
-        // Initialize script-level local variables from the per-object storage
-        // Use passed-in values instead of always initializing to nil
-        for var_decl in self.var_decls {
-            let value = local_vars
-                .get(&var_decl.name)
-                .cloned()
-                .unwrap_or(Value::Nil);
-            env.define(&var_decl.name, value);
-        }
-
-        // Restore the object's numeric Local(n) slots, which persist across calls
-        // like named locals (C++ pObj->Local). They round-trip through local_vars
-        // under "__local_{n}" keys.
-        for (key, value) in local_vars {
-            if let Some(idx) = key
-                .strip_prefix("__local_")
-                .and_then(|s| s.parse::<i32>().ok())
-            {
-                env.local_slots.insert(idx, value.clone());
-            }
-        }
-
-        let result = self.execute_statements(&function.body, &mut env, depth)?;
-        let value = match result {
-            ControlFlow::Return(v) => v,
-            ControlFlow::Normal => Value::Nil,
-            ControlFlow::Break | ControlFlow::LoopContinue => {
-                return Err(RuntimeError::new(format!(
-                    "{} statement outside of loop",
-                    if matches!(result, ControlFlow::Break) {
-                        "break"
-                    } else {
-                        "continue"
-                    }
-                )));
-            }
-        };
-
-        if let Some(debugger) = &self.debugger {
-            if let Some(callback) = debugger.on_return() {
-                callback(name, &value);
-            }
-        }
-
-        // Extract updated local variable values from the environment
-        let mut updated_locals = HashMap::new();
-        for var_decl in self.var_decls {
-            if let Some(val) = env.get(&var_decl.name) {
-                updated_locals.insert(var_decl.name.clone(), val.clone());
-            }
-        }
-        // Persist the object's numeric Local(n) slots back to local_vars.
-        for (idx, slot_value) in &env.local_slots {
-            updated_locals.insert(format!("__local_{idx}"), slot_value.clone());
-        }
-
-        Ok((value, updated_locals))
     }
 
     fn invoke_script_function(
         &self,
         name: &str,
         function: &Function,
-        args: &[Value],
+        args: Vec<CallArg>,
         depth: usize,
-    ) -> Result<Value, RuntimeError> {
+        object_state: ObjectState,
+    ) -> Result<ReturnValue, RuntimeError> {
         // Allow calling with MORE arguments than declared (extras ignored)
         // This matches C++ OpenClonk behavior for action callbacks
         if args.len() < function.params.len() {
@@ -228,24 +478,31 @@ impl<'a> Vm<'a> {
             )));
         }
 
+        let debug_args = self.call_args_to_values(&args)?;
         if let Some(debugger) = &self.debugger {
             if let Some(callback) = debugger.on_call() {
-                callback(name, args);
+                callback(name, &debug_args);
             }
         }
 
-        let mut env = Environment::new_with_params(&function.params, args, function.strict_level);
+        let mut env = Environment::new_with_params(
+            &function.params,
+            &args,
+            function.strict_level,
+            object_state,
+        )?;
 
-        // Initialize script-level local variables to nil
-        // This matches C++ engine behavior where local variables default to nil
+        // Script-level `local` declarations are object-local storage. Nested
+        // calls share the same object state, matching C++ pObj->Local/LocalNamed.
         for var_decl in self.var_decls {
-            env.define(&var_decl.name, Value::Nil);
+            env.define_object_local(&var_decl.name);
         }
 
-        let result = self.execute_statements(&function.body, &mut env, depth)?;
+        let result =
+            self.execute_statements(&function.body, &mut env, depth, function.returns_reference)?;
         let value = match result {
             ControlFlow::Return(v) => v,
-            ControlFlow::Normal => Value::Nil,
+            ControlFlow::Normal => ReturnValue::Value(Value::Nil),
             ControlFlow::Break | ControlFlow::LoopContinue => {
                 return Err(RuntimeError::new(format!(
                     "{} statement outside of loop",
@@ -258,13 +515,18 @@ impl<'a> Vm<'a> {
             }
         };
 
+        let debug_return = value.as_value()?;
         if let Some(debugger) = &self.debugger {
             if let Some(callback) = debugger.on_return() {
-                callback(name, &value);
+                callback(name, &debug_return);
             }
         }
 
         Ok(value)
+    }
+
+    fn call_args_to_values(&self, args: &[CallArg]) -> Result<Vec<Value>, RuntimeError> {
+        args.iter().map(CallArg::read).collect()
     }
 
     fn invoke_host_function(
@@ -296,9 +558,10 @@ impl<'a> Vm<'a> {
         statements: &[Stmt],
         env: &mut Environment,
         depth: usize,
+        returns_reference: bool,
     ) -> Result<ControlFlow, RuntimeError> {
         for statement in statements {
-            match self.execute_statement(statement, env, depth)? {
+            match self.execute_statement(statement, env, depth, returns_reference)? {
                 ControlFlow::Normal => continue,
                 other => return Ok(other),
             }
@@ -311,6 +574,7 @@ impl<'a> Vm<'a> {
         statement: &Stmt,
         env: &mut Environment,
         depth: usize,
+        returns_reference: bool,
     ) -> Result<ControlFlow, RuntimeError> {
         match statement {
             Stmt::VarDecl { name, init } => {
@@ -327,9 +591,22 @@ impl<'a> Vm<'a> {
                 Ok(ControlFlow::Normal)
             }
             Stmt::Return(expr) => {
-                let value = match expr {
-                    Some(expr) => self.evaluate(expr, env, depth)?,
-                    None => Value::Nil,
+                let value = if returns_reference {
+                    match expr {
+                        Some(expr) => {
+                            ReturnValue::Reference(self.expr_to_lvalue(expr, env, depth)?)
+                        }
+                        None => {
+                            return Err(RuntimeError::new(
+                                "reference-returning function must return an lvalue",
+                            ))
+                        }
+                    }
+                } else {
+                    ReturnValue::Value(match expr {
+                        Some(expr) => self.evaluate(expr, env, depth)?,
+                        None => Value::Nil,
+                    })
                 };
                 Ok(ControlFlow::Return(value))
             }
@@ -345,15 +622,15 @@ impl<'a> Vm<'a> {
                 else_branch,
             } => {
                 if self.evaluate(condition, env, depth)?.as_bool() {
-                    return self.execute_block(then_branch, env, depth);
+                    return self.execute_block(then_branch, env, depth, returns_reference);
                 } else if let Some(branch) = else_branch {
-                    return self.execute_block(branch, env, depth);
+                    return self.execute_block(branch, env, depth, returns_reference);
                 }
                 Ok(ControlFlow::Normal)
             }
             Stmt::While { condition, body } => {
                 while self.evaluate(condition, env, depth)?.as_bool() {
-                    match self.execute_block(body, env, depth)? {
+                    match self.execute_block(body, env, depth, returns_reference)? {
                         ControlFlow::Normal => {}
                         ControlFlow::LoopContinue => continue,
                         ControlFlow::Break => break,
@@ -396,7 +673,7 @@ impl<'a> Vm<'a> {
                     }
 
                     // Execute body
-                    match self.execute_block(body, env, depth)? {
+                    match self.execute_block(body, env, depth, returns_reference)? {
                         ControlFlow::Normal => {}
                         ControlFlow::LoopContinue => {
                             // Execute increment before continuing
@@ -444,7 +721,7 @@ impl<'a> Vm<'a> {
                     }
 
                     // Execute body
-                    match self.execute_block(body, env, depth)? {
+                    match self.execute_block(body, env, depth, returns_reference)? {
                         ControlFlow::Normal => {}
                         ControlFlow::LoopContinue => continue,
                         ControlFlow::Break => break,
@@ -454,11 +731,13 @@ impl<'a> Vm<'a> {
 
                 Ok(ControlFlow::Normal)
             }
-            Stmt::Block(statements) => self.execute_block(statements, env, depth),
+            Stmt::Block(statements) => {
+                self.execute_block(statements, env, depth, returns_reference)
+            }
             Stmt::Sequence(statements) => {
                 // Execute statements sequentially WITHOUT creating a new scope
                 // Used for multi-variable declarations
-                self.execute_statements(statements, env, depth)
+                self.execute_statements(statements, env, depth, returns_reference)
             }
         }
     }
@@ -468,9 +747,10 @@ impl<'a> Vm<'a> {
         statements: &[Stmt],
         env: &mut Environment,
         depth: usize,
+        returns_reference: bool,
     ) -> Result<ControlFlow, RuntimeError> {
         env.push_scope();
-        let result = self.execute_statements(statements, env, depth);
+        let result = self.execute_statements(statements, env, depth, returns_reference);
         env.pop_scope();
         result
     }
@@ -487,8 +767,7 @@ impl<'a> Vm<'a> {
             // mirroring C4Script's `this` (C4V_C4Object); Nil for global calls.
             Expr::This => Ok(self.this_value.clone()),
             Expr::Variable(name) => env
-                .get(name)
-                .cloned()
+                .get(name)?
                 .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'"))),
             Expr::Unary(op, expr) => {
                 let value = self.evaluate(expr, env, depth)?;
@@ -532,17 +811,20 @@ impl<'a> Vm<'a> {
                                 // Method doesn't exist - return nil without evaluating args
                                 return Ok(Value::Nil);
                             }
-                            // Method exists, evaluate args and call it
-                            let mut evaluated_args = Vec::with_capacity(args.len());
-                            for arg in args {
-                                evaluated_args.push(self.evaluate(arg, env, depth + 1)?);
-                            }
+                            let function = self.functions.get(name);
+                            let evaluated_args =
+                                self.build_call_args(function, args, env, depth + 1)?;
                             // TODO: Handle forward_rest - append remaining args from current function
                             if *forward_rest {
                                 // For now, just ignore - proper implementation needs access to current call args
                             }
                             // If the call fails for other reasons (arity, runtime error), propagate
-                            self.invoke(name, &evaluated_args, depth + 1)
+                            self.invoke_value(
+                                name,
+                                evaluated_args,
+                                depth + 1,
+                                env.object_state.clone(),
+                            )
                         }
                         _ => {
                             // Optional calls only make sense for property access
@@ -558,11 +840,15 @@ impl<'a> Vm<'a> {
                     // lvalue path (lc-engine registers neither as a host function).
                     if let Expr::Variable(name) = callee.as_ref() {
                         if (name == "Var" || name == "Local")
-                            && args.len() == 1
+                            && (args.is_empty() || args.len() == 1)
                             && !self.functions.contains_key(name)
                             && !self.host_functions.contains_key(name)
                         {
-                            let index = Box::new(args[0].clone());
+                            let index = Box::new(
+                                args.first()
+                                    .cloned()
+                                    .unwrap_or(Expr::Literal(Literal::Int(0))),
+                            );
                             let target = if name == "Var" {
                                 AssignmentTarget::VarSlot(index)
                             } else {
@@ -571,22 +857,35 @@ impl<'a> Vm<'a> {
                             return self.get_target_value(env, &target);
                         }
                     }
-                    // Normal call - evaluate args first, then invoke
-                    let mut evaluated_args = Vec::with_capacity(args.len());
-                    for arg in args {
-                        evaluated_args.push(self.evaluate(arg, env, depth + 1)?);
-                    }
                     // TODO: Handle forward_rest - append remaining args from current function
                     if *forward_rest {
                         // For now, just ignore - proper implementation needs access to current call args
                     }
                     // Extract function name from callee expression
                     match callee.as_ref() {
-                        Expr::Variable(name) => self.invoke(name, &evaluated_args, depth + 1),
+                        Expr::Variable(name) => {
+                            let function = self.functions.get(name);
+                            let evaluated_args =
+                                self.build_call_args(function, args, env, depth + 1)?;
+                            self.invoke_value(
+                                name,
+                                evaluated_args,
+                                depth + 1,
+                                env.object_state.clone(),
+                            )
+                        }
                         Expr::Property(_base, name) => {
                             // For now, just call the method name directly
                             // TODO: Implement proper object method dispatch when we have object support
-                            self.invoke(name, &evaluated_args, depth + 1)
+                            let function = self.functions.get(name);
+                            let evaluated_args =
+                                self.build_call_args(function, args, env, depth + 1)?;
+                            self.invoke_value(
+                                name,
+                                evaluated_args,
+                                depth + 1,
+                                env.object_state.clone(),
+                            )
                         }
                         _ => Err(RuntimeError::new(format!(
                             "cannot call non-function expression: {:?}",
@@ -995,6 +1294,34 @@ impl<'a> Vm<'a> {
         }
     }
 
+    fn build_call_args(
+        &self,
+        function: Option<&Function>,
+        args: &[Expr],
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Vec<CallArg>, RuntimeError> {
+        let mut evaluated_args = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            let wants_reference = function
+                .and_then(|function| function.params.get(index))
+                .is_some_and(|param| param.is_reference);
+            if wants_reference && Self::expr_can_be_lvalue(arg) {
+                evaluated_args.push(CallArg::Reference(self.expr_to_lvalue(arg, env, depth)?));
+            } else {
+                evaluated_args.push(CallArg::Value(self.evaluate(arg, env, depth)?));
+            }
+        }
+        Ok(evaluated_args)
+    }
+
+    fn expr_can_be_lvalue(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) | Expr::Call { .. }
+        )
+    }
+
     fn assign_target(
         &self,
         env: &mut Environment,
@@ -1002,84 +1329,6 @@ impl<'a> Vm<'a> {
         value: Value,
     ) -> Result<(), RuntimeError> {
         match target {
-            AssignmentTarget::Variable(name) => env.assign(name, value),
-            AssignmentTarget::Property(base, property) => {
-                let base_value = self.assignment_target_value(env, base)?;
-                let mut entries = match base_value {
-                    Value::Proplist(entries) => entries,
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "cannot assign property '{property}' on value of type {}",
-                            other.type_name()
-                        )))
-                    }
-                };
-                entries.insert(property.clone(), value);
-                self.assign_target(env, base, Value::Proplist(entries))
-            }
-            AssignmentTarget::Index(base, index_expr) => {
-                let base_value = self.assignment_target_value(env, base)?;
-                let index_value = self.evaluate(index_expr, env, 0)?;
-                let index_int = match index_value {
-                    Value::Int(n) => n,
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "array index must be an integer, got {}",
-                            other.type_name()
-                        )))
-                    }
-                };
-                let mut elements = match base_value {
-                    Value::Array(elements) => elements,
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "cannot index into value of type {}",
-                            other.type_name()
-                        )))
-                    }
-                };
-                // Grow array if necessary
-                let index = index_int as usize;
-                if index >= elements.len() {
-                    elements.resize(index + 1, Value::Nil);
-                }
-                elements[index] = value;
-                self.assign_target(env, base, Value::Array(elements))
-            }
-            AssignmentTarget::LocalSlot(index_expr) => {
-                // Evaluate the index expression
-                let index_value = self.evaluate(index_expr, env, 0)?;
-                let index = match index_value {
-                    Value::Int(n) => n,
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "Local() index must be an integer, got {}",
-                            other.type_name()
-                        )))
-                    }
-                };
-                // Object numeric local slot (C++ pObj->Local[n]), persisted via
-                // local_vars; function-scoped, negative index clamped to 0.
-                env.set_local_slot(index, value);
-                Ok(())
-            }
-            AssignmentTarget::VarSlot(index_expr) => {
-                // Evaluate the index expression
-                let index_value = self.evaluate(index_expr, env, 0)?;
-                let index = match index_value {
-                    Value::Int(n) => n,
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "Var() index must be an integer, got {}",
-                            other.type_name()
-                        )))
-                    }
-                };
-                // Per-call numeric scratch slot (C++ NumVars[n]); function-scoped,
-                // negative index clamped to 0.
-                env.set_var_slot(index, value);
-                Ok(())
-            }
             AssignmentTarget::EffectSlot(args) => {
                 // Evaluate all arguments to create the slot identifier
                 let mut arg_values = Vec::new();
@@ -1137,28 +1386,9 @@ impl<'a> Vm<'a> {
                 env.define(&slot_name, value);
                 Ok(())
             }
-            AssignmentTarget::FunctionCall { name, args } => {
-                // Call the reference-returning function to get the lvalue reference
-                // For now, implement a simplified version using slot naming
-                // TODO: Properly implement reference semantics
-                let mut arg_values = Vec::new();
-                for arg in args {
-                    arg_values.push(self.evaluate(arg, env, 0)?);
-                }
-                // Store using a naming scheme based on the function name and arguments
-                let arg_str = arg_values
-                    .iter()
-                    .map(|v| match v {
-                        Value::Int(n) => n.to_string(),
-                        Value::String(s) => s.clone(),
-                        _ => format!("{:?}", v),
-                    })
-                    .collect::<Vec<_>>()
-                    .join("_");
-                let slot_name = format!("__funcref_{}_{}", name, arg_str);
-                env.define(&slot_name, value);
-                Ok(())
-            }
+            _ => self
+                .assignment_target_to_lvalue(env, target, 0)?
+                .write(value),
         }
     }
 
@@ -1168,73 +1398,6 @@ impl<'a> Vm<'a> {
         target: &AssignmentTarget,
     ) -> Result<Value, RuntimeError> {
         match target {
-            AssignmentTarget::Variable(name) => env
-                .get(name)
-                .cloned()
-                .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'"))),
-            AssignmentTarget::Property(base, property) => {
-                let container = self.assignment_target_value(env, base)?;
-                match container {
-                    Value::Proplist(entries) => {
-                        Ok(entries.get(property).cloned().unwrap_or(Value::Nil))
-                    }
-                    other => Err(RuntimeError::new(format!(
-                        "cannot access property '{property}' on value of type {}",
-                        other.type_name()
-                    ))),
-                }
-            }
-            AssignmentTarget::Index(base, index_expr) => {
-                let container = self.assignment_target_value(env, base)?;
-                let index_value = self.evaluate(index_expr, env, 0)?;
-                let index_int = match index_value {
-                    Value::Int(n) => n,
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "array index must be an integer, got {}",
-                            other.type_name()
-                        )))
-                    }
-                };
-                match container {
-                    Value::Array(elements) => {
-                        let index = index_int as usize;
-                        Ok(elements.get(index).cloned().unwrap_or(Value::Nil))
-                    }
-                    other => Err(RuntimeError::new(format!(
-                        "cannot index into value of type {}",
-                        other.type_name()
-                    ))),
-                }
-            }
-            AssignmentTarget::LocalSlot(index_expr) => {
-                // Evaluate the index expression
-                let index_value = self.evaluate(index_expr, env, 0)?;
-                let index = match index_value {
-                    Value::Int(n) => n,
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "Local() index must be an integer, got {}",
-                            other.type_name()
-                        )))
-                    }
-                };
-                Ok(env.get_local_slot(index))
-            }
-            AssignmentTarget::VarSlot(index_expr) => {
-                // Evaluate the index expression
-                let index_value = self.evaluate(index_expr, env, 0)?;
-                let index = match index_value {
-                    Value::Int(n) => n,
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "Var() index must be an integer, got {}",
-                            other.type_name()
-                        )))
-                    }
-                };
-                Ok(env.get_var_slot(index))
-            }
             AssignmentTarget::EffectSlot(args) => {
                 // Evaluate all arguments to create the slot identifier
                 let mut arg_values = Vec::new();
@@ -1254,7 +1417,7 @@ impl<'a> Vm<'a> {
                         .collect::<Vec<_>>()
                         .join("_")
                 );
-                Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
+                Ok(env.get(&slot_name)?.unwrap_or(Value::Nil))
             }
             AssignmentTarget::MethodSlot {
                 object,
@@ -1286,26 +1449,73 @@ impl<'a> Vm<'a> {
 
                 // Retrieve from environment with naming scheme: __method_{object_id}_{method}_{key}
                 let slot_name = format!("__method_{}_{}_{}", object_id, method, key);
-                Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
+                Ok(env.get(&slot_name)?.unwrap_or(Value::Nil))
+            }
+            _ => self.assignment_target_to_lvalue(env, target, 0)?.read(),
+        }
+    }
+
+    fn assignment_target_to_lvalue(
+        &self,
+        env: &mut Environment,
+        target: &AssignmentTarget,
+        depth: usize,
+    ) -> Result<LValueRef, RuntimeError> {
+        match target {
+            AssignmentTarget::Variable(name) => env
+                .lvalue(name)
+                .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'"))),
+            AssignmentTarget::Property(base, property) => Ok(self
+                .assignment_target_to_lvalue(env, base, depth)?
+                .append(PathSegment::Property(property.clone()))),
+            AssignmentTarget::Index(base, index_expr) => {
+                let index = self.evaluate(index_expr, env, depth)?;
+                Ok(self
+                    .assignment_target_to_lvalue(env, base, depth)?
+                    .append(PathSegment::Index(index)))
+            }
+            AssignmentTarget::LocalSlot(index_expr) => {
+                let index = self.evaluate_slot_index("Local()", index_expr, env, depth)?;
+                Ok(env.local_slot_lvalue(index))
+            }
+            AssignmentTarget::VarSlot(index_expr) => {
+                let index = self.evaluate_slot_index("Var()", index_expr, env, depth)?;
+                Ok(env.var_slot_lvalue(index))
             }
             AssignmentTarget::FunctionCall { name, args } => {
-                // Retrieve the value stored for this reference-returning function call
-                let mut arg_values = Vec::new();
-                for arg in args {
-                    arg_values.push(self.evaluate(arg, env, 0)?);
-                }
-                let arg_str = arg_values
-                    .iter()
-                    .map(|v| match v {
-                        Value::Int(n) => n.to_string(),
-                        Value::String(s) => s.clone(),
-                        _ => format!("{:?}", v),
-                    })
-                    .collect::<Vec<_>>()
-                    .join("_");
-                let slot_name = format!("__funcref_{}_{}", name, arg_str);
-                Ok(env.get(&slot_name).cloned().unwrap_or(Value::Nil))
+                let function = self.functions.get(name);
+                let args = self.build_call_args(function, args, env, depth + 1)?;
+                self.invoke_reference(name, args, depth + 1, env.object_state.clone())
             }
+            AssignmentTarget::EffectSlot(_) | AssignmentTarget::MethodSlot { .. } => Err(
+                RuntimeError::new("this assignment target cannot be passed by reference"),
+            ),
+        }
+    }
+
+    fn expr_to_lvalue(
+        &self,
+        expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<LValueRef, RuntimeError> {
+        let target = Self::expr_to_assignment_target(expr)?;
+        self.assignment_target_to_lvalue(env, &target, depth)
+    }
+
+    fn evaluate_slot_index(
+        &self,
+        name: &str,
+        expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<i32, RuntimeError> {
+        match self.evaluate(expr, env, depth)? {
+            Value::Int(index) => Ok(index),
+            other => Err(RuntimeError::new(format!(
+                "{name} index must be an integer, got {}",
+                other.type_name()
+            ))),
         }
     }
 
@@ -1319,12 +1529,11 @@ impl<'a> Vm<'a> {
                     name.clone(),
                 ))
             }
-            Expr::Index(_, _) => {
-                // Index expressions are not yet supported as assignment targets
-                // This would require extending AssignmentTarget to include Index variant
-                Err(RuntimeError::new(
-                    "index expressions as increment/decrement targets not yet supported"
-                        .to_string(),
+            Expr::Index(base, index) => {
+                let base_target = Self::expr_to_assignment_target(base)?;
+                Ok(AssignmentTarget::Index(
+                    Box::new(base_target),
+                    Box::new((**index).clone()),
                 ))
             }
             // Special case: Local(expr), Var(expr), and EffectVar(args...) are valid for increment/decrement
@@ -1336,10 +1545,18 @@ impl<'a> Vm<'a> {
             } => {
                 if let Expr::Variable(ref name) = **callee {
                     if !is_optional {
-                        if name == "Local" && args.len() == 1 {
-                            return Ok(AssignmentTarget::LocalSlot(Box::new(args[0].clone())));
-                        } else if name == "Var" && args.len() == 1 {
-                            return Ok(AssignmentTarget::VarSlot(Box::new(args[0].clone())));
+                        if name == "Local" && (args.is_empty() || args.len() == 1) {
+                            return Ok(AssignmentTarget::LocalSlot(Box::new(
+                                args.first()
+                                    .cloned()
+                                    .unwrap_or(Expr::Literal(Literal::Int(0))),
+                            )));
+                        } else if name == "Var" && (args.is_empty() || args.len() == 1) {
+                            return Ok(AssignmentTarget::VarSlot(Box::new(
+                                args.first()
+                                    .cloned()
+                                    .unwrap_or(Expr::Literal(Literal::Int(0))),
+                            )));
                         } else if name == "EffectVar" {
                             return Ok(AssignmentTarget::EffectSlot(args.clone()));
                         }
@@ -1388,11 +1605,11 @@ enum ControlFlow {
     Normal,
     Break,
     LoopContinue,
-    Return(Value),
+    Return(ReturnValue),
 }
 
 struct Environment {
-    scopes: Vec<HashMap<String, Value>>,
+    scopes: Vec<HashMap<String, Binding>>,
     /// `#strict` level of the executing function, for level-correct `==`/`!=`.
     strict_level: Option<u8>,
     /// C4Script numeric scratch slots, addressed by `Var(n)` / `Local(n)`. These
@@ -1401,45 +1618,51 @@ struct Environment {
     /// so a `Local(0) = x` inside a block stays visible after it. Unset reads as
     /// nil and the index is clamped to >= 0 (C4ValueList::GetItem). `var_slots`
     /// are per-call; `local_slots` round-trip through the object's `local_vars`.
-    var_slots: HashMap<i32, Value>,
-    local_slots: HashMap<i32, Value>,
+    var_slots: SlotMap,
+    object_state: ObjectState,
 }
 
 impl Environment {
-    fn new_with_params(params: &[Parameter], args: &[Value], strict_level: Option<u8>) -> Self {
+    fn new_with_params(
+        params: &[Parameter],
+        args: &[CallArg],
+        strict_level: Option<u8>,
+        object_state: ObjectState,
+    ) -> Result<Self, RuntimeError> {
         let mut scopes = vec![HashMap::new()];
         let base = scopes.last_mut().unwrap();
-        for (param, value) in params.iter().zip(args.iter()) {
-            base.insert(param.name.clone(), value.clone());
+        for (param, arg) in params.iter().zip(args.iter()) {
+            let binding = if param.is_reference {
+                match arg {
+                    CallArg::Reference(reference) => Binding::Reference(reference.clone()),
+                    CallArg::Value(value) => Binding::direct(value.clone()),
+                }
+            } else {
+                Binding::direct(arg.read()?)
+            };
+            base.insert(param.name.clone(), binding);
         }
-        Self {
+        Ok(Self {
             scopes,
             strict_level,
-            var_slots: HashMap::new(),
-            local_slots: HashMap::new(),
+            var_slots: Rc::new(RefCell::new(HashMap::new())),
+            object_state,
+        })
+    }
+
+    fn var_slot_lvalue(&mut self, index: i32) -> LValueRef {
+        LValueRef::Cell(slot_cell(&self.var_slots, index))
+    }
+
+    fn local_slot_lvalue(&mut self, index: i32) -> LValueRef {
+        LValueRef::Cell(self.object_state.local_slot_cell(index))
+    }
+
+    fn define_object_local(&mut self, name: &str) {
+        let cell = self.object_state.named_local_cell(name);
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), Binding::Direct(cell));
         }
-    }
-
-    fn set_var_slot(&mut self, index: i32, value: Value) {
-        self.var_slots.insert(index.max(0), value);
-    }
-
-    fn get_var_slot(&self, index: i32) -> Value {
-        self.var_slots
-            .get(&index.max(0))
-            .cloned()
-            .unwrap_or(Value::Nil)
-    }
-
-    fn set_local_slot(&mut self, index: i32, value: Value) {
-        self.local_slots.insert(index.max(0), value);
-    }
-
-    fn get_local_slot(&self, index: i32) -> Value {
-        self.local_slots
-            .get(&index.max(0))
-            .cloned()
-            .unwrap_or(Value::Nil)
     }
 
     fn push_scope(&mut self) {
@@ -1452,24 +1675,32 @@ impl Environment {
 
     fn define(&mut self, name: &str, value: Value) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), value);
+            scope.insert(name.to_string(), Binding::direct(value));
         }
     }
 
     fn assign(&mut self, name: &str, value: Value) -> Result<(), RuntimeError> {
         for scope in self.scopes.iter_mut().rev() {
-            if scope.contains_key(name) {
-                scope.insert(name.to_string(), value);
-                return Ok(());
+            if let Some(binding) = scope.get(name) {
+                return binding.write(value);
             }
         }
         Err(RuntimeError::new(format!("undefined variable '{name}'")))
     }
 
-    fn get(&self, name: &str) -> Option<&Value> {
+    fn get(&self, name: &str) -> Result<Option<Value>, RuntimeError> {
         for scope in self.scopes.iter().rev() {
             if let Some(value) = scope.get(name) {
-                return Some(value);
+                return value.read().map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    fn lvalue(&self, name: &str) -> Option<LValueRef> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(value) = scope.get(name) {
+                return Some(value.lvalue());
             }
         }
         None

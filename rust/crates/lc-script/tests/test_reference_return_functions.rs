@@ -1,5 +1,7 @@
 // Test for reference return functions (func &)
 
+use lc_script::{Engine, Value};
+
 #[test]
 fn private_func_ref_no_params() {
     // private func & FuncName()
@@ -216,4 +218,52 @@ fn effect_callback_without_ref_return() {
         );
     }
     assert!(result.is_ok());
+}
+
+#[test]
+fn reference_return_mutates_local_slot() {
+    let mut engine = Engine::new();
+    engine
+        .load_script(
+            r#"
+            func & Slot(int index) { return Local(index); }
+            func Test() {
+                Slot(0) = 42;
+                return Local(0);
+            }
+            "#,
+        )
+        .expect("script loads");
+
+    assert_eq!(engine.call("Test", &[]).unwrap(), Value::Int(42));
+}
+
+#[test]
+fn reference_return_mutates_array_and_proplist_elements() {
+    let mut engine = Engine::new();
+    engine
+        .load_script(
+            r#"
+            local Data;
+
+            func & ArraySlot(int index) { return Data[index]; }
+            func & Score() { return Data.score; }
+
+            func TestArray() {
+                Data = [1, 2];
+                ArraySlot(1) = 9;
+                return Data[0] + Data[1];
+            }
+
+            func TestProplist() {
+                Data = { score = 3 };
+                Score() = 11;
+                return Data.score;
+            }
+            "#,
+        )
+        .expect("script loads");
+
+    assert_eq!(engine.call("TestArray", &[]).unwrap(), Value::Int(10));
+    assert_eq!(engine.call("TestProplist", &[]).unwrap(), Value::Int(11));
 }

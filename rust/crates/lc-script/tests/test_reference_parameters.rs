@@ -1,5 +1,7 @@
 // Test for reference parameters (&param)
 
+use lc_script::{Engine, Value};
+
 #[test]
 fn simple_reference_parameter() {
     let source = r#"func SetValues(&x, &y) { x = 10; y = 20; }"#;
@@ -74,4 +76,48 @@ fn reference_parameter_with_object_type() {
         );
     }
     assert!(result.is_ok());
+}
+
+#[test]
+fn reference_parameter_mutates_variable() {
+    let mut engine = Engine::new();
+    engine
+        .load_script(
+            r#"
+            func SetValue(&x) { x = 7; }
+            func Test() {
+                var value = 1;
+                SetValue(value);
+                return value;
+            }
+            "#,
+        )
+        .expect("script loads");
+
+    assert_eq!(engine.call("Test", &[]).unwrap(), Value::Int(7));
+}
+
+#[test]
+fn reference_parameter_mutates_array_and_proplist_elements() {
+    let mut engine = Engine::new();
+    engine
+        .load_script(
+            r#"
+            func SetValue(&x, value) { x = value; }
+            func TestArray() {
+                var values = [1, 2];
+                SetValue(values[0], 10);
+                return values[0] + values[1];
+            }
+            func TestProplist() {
+                var data = { score = 4 };
+                SetValue(data.score, 8);
+                return data.score;
+            }
+            "#,
+        )
+        .expect("script loads");
+
+    assert_eq!(engine.call("TestArray", &[]).unwrap(), Value::Int(12));
+    assert_eq!(engine.call("TestProplist", &[]).unwrap(), Value::Int(8));
 }
