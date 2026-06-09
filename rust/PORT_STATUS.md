@@ -285,13 +285,24 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
    both ways, C4PlayerList.cpp:82-92; `Player.hostility` persisted sorted in
    `PlayerState`), RejectFight vetoes on both sides, `ObjectActionFight` =
    SetActionByName("Fight", target); Tick10 contained fight (no RejectFight,
-   C4GameObjects.cpp:199-230) with tamper rechecks. **Open:** the Tick35
-   contact-incineration arm (`!Random(ContactIncinerate)`) needs the fire
-   model (object OnFire state + Incinerate + ContactIncinerate DefCore field —
-   no Rust object carries OCF_OnFire yet, so C++ consumes no draws for it
-   either); engine-side DoEnergy lacks the physical max clamp and
-   `AssignDeath` (no death model yet); fight has no ongoing combat exec
-   (DFA_FIGHT procedure).
+   C4GameObjects.cpp:199-230) with tamper rechecks. **Fire model + Tick35
+   incineration arm DONE (2026-06-09):** object `on_fire`/`fire_phase`/
+   `fire_caused_by` state (snapshot-persisted); `ContactIncinerate`/
+   `NoBurnDecay`/`NoBurnDamage` DefCore fields; `Engine::incinerate_object` =
+   C4Object::Incinerate + the deterministic fxFireStart core (already-burning/
+   dead-living refusals, extinguisher-material check BEFORE the
+   `FirePhase = Random(MaxFirePhase)` draw, Incineration callback);
+   `exec_object_fire` = ExecFire (phase mod 15, every-frame `DoCon(-100)`
+   decay with burn-away removal, Tick10 +2 damage, Tick5 −1 energy, Tick5
+   background extinguish + the `Random(3)` landscape-inflame draw over valid
+   material) run post-movement like the C++ fire effect timer;
+   `OCF_OnFire`/`OCF_Inflammable` per SetOCF (dead livings excluded); the
+   Tick35 arm consumes `Random(ContactIncinerate)` whenever the OCF pair
+   matches and attributes via GetFireCausePlr's ValidPlr filter
+   (C4Object.cpp:6193-6203). **Open:** fxFireStart's BurnTurnTo ChangeDef,
+   contents ejection, attach detach, fire modes/sounds, IncinerationEx; Tick5
+   base extinguish (base model); SmokeRate smoke (visual); DoEnergy physical
+   max clamp + `AssignDeath` (death model); DFA_FIGHT combat exec.
 7. **PARTIAL** — `script-values`. **Done:** `C4ScriptCnvMap` 81-cell table +
    `ConvertTo` dispatch (`C4Value.cpp:431-598`; differential-locked
    `script_value_convert` — 81-cell grid + per-(value,target,#strict) result);

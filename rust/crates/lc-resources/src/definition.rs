@@ -87,6 +87,14 @@ pub struct DefCore {
     pub contact_function_calls: bool,
     pub collection: Option<PictureRect>,
     pub collection_limit: Option<u32>,
+    /// ContactIncinerate=N: 1-in-N chance of catching fire on contact with a
+    /// burning object (CrossCheck pass 1, C4GameObjects.cpp:121-125); 0 = not
+    /// inflammable.
+    pub contact_incinerate: i32,
+    /// NoBurnDecay=1: burning does not reduce Con (C4Object.cpp:777-778).
+    pub no_burn_decay: bool,
+    /// NoBurnDamage=1: burning deals no damage (C4Object.cpp:780).
+    pub no_burn_damage: bool,
     pub collectible: bool,
     pub constructable: bool,
     pub con_size_off: i32,
@@ -317,6 +325,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut contact_function_calls = false;
     let mut collection: Option<PictureRect> = None;
     let mut collection_limit: Option<u32> = None;
+    let mut contact_incinerate: i32 = 0;
+    let mut no_burn_decay = false;
+    let mut no_burn_damage = false;
     let mut collectible = false;
     let mut constructable = false;
     let mut con_size_off: i32 = 0;
@@ -420,6 +431,15 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "collection" => {
                 collection = parse_rect(value).filter(|rect| rect.width > 0 && rect.height > 0);
             }
+            "contactincinerate" => {
+                contact_incinerate = parse_i32(value).unwrap_or(0).max(0);
+            }
+            "noburndecay" => {
+                no_burn_decay = parse_bool(value);
+            }
+            "noburndamage" => {
+                no_burn_damage = parse_bool(value);
+            }
             "collectionlimit" => {
                 collection_limit = match parse_i32(value) {
                     Some(limit) if limit > 0 => Some(limit as u32),
@@ -491,6 +511,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         contact_function_calls,
         collection,
         collection_limit,
+        contact_incinerate,
+        no_burn_decay,
+        no_burn_damage,
         collectible,
         constructable,
         con_size_off,
@@ -1613,6 +1636,35 @@ NextAction=Dup
             reference.next_action_index, 4,
             "last duplicate wins (C4Def.cpp:789-791 overwrite loop)"
         );
+    }
+
+    #[test]
+    fn parse_def_core_fire_fields() {
+        // ContactIncinerate / NoBurnDecay / NoBurnDamage (C4Def fire fields;
+        // ContactIncinerate feeds the CrossCheck Tick35 arm,
+        // C4GameObjects.cpp:121-125).
+        let data = br#"
+            [DefCore]
+            id=FIRY
+            Name=Firy
+            ContactIncinerate=10
+            NoBurnDecay=1
+            NoBurnDamage=1
+        "#;
+        let parsed = parse_def_core(data).expect("def core parses");
+        assert_eq!(parsed.contact_incinerate, 10);
+        assert!(parsed.no_burn_decay);
+        assert!(parsed.no_burn_damage);
+
+        let data = br#"
+            [DefCore]
+            id=STON
+            Name=Stone
+        "#;
+        let parsed = parse_def_core(data).expect("def core parses");
+        assert_eq!(parsed.contact_incinerate, 0, "default: not inflammable");
+        assert!(!parsed.no_burn_decay);
+        assert!(!parsed.no_burn_damage);
     }
 
     #[test]

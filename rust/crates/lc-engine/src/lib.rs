@@ -1850,6 +1850,20 @@ pub struct ObjectState {
     /// These are initialized to nil in Construction() and persist across all function calls
     #[serde(default)]
     pub local_vars: HashMap<String, Value>,
+    /// Burning state (C4Object::OnFire, C4Object.h:205). Set by Incinerate
+    /// via the fire effect start (C4Effect.cpp:633); drives OCF_OnFire and
+    /// the per-frame ExecFire burning.
+    #[serde(default)]
+    pub on_fire: bool,
+    /// Fire animation phase 0..MaxFirePhase (C4Object::FirePhase; initialized
+    /// to Random(MaxFirePhase) at fire start, C4Effect.cpp:634 — a synced
+    /// draw).
+    #[serde(default)]
+    pub fire_phase: i32,
+    /// Player that caused the fire (the fire effect's CausedBy var, read by
+    /// C4Object::GetFireCausePlr for contact-incineration attribution).
+    #[serde(default = "default_owner")]
+    pub fire_caused_by: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -3407,6 +3421,9 @@ impl Object {
             command_queue: self.command_queue.iter().cloned().collect(),
             command_stack: self.commands.snapshot(),
             local_vars: self.state.local_vars.clone(),
+            on_fire: self.state.on_fire,
+            fire_phase: self.state.fire_phase,
+            fire_caused_by: self.state.fire_caused_by,
             fixed_position: subpixel_or_none(self.fixed_position, position),
             fixed_velocity: subpixel_or_none(self.fixed_velocity, velocity),
             rotation_velocity: rotation_state.0,
@@ -3927,6 +3944,14 @@ pub struct ObjectSnapshot {
     pub command_stack: CommandStackSnapshot,
     #[serde(default)]
     pub local_vars: HashMap<String, Value>,
+    /// Burning state (C4Object::OnFire) with its animation phase and the
+    /// causing player (the fire effect's CausedBy var).
+    #[serde(default)]
+    pub on_fire: bool,
+    #[serde(default)]
+    pub fire_phase: i32,
+    #[serde(default = "default_owner")]
+    pub fire_caused_by: i32,
     /// Raw 16.16 fixed-point position, recorded only when it carries sub-pixel
     /// detail beyond the whole-pixel `position` (i.e. `position != fixtoi(fix)`).
     /// `None` ⇒ reconstruct losslessly via `itofix(position)`. Mirrors C++
@@ -4440,6 +4465,10 @@ pub struct Definition {
     upright_attach: u32,
     components: Vec<DefinitionComponent>,
     line_connect: u32,
+    /// ContactIncinerate=N: 1-in-N contact-fire chance (0 = not inflammable).
+    contact_incinerate: i32,
+    no_burn_decay: bool,
+    no_burn_damage: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4523,6 +4552,9 @@ impl Definition {
             upright_attach: 0,
             components: Vec::new(),
             line_connect: 0,
+            contact_incinerate: 0,
+            no_burn_decay: false,
+            no_burn_damage: false,
         })
     }
 
@@ -4623,6 +4655,11 @@ impl Definition {
         definition.set_contact_function_calls(resource.core.contact_function_calls);
         definition.set_collection_rect(resource.core.collection.map(DefinitionRect::from));
         definition.set_collection_limit(resource.core.collection_limit);
+        definition.set_fire_properties(
+            resource.core.contact_incinerate,
+            resource.core.no_burn_decay,
+            resource.core.no_burn_damage,
+        );
         definition.set_collectible(resource.core.collectible);
         definition.set_constructable(resource.core.constructable);
         definition.set_construction_offset(resource.core.con_size_off);
@@ -4801,6 +4838,18 @@ impl Definition {
         if self.collectible {
             ocf |= crate::ocf::CARRYABLE;
         }
+        // OCF_OnFire (SetOCF, C4Object.cpp:559-561)
+        if state.on_fire {
+            ocf |= crate::ocf::ON_FIRE;
+        }
+        // OCF_Inflammable: not burning, ContactIncinerate set, not a dead
+        // living (SetOCF, C4Object.cpp:562-566)
+        if !state.on_fire
+            && self.contact_incinerate > 0
+            && (state.category & CATEGORY_LIVING == 0 || state.alive)
+        {
+            ocf |= crate::ocf::INFLAMMABLE;
+        }
         if let Some(rect) = self.collection_rect {
             if rect.is_positive() {
                 let below_limit = self
@@ -4942,6 +4991,29 @@ impl Definition {
 
     pub fn collection_limit(&self) -> Option<u32> {
         self.collection_limit
+    }
+
+    pub fn contact_incinerate(&self) -> i32 {
+        self.contact_incinerate
+    }
+
+    pub fn no_burn_decay(&self) -> bool {
+        self.no_burn_decay
+    }
+
+    pub fn no_burn_damage(&self) -> bool {
+        self.no_burn_damage
+    }
+
+    pub fn set_fire_properties(
+        &mut self,
+        contact_incinerate: i32,
+        no_burn_decay: bool,
+        no_burn_damage: bool,
+    ) {
+        self.contact_incinerate = contact_incinerate.max(0);
+        self.no_burn_decay = no_burn_decay;
+        self.no_burn_damage = no_burn_damage;
     }
 
     pub fn set_collection_limit(&mut self, limit: Option<u32>) {
@@ -10437,6 +10509,8 @@ impl Engine {
 
             self.apply_landscape_at_index(idx);
             self.update_sector_for_index(idx);
+            // effects (fire) run after movement (C4Object.cpp:1073-1077)
+            self.exec_object_fire(idx, frame);
 
             let object_id = self.objects[idx].id;
             let state_snapshot = self.objects[idx].state.clone();
@@ -10638,6 +10712,8 @@ impl Engine {
 
             self.apply_landscape_at_index(idx);
             self.update_sector_for_index(idx);
+            // effects (fire) run after movement (C4Object.cpp:1073-1077)
+            self.exec_object_fire(idx, frame);
             let (procedure, line_connect, ocf_base, collectible) = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
@@ -11700,6 +11776,9 @@ impl Engine {
                     graphics_overlays: snapshot.graphics_overlays.clone(),
                     draw_transform: snapshot.draw_transform,
                     local_vars: snapshot.local_vars.clone(),
+                    on_fire: snapshot.on_fire,
+                    fire_phase: snapshot.fire_phase,
+                    fire_caused_by: snapshot.fire_caused_by,
                 },
                 shape_template,
                 snapshot.own_vertices.clone(),
@@ -13706,11 +13785,17 @@ impl Engine {
     /// draws for it either.
     fn cross_check_at_object_pass(&mut self, frame: u64) -> Result<(), EngineError> {
         let tick5 = frame % 5 == 0;
+        let tick35 = frame % 35 == 0;
         let mut focf = crate::ocf::NONE;
         let mut tocf = crate::ocf::NONE;
         if tick5 {
             focf |= crate::ocf::FIGHT_READY;
             tocf |= crate::ocf::FIGHT_READY;
+        }
+        // Very low level: Incineration (C4GameObjects.cpp:106-110)
+        if tick35 {
+            focf |= crate::ocf::ON_FIRE;
+            tocf |= crate::ocf::INFLAMMABLE;
         }
         if focf == 0 || tocf == 0 {
             return Ok(());
@@ -13738,6 +13823,27 @@ impl Engine {
             else {
                 continue;
             };
+            // Incineration (C4GameObjects.cpp:120-125): the Random draw runs
+            // whenever the OCF pair matches, regardless of its outcome.
+            if ocf1 & crate::ocf::ON_FIRE != 0 && ocf2 & crate::ocf::INFLAMMABLE != 0 {
+                let contact_incinerate = self
+                    .definitions
+                    .get(&self.objects[obj2_idx].definition_id)
+                    .map(|definition| definition.contact_incinerate())
+                    .unwrap_or(0);
+                if self.rng.random(contact_incinerate) == 0 {
+                    // GetFireCausePlr: the fire effect's CausedBy, NO_OWNER
+                    // unless it is a valid player.
+                    let cause = self.objects[idx].state.fire_caused_by;
+                    let cause = if self.players.contains_key(&cause) {
+                        cause
+                    } else {
+                        OWNER_NONE
+                    };
+                    let _ = self.incinerate_object(obj2_idx, cause, false, Some(obj1_id))?;
+                    continue;
+                }
+            }
             // Fight (C4GameObjects.cpp:126-136)
             if ocf1 & crate::ocf::FIGHT_READY != 0 && ocf2 & crate::ocf::FIGHT_READY != 0 {
                 let owner1 = self.objects[idx].state.owner;
@@ -14028,6 +14134,121 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// `C4Object::Incinerate` (C4Object.cpp:1230-1241) + the deterministic
+    /// core of fxFireStart (C4Effect.cpp:560-641): refuse when already
+    /// burning or a dead living; no fire in extinguishing material (checked
+    /// BEFORE the FirePhase draw); otherwise set OnFire, draw
+    /// `FirePhase = Random(MaxFirePhase)` (one synced draw), store the cause,
+    /// and run the Incineration script callback. Still open: BurnTurnTo
+    /// ChangeDef, contents ejection, attached-object detach, fire modes,
+    /// sounds, and the IncinerationEx blasted-in-water callback.
+    fn incinerate_object(
+        &mut self,
+        idx: usize,
+        caused_by: i32,
+        _blasted: bool,
+        _incinerating: Option<ObjectId>,
+    ) -> Result<bool, EngineError> {
+        {
+            let state = &self.objects[idx].state;
+            // Already on fire (C4Object.cpp:1233)
+            if state.on_fire {
+                return Ok(false);
+            }
+            // Dead living don't burn (C4Object.cpp:1235)
+            if state.category & CATEGORY_LIVING != 0 && !state.alive {
+                return Ok(false);
+            }
+        }
+        // In extinguishing material: no fire caused (C4Effect.cpp:574-583)
+        let position = self.objects[idx].state.position;
+        let in_extinguisher = self
+            .landscape
+            .as_ref()
+            .and_then(|landscape| landscape.material_at(position.x, position.y))
+            .and_then(|material_id| self.materials.get_by_id(material_id))
+            .map(|material| material.extinguisher() > 0)
+            .unwrap_or(false);
+        if in_extinguisher {
+            return Ok(false);
+        }
+        // Set values (C4Effect.cpp:632-634)
+        {
+            let object = &mut self.objects[idx];
+            object.state.on_fire = true;
+            object.state.fire_caused_by = caused_by;
+        }
+        self.objects[idx].state.fire_phase = self.rng.random(15); // Random(MaxFirePhase)
+        // Engine script call (C4Effect.cpp:638)
+        let _ = self.call_object_function(idx, "Incineration", vec![Value::Int(caused_by)])?;
+        Ok(true)
+    }
+
+    /// `C4Object::ExecFire` (C4Object.cpp:766-810), run for burning objects
+    /// after movement like the C++ fire effect timer. Still open: the Tick5
+    /// base extinguish (needs the base model), SmokeRate smoke (visual), and
+    /// death/removal callbacks from the energy and damage changes.
+    fn exec_object_fire(&mut self, idx: usize, frame: u64) {
+        if !self.objects[idx].state.on_fire {
+            return;
+        }
+        // Fire Phase (C4Object.cpp:769)
+        {
+            let object = &mut self.objects[idx];
+            object.state.fire_phase = (object.state.fire_phase + 1) % 15;
+        }
+        let (no_burn_decay, no_burn_damage) = self
+            .definitions
+            .get(&self.objects[idx].definition_id)
+            .map(|definition| (definition.no_burn_decay(), definition.no_burn_damage()))
+            .unwrap_or((false, false));
+        // Decay: DoCon(-100) every frame (C4Object.cpp:776-778); burned away
+        // at zero construction (C4Object::DoCon removal)
+        if !no_burn_decay {
+            let object = &mut self.objects[idx];
+            object.state.construction = (object.state.construction - 100).clamp(0, FULL_CON);
+            if object.state.construction == 0 {
+                let _ = object.mark_destroyed();
+                return;
+            }
+        }
+        // Damage: Tick10 DoDamage(+2) (C4Object.cpp:780)
+        if frame % 10 == 0 && !no_burn_damage {
+            let object = &mut self.objects[idx];
+            object.state.damage = object.state.damage.saturating_add(2);
+        }
+        // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:782)
+        if frame % 5 == 0 {
+            self.change_object_energy(idx, -1);
+        }
+        // Background effects: Tick5 over valid landscape material
+        // (C4Object.cpp:791-806) — extinguish in extinguisher material, then
+        // the unconditional Random(3) landscape-inflame draw.
+        if frame % 5 == 0 {
+            let position = self.objects[idx].state.position;
+            let material = self
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.material_at(position.x, position.y));
+            if let Some(material_id) = material {
+                let extinguisher = self
+                    .materials
+                    .get_by_id(material_id)
+                    .map(|material| material.extinguisher() > 0)
+                    .unwrap_or(false);
+                if extinguisher {
+                    // Extinguish (C4Object.cpp:799-801); the Pshshsh sound is
+                    // presentation-only.
+                    self.objects[idx].state.on_fire = false;
+                }
+                // Inflame (C4Object.cpp:803-804)
+                if self.rng.random(3) == 0 {
+                    let _ = self.spawn_fire_at(position.x, position.y);
+                }
+            }
+        }
     }
 
     /// Engine-side `C4Object::DoEnergy` slice (C4Object.cpp:1345-1365) in the
@@ -15787,6 +16008,9 @@ impl Engine {
                 graphics_overlays: Vec::new(),
                 draw_transform: None,
                 local_vars: HashMap::new(),
+                on_fire: false,
+                fire_phase: 0,
+                fire_caused_by: OWNER_NONE,
             },
             shape_template,
             own_shape_vertices,
@@ -17953,6 +18177,218 @@ mod tests {
             engine.objects[victim_idx].fixed_velocity.y,
             math::C4Fixed::ZERO
         );
+        Ok(())
+    }
+
+    #[test]
+    fn incinerate_object_matches_cpp_start_semantics() -> Result<(), EngineError> {
+        // C4Object::Incinerate (C4Object.cpp:1230-1241) + fxFireStart core
+        // (C4Effect.cpp:560-641): already burning → false; dead livings don't
+        // burn; in extinguishing material → no fire and NO FirePhase draw
+        // (the extinguisher check precedes it); otherwise OnFire is set and
+        // FirePhase = Random(MaxFirePhase) consumes one synced draw
+        // (C4Effect.cpp:633-634, MaxFirePhase = 15).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+            Extinguisher=1
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut engine = Engine::with_seed(70);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(40, 30, Some(earth)));
+        engine.register_definition(simple_definition("Tree"))?;
+        let tree = engine.spawn_object(
+            SpawnConfig::new("Tree").with_position(Vector2::new(10, 10)),
+        )?;
+        let idx = engine.find_object_index(tree).expect("tree exists");
+
+        let mut mirror = engine.rng.clone();
+        let expected_phase = mirror.random(15);
+        assert!(engine.incinerate_object(idx, 1, false, None)?);
+        assert!(engine.objects[idx].state.on_fire);
+        assert_eq!(engine.objects[idx].state.fire_phase, expected_phase);
+        assert_eq!(engine.objects[idx].state.fire_caused_by, 1);
+        assert_eq!(engine.rng, mirror, "one FirePhase draw");
+
+        // already burning → false, no draw (C4Object.cpp:1233)
+        assert!(!engine.incinerate_object(idx, 2, false, None)?);
+        assert_eq!(engine.rng, mirror);
+        assert_eq!(engine.objects[idx].state.fire_caused_by, 1);
+
+        // dead living → false (C4Object.cpp:1235)
+        let mut dead_def = simple_definition("Corpse");
+        dead_def.set_crew_member(true);
+        dead_def.set_category(CATEGORY_LIVING);
+        engine.register_definition(dead_def)?;
+        let corpse = engine.spawn_object(
+            SpawnConfig::new("Corpse")
+                .with_position(Vector2::new(20, 10))
+                .with_alive(false),
+        )?;
+        let corpse_idx = engine.find_object_index(corpse).expect("corpse exists");
+        assert!(!engine.incinerate_object(corpse_idx, 1, false, None)?);
+        assert!(!engine.objects[corpse_idx].state.on_fire);
+
+        // submerged in extinguisher material → no fire, no draw
+        // (C4Effect.cpp:574-583)
+        if let Some(landscape) = engine.landscape.as_mut() {
+            landscape.set_liquid_column(30, vec![LiquidSegment::with_material(5, 12, Some(water))]);
+        }
+        let soaked = engine.spawn_object(
+            SpawnConfig::new("Tree").with_position(Vector2::new(30, 8)),
+        )?;
+        let soaked_idx = engine.find_object_index(soaked).expect("soaked exists");
+        let mirror = engine.rng.clone();
+        assert!(!engine.incinerate_object(soaked_idx, 1, false, None)?);
+        assert!(!engine.objects[soaked_idx].state.on_fire);
+        assert_eq!(engine.rng, mirror, "no draw when extinguished at start");
+        Ok(())
+    }
+
+    #[test]
+    fn exec_fire_burns_objects_like_cpp() -> Result<(), EngineError> {
+        // C4Object::ExecFire (C4Object.cpp:766-810): every frame FirePhase
+        // cycles mod 15 and Con decays by 100 raw units (unless NoBurnDecay);
+        // Tick10 deals +2 damage (unless NoBurnDamage); Tick5 drains 1
+        // energy; Tick5 over valid landscape material extinguishes in
+        // extinguisher material and otherwise draws Random(3) for landscape
+        // inflammation.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut engine = Engine::with_seed(71);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(40, 30, Some(earth)));
+        engine.register_definition(simple_definition("Hut"))?;
+        // in open air: the Tick5 background-material block never fires
+        let hut = engine.spawn_object(
+            SpawnConfig::new("Hut")
+                .with_position(Vector2::new(10, 10))
+                .with_energy(50),
+        )?;
+        let idx = engine.find_object_index(hut).expect("hut exists");
+        assert!(engine.incinerate_object(idx, 1, false, None)?);
+        let phase_after_start = engine.objects[idx].state.fire_phase;
+        let con_before = engine.objects[idx].state.construction;
+        let mirror = engine.rng.clone();
+
+        // frame 1: neither Tick5 nor Tick10 — only phase + decay
+        engine.exec_object_fire(idx, 1);
+        assert_eq!(
+            engine.objects[idx].state.fire_phase,
+            (phase_after_start + 1) % 15
+        );
+        assert_eq!(engine.objects[idx].state.construction, con_before - 100);
+        assert_eq!(engine.objects[idx].state.energy, 50);
+        assert_eq!(engine.objects[idx].state.damage, 0);
+        assert_eq!(engine.rng, mirror, "no draws in open air off-tick");
+
+        // frame 5: Tick5 → energy -1 (air: no background draw)
+        engine.exec_object_fire(idx, 5);
+        assert_eq!(engine.objects[idx].state.energy, 49);
+        // frame 10: Tick10 + Tick5 → damage +2, energy -1
+        engine.exec_object_fire(idx, 10);
+        assert_eq!(engine.objects[idx].state.damage, 2);
+        assert_eq!(engine.objects[idx].state.energy, 48);
+        assert_eq!(engine.rng, mirror, "still no draws in open air");
+
+        // Buried in earth (below the flat surface at y = 30): Tick5 draws
+        // Random(3) for landscape inflammation (C4Object.cpp:797-805).
+        let buried = engine.spawn_object(
+            SpawnConfig::new("Hut")
+                .with_position(Vector2::new(20, 35))
+                .with_energy(50),
+        )?;
+        let buried_idx = engine.find_object_index(buried).expect("buried exists");
+        assert!(engine.incinerate_object(buried_idx, 1, false, None)?);
+        let mut mirror = engine.rng.clone();
+        engine.exec_object_fire(buried_idx, 15);
+        mirror.random(3);
+        assert_eq!(engine.rng, mirror, "Tick5 inflame draw over material");
+        assert!(engine.objects[buried_idx].state.on_fire, "earth does not extinguish");
+        Ok(())
+    }
+
+    #[test]
+    fn cross_check_contact_incineration_on_tick35() -> Result<(), EngineError> {
+        // CrossCheck pass 1, incineration arm (C4GameObjects.cpp:106-125):
+        // on Tick35 frames an OCF_OnFire object standing at an
+        // OCF_Inflammable object's shape incinerates it when
+        // !Random(ContactIncinerate), attributing the original fire cause.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut engine = Engine::with_seed(72);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(80, 60, Some(earth)));
+        // GetFireCausePlr only forwards VALID players (C4Object.cpp:6193-6203)
+        engine.register_player(PlayerConfig::new(7, "P7"))?;
+        let mut torch_def = simple_definition("Torch");
+        torch_def.set_fire_properties(1, false, false);
+        engine.register_definition(torch_def)?;
+        let mut tree_def = simple_definition("Tree");
+        tree_def.set_fire_properties(1, false, false); // Random(1) == 0 always
+        tree_def.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 16)));
+        engine.register_definition(tree_def)?;
+
+        let torch = engine.spawn_object(
+            SpawnConfig::new("Torch").with_position(Vector2::new(40, 20)),
+        )?;
+        let tree = engine.spawn_object(
+            SpawnConfig::new("Tree").with_position(Vector2::new(41, 20)),
+        )?;
+        let torch_idx = engine.find_object_index(torch).expect("torch exists");
+        assert!(engine.incinerate_object(torch_idx, 7, false, None)?);
+
+        // Not a Tick35 frame: nothing happens, no draws.
+        let mirror = engine.rng.clone();
+        engine.cross_check(34)?;
+        let tree_idx = engine.find_object_index(tree).expect("tree exists");
+        assert!(!engine.objects[tree_idx].state.on_fire);
+        assert_eq!(engine.rng, mirror);
+
+        // Tick35: Random(ContactIncinerate=1) == 0 → incinerate, which draws
+        // the new fire's FirePhase. The fire cause carries over (GetFireCausePlr).
+        let mut mirror = engine.rng.clone();
+        mirror.random(1);
+        mirror.random(15);
+        engine.cross_check(35)?;
+        let tree_idx = engine.find_object_index(tree).expect("tree exists");
+        assert!(engine.objects[tree_idx].state.on_fire, "tree caught fire");
+        assert_eq!(engine.objects[tree_idx].state.fire_caused_by, 7);
+        assert_eq!(engine.rng, mirror, "contact draw then FirePhase draw");
         Ok(())
     }
 
