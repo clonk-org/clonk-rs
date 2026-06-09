@@ -104,7 +104,7 @@ audited subsystems are determinism-critical.
 | **objects-core** | partial | `AtObject()` exists; collection auto-check is sector-backed. Full `CrossCheck()` (919-LOC inter-object loop: Tick3/5/10/35 incineration/fight/collection/hit-damage) absent. OCF computes ~8 vs ~30 checks (`ocf.rs:46-76` vs `lib.rs:527-666`); object list is `Vec` vs category/ID-sorted. | `lib.rs`, `ocf.rs`, `compat.rs` |
 | **game-control-record** | partial (35%) | No varint frame-delta encoding (`C4Record.cpp:243-264`) — JSON snapshots instead. No `ControlRate`/`ControlTick` throttle, no `SyncRate` sync-check state machine, no `+37` end-marker (`:196`), no `Prepare()` pre-validation. | `lib.rs`, `control.rs`, `record.rs`, `ffi.rs` |
 | **material** | partial (40%) | Reaction *execution* partly missing: `mrfInsertCheck` splash/slide physics (`C4Material.cpp:570-604`) and script reactions unported. `MaterialReactionKind` classifies; mass-mover path now executes corrode/poof (see item 9). No full `ExtractMaterial/InsertMaterial` semantics. | `lc-engine/material.rs`, `lc-resources/material.rs` |
-| **pxs-massmover** | partial (296 vs 691) | Down/L/R corrosion, two-pass reverse exec, `Random(10)` before `Rnd3()` transfer order, and `LandscapeInsertThrust` plumbing landed. Remaining: exact `CreatePtr` fixed-slot reuse, richer per-pixel thrust/insert, step-by-step `_PathFree` (vs `first_collision_on_line`). | `mass_mover.rs`; `lib.rs:12211+` |
+| **pxs-massmover** | mostly done (2026-06-09) | **Done:** full `C4PXS::Execute` port — `pxs.rs` chunk/slot storage with `New()` lowest-free-slot reuse and chunk-major execution order (`C4PXS.cpp:175-234`), out-of-bounds rules, meePXSPos/meePXSMove reaction dispatch (`execute_pxs_reaction` mirrors mrfConvert/Poof/Corrode/Incinerate/Insert incl. depth-checked conversion and `Landscape.Incinerate`-at-position semantics), free-fall wind drift with the synced `Random(1200)` pair and `WindDrift_Factor`, coarse `_PathFree` (17×15 `PixCnt` cells, on-demand occupancy), step-loop with `fStopMovement` snap; `PXS.Cast` draw order (`r2` before `r1`, C4PXS.cpp:303-316) wired into blast (`level=60`, C4Landscape.cpp:1075-1078); dig spill as zero-velocity `PXS.Create`; raw-fixed save/load (`ParticleSnapshot.pxs_fixed`). Mass-mover side: down/L/R corrosion, two-pass reverse exec, `Random(10)` before `Rnd3()`. **Open:** mass-move `Convert` → `PXS.Create` handoff (C4Material.cpp:654-657; `MaterialReactionExecution::Converted` is produced but unconsumed), position-dependent `GBackWind`, exact `BlastFree` material accounting around the cast. The invented PXS→object friction coupling was REMOVED (C++ PXS never touch objects). | `pxs.rs`, `mass_mover.rs`, `lib.rs`, `landscape.rs` |
 | **landscape** | partial (25%) | Batch `apply_temperature_conversions` vs C++ incremental `ExecuteScan/DoScan` with `ScanX` cursor (scan order desyncs). No `PRETTY_TEMP_CONV`, no map creation (`ChunkyRandom`/`MapToLandscape`), no `DigFree/BlastFree`, no pixel ops, no Save/Load. Liquid model is segment- vs pixel-based. | `landscape.rs`, `material.rs` |
 | **effects** | partial (35%, 195 vs 921) | Builtin fire effect (300+ LOC) + helper effects (Splash/Smoke/Explosion/BubbleOut) missing. No `Check()` priority-conflict, no `TempRemove/TempReadd`. `advance_tick()` uses saturation vs modulo `iTime % iIntervall` → timing drift. Dispatch infra exists but never invoked for builtins. | `effect.rs`, `lib.rs:5175+,5272+` |
 | **commands** | partial (55%) | AI determinism: MoveTo lacks Jump/Flight/Swim control; Get missing `Random(15)-7` offset (`C4Command.cpp:1290`) + side-jump (`:1272`). Tick2/5/35 throttling absent → continuous exec breaks tick-sync. Scale/Hangle let-go thresholds missing. | `command.rs` |
@@ -171,9 +171,11 @@ collision; `remove_material_at` (`:900-919`) no extraction/spawn; `incinerate_at
 (`material.rs:110-121`) variants defined; `reaction()`/`custom_reaction()`
 (`:705-767`) classify only — non-mass-mover callers must implement physics.
 
-**pxs-massmover** — `find_liquid_target()` (`mass_mover.rs:254-291`) no reaction
-callbacks during slide; `tick_material_particles()` (`lib.rs:12259`)
-`first_collision_on_line` skips step-by-step reactions.
+**pxs-massmover** — RESOLVED for the PXS core (see GAP LIST row): the old
+`tick_material_particles` float-jitter loop and its `first_collision_on_line`
+shortcut are replaced by the faithful `C4PXS::Execute` step loop. Still
+stubbed: `find_liquid_target()` (`mass_mover.rs`) reaction callbacks during
+slide; mass-move `Convert` → `PXS.Create` handoff.
 
 **effects** — `advance_tick` (`effect.rs:86`) timer bool only; `set_var/var`
 (`:100-112`) no callbacks; dispatch infra (`lib.rs:5175+,5272+`) never invoked for
@@ -294,10 +296,12 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
    Insert/Poof/Corrode/Incinerate arms with the C++ contact-adjacent check
    position (`C4PXS.cpp:96-117`). Remaining: script reactions (`mrfScript`),
    full fixed-point `C4PXS::Execute` step loop (item 10).
-10. **PARTIAL** — Mass-mover parity. Down/L/R corrosion, two-pass reverse exec,
-    immediate spawned-mover exec, `LandscapeInsertThrust` plumbing, `Random(10)`
-    before `Rnd3()` order landed. Remaining: exact `CreatePtr` slot reuse, richer
-    per-pixel thrust/insert.
+10. **DONE (PXS core; 2026-06-09)** — `C4PXS::Execute` + `C4PXSSystem`
+    chunk/slot storage with exact `New()` slot reuse and execution order,
+    reaction dispatch on both PXS events, `_PathFree`, `PXS.Cast`/`Create`
+    at blast/dig sites, fixed-point state with lossless save/load. See the
+    pxs-massmover GAP row for the short open list (mass-move Convert→PXS
+    handoff, position-dependent wind, BlastFree accounting).
 11. **DONE (load-time mapping; 2026-06-09)** — `CrossMapActMap()` in
     definition loading per `C4Def.cpp:773-799`: `ActionMap.actions` is now an
     ordered Vec keeping duplicates (C++ array semantics, first-match `get()`

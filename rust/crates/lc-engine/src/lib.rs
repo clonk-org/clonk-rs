@@ -33,6 +33,7 @@ pub mod ocf;
 mod parity_differential;
 pub mod particles;
 mod pathfinder;
+pub mod pxs;
 mod player;
 mod record;
 mod rng;
@@ -115,7 +116,7 @@ use compat::{
     PlayerCommand,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
-use material::{consume_corrosion_effect_rng, evaluate_corrosion, MaterialReactionKind};
+use material::{evaluate_corrosion, MaterialInteractionEvent, MaterialReactionKind};
 use message::{MessageCommand, MessageManager, MessageSpec, PersistedMessage};
 use ocf::NORMAL as OCF_NORMAL;
 use sector::{SectorMap, SectorObject};
@@ -128,7 +129,9 @@ use std::ops::AddAssign;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::math::{fixed10, fixed100, fixtoi, fixtoi_prec, itofix, C4Fixed, FixedVec2};
+use crate::math::{
+    fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed, FixedVec2,
+};
 pub use crate::rng::LcgRng;
 use lc_resources::definition::{
     ActionFacet as ResourceActionFacet, TargetRect as ResourceTargetRect,
@@ -139,7 +142,7 @@ use lc_resources::{
 };
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, ScriptError, Value};
 use mass_mover::MassMoverSet;
-use rand::{seq::SliceRandom, Rng};
+use rand::Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sky::SkyState;
 use thiserror::Error;
@@ -733,6 +736,10 @@ pub struct ParticleSnapshot {
     #[serde(default)]
     pub parameter_b: i32,
     pub layer: ParticleLayer,
+    /// Raw `C4Fixed` `[x, y, xdir, ydir]` for C4PXS pixel sprites — the
+    /// sync-relevant state; the float fields above are lossy projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pxs_fixed: Option<[i32; 4]>,
 }
 
 impl PartialEq for ParticleSnapshot {
@@ -744,6 +751,7 @@ impl PartialEq for ParticleSnapshot {
             && self.parameter_a.to_bits() == other.parameter_a.to_bits()
             && self.parameter_b == other.parameter_b
             && self.layer == other.layer
+            && self.pxs_fixed == other.pxs_fixed
     }
 }
 
@@ -838,6 +846,7 @@ impl ActiveParticle {
             parameter_a,
             parameter_b,
             layer,
+            pxs_fixed: None,
         };
         Self {
             snapshot,
@@ -882,39 +891,27 @@ fn system_particle_snapshot(particle: &particles::Particle) -> ParticleSnapshot 
         parameter_a: particle.a,
         parameter_b: particle.b,
         layer: particle.layer.clone(),
+        pxs_fixed: None,
     }
 }
 
-#[derive(Debug, Clone)]
-struct MaterialParticle {
-    material: MaterialId,
-    position: FloatVector2,
-    velocity: FloatVector2,
-}
-
-impl MaterialParticle {
-    fn new(material: MaterialId, position: FloatVector2, velocity: FloatVector2) -> Self {
-        Self {
-            material,
-            position,
-            velocity,
-        }
-    }
-
-    fn snapshot(&self, materials: &MaterialSet) -> ParticleSnapshot {
-        let definition_id = materials
-            .get_by_id(self.material)
-            .map(|material| format!("material/pxs/{}", material.normalized_name()))
-            .unwrap_or_else(|| "material/pxs/unknown".to_string());
-        ParticleSnapshot {
-            definition_id,
-            position: self.position,
-            velocity: self.velocity,
-            life: 0,
-            parameter_a: 0.0,
-            parameter_b: self.material.index() as i32,
-            layer: ParticleLayer::Global,
-        }
+/// Snapshot form of a C4PXS pixel sprite. The float position/velocity are
+/// `fixtof` projections for display; `pxs_fixed` carries the raw sync-relevant
+/// `C4Fixed` state for lossless save/load.
+fn pxs_snapshot(pxs: &pxs::Pxs, materials: &MaterialSet) -> ParticleSnapshot {
+    let definition_id = materials
+        .get_by_id(pxs.mat)
+        .map(|material| format!("material/pxs/{}", material.normalized_name()))
+        .unwrap_or_else(|| "material/pxs/unknown".to_string());
+    ParticleSnapshot {
+        definition_id,
+        position: FloatVector2::new(math::fixtof(pxs.x), math::fixtof(pxs.y)),
+        velocity: FloatVector2::new(math::fixtof(pxs.xdir), math::fixtof(pxs.ydir)),
+        life: 0,
+        parameter_a: 0.0,
+        parameter_b: pxs.mat.index() as i32,
+        layer: ParticleLayer::Global,
+        pxs_fixed: Some([pxs.x.val(), pxs.y.val(), pxs.xdir.val(), pxs.ydir.val()]),
     }
 }
 
@@ -6785,7 +6782,8 @@ pub struct Engine {
     /// C4ParticleSystem port (def-based particles, src/C4Particles.cpp). The
     /// `particles` Vec above only serves def-less legacy fixture particles.
     particle_system: particles::ParticleSystem,
-    material_particles: Vec<MaterialParticle>,
+    /// C4PXSSystem port (sync-relevant pixel sprites, src/C4PXS.cpp).
+    pxs_system: pxs::PxsSystem,
     mass_movers: MassMoverSet,
     weather_events: Vec<WeatherEvent>,
     scenario_script: Option<ScenarioScript>,
@@ -7664,7 +7662,7 @@ impl Engine {
             global_effects: Vec::new(),
             particles: Vec::new(),
             particle_system: particles::ParticleSystem::default(),
-            material_particles: Vec::new(),
+            pxs_system: pxs::PxsSystem::default(),
             mass_movers: MassMoverSet::new(),
             weather_events: Vec::new(),
             scenario_script: None,
@@ -8070,7 +8068,7 @@ impl Engine {
     pub fn clear_landscape(&mut self) {
         self.landscape = None;
         self.sectors = None;
-        self.material_particles.clear();
+        self.pxs_system.clear();
     }
 
     pub fn landscape(&self) -> Option<&Landscape> {
@@ -9778,7 +9776,7 @@ impl Engine {
         self.objective_check_counter =
             (self.objective_check_counter + 1) % GAME_OVER_CHECK_INTERVAL;
         let frame = self.frame;
-        self.tick_material_particles();
+        self.tick_pxs();
         self.tick_particles();
         let mut rescan_mass_movers = false;
         if let Some(landscape) = self.landscape.as_mut() {
@@ -11278,9 +11276,9 @@ impl Engine {
             .map(ActiveParticle::snapshot)
             .collect();
         particles.extend(
-            self.material_particles
+            self.pxs_system
                 .iter()
-                .map(|particle| particle.snapshot(&self.materials)),
+                .map(|pixel| pxs_snapshot(pixel, &self.materials)),
         );
         particles.extend(
             self.particle_system
@@ -11448,7 +11446,7 @@ impl Engine {
             .iter()
             .filter(|object| object.state.crew_member && object.state.status.is_active())
             .fold(0i64, |acc, object| acc + i64::from(object.state.position.x));
-        let pxs_count = i32::try_from(self.material_particles.len()).unwrap_or(i32::MAX);
+        let pxs_count = i32::try_from(self.pxs_system.count()).unwrap_or(i32::MAX);
         let mass_mover_index = self.mass_movers.sync_signature();
         let object_count = i32::try_from(self.objects.len()).unwrap_or(i32::MAX);
         let object_enumeration_index = saturating_u64_to_i32(self.next_object_id);
@@ -11521,9 +11519,9 @@ impl Engine {
             .map(ActiveParticle::snapshot)
             .collect();
         particles.extend(
-            self.material_particles
+            self.pxs_system
                 .iter()
-                .map(|particle| particle.snapshot(&self.materials)),
+                .map(|pixel| pxs_snapshot(pixel, &self.materials)),
         );
         let mut players: Vec<_> = self.players.values().map(Player::to_state).collect();
         players.sort_unstable_by_key(|player| player.id);
@@ -11584,16 +11582,26 @@ impl Engine {
         self.objects.clear();
         self.global_effects = state.global_effects.clone();
         self.particles.clear();
-        self.material_particles.clear();
+        self.pxs_system.clear();
         self.particle_system.clear_particles();
         for snapshot in &state.particles {
             if snapshot.definition_id.starts_with("material/pxs/") && snapshot.parameter_b >= 0 {
                 if let Some(material) = MaterialId::new(snapshot.parameter_b as usize) {
-                    self.material_particles.push(MaterialParticle::new(
+                    // raw C4Fixed state when present (lossless save/load);
+                    // float projections only for legacy snapshots
+                    let [x, y, xdir, ydir] = snapshot.pxs_fixed.unwrap_or([
+                        math::ftofix(snapshot.position.x).val(),
+                        math::ftofix(snapshot.position.y).val(),
+                        math::ftofix(snapshot.velocity.x).val(),
+                        math::ftofix(snapshot.velocity.y).val(),
+                    ]);
+                    self.pxs_system.create(
                         material,
-                        snapshot.position,
-                        snapshot.velocity,
-                    ));
+                        C4Fixed::from_raw(x),
+                        C4Fixed::from_raw(y),
+                        C4Fixed::from_raw(xdir),
+                        C4Fixed::from_raw(ydir),
+                    );
                 }
                 continue;
             }
@@ -14402,16 +14410,16 @@ impl Engine {
                 Ok(count) if count > 0 => count,
                 _ => continue,
             };
-            let span = removed.max(1) as f32;
-            for _ in 0..count {
-                let px = column as f32 + self.rng.gen_range(-0.4..0.4);
-                let base_y = previous_height as f32 + self.rng.gen_range(0.0..span);
-                let py = (base_y + self.rng.gen_range(-0.25..0.25)).max(0.0);
-                let velocity =
-                    FloatVector2::new(self.rng.gen_range(-0.4..0.4), self.rng.gen_range(-0.8..0.0));
-                let particle =
-                    MaterialParticle::new(material_id, FloatVector2::new(px, py), velocity);
-                self.material_particles.push(particle);
+            // Freed pixels become zero-velocity PXS at their integer
+            // positions, like DigFreePix → PXS.Create (C4Landscape.cpp:947-954).
+            for offset in 0..count {
+                self.pxs_system.create(
+                    material_id,
+                    itofix(column),
+                    itofix(previous_height.saturating_add(offset as i32)),
+                    C4Fixed::ZERO,
+                    C4Fixed::ZERO,
+                );
             }
         }
     }
@@ -14448,16 +14456,17 @@ impl Engine {
 
             if let Some(ratio) = blast_to_pxs_ratio {
                 if ratio > 0 {
+                    // BlastFree → PXS.Cast(mat, count, tx, ty, 60)
+                    // (C4Landscape.cpp:1075-1078)
                     let pxs_count = (*removed / ratio).max(0);
-                    for _ in 0..pxs_count {
-                        let particle = self.build_material_particle(
-                            material_id_value,
-                            splash_rate,
-                            center,
-                            &result.affected_columns,
-                        );
-                        self.material_particles.push(particle);
-                    }
+                    self.pxs_system.cast(
+                        &mut self.rng,
+                        material_id_value,
+                        pxs_count,
+                        center.x,
+                        center.y,
+                        60,
+                    );
                 }
             }
 
@@ -14566,33 +14575,6 @@ impl Engine {
             let column = candidate.column as u32;
             landscape.set_solid_material(column, Some(candidate.target));
         }
-    }
-
-    fn build_material_particle(
-        &mut self,
-        material: MaterialId,
-        _splash_rate: i32,
-        center: Vector2,
-        affected_columns: &[(i32, i32)],
-    ) -> MaterialParticle {
-        const LEVEL: i32 = 60;
-        let position = if let Some(&(column, height)) = affected_columns.choose(&mut self.rng) {
-            FloatVector2::new(
-                column as f32 + self.rng.gen_range(-0.5..=0.5),
-                height as f32 + self.rng.gen_range(-0.5..=0.5),
-            )
-        } else {
-            FloatVector2::new(
-                center.x as f32 + self.rng.gen_range(-0.5..=0.5),
-                center.y as f32 + self.rng.gen_range(-0.5..=0.5),
-            )
-        };
-        let velocity = {
-            let x_offset = self.rng.gen_range(0..=LEVEL) as f32 - (LEVEL as f32 / 2.0);
-            let y_offset = self.rng.gen_range(0..=LEVEL) as f32 - LEVEL as f32;
-            FloatVector2::new(x_offset / 10.0, y_offset / 10.0)
-        };
-        MaterialParticle::new(material, position, velocity)
     }
 
     /// Object origin for the particle Attach offset (C4Particles.cpp:404-408
@@ -14705,86 +14687,337 @@ impl Engine {
         }
     }
 
-    fn tick_material_particles(&mut self) {
-        if self.material_particles.is_empty() {
-            return;
+    /// `C4PXSSystem::Execute` (C4PXS.cpp:212-234): free empty chunks, then
+    /// run every live PXS in chunk-major slot order.
+    fn tick_pxs(&mut self) {
+        self.pxs_system.free_empty_chunks();
+        for chunk in 0..pxs::PXS_MAX_CHUNK {
+            if !self.pxs_system.chunk_allocated(chunk) {
+                continue;
+            }
+            for slot in 0..pxs::PXS_CHUNK_SIZE {
+                let Some(pixel) = self.pxs_system.take_slot(chunk, slot) else {
+                    continue;
+                };
+                match self.execute_pxs(pixel) {
+                    Some(updated) => self.pxs_system.put_slot(chunk, slot, updated),
+                    None => self.pxs_system.release_slot(chunk),
+                }
+            }
         }
-        let Some(width) = self
-            .landscape
+    }
+
+    fn landscape_material(&self, x: i32, y: i32) -> Option<MaterialId> {
+        self.landscape
             .as_ref()
-            .map(|landscape| landscape.width() as i32)
-        else {
-            self.material_particles.clear();
-            return;
+            .and_then(|landscape| landscape.material_at(x, y))
+    }
+
+    /// `C4PXS::Execute` (C4PXS.cpp:28-127). Returns the surviving PXS, or
+    /// `None` when it deactivates.
+    fn execute_pxs(&mut self, mut pixel: pxs::Pxs) -> Option<pxs::Pxs> {
+        // Safety (C4PXS.cpp:40-43)
+        let Some(material) = self.materials.get_by_id(pixel.mat) else {
+            return None;
         };
-        if width <= 0 {
-            self.material_particles.clear();
-            return;
-        }
-        let max_height = self
+        let density = material.density();
+        let wind_drift_param = material.wind_drift();
+        // Out of bounds (C4PXS.cpp:45-49)
+        let (back_wdt, back_hgt) = self
             .landscape
             .as_ref()
-            .map(|landscape| landscape.surface().iter().copied().max().unwrap_or(0) + 20)
-            .unwrap_or(20);
-        let top_limit = -10;
-        let wind_force = self.environment.wind_force(self.frame) as f32;
-        let gravity = self.physics.gravity as f32;
-        let mut survivors = Vec::with_capacity(self.material_particles.len());
-        let pending_particles = std::mem::take(&mut self.material_particles);
-        for mut particle in pending_particles.into_iter() {
-            let Some(material) = self.materials.get_by_id(particle.material) else {
-                continue;
-            };
-
-            particle.velocity.y += gravity / 10.0;
-
-            let drift = material.wind_drift();
-            if drift != 0 {
-                let drift_factor = drift as f32 / 100.0;
-                particle.velocity.x += (wind_force / 10.0) * drift_factor;
+            .map(|landscape| (landscape.width() as i32, landscape.estimated_height()))
+            .unwrap_or((0, 0));
+        if pixel.x < C4Fixed::ZERO
+            || pixel.x >= itofix(back_wdt)
+            || pixel.y < itofix(-10)
+            || pixel.y >= itofix(back_hgt)
+        {
+            return None;
+        }
+        // Material conversion: meePXSPos check before movement (C4PXS.cpp:51-57)
+        let mut ix = fixtoi(pixel.x);
+        let mut iy = fixtoi(pixel.y);
+        let inmat = self.landscape_material(ix, iy);
+        let reaction =
+            self.materials
+                .reaction_for_event(Some(pixel.mat), inmat, MaterialInteractionEvent::PxsPos);
+        if !matches!(reaction, MaterialReactionKind::None) {
+            // C++ passes nullptr for pfPosChanged at the PXSPos event; the
+            // landscape position equals the PXS position here (C4PXS.cpp:55).
+            let (ls_x, ls_y) = (ix, iy);
+            let mut pos_changed = false;
+            if self.execute_pxs_reaction(
+                reaction,
+                &mut ix,
+                &mut iy,
+                ls_x,
+                ls_y,
+                &mut pixel,
+                inmat,
+                MaterialInteractionEvent::PxsPos,
+                &mut pos_changed,
+            ) {
+                return None;
             }
-
-            let jitter_scale = (material.splash_rate().max(1) as f32).sqrt();
-            let jitter_x = self.rng.gen_range(-0.5..=0.5) * 0.1 * jitter_scale;
-            let jitter_y = self.rng.gen_range(-0.5..=0.5) * 0.05 * jitter_scale;
-            particle.velocity.x = (particle.velocity.x + jitter_x).clamp(-8.0, 8.0);
-            particle.velocity.y = (particle.velocity.y + jitter_y).clamp(-12.0, 12.0);
-
-            let new_position = FloatVector2::new(
-                particle.position.x + particle.velocity.x,
-                particle.position.y + particle.velocity.y,
-            );
-
-            let new_x = new_position.x.floor() as i32;
-            let new_y = new_position.y.floor() as i32;
-            if new_x < 0 || new_x >= width || new_y < top_limit || new_y > max_height {
-                continue;
-            }
-
-            let start = Vector2::new(
-                particle.position.x.floor() as i32,
-                particle.position.y.floor() as i32,
-            );
-            let end = Vector2::new(new_x, new_y);
-
-            let collision = self
+        }
+        // Gravity (C4PXS.cpp:60)
+        pixel.ydir += self.physics.gravity_as_c4fixed();
+        // Free fall: wind drift with synced jitter (C4PXS.cpp:62-74). The
+        // Random(1200) draws are unconditional in free fall; WindDrift only
+        // scales the result. GBackWind(x, y) is approximated by the global
+        // wind force (the Rust environment model is not position-dependent).
+        let below_density = self
+            .landscape
+            .as_ref()
+            .map(|landscape| landscape.density_at(ix, iy + 1, &self.materials))
+            .unwrap_or(0);
+        if below_density < density {
+            let wind = self.environment.wind_force(self.frame);
+            let txdir = itofix_prec(wind, 15) + fixed256(self.rng.random(1200) - 600);
+            let tydir = fixed256(self.rng.random(1200) - 600);
+            let wind_drift = (wind_drift_param - 20).max(0);
+            // WindDrift_Factor = itofix(1, 800) (C4PXS.cpp:26)
+            let factor = itofix_prec(1, 800);
+            pixel.xdir += (txdir - pixel.xdir) * wind_drift * factor;
+            pixel.ydir += (tydir - pixel.ydir) * wind_drift * factor;
+        }
+        // Target position (C4PXS.cpp:76-81)
+        let ctcox = pixel.x + pixel.xdir;
+        let ctcoy = pixel.y + pixel.ydir;
+        let ito_x = fixtoi(ctcox);
+        let ito_y = fixtoi(ctcoy);
+        // In bounds + free path → move (C4PXS.cpp:83-89)
+        // Inside<int32_t>(iToX, 0, GBackWdt - 1) / (iToY, 0, GBackHgt - 1)
+        if ito_x >= 0
+            && ito_x < back_wdt
+            && ito_y >= 0
+            && ito_y < back_hgt
+            && self
                 .landscape
                 .as_ref()
-                .and_then(|landscape| landscape.first_collision_on_line(start, end));
-
-            let keep = if let Some(hit) = collision {
-                self.resolve_material_particle_collision(&mut particle, hit, new_position)
-            } else {
-                particle.position = new_position;
-                true
-            };
-
-            if keep && self.handle_particle_object_collisions(&particle) {
-                survivors.push(particle);
+                .map(|landscape| landscape.path_free(ix, iy, ito_x, ito_y, &self.materials))
+                .unwrap_or(false)
+        {
+            pixel.x = ctcox;
+            pixel.y = ctcoy;
+            return Some(pixel);
+        }
+        // Step toward the target (C4PXS.cpp:91-117), do-while
+        loop {
+            let in_x = ix + (ito_x - ix).signum();
+            let in_y = iy + (ito_y - iy).signum();
+            let inmat = self.landscape_material(in_x, in_y);
+            let reaction = self.materials.reaction_for_event(
+                Some(pixel.mat),
+                inmat,
+                MaterialInteractionEvent::PxsMove,
+            );
+            if !matches!(reaction, MaterialReactionKind::None) {
+                let mut pos_changed = false;
+                if self.execute_pxs_reaction(
+                    reaction,
+                    &mut ix,
+                    &mut iy,
+                    in_x,
+                    in_y,
+                    &mut pixel,
+                    inmat,
+                    MaterialInteractionEvent::PxsMove,
+                    &mut pos_changed,
+                ) {
+                    // destructive contact
+                    return None;
+                }
+                if pos_changed {
+                    // speed or position changed: stop moving for now
+                    pixel.x = itofix(ix);
+                    pixel.y = itofix(iy);
+                    return Some(pixel);
+                }
+                // reaction did nothing — continue movement
+            }
+            ix = in_x;
+            iy = in_y;
+            if ix == ito_x && iy == ito_y {
+                break;
             }
         }
+        // No contact: free movement (C4PXS.cpp:119-120)
+        pixel.x = ctcox;
+        pixel.y = ctcoy;
+        Some(pixel)
+    }
 
-        self.material_particles = survivors;
+    /// Reaction proc dispatch for the PXS events, mirroring the mrf*
+    /// functions (C4Material.cpp:626-798). Returns true when the PXS dies
+    /// (the C++ procs' return value).
+    #[allow(clippy::too_many_arguments)]
+    fn execute_pxs_reaction(
+        &mut self,
+        reaction: MaterialReactionKind,
+        x: &mut i32,
+        y: &mut i32,
+        ls_x: i32,
+        ls_y: i32,
+        pixel: &mut pxs::Pxs,
+        ls_mat: Option<MaterialId>,
+        event: MaterialInteractionEvent,
+        pos_changed: &mut bool,
+    ) -> bool {
+        match reaction {
+            MaterialReactionKind::None => false,
+            // mrfConvert (C4Material.cpp:626-661)
+            MaterialReactionKind::Convert { target, depth } => {
+                if event != MaterialInteractionEvent::PxsPos {
+                    // hardcoded InMatConvert has no collision proc
+                    // (C4Material.cpp:631-633)
+                    return false;
+                }
+                // Check depth (C4Material.cpp:638-650)
+                let depth = depth.unwrap_or(0);
+                if depth != 0 && self.landscape_material(*x, *y - depth) != ls_mat {
+                    return false;
+                }
+                match target.filter(|id| self.materials.get_by_id(*id).is_some()) {
+                    Some(target) => {
+                        pixel.mat = target;
+                        pixel.xdir = C4Fixed::ZERO;
+                        pixel.ydir = C4Fixed::ZERO;
+                        *pos_changed = true;
+                        false
+                    }
+                    // Convert failure (target not loaded or sky): kill pix
+                    None => true,
+                }
+            }
+            // mrfPoof (C4Material.cpp:663-689)
+            MaterialReactionKind::Poof => {
+                if event == MaterialInteractionEvent::PxsMove
+                    && !self.mrf_insert_check(
+                        x,
+                        y,
+                        &mut pixel.xdir,
+                        &mut pixel.ydir,
+                        pixel.mat,
+                        ls_mat,
+                        pos_changed,
+                    )
+                {
+                    // either splash or slide prevented interaction
+                    return false;
+                }
+                // Always kill both landscape and PXS mat
+                if let Some(landscape) = self.landscape.as_mut() {
+                    let _ = landscape.extract_material_at(ls_x, ls_y);
+                }
+                if self.rng.rnd3() == 0 {
+                    self.spawn_smoke(*x, *y, 3);
+                }
+                // !Rnd3() → "Pshshsh" sound; the draw is sync-relevant.
+                let _ = self.rng.rnd3();
+                true
+            }
+            // mrfCorrode (C4Material.cpp:691-745)
+            MaterialReactionKind::Corrode {
+                corrosive_strength,
+                corrode_resistance,
+                corrosion_probability,
+            } => {
+                if event != MaterialInteractionEvent::PxsMove {
+                    // No corrosion before movement (C4Material.cpp:696-698)
+                    return false;
+                }
+                if !self.mrf_insert_check(
+                    x,
+                    y,
+                    &mut pixel.xdir,
+                    &mut pixel.ydir,
+                    pixel.mat,
+                    ls_mat,
+                    pos_changed,
+                ) {
+                    return false;
+                }
+                let corroded = evaluate_corrosion(
+                    corrosive_strength,
+                    corrode_resistance,
+                    corrosion_probability,
+                    &mut self.rng,
+                );
+                if corroded {
+                    if let Some(landscape) = self.landscape.as_mut() {
+                        let _ = landscape.extract_material_at(ls_x, ls_y);
+                    }
+                    // effect draws (C4Material.cpp:734-735): 1/5 smoke with a
+                    // Random(3) size component, then the 1/20 sound draw
+                    if self.rng.random(5) == 0 {
+                        let level = 3 + self.rng.random(3);
+                        self.spawn_smoke(*x, *y, level);
+                    }
+                    let _ = self.rng.random(20);
+                } else if let Some(landscape) = self.landscape.as_mut() {
+                    // Else: dead. Insert material here (C4Material.cpp:739)
+                    landscape.insert_material_at(*x, *y, pixel.mat);
+                }
+                true
+            }
+            // mrfIncinerate (C4Material.cpp:747-771)
+            MaterialReactionKind::Incinerate => {
+                if event == MaterialInteractionEvent::PxsMove
+                    && !self.mrf_insert_check(
+                        x,
+                        y,
+                        &mut pixel.xdir,
+                        &mut pixel.ydir,
+                        pixel.mat,
+                        ls_mat,
+                        pos_changed,
+                    )
+                {
+                    return false;
+                }
+                let can_incinerate = self
+                    .landscape
+                    .as_ref()
+                    .map(|landscape| landscape.can_incinerate(*x, *y, &self.materials))
+                    .unwrap_or(false);
+                if can_incinerate && self.spawn_fire_at(*x, *y) {
+                    return true;
+                }
+                if event == MaterialInteractionEvent::PxsMove {
+                    // Else: dead. Insert material here (C4Material.cpp:765-767)
+                    if let Some(landscape) = self.landscape.as_mut() {
+                        landscape.insert_material_at(*x, *y, pixel.mat);
+                    }
+                    return true;
+                }
+                false
+            }
+            // mrfInsert (C4Material.cpp:773-798)
+            MaterialReactionKind::Insert => {
+                if event != MaterialInteractionEvent::PxsMove {
+                    return false;
+                }
+                if !self.mrf_insert_check(
+                    x,
+                    y,
+                    &mut pixel.xdir,
+                    &mut pixel.ydir,
+                    pixel.mat,
+                    ls_mat,
+                    pos_changed,
+                ) {
+                    // continue existing
+                    return false;
+                }
+                // Else: dead. Insert material here (C4Material.cpp:789)
+                if let Some(landscape) = self.landscape.as_mut() {
+                    landscape.insert_material_at(*x, *y, pixel.mat);
+                }
+                true
+            }
+        }
     }
 
     /// `Smoke()` (C4Effect.cpp:859-865): create a "Smoke" particle if the def
@@ -14895,162 +15128,6 @@ impl Engine {
         true
     }
 
-    fn resolve_material_particle_collision(
-        &mut self,
-        particle: &mut MaterialParticle,
-        hit: Vector2,
-        target: FloatVector2,
-    ) -> bool {
-        if self.materials.get_by_id(particle.material).is_none() {
-            return false;
-        }
-
-        let landscape_material = self
-            .landscape
-            .as_ref()
-            .and_then(|landscape| landscape.solid_material_at(hit.x));
-        let reaction = self
-            .materials
-            .reaction(Some(particle.material), landscape_material);
-        // The default Insert/Poof/Corrode/Incinerate reactions all run the
-        // mrfInsertCheck splash/slide preamble on the PXS-move event
-        // (C4Material.cpp:678,721,760,785).
-        if matches!(
-            reaction,
-            MaterialReactionKind::Insert
-                | MaterialReactionKind::Poof
-                | MaterialReactionKind::Incinerate
-                | MaterialReactionKind::Corrode { .. }
-        ) {
-            // C++ runs the check with iX/iY at the step-loop's current cell —
-            // the last free cell adjacent to the contact (C4PXS.cpp:96-117) —
-            // not at the start of the movement line.
-            let start_x = particle.position.x.floor() as i32;
-            let start_y = particle.position.y.floor() as i32;
-            let mut check_x = hit.x - (hit.x - start_x).signum();
-            let mut check_y = hit.y - (hit.y - start_y).signum();
-            let mut xdir = math::ftofix(particle.velocity.x);
-            let mut ydir = math::ftofix(particle.velocity.y);
-            let mut pos_changed = false;
-            if !self.mrf_insert_check(
-                &mut check_x,
-                &mut check_y,
-                &mut xdir,
-                &mut ydir,
-                particle.material,
-                landscape_material,
-                &mut pos_changed,
-            ) {
-                // splash or slide prevented interaction: the PXS keeps
-                // existing, snapped to its integer position like
-                // fStopMovement (C4PXS.cpp:106-112).
-                particle.position = FloatVector2::new(check_x as f32, check_y as f32);
-                particle.velocity = FloatVector2::new(math::fixtof(xdir), math::fixtof(ydir));
-                return true;
-            }
-            // insertion approved: keep the mutated dirs (ydir zeroed).
-            particle.velocity = FloatVector2::new(math::fixtof(xdir), math::fixtof(ydir));
-        }
-        match reaction {
-            MaterialReactionKind::None => {
-                let mut deposited = false;
-                if let Some(current_height) = self
-                    .landscape
-                    .as_ref()
-                    .and_then(|landscape| landscape.surface_height(hit.x))
-                {
-                    if current_height > 0 {
-                        let desired_target = current_height.saturating_sub(1);
-                        let deposit_y = desired_target.saturating_sub(1);
-                        let before_height = current_height;
-                        if let Some(landscape) = self.landscape.as_mut() {
-                            if landscape.insert_material_at(hit.x, deposit_y, particle.material) {
-                                if let Some(after_height) = landscape.surface_height(hit.x) {
-                                    if after_height <= before_height {
-                                        deposited = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if deposited {
-                    false
-                } else {
-                    particle.position = FloatVector2::new(hit.x as f32, (hit.y - 1) as f32);
-                    particle.velocity.y = 0.0;
-                    particle.velocity.x *= 0.5;
-                    true
-                }
-            }
-            MaterialReactionKind::Convert {
-                target: Some(target_material),
-                ..
-            } => {
-                particle.material = target_material;
-                particle.position = target;
-                particle.velocity = FloatVector2::new(0.0, 0.0);
-                true
-            }
-            MaterialReactionKind::Convert { target: None, .. } => false,
-            MaterialReactionKind::Poof => {
-                if let Some(landscape) = self.landscape.as_mut() {
-                    let _ = landscape.extract_material_at(hit.x, hit.y);
-                }
-                let _ = self.rng.rnd3();
-                let _ = self.rng.rnd3();
-                false
-            }
-            MaterialReactionKind::Incinerate => {
-                let can_incinerate = self
-                    .landscape
-                    .as_ref()
-                    .map(|landscape| landscape.can_incinerate(hit.x, hit.y, &self.materials))
-                    .unwrap_or(false);
-                if can_incinerate {
-                    let spawned = self.spawn_fire_at(hit.x, hit.y);
-                    if !spawned {
-                        if let Some(landscape) = self.landscape.as_mut() {
-                            landscape.insert_material_at(hit.x, hit.y, particle.material);
-                        }
-                    }
-                } else if let Some(landscape) = self.landscape.as_mut() {
-                    landscape.insert_material_at(hit.x, hit.y, particle.material);
-                }
-                false
-            }
-            MaterialReactionKind::Corrode {
-                corrosive_strength,
-                corrode_resistance,
-                corrosion_probability,
-            } => {
-                // C4Material.cpp:701,724: default corrosion uses short-circuited
-                // Random(100) checks for corrosive strength and target resistance.
-                let success = evaluate_corrosion(
-                    corrosive_strength,
-                    corrode_resistance,
-                    corrosion_probability,
-                    &mut self.rng,
-                );
-                if success {
-                    if let Some(landscape) = self.landscape.as_mut() {
-                        let _ = landscape.extract_material_at(hit.x, hit.y);
-                    }
-                    consume_corrosion_effect_rng(&mut self.rng);
-                } else if let Some(landscape) = self.landscape.as_mut() {
-                    landscape.insert_material_at(hit.x, hit.y, particle.material);
-                }
-                false
-            }
-            MaterialReactionKind::Insert => {
-                if let Some(landscape) = self.landscape.as_mut() {
-                    landscape.insert_material_at(hit.x, hit.y, particle.material);
-                }
-                false
-            }
-        }
-    }
-
     fn spawn_fire_at(&mut self, x: i32, y: i32) -> bool {
         if !self
             .landscape
@@ -15091,68 +15168,6 @@ impl Engine {
         let result = self
             .spawn_object(SpawnConfig::new(FIRE_DEFINITION_ID).with_position(Vector2::new(x, y)));
         result.is_ok()
-    }
-
-    fn handle_particle_object_collisions(&mut self, particle: &MaterialParticle) -> bool {
-        let friction = match self.materials.get_by_id(particle.material) {
-            Some(material) => material.friction(),
-            None => return true,
-        };
-        if self.objects.is_empty() {
-            return true;
-        }
-        let px = particle.position.x;
-        let py = particle.position.y;
-        let mut collided = false;
-        for object in &mut self.objects {
-            if object.destroyed {
-                continue;
-            }
-            if Self::particle_intersects_object(px, py, object) {
-                if friction != 0 {
-                    object.fixed_velocity.x =
-                        apply_horizontal_friction_fixed(object.fixed_velocity.x, friction);
-                    object.refresh_velocity_from_fixed();
-                    for vertex in &mut object.state.vertices {
-                        vertex.friction = friction;
-                    }
-                }
-                collided = true;
-            }
-        }
-        !collided
-    }
-
-    fn particle_intersects_object(px: f32, py: f32, object: &Object) -> bool {
-        let ox = object.state.position.x as f32;
-        let oy = object.state.position.y as f32;
-        let (mut half_width, mut half_height) = (4.0f32, 6.0f32);
-        if !object.state.vertices.is_empty() {
-            let mut min_x = object.state.vertices[0].x;
-            let mut max_x = min_x;
-            let mut min_y = object.state.vertices[0].y;
-            let mut max_y = min_y;
-            for vertex in &object.state.vertices {
-                if vertex.x < min_x {
-                    min_x = vertex.x;
-                }
-                if vertex.x > max_x {
-                    max_x = vertex.x;
-                }
-                if vertex.y < min_y {
-                    min_y = vertex.y;
-                }
-                if vertex.y > max_y {
-                    max_y = vertex.y;
-                }
-            }
-            half_width = ((max_x - min_x).abs() as f32 / 2.0).max(2.0);
-            half_height = ((max_y - min_y).abs() as f32 / 2.0).max(2.0);
-        }
-        px >= ox - half_width
-            && px <= ox + half_width
-            && py >= oy - half_height
-            && py <= oy + half_height
     }
 
     fn apply_transfer_zone_commands(
@@ -17839,6 +17854,7 @@ mod tests {
             Density=25
             Friction=10
             MaxSlide=2
+            SplashRate=0
 
             [Material Earth]
             Name=Earth
@@ -17851,6 +17867,12 @@ mod tests {
         let sand = materials.id_of("Sand").expect("sand exists");
         let earth = materials.id_of("Earth").expect("earth exists");
 
+        // Slide available: the step loop hits earth below, mrfInsertCheck
+        // finds the two-column slide, the PXS survives snapped to its int
+        // position with the accelerated xdir (fStopMovement, C4PXS.cpp:106-112).
+        // Default gravity stays on: Sign(GravAccel) feeds the slide direction
+        // (C4Material.cpp:590) and the added ydir is small enough not to
+        // shift fixtoi. SplashRate=0 keeps the splash branch draw-free.
         let mut engine = Engine::with_seed(21);
         engine.set_materials(materials.clone());
         engine.set_landscape(
@@ -17858,28 +17880,25 @@ mod tests {
                 .expect("landscape builds"),
         );
         let mut mirror = engine.rng.clone();
-        let expected_xdir = math::C4Fixed::from_raw(
-            (math::ftofix(1.0).val() * 10 + math::itofix(-1).val()) / 11,
-        ) + math::fixed10(mirror.random(5) - 2);
+        // fXDir = (0*10 + Sign(0-2))/11 + FIXED10(Random(5)-2) (C4Material.cpp:597)
+        let expected_xdir = math::C4Fixed::from_raw(math::itofix(-1).val() / 11)
+            + math::fixed10(mirror.random(5) - 2);
 
-        let mut particle = MaterialParticle::new(
+        assert!(engine.pxs_system.create(
             sand,
-            FloatVector2::new(2.0, 9.0),
-            FloatVector2::new(1.0, 0.0),
-        );
-        let keep = engine.resolve_material_particle_collision(
-            &mut particle,
-            Vector2::new(2, 10),
-            FloatVector2::new(3.0, 9.5),
-        );
-        assert!(keep, "slide path keeps the PXS alive");
-        assert_eq!(particle.position.x.to_bits(), 2.0f32.to_bits());
-        assert_eq!(particle.position.y.to_bits(), 9.0f32.to_bits());
-        assert_eq!(
-            particle.velocity.x.to_bits(),
-            math::fixtof(expected_xdir).to_bits()
-        );
-        assert_eq!(particle.velocity.y.to_bits(), 0.0f32.to_bits());
+            math::itofix(2),
+            math::itofix(9),
+            math::C4Fixed::ZERO,
+            math::itofix(1),
+        ));
+        engine.tick_pxs();
+        let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
+        assert_eq!(survivors.len(), 1, "slide path keeps the PXS alive");
+        assert_eq!(survivors[0].x, math::itofix(2), "snapped to int position");
+        assert_eq!(survivors[0].y, math::itofix(9));
+        assert_eq!(survivors[0].xdir, expected_xdir);
+        assert_eq!(survivors[0].ydir, math::C4Fixed::ZERO, "contact stops ydir");
+        assert_eq!(engine.rng, mirror, "exactly one Random(5) draw");
         assert_eq!(
             engine
                 .landscape
@@ -17889,21 +17908,25 @@ mod tests {
             "nothing inserted while sliding"
         );
 
-        // Enclosed: no slide → insertion proceeds and the PXS dies.
+        // Enclosed: no slide anywhere → insertion proceeds and the PXS dies
+        // (C4Material.cpp:788-790). The liquid column only extends the world
+        // height so the buried PXS stays in bounds (C4PXS.cpp:45-49).
         let mut engine = Engine::with_seed(21);
         engine.set_materials(materials);
-        engine.set_landscape(Landscape::flat_with_material(5, 10, Some(earth)));
-        let mut particle = MaterialParticle::new(
+        let mut landscape = Landscape::flat_with_material(5, 10, Some(earth));
+        landscape.set_liquid_column(0, vec![LiquidSegment::new(25, 28)]);
+        engine.set_landscape(landscape);
+        let mirror = engine.rng.clone();
+        assert!(engine.pxs_system.create(
             sand,
-            FloatVector2::new(2.0, 20.0),
-            FloatVector2::new(0.0, 1.0),
-        );
-        let keep = engine.resolve_material_particle_collision(
-            &mut particle,
-            Vector2::new(2, 21),
-            FloatVector2::new(2.0, 21.0),
-        );
-        assert!(!keep, "enclosed PXS inserts and dies");
+            math::itofix(2),
+            math::itofix(20),
+            math::C4Fixed::ZERO,
+            math::itofix(1),
+        ));
+        engine.tick_pxs();
+        assert_eq!(engine.pxs_system.count(), 0, "enclosed PXS inserts and dies");
+        assert_eq!(engine.rng, mirror, "no synced draws while enclosed");
     }
 
     #[test]
@@ -17990,7 +18013,7 @@ mod tests {
             Name=Flame
             Density=60
             Friction=10
-            SplashRate=5
+            SplashRate=0
             Incindiary=100
 
             [Material Wood]
@@ -18005,12 +18028,21 @@ mod tests {
         let flame = materials.id_of("Flame").expect("flame exists");
         let wood = materials.id_of("Wood").expect("wood exists");
 
+        // Ignition happens via the meePXSPos check (C4PXS.cpp:51-57): when a
+        // flame PXS's rounded position lies inside inflammable material,
+        // mrfIncinerate calls Landscape.Incinerate(x, y), which reads the
+        // material AT the position (C4Landscape.cpp:1430-1440). A contact
+        // from above inserts at the air cell instead, in C++ too. The liquid
+        // column only extends the estimated world height so the embedded PXS
+        // stays in bounds (the column model has no separate map height).
         let mut engine = Engine::with_seed(31);
         engine.set_materials(materials);
         engine
             .register_definition(simple_definition(FIRE_DEFINITION_ID))
             .expect("fire definition registers");
-        engine.set_landscape(Landscape::flat_with_material(17, 80, Some(wood)));
+        let mut landscape = Landscape::flat_with_material(17, 80, Some(wood));
+        landscape.set_liquid_column(0, vec![LiquidSegment::new(150, 160)]);
+        engine.set_landscape(landscape);
 
         let column_x = 8;
         let before_height = engine
@@ -18019,28 +18051,25 @@ mod tests {
             .surface_height(column_x)
             .expect("surface height available");
 
-        engine.material_particles.push(MaterialParticle::new(
+        engine.pxs_system.create(
             flame,
-            FloatVector2::new(column_x as f32, (before_height - 8) as f32),
-            FloatVector2::new(0.0, 3.5),
-        ));
+            math::itofix(column_x),
+            math::ftofix(before_height as f32 + 0.25),
+            math::C4Fixed::ZERO,
+            math::C4Fixed::ZERO,
+        );
 
-        let mut flame_spawned = false;
-        for _ in 0..20 {
-            engine.tick_material_particles();
-            flame_spawned = engine.objects.iter().any(|object| {
-                !object.destroyed
-                    && object.state.status.is_active()
-                    && object.definition_id == FIRE_DEFINITION_ID
-            });
-            if flame_spawned {
-                break;
-            }
-        }
+        engine.tick_pxs();
+        let flame_spawned = engine.objects.iter().any(|object| {
+            !object.destroyed
+                && object.state.status.is_active()
+                && object.definition_id == FIRE_DEFINITION_ID
+        });
         assert!(
             flame_spawned,
-            "expected a flame to spawn after particle collision"
+            "expected a flame to spawn from the embedded PXS"
         );
+        assert_eq!(engine.pxs_system.count(), 0, "ignited PXS deactivates");
 
         let after_height = engine
             .landscape()
@@ -18052,13 +18081,15 @@ mod tests {
             "incineration should not erode the landscape surface"
         );
 
-        engine.material_particles.push(MaterialParticle::new(
+        engine.pxs_system.create(
             flame,
-            FloatVector2::new(column_x as f32, (before_height - 8) as f32),
-            FloatVector2::new(0.0, 3.5),
-        ));
-        for _ in 0..20 {
-            engine.tick_material_particles();
+            math::itofix(column_x),
+            math::ftofix(before_height as f32 + 0.25),
+            math::C4Fixed::ZERO,
+            math::C4Fixed::ZERO,
+        );
+        for _ in 0..3 {
+            engine.tick_pxs();
         }
 
         let capped_flame_count = engine
@@ -18130,57 +18161,10 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn material_particles_apply_friction_to_objects() -> Result<(), EngineError> {
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Earth]
-            Name=Earth
-            Density=100
-            Friction=45
-            BlastFree=1
-            Blast2PXSRatio=1
-            SplashRate=10
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let earth = materials.id_of("Earth").expect("earth exists");
-        let mut engine = Engine::with_seed(23);
-        engine.set_materials(materials);
-        engine.set_landscape(Landscape::flat_with_material(20, 24, Some(earth)));
-        engine
-            .register_definition(simple_definition("Crate"))
-            .expect("definition registers");
-
-        let crate_id = engine
-            .spawn_object(
-                SpawnConfig::new("Crate")
-                    .with_position(Vector2::new(8, 24))
-                    .with_velocity(Vector2::new(8, 0)),
-            )
-            .expect("spawn succeeds");
-
-        engine
-            .blast_circle(Vector2::new(8, 24), 2, None)
-            .expect("blast applies");
-
-        for _ in 0..20 {
-            engine.tick().expect("tick succeeds");
-        }
-
-        let object = engine
-            .object_snapshot(crate_id)
-            .expect("crate still present");
-        assert!(
-            object.velocity.x.abs() < 8,
-            "expected particle collision to reduce horizontal velocity"
-        );
-
-        let snapshot = engine.snapshot();
-        assert!(snapshot.particles.is_empty(), "particles dissipated");
-        Ok(())
-    }
+    // NOTE: the former `material_particles_apply_friction_to_objects` test
+    // was removed with the C4PXS port: C++ PXS never interact with objects
+    // (C4PXS.cpp has no object coupling), so the friction behavior it pinned
+    // was an invention of the placeholder particle loop.
 
     const PASSIVE_PLAYER_SCRIPT: &str = r#"
 global func Initialize(state, random)

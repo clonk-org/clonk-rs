@@ -876,6 +876,99 @@ impl Landscape {
         }
     }
 
+    /// One 17×15 `PixCnt` cell's occupancy: whether any pixel in the cell has
+    /// nonzero density (`UpdatePixCnt` counts `_GetDensity(x, y) != 0`,
+    /// C4Landscape.cpp:2894-2908). Computed on demand from the column model
+    /// instead of C++'s incrementally-maintained counter cache.
+    fn pix_cnt_cell_occupied(&self, cell_x: i32, cell_y: i32, materials: &MaterialSet) -> bool {
+        let top = cell_y * 15;
+        let bottom = top + 15;
+        let left = (cell_x * 17).max(0);
+        let right = (cell_x * 17 + 17).min(self.width as i32);
+        for x in left..right {
+            // solid part of the column inside the cell rows
+            if let Some(surface) = self.surface_height(x) {
+                if surface < bottom {
+                    let solid_density = self
+                        .solid_material_at(x)
+                        .and_then(|id| materials.get_by_id(id))
+                        .map(|material| material.density())
+                        .unwrap_or(0);
+                    if solid_density != 0 && surface.max(top) < bottom {
+                        return true;
+                    }
+                }
+            }
+            // liquid segments overlapping the cell rows
+            if let Some(column) = self.liquids.get(x as usize) {
+                // segments are inclusive of both top and bottom rows
+                for segment in column.segments() {
+                    if segment.top < bottom && segment.bottom >= top {
+                        let density = segment
+                            .material
+                            .or(self.default_liquid_material)
+                            .and_then(|id| materials.get_by_id(id))
+                            .map(|material| material.density())
+                            .unwrap_or(0);
+                        if density != 0 {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// `C4Landscape::_PathFree` (C4Landscape.cpp:890-915): coarse-grid path
+    /// check on 17×15 cells — diagonal steps while both axes differ, then a
+    /// straight run, then the destination cell itself.
+    pub fn path_free(&self, x: i32, y: i32, x2: i32, y2: i32, materials: &MaterialSet) -> bool {
+        let (mut x, mut y, x2, y2) = (x / 17, y / 15, x2 / 17, y2 / 15);
+        while x != x2 && y != y2 {
+            if self.pix_cnt_cell_occupied(x, y, materials) {
+                return false;
+            }
+            if x > x2 {
+                x -= 1;
+            } else {
+                x += 1;
+            }
+            if y > y2 {
+                y -= 1;
+            } else {
+                y += 1;
+            }
+        }
+        if x != x2 {
+            loop {
+                if self.pix_cnt_cell_occupied(x, y, materials) {
+                    return false;
+                }
+                if x > x2 {
+                    x -= 1;
+                } else {
+                    x += 1;
+                }
+                if x == x2 {
+                    break;
+                }
+            }
+        } else {
+            while y != y2 {
+                if self.pix_cnt_cell_occupied(x, y, materials) {
+                    return false;
+                }
+                if y > y2 {
+                    y -= 1;
+                } else {
+                    y += 1;
+                }
+            }
+        }
+        !self.pix_cnt_cell_occupied(x, y2, materials)
+    }
+
     /// `C4Landscape::FindMatSlide` (C4Landscape.cpp:1260-1290): find the
     /// closest immediate slide position for a material of density `mdens`.
     /// Straight down first, then per `cslide` ring check left before right; a
@@ -1626,6 +1719,50 @@ mod tests {
         landscape.set_liquid_column(3, vec![LiquidSegment::new(4, 6)]);
         LandscapeCommand::ClearLiquidColumn { column: 3 }.apply(&mut landscape);
         assert!(landscape.liquids()[3].segments().is_empty());
+    }
+
+    #[test]
+    fn path_free_walks_coarse_cells_like_cpp() {
+        // C4Landscape::_PathFree (C4Landscape.cpp:890-915): coordinates are
+        // divided into 17×15 cells; the walk steps diagonally while both
+        // axes differ, then straight; any cell containing a nonzero-density
+        // pixel (UpdatePixCnt, C4Landscape.cpp:2894-2908) blocks the path.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let water = materials.id_of("Water").expect("water exists");
+
+        // Flat earth surface at y = 30: cell row 2 (rows 30-44) is occupied,
+        // rows 0-29 (cell rows 0-1) are open sky.
+        let mut landscape = Landscape::flat_with_material(64, 30, Some(earth));
+
+        // Sky-only horizontal path.
+        assert!(landscape.path_free(5, 5, 40, 10, &materials));
+        // Vertical path crossing the surface cell row.
+        assert!(!landscape.path_free(5, 5, 5, 40, &materials));
+        // Diagonal phase: (0,0)→(50,40) walks cells (0,0),(1,1),(2,2);
+        // cell (2,2) covers rows 30-44 → blocked.
+        assert!(!landscape.path_free(0, 0, 50, 40, &materials));
+        // Endpoint cell itself occupied → blocked even if the walk is clear.
+        assert!(!landscape.path_free(5, 5, 5, 31, &materials));
+
+        // A liquid segment in an otherwise open cell blocks too (PixCnt
+        // counts any nonzero density, liquids included).
+        landscape.set_liquid_column(40, vec![LiquidSegment::with_material(5, 8, Some(water))]);
+        assert!(!landscape.path_free(5, 5, 60, 10, &materials));
     }
 
     #[test]
