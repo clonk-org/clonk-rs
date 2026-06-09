@@ -3204,8 +3204,10 @@ fn convert_action_map(map: &ResourceActionMap) -> DefinitionActions {
     let mut graphics = HashMap::new();
     for (name, definition) in &map.actions {
         let (spec, visuals) = convert_action_definition(definition);
-        specs.insert(name.clone(), spec);
-        graphics.insert(name.clone(), visuals);
+        // Duplicate action names: the FIRST entry wins, matching the forward
+        // scan in C++ SetActionByName.
+        specs.entry(name.clone()).or_insert(spec);
+        graphics.entry(name.clone()).or_insert(visuals);
     }
     DefinitionActions {
         default_action: map.default_action.clone(),

@@ -160,19 +160,53 @@ pub struct PictureRect {
     pub height: i32,
 }
 
-/// Representation of `ActMap.txt`.
+/// `DFA_NONE` (C4Def.h:429): no procedure.
+pub const DFA_NONE: i32 = -1;
+/// `ActIdle` (C4Def.h:139): no next action.
+pub const ACT_IDLE: i32 = -1;
+/// `ActHold` (C4Def.h:140): hold the final phase.
+pub const ACT_HOLD: i32 = -2;
+
+/// `ProcedureName` table (C4Def.cpp:38-58); index = DFA_* value
+/// (C4Def.h:430-447). Matching is case-SENSITIVE (`SEqual`,
+/// C4Def.cpp:781).
+pub const PROCEDURE_NAMES: [&str; 18] = [
+    "WALK", "FLIGHT", "KNEEL", "SCALE", "HANGLE", "DIG", "SWIM", "THROW", "BRIDGE", "BUILD",
+    "PUSH", "CHOP", "LIFT", "FLOAT", "ATTACH", "FIGHT", "CONNECT", "PULL",
+];
+
+/// Representation of `ActMap.txt`. Actions keep their file order and
+/// duplicates, mirroring the C++ `C4ActionDef` array — `NextAction` indices
+/// and first-match name lookups (`SetActionByName`) depend on it.
 #[derive(Debug, Clone)]
 pub struct ActionMap {
     pub default_action: Option<String>,
-    pub actions: HashMap<String, ActionDefinition>,
+    pub actions: Vec<(String, ActionDefinition)>,
+}
+
+impl ActionMap {
+    /// First action with the given name, like C++ `SetActionByName`'s forward
+    /// scan (C4Object.cpp).
+    pub fn get(&self, name: &str) -> Option<&ActionDefinition> {
+        self.actions
+            .iter()
+            .find(|(action_name, _)| action_name == name)
+            .map(|(_, action)| action)
+    }
 }
 
 /// Action metadata used to construct runtime action specifications.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ActionDefinition {
     pub procedure: Option<String>,
+    /// Numeric DFA_* procedure from `CrossMapActMap` (C4Def.cpp:778-782);
+    /// `DFA_NONE` when ProcedureName has no case-sensitive table match.
+    pub procedure_index: i32,
     pub length: Option<u32>,
     pub next_action: Option<String>,
+    /// Numeric next action from `CrossMapActMap` (C4Def.cpp:783-792):
+    /// `ACT_IDLE`, `ACT_HOLD`, or an index into `ActionMap::actions`.
+    pub next_action_index: i32,
     pub delay: Option<u32>,
     pub step: Option<u32>,
     pub phase_call: Option<String>,
@@ -189,6 +223,36 @@ pub struct ActionDefinition {
     pub facet_base: bool,
     pub facet_top_face: bool,
     pub facet_target_stretch: bool,
+}
+
+impl Default for ActionDefinition {
+    fn default() -> Self {
+        Self {
+            procedure: None,
+            // C4ActionDef ctor: Procedure{DFA_NONE} (C4Def.cpp:62),
+            // NextAction{ActIdle} (C4Def.h:154).
+            procedure_index: DFA_NONE,
+            length: None,
+            next_action: None,
+            next_action_index: ACT_IDLE,
+            delay: None,
+            step: None,
+            phase_call: None,
+            start_call: None,
+            end_call: None,
+            abort_call: None,
+            no_other_action: false,
+            dig_free: None,
+            attach: 0,
+            directions: None,
+            flip_dir: None,
+            facet: None,
+            reverse: false,
+            facet_base: false,
+            facet_top_face: false,
+            facet_target_stretch: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -580,7 +644,7 @@ fn is_script_file(path: &Path) -> bool {
 fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
     let text = String::from_utf8_lossy(bytes);
     let mut default_action: Option<String> = None;
-    let mut actions: HashMap<String, ActionDefinition> = HashMap::new();
+    let mut actions: Vec<(String, ActionDefinition)> = Vec::new();
     let mut current_name: Option<String> = None;
     let mut current_definition = ActionDefinition::default();
 
@@ -596,7 +660,7 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
 
         if line.starts_with('[') && line.ends_with(']') {
             if let Some(name) = current_name.take() {
-                actions.insert(name, current_definition);
+                actions.push((name, current_definition));
             }
             current_definition = ActionDefinition::default();
             continue;
@@ -611,7 +675,7 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
         if key.eq_ignore_ascii_case("Name") {
             if !value.is_empty() {
                 if let Some(name) = current_name.replace(value.to_string()) {
-                    actions.insert(name, current_definition);
+                    actions.push((name, current_definition));
                     current_definition = ActionDefinition::default();
                 }
             }
@@ -700,7 +764,7 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
     }
 
     if let Some(name) = current_name {
-        actions.insert(name, current_definition);
+        actions.push((name, current_definition));
     }
 
     if actions.is_empty() && default_action.is_some() {
@@ -709,10 +773,43 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
         ));
     }
 
+    cross_map_act_map(&mut actions);
+
     Ok(ActionMap {
         default_action,
         actions,
     })
+}
+
+/// `C4Def::CrossMapActMap` (C4Def.cpp:773-799): resolve procedure names to
+/// DFA_* indices (case-sensitive against `PROCEDURE_NAMES`) and next-action
+/// names to indices ("Hold" case-insensitively to `ACT_HOLD`; the C++
+/// overwrite loop makes the last duplicate win). The `*Call="None"` clearing
+/// from lines 794-797 already happens during parsing.
+fn cross_map_act_map(actions: &mut [(String, ActionDefinition)]) {
+    let names: Vec<String> = actions.iter().map(|(name, _)| name.clone()).collect();
+    for (_, action) in actions.iter_mut() {
+        action.procedure_index = DFA_NONE;
+        if let Some(procedure) = &action.procedure {
+            for (index, table_name) in PROCEDURE_NAMES.iter().enumerate() {
+                if procedure == table_name {
+                    action.procedure_index = index as i32;
+                }
+            }
+        }
+        action.next_action_index = ACT_IDLE;
+        if let Some(next) = &action.next_action {
+            if next.eq_ignore_ascii_case("Hold") {
+                action.next_action_index = ACT_HOLD;
+            } else {
+                for (index, name) in names.iter().enumerate() {
+                    if next == name {
+                        action.next_action_index = index as i32;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn load_definition_picture(group: &Group, core: &DefCore) -> Option<GraphicsImage> {
@@ -1446,12 +1543,76 @@ EndCall=OnIdleEnd
         assert!(def.script.combined.contains("Initialize"));
         let action_map = def.action_map.expect("action map present");
         assert!(action_map.default_action.is_none());
-        let idle = action_map.actions.get("Idle").expect("idle action present");
+        let idle = action_map.get("Idle").expect("idle action present");
         assert_eq!(idle.procedure.as_deref(), Some("Walk"));
         assert_eq!(idle.length, Some(20));
         assert_eq!(idle.next_action.as_deref(), Some("Idle"));
         assert_eq!(idle.start_call.as_deref(), Some("OnIdleStart"));
         assert_eq!(idle.end_call.as_deref(), Some("OnIdleEnd"));
+    }
+
+    #[test]
+    fn cross_map_act_map_maps_procedures_and_next_actions_like_cpp() {
+        // C4Def::CrossMapActMap (C4Def.cpp:773-799): Procedure maps
+        // case-SENSITIVELY against the uppercase ProcedureName table
+        // (C4Def.cpp:38-58) with DFA_NONE fallback; NextAction maps "Hold"
+        // case-insensitively to ActHold, otherwise case-SENSITIVELY against
+        // the action names — the overwrite loop means the LAST duplicate
+        // wins; no match leaves the ActIdle default.
+        let data = br#"
+[Action]
+Name=Walk
+Procedure=WALK
+NextAction=hOLD
+
+[Action]
+Name=Fall
+Procedure=walk
+NextAction=Walk
+
+[Action]
+Name=Spin
+NextAction=spin
+
+[Action]
+Name=Dup
+
+[Action]
+Name=Dup
+
+[Action]
+Name=Ref
+Procedure=FLIGHT
+NextAction=Dup
+"#;
+        let map = parse_act_map(data).expect("act map parsed");
+        // file order preserved, duplicates kept (C++ array semantics)
+        let order: Vec<&str> = map.actions.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(order, ["Walk", "Fall", "Spin", "Dup", "Dup", "Ref"]);
+
+        let walk = map.get("Walk").expect("walk present");
+        assert_eq!(walk.procedure_index, 0, "WALK → DFA_WALK");
+        assert_eq!(walk.next_action_index, ACT_HOLD, "Hold is case-insensitive");
+
+        let fall = map.get("Fall").expect("fall present");
+        assert_eq!(
+            fall.procedure_index, DFA_NONE,
+            "lowercase 'walk' does not match the case-sensitive table"
+        );
+        assert_eq!(fall.next_action_index, 0, "NextAction=Walk → index 0");
+
+        let spin = map.get("Spin").expect("spin present");
+        assert_eq!(
+            spin.next_action_index, ACT_IDLE,
+            "case-sensitive miss leaves ActIdle"
+        );
+
+        let reference = map.get("Ref").expect("ref present");
+        assert_eq!(reference.procedure_index, 1, "FLIGHT → DFA_FLIGHT");
+        assert_eq!(
+            reference.next_action_index, 4,
+            "last duplicate wins (C4Def.cpp:789-791 overwrite loop)"
+        );
     }
 
     #[test]
@@ -1463,7 +1624,7 @@ Procedure=Dig
 DigFree=24
 "#;
         let map = parse_act_map(data).expect("act map parsed");
-        let dig = map.actions.get("Dig").expect("dig action present");
+        let dig = map.get("Dig").expect("dig action present");
         assert_eq!(dig.dig_free, Some(24));
     }
 
@@ -1476,7 +1637,7 @@ Procedure=Scale
 Attach=1
 "#;
         let map = parse_act_map(data).expect("act map parsed");
-        let scale = map.actions.get("Scale").expect("scale action present");
+        let scale = map.get("Scale").expect("scale action present");
         assert_eq!(scale.attach, 1);
     }
 

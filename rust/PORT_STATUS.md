@@ -298,8 +298,16 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
     immediate spawned-mover exec, `LandscapeInsertThrust` plumbing, `Random(10)`
     before `Rnd3()` order landed. Remaining: exact `CreatePtr` slot reuse, richer
     per-pixel thrust/insert.
-11. **TODO** — `CrossMapActMap()` in definition loading (`definition.rs:35,
-    486-619`): procedure→numeric, `next_action`→indices per `C4Def.cpp:773-799`.
+11. **DONE (load-time mapping; 2026-06-09)** — `CrossMapActMap()` in
+    definition loading per `C4Def.cpp:773-799`: `ActionMap.actions` is now an
+    ordered Vec keeping duplicates (C++ array semantics, first-match `get()`
+    like `SetActionByName`); `procedure_index` resolves case-SENSITIVELY
+    against the `ProcedureName` table (C4Def.cpp:38-58, miss → `DFA_NONE`);
+    `next_action_index` maps "Hold"→`ACT_HOLD` case-insensitively, else
+    case-sensitive name→index with last-duplicate-wins (overwrite loop
+    :789-791), default `ACT_IDLE`. Remaining: engine runtime still dispatches
+    on the procedure *string* (`ActionSpec`); switch dispatch + `next_action`
+    transitions to the numeric indices.
 12. **DONE (sim side; 2026-06-09)** — Full particle physics processor in
     `particles.rs`: `fxStdExec`/`fxSmokeExec`/collision procs, `Cast()`,
     `Push()`, proc maps, `Load` adjustments, `SafeRandom` stand-in (`SafeRng`).
