@@ -619,6 +619,8 @@ trait WorldAccessor {
     fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect;
     fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>>;
     fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>>;
+    /// Definition mass/value for the C4SO_Mass/C4SO_Value sorts.
+    fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata>;
 }
 
 impl WorldAccessor for HostWorldContext {
@@ -641,6 +643,10 @@ impl WorldAccessor for HostWorldContext {
     fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
         self.shape_sector_ids_in_rect(rect)
     }
+
+    fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata> {
+        HostWorldContext::definition_metadata(self, id).cloned()
+    }
 }
 
 impl WorldAccessor for EffectHostContext {
@@ -658,6 +664,10 @@ impl WorldAccessor for EffectHostContext {
         } else {
             self.world.object_shape_rect(object)
         }
+    }
+
+    fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata> {
+        HostWorldContext::definition_metadata(&self.world, id).cloned()
     }
 
     fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
@@ -2276,7 +2286,9 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetRDir", set_r_dir);
     script.register_host_function("GetRDir", get_r_dir);
     script.register_host_function("FindObject", find_object);
-    script.register_host_function("FindObjects", find_objects);
+    script.register_host_function("FindObject2", find_object2);
+    script.register_host_function("FindObjects", find_objects_dispatch);
+    script.register_host_function("ObjectCount2", object_count2);
     script.register_host_function("ObjectCount", object_count);
     script.register_host_function("ObjectDistance", object_distance);
     script.register_host_function("GetX", get_x);
@@ -6904,6 +6916,565 @@ fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+// ── C4FindObject / C4SortObject condition trees (C4FindObject.{h,cpp}) ──────
+
+/// C4FO_* constants (C4FindObject.h:27-50) as a parsed condition tree.
+/// Known divergences: `Func` conditions need host→VM reentrancy (treated as
+/// impossible); `Controller` compares the owner (the engine has no separate
+/// controller); `Layer` is unmodeled on host objects (never matches);
+/// shape tests use the vertices bounding box.
+#[derive(Debug, Clone)]
+enum FindCondition {
+    Not(Box<FindCondition>),
+    And(Vec<FindCondition>),
+    Or(Vec<FindCondition>),
+    Exclude(Option<ObjectId>),
+    Id(String),
+    InRect(DefinitionRect),
+    AtPoint(i32, i32),
+    AtRect(DefinitionRect),
+    OnLine(i32, i32, i32, i32),
+    Distance { x: i32, y: i32, r2: i64 },
+    Ocf(u32),
+    Category(i32),
+    Action(String),
+    ActionTarget { target: Option<ObjectId>, index: usize },
+    Container(Option<ObjectId>),
+    AnyContainer,
+    Owner(i32),
+    Controller(i32),
+    Func,
+    Layer,
+}
+
+/// C4SO_* constants (C4FindObject.h:53-62) as a parsed sort tree.
+#[derive(Debug, Clone)]
+enum SortCriterion {
+    Reverse(Box<SortCriterion>),
+    Multiple(Vec<SortCriterion>),
+    Distance { x: i32, y: i32 },
+    Random,
+    Speed,
+    Mass,
+    Value,
+    /// Sort_Func needs host→VM reentrancy; all values compare equal.
+    Func,
+}
+
+enum ParsedCriterion {
+    Condition(FindCondition),
+    Sort(SortCriterion),
+    None,
+}
+
+fn value_as_object_id(value: &Value) -> Option<ObjectId> {
+    match value {
+        Value::Object(id) => Some(ObjectId::new(*id)),
+        _ => object_id_from_value(value),
+    }
+}
+
+fn value_as_i32(value: &Value) -> i32 {
+    match value {
+        Value::Int(value) => *value,
+        Value::Bool(value) => i32::from(*value),
+        _ => 0,
+    }
+}
+
+impl FindCondition {
+    /// `C4FindObject::CreateByValue` (C4FindObject.cpp:37-162): arrays whose
+    /// first element is in C4SO_First..=C4SO_Last parse as sort criteria
+    /// instead.
+    fn parse(value: &Value) -> ParsedCriterion {
+        // Must be an array (C4FindObject.cpp:40-41)
+        let Value::Array(data) = value else {
+            return ParsedCriterion::None;
+        };
+        let kind = data.first().map(value_as_i32).unwrap_or(0);
+        if (100..=200).contains(&kind) {
+            return SortCriterion::parse_typed(kind, data)
+                .map(ParsedCriterion::Sort)
+                .unwrap_or(ParsedCriterion::None);
+        }
+        let arg_i32 = |index: usize| data.get(index).map(value_as_i32).unwrap_or(0);
+        let condition = match kind {
+            // C4FO_Not
+            1 => match data.get(1).map(Self::parse) {
+                Some(ParsedCriterion::Condition(child)) => {
+                    FindCondition::Not(Box::new(child))
+                }
+                _ => return ParsedCriterion::None,
+            },
+            // C4FO_And / C4FO_Or: trivial single-condition unwrap, dropped
+            // null children (C4FindObject.cpp:67-87)
+            2 | 3 => {
+                let children: Vec<FindCondition> = data[1..]
+                    .iter()
+                    .filter_map(|entry| match Self::parse(entry) {
+                        ParsedCriterion::Condition(child) => Some(child),
+                        _ => None,
+                    })
+                    .collect();
+                if data.len() == 2 {
+                    match children.into_iter().next() {
+                        Some(child) => child,
+                        None => return ParsedCriterion::None,
+                    }
+                } else if kind == 2 {
+                    FindCondition::And(children)
+                } else {
+                    FindCondition::Or(children)
+                }
+            }
+            // C4FO_Exclude
+            5 => FindCondition::Exclude(data.get(1).and_then(value_as_object_id)),
+            // C4FO_InRect
+            10 => FindCondition::InRect(DefinitionRect::new(
+                arg_i32(1),
+                arg_i32(2),
+                arg_i32(3),
+                arg_i32(4),
+            )),
+            // C4FO_AtPoint
+            11 => FindCondition::AtPoint(arg_i32(1), arg_i32(2)),
+            // C4FO_AtRect
+            12 => FindCondition::AtRect(DefinitionRect::new(
+                arg_i32(1),
+                arg_i32(2),
+                arg_i32(3),
+                arg_i32(4),
+            )),
+            // C4FO_OnLine
+            13 => FindCondition::OnLine(arg_i32(1), arg_i32(2), arg_i32(3), arg_i32(4)),
+            // C4FO_Distance
+            14 => {
+                let r = i64::from(arg_i32(3));
+                FindCondition::Distance {
+                    x: arg_i32(1),
+                    y: arg_i32(2),
+                    r2: r * r,
+                }
+            }
+            // C4FO_ID
+            20 => match data.get(1) {
+                Some(Value::C4Id(id)) => FindCondition::Id(id.clone()),
+                Some(Value::String(id)) => FindCondition::Id(id.clone()),
+                _ => return ParsedCriterion::None,
+            },
+            // C4FO_OCF
+            21 => FindCondition::Ocf(arg_i32(1) as u32),
+            // C4FO_Category
+            22 => FindCondition::Category(arg_i32(1)),
+            // C4FO_Action
+            30 => match data.get(1) {
+                Some(Value::String(name)) => FindCondition::Action(name.clone()),
+                _ => return ParsedCriterion::None,
+            },
+            // C4FO_ActionTarget (index clamped to 0..=1, C4FindObject.cpp:138-144)
+            31 => FindCondition::ActionTarget {
+                target: data.get(1).and_then(value_as_object_id),
+                index: arg_i32(2).clamp(0, 1) as usize,
+            },
+            // C4FO_Container
+            40 => FindCondition::Container(data.get(1).and_then(value_as_object_id)),
+            // C4FO_AnyContainer
+            41 => FindCondition::AnyContainer,
+            // C4FO_Owner
+            50 => FindCondition::Owner(arg_i32(1)),
+            // C4FO_Controller
+            51 => FindCondition::Controller(arg_i32(1)),
+            // C4FO_Func
+            60 => FindCondition::Func,
+            // C4FO_Layer
+            70 => FindCondition::Layer,
+            _ => return ParsedCriterion::None,
+        };
+        ParsedCriterion::Condition(condition)
+    }
+
+    /// Per-condition Check (C4FindObject.cpp:390-679).
+    fn check(&self, world: &impl WorldAccessor, object: &HostWorldObject) -> bool {
+        match self {
+            FindCondition::Not(child) => !child.check(world, object),
+            FindCondition::And(children) => {
+                children.iter().all(|child| child.check(world, object))
+            }
+            FindCondition::Or(children) => {
+                children.iter().any(|child| child.check(world, object))
+            }
+            FindCondition::Exclude(excluded) => Some(object.id) != *excluded,
+            FindCondition::Id(id) => object.definition_id() == id,
+            FindCondition::InRect(rect) => {
+                let position = object.position();
+                rect.contains_offset(position.x - rect.x, position.y - rect.y)
+                    || (position.x >= rect.x
+                        && position.x < rect.x + rect.width
+                        && position.y >= rect.y
+                        && position.y < rect.y + rect.height)
+            }
+            FindCondition::AtPoint(x, y) => {
+                let metadata = world.definition_metadata(object.definition_id());
+                compute_object_bounds(object, metadata.as_ref())
+                    .map(|(left, top, right, bottom)| {
+                        *x >= left && *x < right && *y >= top && *y < bottom
+                    })
+                    .unwrap_or(false)
+            }
+            FindCondition::AtRect(rect) => {
+                let metadata = world.definition_metadata(object.definition_id());
+                compute_object_bounds(object, metadata.as_ref())
+                    .map(|(left, top, right, bottom)| {
+                        rect.x < right
+                            && rect.x + rect.width > left
+                            && rect.y < bottom
+                            && rect.y + rect.height > top
+                    })
+                    .unwrap_or(false)
+            }
+            FindCondition::OnLine(x1, y1, x2, y2) => {
+                let metadata = world.definition_metadata(object.definition_id());
+                compute_object_bounds(object, metadata.as_ref())
+                    .map(|bounds| segment_intersects_bounds(*x1, *y1, *x2, *y2, bounds))
+                    .unwrap_or(false)
+            }
+            FindCondition::Distance { x, y, r2 } => {
+                let position = object.position();
+                let dx = i64::from(position.x - x);
+                let dy = i64::from(position.y - y);
+                dx * dx + dy * dy <= *r2
+            }
+            FindCondition::Ocf(mask) => object.ocf() & mask != 0,
+            FindCondition::Category(category) => object.category() & category != 0,
+            FindCondition::Action(name) => object.action_name() == name,
+            FindCondition::ActionTarget { target, index } => {
+                object.action_target(*index) == *target
+            }
+            FindCondition::Container(container) => object.container() == *container,
+            FindCondition::AnyContainer => object.container().is_some(),
+            FindCondition::Owner(owner) => object.owner() == *owner,
+            FindCondition::Controller(controller) => object.owner() == *controller,
+            FindCondition::Func | FindCondition::Layer => false,
+        }
+    }
+
+    /// IsImpossible/IsEnsured pruning (C4FindObject.cpp:453-590).
+    fn is_impossible(&self) -> bool {
+        match self {
+            FindCondition::And(children) => {
+                children.iter().any(FindCondition::is_impossible)
+            }
+            FindCondition::Or(children) => {
+                !children.iter().any(|child| !child.is_impossible())
+            }
+            FindCondition::InRect(rect) => rect.width == 0 || rect.height == 0,
+            FindCondition::Ocf(mask) => *mask == 0,
+            FindCondition::Func => true,
+            _ => false,
+        }
+    }
+
+    fn is_ensured(&self) -> bool {
+        matches!(self, FindCondition::Category(category) if *category == 0)
+    }
+}
+
+/// Axis-aligned segment/box intersection for C4FO_OnLine (the C++ uses
+/// `Shape.IntersectsLine`; the host shape is its vertices bounding box).
+fn segment_intersects_bounds(
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    bounds: (i32, i32, i32, i32),
+) -> bool {
+    let (left, top, right, bottom) = bounds;
+    let inside = |x: i32, y: i32| x >= left && x < right && y >= top && y < bottom;
+    if inside(x1, y1) || inside(x2, y2) {
+        return true;
+    }
+    // sample the segment at integer steps (sufficient for the pixel grid)
+    let steps = (x2 - x1).abs().max((y2 - y1).abs());
+    for step in 0..=steps {
+        let x = x1 + (x2 - x1) * step / steps.max(1);
+        let y = y1 + (y2 - y1) * step / steps.max(1);
+        if inside(x, y) {
+            return true;
+        }
+    }
+    false
+}
+
+impl SortCriterion {
+    /// `C4SortObject::CreateByValue` (C4FindObject.cpp:683-758).
+    fn parse_typed(kind: i32, data: &[Value]) -> Option<SortCriterion> {
+        let arg_i32 = |index: usize| data.get(index).map(value_as_i32).unwrap_or(0);
+        Some(match kind {
+            // C4SO_Reverse
+            101 => SortCriterion::Reverse(Box::new(
+                data.get(1).and_then(Self::parse)?,
+            )),
+            // C4SO_Multiple (trivial single unwrap, C4FindObject.cpp:705-726)
+            102 => {
+                let children: Vec<SortCriterion> = data[1..]
+                    .iter()
+                    .filter_map(Self::parse)
+                    .collect();
+                if data.len() == 2 {
+                    children.into_iter().next()?
+                } else {
+                    SortCriterion::Multiple(children)
+                }
+            }
+            // C4SO_Distance
+            110 => SortCriterion::Distance {
+                x: arg_i32(1),
+                y: arg_i32(2),
+            },
+            // C4SO_Random
+            120 => SortCriterion::Random,
+            // C4SO_Speed
+            130 => SortCriterion::Speed,
+            // C4SO_Mass
+            140 => SortCriterion::Mass,
+            // C4SO_Value
+            150 => SortCriterion::Value,
+            // C4SO_Func
+            160 => SortCriterion::Func,
+            _ => return None,
+        })
+    }
+
+    fn parse(value: &Value) -> Option<SortCriterion> {
+        let Value::Array(data) = value else {
+            return None;
+        };
+        Self::parse_typed(data.first().map(value_as_i32).unwrap_or(0), data)
+    }
+
+    /// `CompareGetValue` (C4FindObject.cpp:908-932). `Random` draws the
+    /// synced `Random(1 << 16)` — exactly once per object, in collection
+    /// order, via the cache (C4SortObjectByValue::PrepareCache).
+    fn value_for(&self, world: &impl WorldAccessor, object: &HostWorldObject) -> i64 {
+        match self {
+            SortCriterion::Distance { x, y } => {
+                let position = object.position();
+                let dx = i64::from(position.x - x);
+                let dy = i64::from(position.y - y);
+                dx * dx + dy * dy
+            }
+            SortCriterion::Random => RANDOM_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .map(|context| i64::from(context.rng.borrow_mut().random(1 << 16)))
+                    .unwrap_or(0)
+            }),
+            SortCriterion::Speed => {
+                let velocity = object.velocity();
+                let dx = i64::from(velocity.x);
+                let dy = i64::from(velocity.y);
+                dx * dx + dy * dy
+            }
+            SortCriterion::Mass => i64::from(
+                world
+                    .definition_metadata(object.definition_id())
+                    .map(|metadata| metadata.mass)
+                    .unwrap_or(0),
+            ),
+            SortCriterion::Value => i64::from(
+                world
+                    .definition_metadata(object.definition_id())
+                    .map(|metadata| metadata.value)
+                    .unwrap_or(0),
+            ),
+            SortCriterion::Func => 0,
+            SortCriterion::Reverse(_) | SortCriterion::Multiple(_) => 0,
+        }
+    }
+
+    /// `C4SortObject::SortObjects` (C4FindObject.cpp:784-812): per-criterion
+    /// value caches computed in collection order, then a stable sort with
+    /// `Compare > 0` ⇒ ascending by value (smallest first).
+    fn sort(&self, world: &impl WorldAccessor, ids: &mut [ObjectId]) {
+        let keys = self.cache_keys(world, ids);
+        let mut order: Vec<usize> = (0..ids.len()).collect();
+        order.sort_by(|&a, &b| Self::compare_keys(&keys[a], &keys[b]));
+        let sorted: Vec<ObjectId> = order.iter().map(|&index| ids[index]).collect();
+        ids.copy_from_slice(&sorted);
+    }
+
+    /// Per-object key vectors: flattened (criterion, direction) values so
+    /// Reverse/Multiple compose like the C++ Compare chain.
+    fn cache_keys(&self, world: &impl WorldAccessor, ids: &[ObjectId]) -> Vec<Vec<i64>> {
+        let mut keys = vec![Vec::new(); ids.len()];
+        self.fill_keys(world, ids, &mut keys, false);
+        keys
+    }
+
+    fn fill_keys(
+        &self,
+        world: &impl WorldAccessor,
+        ids: &[ObjectId],
+        keys: &mut [Vec<i64>],
+        reverse: bool,
+    ) {
+        match self {
+            SortCriterion::Reverse(child) => child.fill_keys(world, ids, keys, !reverse),
+            SortCriterion::Multiple(children) => {
+                for child in children {
+                    child.fill_keys(world, ids, keys, reverse);
+                }
+            }
+            _ => {
+                let sign = if reverse { -1 } else { 1 };
+                for (index, id) in ids.iter().enumerate() {
+                    let value = world
+                        .get_object(*id)
+                        .map(|object| self.value_for(world, &object))
+                        .unwrap_or(0);
+                    keys[index].push(sign * value);
+                }
+            }
+        }
+    }
+
+    fn compare_keys(a: &[i64], b: &[i64]) -> std::cmp::Ordering {
+        for (lhs, rhs) in a.iter().zip(b.iter()) {
+            match lhs.cmp(rhs) {
+                std::cmp::Ordering::Equal => continue,
+                other => return other,
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
+}
+
+/// `CreateCriterionsFromPars` (C4Script.cpp:1985-2034): each argument array
+/// parses as a condition or sort; conditions AND together, sorts merge into
+/// a Multiple; no conditions at all is a script error.
+fn parse_criterions(args: &[Value]) -> Option<(FindCondition, Option<SortCriterion>)> {
+    let mut conditions = Vec::new();
+    let mut sorts = Vec::new();
+    for arg in args {
+        if matches!(arg, Value::Nil) {
+            continue;
+        }
+        match FindCondition::parse(arg) {
+            ParsedCriterion::Condition(condition) => conditions.push(condition),
+            ParsedCriterion::Sort(sort) => sorts.push(sort),
+            ParsedCriterion::None => {}
+        }
+    }
+    if conditions.is_empty() {
+        return None;
+    }
+    let condition = if conditions.len() == 1 {
+        conditions.into_iter().next().expect("one condition")
+    } else {
+        FindCondition::And(conditions)
+    };
+    let sort = match sorts.len() {
+        0 => None,
+        1 => sorts.into_iter().next(),
+        _ => Some(SortCriterion::Multiple(sorts)),
+    };
+    Some((condition, sort))
+}
+
+/// Search over the main object list (C4FindObject::Find/FindMany,
+/// C4FindObject.cpp:180-226). The sector-bounds traversal optimization (and
+/// its sector-order result ordering) is still open — the main list is always
+/// walked, which matches the C++ unbounded path.
+fn find_condition_matches(
+    world: &impl WorldAccessor,
+    condition: &FindCondition,
+) -> Vec<ObjectId> {
+    if condition.is_impossible() {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    for object_id in world.object_ids() {
+        let Some(object) = world.get_object(object_id) else {
+            continue;
+        };
+        if !object.status().is_active() {
+            continue;
+        }
+        if condition.check(world, &object) {
+            matches.push(object_id);
+        }
+    }
+    matches
+}
+
+/// FnFindObject2 (C4Script.cpp:2052-2067).
+fn find_object2(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some((condition, sort)) = parse_criterions(args) else {
+        return Err(RuntimeError::new(
+            "FindObject: No valid search criterions supplied!",
+        ));
+    };
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let mut matches = find_condition_matches(context, &condition);
+        if let Some(sort) = sort {
+            sort.sort(context, &mut matches);
+        }
+        Ok(matches
+            .first()
+            .map(|id| object_reference_value(*id))
+            .unwrap_or(Value::Nil))
+    })
+}
+
+/// FnFindObjects array form (C4Script.cpp:2069-2084).
+fn find_objects2(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some((condition, sort)) = parse_criterions(args) else {
+        return Err(RuntimeError::new(
+            "FindObjects: No valid search criterions supplied!",
+        ));
+    };
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Array(Vec::new()));
+        };
+        let mut matches = find_condition_matches(context, &condition);
+        if let Some(sort) = sort {
+            sort.sort(context, &mut matches);
+        }
+        Ok(Value::Array(
+            matches.into_iter().map(object_reference_value).collect(),
+        ))
+    })
+}
+
+/// FnObjectCount2 (C4Script.cpp:2036-2050).
+fn object_count2(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some((condition, _)) = parse_criterions(args) else {
+        return Err(RuntimeError::new(
+            "ObjectCount: No valid search criterions supplied!",
+        ));
+    };
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Int(0));
+        };
+        if condition.is_ensured() {
+            return Ok(Value::Int(truncate_to_i32(
+                context.world_object_ids().len() as u64,
+            )));
+        }
+        Ok(Value::Int(truncate_to_i32(
+            find_condition_matches(context, &condition).len() as u64,
+        )))
+    })
+}
+
 fn find_object(args: &[Value]) -> Result<Value, RuntimeError> {
     let params = FindObjectParams::parse(args)?;
     HOST_CONTEXT.with(|cell| {
@@ -6971,6 +7542,17 @@ fn find_object_closest(world: &impl WorldAccessor, params: &FindObjectParams) ->
         }
     }
     best.map(|(id, _)| id)
+}
+
+/// C++ `FindObjects` is the array-criteria form (C4Script.cpp:7043); the
+/// legacy fixed-parameter form predates it in this port and is kept for the
+/// existing fixtures. Array first argument → C++ semantics.
+fn find_objects_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
+    if matches!(args.first(), Some(Value::Array(_))) {
+        find_objects2(args)
+    } else {
+        find_objects(args)
+    }
 }
 
 fn find_objects(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -11512,6 +12094,7 @@ mod tests {
         "EffectVar",
         "FindContents",
         "FindObject",
+        "FindObject2",
         "FindObjects",
         "FindOtherContents",
         "Format",
@@ -11583,6 +12166,7 @@ mod tests {
         "Message",
         "Min",
         "ObjectCount",
+        "ObjectCount2",
         "ObjectDistance",
         "PathFree",
         "PlayerMessage",
@@ -16358,6 +16942,198 @@ mod tests {
         let value = result.expect("CreateParticle handles missing object");
         assert_eq!(value, Value::Bool(false));
         assert!(outcome.particles.is_empty());
+    }
+
+    fn find_world_object(
+        id: u64,
+        definition: &str,
+        x: i32,
+        y: i32,
+        owner: i32,
+    ) -> HostWorldObject {
+        HostWorldObject::new(
+            ObjectId::new(id),
+            definition,
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            owner,
+            100,
+            crate::FULL_CON,
+            Vector2::new(x, y),
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+    }
+
+    #[test]
+    fn find_object2_condition_tree_matches_cpp() {
+        // C4FindObject::CreateByValue (C4FindObject.cpp:37-162) +
+        // CreateCriterionsFromPars (C4Script.cpp:1985-2034): criteria arrays
+        // AND together; Not/Or nest; the first main-list match wins
+        // (C4FindObject.cpp:188-194).
+        let world = HostWorldContext::from_objects(vec![
+            find_world_object(1, "ROCK", 10, 10, 1),
+            find_world_object(2, "TREE", 50, 10, 2),
+            find_world_object(3, "ROCK", 90, 10, 2),
+        ]);
+        // [C4FO_ID(20), "ROCK"] AND [C4FO_Owner(50), 2] → object 3
+        let args = vec![
+            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
+            Value::Array(vec![Value::Int(50), Value::Int(2)]),
+        ];
+        let (result, _) =
+            with_object_host_context_with_world(world.clone(), || find_object2(&args));
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject2 succeeds")),
+            Some(ObjectId::new(3))
+        );
+
+        // [C4FO_Not(1), [C4FO_ID, "ROCK"]] → first non-rock (object 2)
+        let args = vec![Value::Array(vec![
+            Value::Int(1),
+            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
+        ])];
+        let (result, _) =
+            with_object_host_context_with_world(world.clone(), || find_object2(&args));
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject2 succeeds")),
+            Some(ObjectId::new(2))
+        );
+
+        // [C4FO_Or(3), [ID TREE], [InRect around object 3]] → objects 2 and 3
+        let args = vec![Value::Array(vec![
+            Value::Int(3),
+            Value::Array(vec![Value::Int(20), Value::String("TREE".into())]),
+            Value::Array(vec![
+                Value::Int(10),
+                Value::Int(85),
+                Value::Int(5),
+                Value::Int(10),
+                Value::Int(10),
+            ]),
+        ])];
+        let (result, _) =
+            with_object_host_context_with_world(world.clone(), || object_count2(&args));
+        assert_eq!(result.expect("ObjectCount2 succeeds"), Value::Int(2));
+
+        // No valid criterions → script error (C4Script.cpp:2042-2043)
+        let (result, _) =
+            with_object_host_context_with_world(world, || find_object2(&[Value::Int(5)]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn find_objects2_sort_random_consumes_synced_draws_in_collection_order() {
+        // C4SortObjectRandom::CompareGetValue draws the synced
+        // Random(1 << 16) (C4FindObject.cpp:914-917) — once per object via
+        // the PrepareCache pass in collection order
+        // (C4FindObject.cpp:819-832), then a stable ascending sort.
+        let world = HostWorldContext::from_objects(vec![
+            find_world_object(1, "ROCK", 10, 10, 1),
+            find_world_object(2, "ROCK", 50, 10, 1),
+            find_world_object(3, "ROCK", 90, 10, 1),
+        ]);
+        let args = vec![
+            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
+            Value::Array(vec![Value::Int(120)]), // C4SO_Random
+        ];
+        let rng = LcgRng::seed_from_u64(99);
+        let mut mirror = rng.clone();
+        let guard = enter_random_context(rng);
+        let (result, _) = with_object_host_context_with_world(world, || find_objects2(&args));
+        let rng_after = guard.finish();
+        let draws = [
+            mirror.random(1 << 16),
+            mirror.random(1 << 16),
+            mirror.random(1 << 16),
+        ];
+        assert_eq!(rng_after, mirror, "exactly one draw per object, in order");
+        // ascending by drawn value, stable
+        let mut expected: Vec<(i32, u64)> = draws
+            .iter()
+            .zip([1u64, 2, 3])
+            .map(|(&draw, id)| (draw, id))
+            .collect();
+        expected.sort_by_key(|&(draw, _)| draw);
+        let Ok(Value::Array(values)) = result else {
+            panic!("FindObjects returns array");
+        };
+        let ids: Vec<Option<ObjectId>> = values.iter().map(object_id_from_value).collect();
+        let expected_ids: Vec<Option<ObjectId>> = expected
+            .iter()
+            .map(|&(_, id)| Some(ObjectId::new(id)))
+            .collect();
+        assert_eq!(ids, expected_ids);
+    }
+
+    #[test]
+    fn find_objects2_sort_mass_and_reverse_match_cpp() {
+        // C4SO_Mass sorts lightest first (C4FindObject.h:59, ascending by
+        // CompareGetValue); C4SO_Reverse flips it (C4FindObject.cpp:856-869).
+        let definitions: HashMap<DefinitionId, DefinitionMetadata> = [
+            (
+                "LGHT".to_string(),
+                DefinitionMetadata {
+                    mass: 10,
+                    ..DefinitionMetadata::default()
+                },
+            ),
+            (
+                "HEVY".to_string(),
+                DefinitionMetadata {
+                    mass: 500,
+                    ..DefinitionMetadata::default()
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let world = HostWorldContext::with_landscape(
+            vec![
+                find_world_object(1, "HEVY", 10, 10, 1),
+                find_world_object(2, "LGHT", 50, 10, 1),
+            ],
+            None,
+            definitions,
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            10,
+            false,
+        );
+        let all = Value::Array(vec![Value::Int(22), Value::Int(0xFFFF)]); // C4FO_Category any
+        let args = vec![all.clone(), Value::Array(vec![Value::Int(140)])]; // C4SO_Mass
+        let (result, _) =
+            with_object_host_context_with_world(world.clone(), || find_objects2(&args));
+        let Ok(Value::Array(values)) = result else {
+            panic!("array result");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![Some(ObjectId::new(2)), Some(ObjectId::new(1))],
+            "lightest first"
+        );
+
+        // [C4SO_Reverse(101), [C4SO_Mass]] → heaviest first
+        let args = vec![
+            all,
+            Value::Array(vec![Value::Int(101), Value::Array(vec![Value::Int(140)])]),
+        ];
+        let (result, _) = with_object_host_context_with_world(world, || find_objects2(&args));
+        let Ok(Value::Array(values)) = result else {
+            panic!("array result");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![Some(ObjectId::new(1)), Some(ObjectId::new(2))],
+            "reverse: heaviest first"
+        );
     }
 
     #[test]

@@ -374,10 +374,24 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
 14. **TODO** — Sync-check state machine + binary record: `DoSync`/`SyncRate`,
     queue + `RemoveOldSyncChecks` (`C4GameControl.cpp:441-468`), varint frame-diff
     (`C4Record.cpp:243-264`), `+37` end-marker (`:196`).
-15. **TODO** — `FindObject` condition-tree factory (`CreateByValue()`,
-    `C4FindObject.cpp:37-162`) + `C4SortObject` (`Random/Speed/Mass/Value/Func`),
-    full `C4FO_AtRect`/`UseShapes()`, deterministic sorted iteration; fix
-    `ocf.rs:46` dynamic state.
+15. **MOSTLY DONE (2026-06-09)** — `FindObject` condition-tree factory
+    (`CreateByValue()`, C4FindObject.cpp:37-162) + `C4SortObject`
+    (C4FindObject.cpp:683-932) ported into `compat.rs`: full condition set
+    (Not/And/Or with null-filtering and trivial unwrap, Exclude, ID, InRect,
+    AtPoint/AtRect/OnLine on definition-shape bounds, Distance, OCF, Category,
+    Action, ActionTarget with 0..=1 clamp, Container, AnyContainer, Owner),
+    IsImpossible/IsEnsured pruning, sorts Reverse/Multiple/Distance/Random/
+    Speed/Mass/Value with C++ cache semantics — `C4SO_Random` draws the synced
+    `Random(1<<16)` exactly once per object in collection order, then a stable
+    ascending sort. Host fns `FindObject2`/`ObjectCount2` registered;
+    `FindObjects` dispatches array-first-arg → C++ criteria form, else the
+    legacy fixture form. CreateCriterionsFromPars AND-merging + no-criterion
+    script error (C4Script.cpp:1985-2060). **Open:** `Find_Func`/`Sort_Func`
+    need host→VM reentrancy (Func conditions are impossible, Func sorts
+    compare equal); `Controller` compares owner (no controller model);
+    `Layer` never matches (host objects carry no layer); the sector-bounds
+    traversal (and its sector-order FindMany result ordering) — the main
+    list is always walked, matching the C++ unbounded path.
 
 ---
 
