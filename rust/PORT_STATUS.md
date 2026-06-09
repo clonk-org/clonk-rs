@@ -371,9 +371,25 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
     `ControlRate`/`ControlTick`/`SyncRate` modulo (`ffi.rs:451-489`); meteor
     cave-landscape y offset needs the scenario `TopOpen` flag carried onto
     the engine landscape.
-14. **TODO** — Sync-check state machine + binary record: `DoSync`/`SyncRate`,
-    queue + `RemoveOldSyncChecks` (`C4GameControl.cpp:441-468`), varint frame-diff
-    (`C4Record.cpp:243-264`), `+37` end-marker (`:196`).
+14. **MOSTLY DONE (2026-06-09)** — Sync-check state machine + binary record.
+    **Done:** the C4ControlSyncCheck digest now carries the real C++ fields
+    (`Random3` = the Rnd3 ring pointer, `RandomCount`, `AllCrewPosX` =
+    `fixtoi(fix_x, 100)` centipixels over the players' crew lists,
+    `SectShapeSum` = sector shape-list sum via `C4LSectors::getShapeSum` —
+    replacing the invented FNV rng hash / whole-pixel / landscape-sum
+    digest); `ControlTick` advances every `ControlRate` frames and `DoSync`
+    fires every `SyncRate` (100) frames in `control_ticks()`
+    (C4GameControl.cpp:326-332) with `do_sync_check()` closing each frame
+    (C4Game.cpp:829); local queue + `get_sync_check` + strict-cutoff
+    `remove_old_sync_checks` (keep 50) + `register_remote_sync_check`
+    comparison for the network layer (C4Control.cpp:469-525). Binary record:
+    `BinaryControlRecord` with the exact 2-byte `C4RecordChunkHead` stream,
+    `RCT_Frame` filler chunks past 0xff frame diffs, no-rewind diff clamp,
+    and the truncated `frame + 37` `RCT_End` marker (C4Record.cpp:194-264).
+    **Open:** `MassMoverIndex` is still a signature hash (needs C++
+    `CreatePtr` slots); control-packet payload serialization into the binary
+    stream (`DecompileToBuf<StdCompilerBinWrite>` packet encoding) and the
+    lc-network DoInput/queue wiring for host sync-check broadcast.
 15. **MOSTLY DONE (2026-06-09)** — `FindObject` condition-tree factory
     (`CreateByValue()`, C4FindObject.cpp:37-162) + `C4SortObject`
     (C4FindObject.cpp:683-932) ported into `compat.rs`: full condition set

@@ -6856,6 +6856,14 @@ pub struct Engine {
     particle_system: particles::ParticleSystem,
     /// C4PXSSystem port (sync-relevant pixel sprites, src/C4PXS.cpp).
     pxs_system: pxs::PxsSystem,
+    /// Control/sync-check state machine (C4GameControl): ControlTick advances
+    /// every ControlRate frames; a sync check is digested every SyncRate
+    /// frames (C4SyncCheckRate = 100) and kept for 50 frames.
+    control_rate: i32,
+    control_tick: i32,
+    sync_rate: i32,
+    do_sync: bool,
+    sync_checks: Vec<SyncCheckPacket>,
     mass_movers: MassMoverSet,
     weather_events: Vec<WeatherEvent>,
     scenario_script: Option<ScenarioScript>,
@@ -7735,6 +7743,11 @@ impl Engine {
             particles: Vec::new(),
             particle_system: particles::ParticleSystem::default(),
             pxs_system: pxs::PxsSystem::default(),
+            control_rate: 1,
+            control_tick: 0,
+            sync_rate: 100,
+            do_sync: false,
+            sync_checks: Vec::new(),
             mass_movers: MassMoverSet::new(),
             weather_events: Vec::new(),
             scenario_script: None,
@@ -9864,6 +9877,8 @@ impl Engine {
         self.objective_check_counter =
             (self.objective_check_counter + 1) % GAME_OVER_CHECK_INTERVAL;
         let frame = self.frame;
+        // C4GameControl::Ticks runs with the frame advance (C4Game.cpp:801)
+        self.control_ticks();
         self.tick_pxs();
         self.tick_particles();
         let mut rescan_mass_movers = false;
@@ -10782,6 +10797,8 @@ impl Engine {
         self.process_spawn_queue(spawn_requests)?;
         self.refresh_elimination_state();
         self.check_game_over()?;
+        // Control.DoSyncCheck() closes the frame (C4Game.cpp:829)
+        self.do_sync_check();
         let mut snapshot = self.snapshot();
         snapshot.menu_requests = self.pending_menu_requests.drain(..).collect();
         snapshot.audio = self.pending_audio.drain(..).collect();
@@ -11531,30 +11548,39 @@ impl Engine {
         }
     }
 
+    /// `C4ControlSyncCheck::Set` (C4Control.cpp:445-458): the per-frame
+    /// determinism digest. `Random3` is the Rnd3 ring pointer (`FRndPtr3`),
+    /// `AllCrewPosX` sums `fixtoi(fix_x, 100)` (centipixels) over the
+    /// players' crew lists (C4Control.cpp:460-467), `SectShapeSum` counts the
+    /// sector shape lists (C4Sector.cpp:197-203). `MassMoverIndex` remains a
+    /// signature hash until the mass-mover gets C++ `CreatePtr` slots.
     pub fn sync_check(&self, by_client: i32) -> SyncCheckPacket {
         let frame = saturating_u64_to_i32(self.frame);
-        let control_tick = frame;
-        let (random3, random_count) = self.sync_rng_digest();
-        let crew_positions_sum = self
-            .objects
-            .iter()
-            .filter(|object| object.state.crew_member && object.state.status.is_active())
-            .fold(0i64, |acc, object| acc + i64::from(object.state.position.x));
+        let crew_positions_sum: i64 = {
+            let mut owners: Vec<&Player> = self.players.values().collect();
+            owners.sort_unstable_by_key(|player| player.id());
+            owners
+                .iter()
+                .flat_map(|player| player.crew().iter())
+                .filter_map(|id| self.find_object_index(*id))
+                .map(|index| i64::from(fixtoi_prec(self.objects[index].fixed_position.x, 100)))
+                .sum()
+        };
         let pxs_count = i32::try_from(self.pxs_system.count()).unwrap_or(i32::MAX);
         let mass_mover_index = self.mass_movers.sync_signature();
         let object_count = i32::try_from(self.objects.len()).unwrap_or(i32::MAX);
         let object_enumeration_index = saturating_u64_to_i32(self.next_object_id);
         let sector_shape_sum = self
-            .landscape
+            .sectors
             .as_ref()
-            .map(|landscape| saturating_i64_to_i32(landscape.shape_sum()))
+            .map(|sectors| i32::try_from(sectors.shape_sum()).unwrap_or(i32::MAX))
             .unwrap_or(0);
 
         SyncCheckPacket {
             frame,
-            control_tick,
-            random3,
-            random_count,
+            control_tick: self.control_tick,
+            random3: self.rng.rnd3_ptr(),
+            random_count: self.rng.count,
             crew_positions_sum: saturating_i64_to_i32(crew_positions_sum),
             pxs_count,
             mass_mover_index,
@@ -11565,12 +11591,56 @@ impl Engine {
         }
     }
 
-    fn sync_rng_digest(&self) -> (i32, i32) {
-        let bytes = serde_json::to_vec(&self.rng).unwrap_or_default();
-        let hash = fnv_update(FNV_OFFSET_BASIS, &bytes);
-        let lower = (hash & 0xFFFF_FFFF) as i32;
-        let upper = ((hash >> 32) & 0xFFFF_FFFF) as i32;
-        (upper, lower)
+    /// `C4GameControl::Ticks` (C4GameControl.cpp:326-332): advance
+    /// ControlTick every ControlRate frames and request a sync check every
+    /// SyncRate frames (C4SyncCheckRate = 100, C4GameControl.h:38).
+    fn control_ticks(&mut self) {
+        if self.frame % self.control_rate.max(1) as u64 == 0 {
+            self.control_tick += 1;
+        }
+        if self.frame % self.sync_rate.max(1) as u64 == 0 {
+            self.do_sync = true;
+        }
+    }
+
+    /// `C4GameControl::DoSyncCheck` (C4GameControl.cpp:441-468), run at the
+    /// end of the frame (C4Game.cpp:829): build the digest once per DoSync,
+    /// keep it in the local queue (the network layer exchanges packets and
+    /// feeds foreign ones to `register_remote_sync_check`), drop old entries.
+    fn do_sync_check(&mut self) {
+        if !self.do_sync {
+            return;
+        }
+        self.do_sync = false;
+        let packet = self.sync_check(0);
+        if self.get_sync_check(packet.frame).is_none() {
+            self.sync_checks.push(packet);
+        }
+        self.remove_old_sync_checks();
+    }
+
+    /// `C4GameControl::GetSyncCheck` (C4GameControl.cpp:493-506).
+    pub fn get_sync_check(&self, frame: i32) -> Option<&SyncCheckPacket> {
+        self.sync_checks.iter().find(|check| check.frame == frame)
+    }
+
+    /// `C4GameControl::RemoveOldSyncChecks` (C4GameControl.cpp:508-522):
+    /// drop checks older than `FrameCounter - C4SyncCheckMaxKeep` (50).
+    fn remove_old_sync_checks(&mut self) {
+        let cutoff = saturating_u64_to_i32(self.frame) - 50;
+        self.sync_checks.retain(|check| check.frame >= cutoff);
+    }
+
+    /// `C4ControlSyncCheck::Execute` (C4Control.cpp:469-525) for a sync check
+    /// received from another client: compare against the local digest for the
+    /// same frame, or queue it until that frame's local check exists. Returns
+    /// false on synchronization loss.
+    pub fn register_remote_sync_check(&mut self, packet: SyncCheckPacket) -> bool {
+        let Some(local) = self.get_sync_check(packet.frame) else {
+            self.sync_checks.push(packet);
+            return true;
+        };
+        local.matches(&packet)
     }
 
     pub fn capture_state(&self) -> EngineState {
@@ -18177,6 +18247,87 @@ mod tests {
             engine.objects[victim_idx].fixed_velocity.y,
             math::C4Fixed::ZERO
         );
+        Ok(())
+    }
+
+    #[test]
+    fn sync_check_digest_and_state_machine_match_cpp() -> Result<(), EngineError> {
+        // C4ControlSyncCheck::Set (C4Control.cpp:445-468): Random3 is the
+        // Rnd3 ring pointer, RandomCount the synced draw count, AllCrewPosX
+        // sums fixtoi(fix_x, 100) (centipixels) over the players' crew
+        // lists. C4GameControl::Ticks (C4GameControl.cpp:326-332) advances
+        // ControlTick every ControlRate frames and requests a sync check
+        // every SyncRate frames; old checks drop after 50 frames
+        // (C4GameControl.cpp:508-522, C4SyncCheckMaxKeep).
+        let mut engine = Engine::with_seed(80);
+        engine.register_player(PlayerConfig::new(1, "P1"))?;
+        let mut crew_def = simple_definition("Clonk");
+        crew_def.set_crew_member(true);
+        engine.register_definition(crew_def)?;
+        let crew = engine.spawn_object(
+            SpawnConfig::new("Clonk")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_alive(true)
+                .with_position(Vector2::new(10, 10)),
+        )?;
+        // give the crew sub-pixel x so the centipixel precision is visible
+        let idx = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[idx].fixed_position.x =
+            math::itofix(10) + math::C4Fixed::from_raw(math::itofix(1).val() / 4); // 10.25
+
+        engine.tick()?; // builds crew lists
+        let packet = engine.sync_check(0);
+        assert_eq!(packet.random3, engine.rng.rnd3_ptr());
+        assert_eq!(packet.random_count, engine.rng.count);
+        assert_eq!(
+            packet.crew_positions_sum,
+            math::fixtoi_prec(engine.objects[idx].fixed_position.x, 100),
+            "centipixel crew sum over the player's crew list"
+        );
+        assert_eq!(packet.object_count, 1);
+
+        // ControlRate gating: with rate 2, ControlTick advances on even frames.
+        let mut gated = Engine::with_seed(81);
+        gated.control_rate = 2;
+        for _ in 0..4 {
+            gated.tick()?;
+        }
+        assert_eq!(gated.control_tick, 2, "frames 2 and 4 advance the tick");
+
+        // SyncRate: the digest is queued on frame % 100 == 0 and pruned
+        // after 50 frames.
+        let mut machine = Engine::with_seed(82);
+        machine.sync_rate = 10;
+        for _ in 0..10 {
+            machine.tick()?;
+        }
+        assert!(machine.get_sync_check(10).is_some(), "queued on frame 10");
+        // strict cutoff (C4GameControl.cpp:519: frame < FrameCounter - 50):
+        // check 10 survives the frame-60 prune and drops at the frame-70 one.
+        for _ in 0..50 {
+            machine.tick()?;
+        }
+        assert!(
+            machine.get_sync_check(10).is_some(),
+            "10 >= 60 - 50 keeps it at frame 60"
+        );
+        for _ in 0..10 {
+            machine.tick()?;
+        }
+        assert!(
+            machine.get_sync_check(10).is_none(),
+            "pruned once frame - 50 exceeds it"
+        );
+        assert!(machine.get_sync_check(60).is_some());
+
+        // Remote comparison (C4ControlSyncCheck::Execute, C4Control.cpp:469+):
+        // matching digest → ok; tampered digest → synchronization loss.
+        let local = machine.get_sync_check(60).cloned().expect("local check");
+        assert!(machine.register_remote_sync_check(local.clone()));
+        let mut tampered = local;
+        tampered.random_count += 1;
+        assert!(!machine.register_remote_sync_check(tampered));
         Ok(())
     }
 

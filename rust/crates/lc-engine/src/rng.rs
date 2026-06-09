@@ -76,6 +76,12 @@ impl LcgRng {
         }
     }
 
+    /// Current Rnd3 ring pointer (`FRndPtr3`) — part of the C4ControlSyncCheck
+    /// digest (C4Control.cpp:445-450).
+    pub fn rnd3_ptr(&self) -> i32 {
+        self.rnd3_ptr as i32
+    }
+
     /// Read next element from the Rnd3 circular buffer. C4Random.cpp:35-42.
     /// Increments the pointer *before* reading (matches C++ `FRndPtr3++` then
     /// wrap then read).

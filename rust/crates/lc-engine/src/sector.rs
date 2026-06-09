@@ -225,7 +225,8 @@ impl SectorMap {
         ids
     }
 
-    #[cfg(test)]
+    /// `C4LSectors::getShapeSum` (C4Sector.cpp:197-203): the sum of the
+    /// per-sector shape-list object counts — part of the sync-check digest.
     pub(crate) fn shape_sum(&self) -> usize {
         self.sectors
             .iter()
