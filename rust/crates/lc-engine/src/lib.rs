@@ -31,6 +31,7 @@ mod message;
 pub mod ocf;
 #[cfg(test)]
 mod parity_differential;
+pub mod particles;
 mod pathfinder;
 mod player;
 mod record;
@@ -776,12 +777,35 @@ impl PartialEq for ParticleConfig {
 
 impl Eq for ParticleConfig {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ParticleCommand {
     Create(ParticleConfig),
     Clear {
         definition_id: Option<String>,
         scope: ParticleScope,
+    },
+    /// `C4ParticleSystem::Cast` via FnCastParticles/FnCastBackParticles
+    /// (C4Script.cpp:4881-4908). Coordinates are world coordinates (the
+    /// caller's local offset is already applied); `a0`/`a1` carry the script
+    /// ints divided by 10, `b0`/`b1` the raw color bounds.
+    Cast {
+        definition_id: String,
+        amount: i32,
+        x: f32,
+        y: f32,
+        level: i32,
+        a0: f32,
+        b0: u32,
+        a1: f32,
+        b1: u32,
+        layer: ParticleLayer,
+    },
+    /// `C4ParticleSystem::Push` via FnPushParticles (C4Script.cpp:4910-4923):
+    /// deltas are script ints divided by 10; no def = push every particle.
+    Push {
+        definition_id: Option<String>,
+        dxdir: f32,
+        dydir: f32,
     },
 }
 
@@ -842,6 +866,19 @@ impl ActiveParticle {
 
     fn snapshot(&self) -> ParticleSnapshot {
         self.snapshot.clone()
+    }
+}
+
+/// Snapshot form of a `C4ParticleSystem` particle (save/load + FFI surface).
+fn system_particle_snapshot(particle: &particles::Particle) -> ParticleSnapshot {
+    ParticleSnapshot {
+        definition_id: particle.def_name.clone(),
+        position: FloatVector2::new(particle.x, particle.y),
+        velocity: FloatVector2::new(particle.xdir, particle.ydir),
+        life: particle.life,
+        parameter_a: particle.a,
+        parameter_b: particle.b,
+        layer: particle.layer.clone(),
     }
 }
 
@@ -6480,6 +6517,7 @@ impl ScenarioScript {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn initialize(
         &mut self,
         snapshot: &SimulationSnapshot,
@@ -6489,6 +6527,7 @@ impl ScenarioScript {
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
         audio: AudioRegistry,
+        particle_defs: HashSet<String>,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         if !self.has_initialize {
             return Ok((ScenarioBatch::default(), audio, rng));
@@ -6506,9 +6545,11 @@ impl ScenarioScript {
             physics,
             environment,
             audio,
+            particle_defs,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn step(
         &mut self,
         snapshot: &SimulationSnapshot,
@@ -6519,6 +6560,7 @@ impl ScenarioScript {
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
         audio: AudioRegistry,
+        particle_defs: HashSet<String>,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         if !self.has_step {
             return Ok((ScenarioBatch::default(), audio, rng));
@@ -6542,6 +6584,7 @@ impl ScenarioScript {
             physics,
             environment,
             audio,
+            particle_defs,
         )
     }
 
@@ -6549,6 +6592,7 @@ impl ScenarioScript {
         self.script.has_function(function)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn call_raw(
         &mut self,
         function: &'static str,
@@ -6560,11 +6604,13 @@ impl ScenarioScript {
         physics: PhysicsSettings,
         environment: EnvironmentSettings,
         audio: AudioRegistry,
+        particle_defs: HashSet<String>,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
         let guard = enter_random_context(rng);
-        let world = host_world_context_from_snapshot(snapshot);
+        let world =
+            host_world_context_from_snapshot(snapshot).with_particle_defs(particle_defs);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
         let (result, host_effects) = compat::with_effect_context_with_state(
@@ -6733,6 +6779,9 @@ pub struct Engine {
     sky: Option<SkyState>,
     global_effects: Vec<EffectState>,
     particles: Vec<ActiveParticle>,
+    /// C4ParticleSystem port (def-based particles, src/C4Particles.cpp). The
+    /// `particles` Vec above only serves def-less legacy fixture particles.
+    particle_system: particles::ParticleSystem,
     material_particles: Vec<MaterialParticle>,
     mass_movers: MassMoverSet,
     weather_events: Vec<WeatherEvent>,
@@ -7611,6 +7660,7 @@ impl Engine {
             sky: None,
             global_effects: Vec::new(),
             particles: Vec::new(),
+            particle_system: particles::ParticleSystem::default(),
             material_particles: Vec::new(),
             mass_movers: MassMoverSet::new(),
             weather_events: Vec::new(),
@@ -8153,6 +8203,23 @@ impl Engine {
         self.physics
     }
 
+    /// Register a particle definition, mirroring `C4ParticleDef::Load`
+    /// (C4Particles.cpp:118-192). `gfx_length` is the number of animation
+    /// phases in the graphics, `aspect` the phase height:width ratio — both
+    /// derived from Graphics.png at load time in C++.
+    pub fn register_particle_definition(
+        &mut self,
+        core: particles::ParticleDefCore,
+        gfx_length: i32,
+        aspect: f32,
+    ) -> Result<(), particles::ParticleDefError> {
+        self.particle_system.register_def(core, gfx_length, aspect)
+    }
+
+    pub fn particle_system(&self) -> &particles::ParticleSystem {
+        &self.particle_system
+    }
+
     pub fn set_physics(&mut self, physics: PhysicsSettings) {
         self.physics = physics;
         for object in &mut self.objects {
@@ -8289,6 +8356,7 @@ impl Engine {
             self.next_object_id,
             self.team_home_base_rule,
         )
+        .with_particle_defs(self.particle_system.def_names())
     }
 
     pub fn clear_scenario_script(&mut self) {
@@ -8313,6 +8381,7 @@ impl Engine {
             self.physics,
             self.environment,
             self.audio_registry.clone(),
+            self.particle_system.def_names(),
         )?;
         self.rng = new_rng;
         self.audio_registry = audio_state;
@@ -8340,6 +8409,7 @@ impl Engine {
         let physics = self.physics;
         let environment = self.environment;
         let audio_state = self.audio_registry.clone();
+        let particle_defs = self.particle_system.def_names();
         let script = match self.scenario_script.as_mut() {
             Some(script) if script.has_function(function) => script,
             Some(_) => return Ok(()),
@@ -8355,6 +8425,7 @@ impl Engine {
             physics,
             environment,
             audio_state,
+            particle_defs,
         )?;
         self.rng = new_rng;
         self.audio_registry = audio_state;
@@ -9617,6 +9688,7 @@ impl Engine {
             let rng_state = self.rng.clone();
             let environment = self.environment;
             let global_effects = self.global_effects.clone();
+            let particle_defs = self.particle_system.def_names();
             let (batch, audio_state, new_rng) = {
                 let script = self
                     .scenario_script
@@ -9631,6 +9703,7 @@ impl Engine {
                     self.physics,
                     environment,
                     self.audio_registry.clone(),
+                    particle_defs,
                 )?
             };
             self.rng = new_rng;
@@ -11089,6 +11162,12 @@ impl Engine {
                 .iter()
                 .map(|particle| particle.snapshot(&self.materials)),
         );
+        particles.extend(
+            self.particle_system
+                .particles()
+                .iter()
+                .map(system_particle_snapshot),
+        );
         let crew_selection = self
             .crew_selection
             .iter()
@@ -11386,6 +11465,7 @@ impl Engine {
         self.global_effects = state.global_effects.clone();
         self.particles.clear();
         self.material_particles.clear();
+        self.particle_system.clear_particles();
         for snapshot in &state.particles {
             if snapshot.definition_id.starts_with("material/pxs/") && snapshot.parameter_b >= 0 {
                 if let Some(material) = MaterialId::new(snapshot.parameter_b as usize) {
@@ -11395,6 +11475,24 @@ impl Engine {
                         snapshot.velocity,
                     ));
                 }
+                continue;
+            }
+            if self
+                .particle_system
+                .get_def(&snapshot.definition_id)
+                .is_some()
+            {
+                self.particle_system.restore_particle(particles::Particle {
+                    def_name: snapshot.definition_id.clone(),
+                    x: snapshot.position.x,
+                    y: snapshot.position.y,
+                    xdir: snapshot.velocity.x,
+                    ydir: snapshot.velocity.y,
+                    life: snapshot.life,
+                    a: snapshot.parameter_a,
+                    b: snapshot.parameter_b,
+                    layer: snapshot.layer.clone(),
+                });
                 continue;
             }
             self.particles
@@ -14377,6 +14475,23 @@ impl Engine {
         MaterialParticle::new(material, position, velocity)
     }
 
+    /// Object origin for the particle Attach offset (C4Particles.cpp:404-408
+    /// subtracts the target object's position when the def has Attach set).
+    fn particle_attach_origin(&self, layer: &ParticleLayer) -> Option<(i32, i32)> {
+        match layer {
+            ParticleLayer::Global => None,
+            ParticleLayer::ObjectFront(id) | ParticleLayer::ObjectBack(id) => {
+                self.find_object_index(*id).map(|index| {
+                    let object = &self.objects[index];
+                    (
+                        object.fixed_position.int_x(),
+                        object.fixed_position.int_y(),
+                    )
+                })
+            }
+        }
+    }
+
     fn apply_particle_commands(&mut self, commands: Vec<ParticleCommand>) {
         if commands.is_empty() {
             return;
@@ -14384,12 +14499,57 @@ impl Engine {
         for command in commands {
             match command {
                 ParticleCommand::Create(config) => {
-                    self.particles.push(ActiveParticle::from_config(config));
+                    // Def-based path: full C4ParticleSystem::Create semantics.
+                    // Def-less names keep the legacy fixture particle.
+                    if self.particle_system.get_def(&config.definition_id).is_some() {
+                        let attach_origin = self.particle_attach_origin(&config.layer);
+                        self.particle_system.create(
+                            &config.definition_id.clone(),
+                            config.position.x,
+                            config.position.y,
+                            config.velocity.x,
+                            config.velocity.y,
+                            config.parameter_a,
+                            config.parameter_b,
+                            config.layer,
+                            attach_origin,
+                        );
+                    } else {
+                        self.particles.push(ActiveParticle::from_config(config));
+                    }
+                }
+                ParticleCommand::Cast {
+                    definition_id,
+                    amount,
+                    x,
+                    y,
+                    level,
+                    a0,
+                    b0,
+                    a1,
+                    b1,
+                    layer,
+                } => {
+                    let attach_origin = self.particle_attach_origin(&layer);
+                    self.particle_system.cast(
+                        &definition_id, amount, x, y, level, a0, b0, a1, b1, layer,
+                        attach_origin,
+                    );
+                }
+                ParticleCommand::Push {
+                    definition_id,
+                    dxdir,
+                    dydir,
+                } => {
+                    self.particle_system
+                        .push(definition_id.as_deref(), dxdir, dydir);
                 }
                 ParticleCommand::Clear {
                     definition_id,
                     scope,
                 } => {
+                    self.particle_system
+                        .remove(definition_id.as_deref(), &scope);
                     let definition = definition_id.as_deref();
                     match scope {
                         ParticleScope::Global => {
@@ -14758,13 +14918,77 @@ impl Engine {
     }
 
     fn tick_particles(&mut self) {
-        if self.particles.is_empty() {
+        // Legacy def-less fixture particles (additive command-DSL path).
+        if !self.particles.is_empty() {
+            for particle in &mut self.particles {
+                particle.tick();
+            }
+            self.particles.retain(|particle| !particle.is_expired());
+        }
+        // C4ParticleSystem exec: each object's Back then Front list
+        // (C4Object.cpp:1071-1072), then GlobalParticles (C4Game.cpp:814).
+        if self.particle_system.particles().is_empty() {
             return;
         }
-        for particle in &mut self.particles {
-            particle.tick();
+        let gravity = self.physics.gravity_as_c4fixed();
+        let frame_counter = self.frame as i32;
+        let wind_force = self.environment.wind_force(self.frame);
+        // GBackWdt/GBackHgt; the Rust landscape is a height-map model, so the
+        // world height is the estimated extent rather than a pixel-map height.
+        let (back_wdt, back_hgt) = self
+            .landscape
+            .as_ref()
+            .map(|landscape| (landscape.width() as i32, landscape.estimated_height()))
+            .unwrap_or((0, 0));
+        let attached_ids: HashSet<ObjectId> = self
+            .particle_system
+            .particles()
+            .iter()
+            .filter_map(|particle| match particle.layer {
+                ParticleLayer::ObjectFront(id) | ParticleLayer::ObjectBack(id) => Some(id),
+                ParticleLayer::Global => None,
+            })
+            .collect();
+        let targets: Vec<(ObjectId, particles::ParticleTarget)> = self
+            .objects
+            .iter()
+            .filter(|object| attached_ids.contains(&object.id))
+            .map(|object| {
+                (
+                    object.id,
+                    particles::ParticleTarget {
+                        x: object.fixed_position.int_x(),
+                        y: object.fixed_position.int_y(),
+                        xdir: object.fixed_velocity.x,
+                        ydir: object.fixed_velocity.y,
+                    },
+                )
+            })
+            .collect();
+        let landscape = self.landscape.as_ref();
+        let solid = move |x: i32, y: i32| {
+            landscape
+                .map(|landscape| landscape.is_solid_at(x, y))
+                .unwrap_or(false)
+        };
+        // GBackWind(x, y) is position-dependent in C++; the Rust environment
+        // model only carries a global wind force (visual-only divergence).
+        let wind = move |_x: i32, _y: i32| wind_force;
+        let env = particles::ParticleEnv {
+            gravity,
+            frame_counter,
+            back_wdt,
+            back_hgt,
+            solid: &solid,
+            wind: &wind,
+        };
+        let mut system = std::mem::take(&mut self.particle_system);
+        for (id, target) in targets {
+            system.exec_layer(&ParticleLayer::ObjectBack(id), Some(target), &env);
+            system.exec_layer(&ParticleLayer::ObjectFront(id), Some(target), &env);
         }
-        self.particles.retain(|particle| !particle.is_expired());
+        system.exec_layer(&ParticleLayer::Global, None, &env);
+        self.particle_system = system;
     }
 
     fn tick_global_effects(&mut self) {
@@ -24029,6 +24253,70 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(flag_snapshot.owner, 1);
         assert_eq!(flag_snapshot.position, Vector2::new(100, 200));
 
+        Ok(())
+    }
+
+    #[test]
+    fn scenario_cast_particles_creates_and_executes_system_particles(
+    ) -> Result<(), EngineError> {
+        // End-to-end FnCastParticles → C4ParticleSystem::Cast → fxStdExec:
+        // (C4Script.cpp:4881-4903, C4Particles.cpp:421-443,614-697).
+        // level = 0 makes the cast velocity spread deterministic (zero), so
+        // PushParticles and gravity fully determine the motion.
+        const SCRIPT: &str = r#"
+        global func Initialize(state, random) {
+            CastParticles("Flame", 5, 0, 60, 40, 10, 20, 100, 200);
+            PushParticles("Flame", 10, 0);
+            return nil;
+        }
+        global func Step(state, frame, random) { return nil; }
+        "#;
+        let mut engine = Engine::with_seed(3);
+        let core = particles::ParticleDefCore {
+            name: "Flame".into(),
+            init_fn: "StdInit".into(),
+            exec_fn: "StdExec".into(),
+            draw_fn: "Std".into(),
+            gravity_acc: 100,
+            delay: 1,
+            repeats: 1000,
+            ..Default::default()
+        };
+        engine
+            .register_particle_definition(core, 8, 1.0)
+            .expect("def registers");
+        engine.install_scenario_script("Scenario", SCRIPT)?;
+
+        let system = engine.particle_system();
+        assert_eq!(system.particles().len(), 5, "cast created 5 particles");
+        assert_eq!(system.get_def("Flame").unwrap().count, 5);
+        for particle in system.particles() {
+            assert_eq!(particle.x.to_bits(), 60.0f32.to_bits());
+            assert_eq!(particle.y.to_bits(), 40.0f32.to_bits());
+            assert_eq!(particle.xdir.to_bits(), 1.0f32.to_bits(), "pushed");
+            assert_eq!(particle.ydir.to_bits(), 0.0f32.to_bits());
+        }
+
+        engine.tick()?;
+        let gravity = engine.physics().gravity_as_c4fixed();
+        let expected_ydir =
+            math::fixtof(math::C4Fixed::from_raw(gravity.val().wrapping_mul(100))) / 100.0;
+        for particle in engine.particle_system().particles() {
+            assert_eq!(particle.x.to_bits(), 61.0f32.to_bits(), "moved by xdir");
+            assert_eq!(particle.ydir.to_bits(), expected_ydir.to_bits(), "gravity");
+            assert_eq!(particle.life, 1, "delay lifetime advanced");
+        }
+
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot
+                .particles
+                .iter()
+                .filter(|particle| particle.definition_id == "Flame")
+                .count(),
+            5,
+            "system particles appear in the snapshot"
+        );
         Ok(())
     }
 

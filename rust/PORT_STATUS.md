@@ -98,7 +98,7 @@ audited subsystems are determinism-critical.
 | Subsystem | Coverage | Key Parity Risk | Rust Location |
 |---|---|---|---|
 | **script-values** | partial | **Done:** `C4ScriptCnvMap` 81-cell conversion table + `ConvertTo` dispatch (differential-locked `script_value_convert`); boost `hashCombine` + libc++ `std::hash<C4Value>` map-key hash (`script_value_hash`); typed `C4V_C4Object` identity as `Value::Object(u64)` through VM equality/truthiness/type/hash, FFI, host `this`, object-returning helpers, and effect vars; recursive FFI marshalling for `C4Id`/`Array`/`Proplist` through `LcScriptValueKind` + `LcScriptMapEntry`; VM-visible reference semantics for `&` params, `func &` returns, Local/Var slots, and array/map element refs. **Open:** `GuessType()` data-nonzero path (unreachable in the eager Rust value model — types are always known), C++ string-table interning/refcounts. Save/load + net sync still incomplete. | `lc-script/src/value.rs`, `lc-script/src/vm.rs`, `lc-engine/src/compat.rs` |
-| **particles** | **stub (420 vs 808)** | `ActiveParticle::tick()` is `pos+=vel; life-=1` only — no gravity, wind, collision, alpha fade, animation, or `SafeRandom` variation. `Cast()`, `Push()`, all `fx*` procs, `C4ParticleDef::Load()` absent. Any particle scenario desyncs RNG + state. | `lib.rs:669-860,12136-12547`; `compat.rs:8355-8539` |
+| **particles** | mostly done (sim side) | **Corrected risk model:** C4Particles is *non-sync-relevant by design* (C4Particles.h:18-27) — every draw is `SafeRandom` (wall-clock-seeded libc `rand()`, C4Random.h:35,71-75), never the synced LCG, and counts scale with local `SmokeLevel`. The real parity risk was script-visible behavior: `CastParticles`/`CastBackParticles`/`PushParticles` were unregistered (script abort vs C++ `true`). **Done:** `particles.rs` ports `C4ParticleDefCore`+`Load` adjustments, def registry/overload, `Create` (room check, Attach offset), `Cast` draw structure, `Push`, `fxStdInit/Exec` (move/collision/RByV/gravity/WindDrift/AlphaFade/delay-phase/fadeout/offscreen), `fxSmokeInit/Exec`, Bounce/BounceY/Stop/Die; host fns with C++ return semantics incl. GetDef-failure → false; engine exec order object Back→Front then Global; snapshot/restore. **Open:** Particle.txt group loading (lc-resources) + gfx length/aspect from Graphics.png, draw procs (presentation), position-dependent `GBackWind`, clearing object-layer particles on object death. | `lc-engine/src/particles.rs`; `lib.rs`, `compat.rs` |
 | **findobject-ocf** | **stub (35%, 280 vs 956)** | No `CreateByValue()` condition-tree factory (nested `C4FO_And/Or/Not` fail silently), no `C4SortObject` (`Random/Speed/Mass/Value` unsorted → desync), no `C4FO_AtRect`/`UseShapes()` beyond the legacy rectangle path. | `compat.rs:1667-1835,6784-6931`; `ocf.rs` |
 | **movement-physics** | partial | Central motion accumulates sub-pixel fixed velocity, steps x/y per pixel, consumes DefCore/current owned vertices and `StretchGrowth`/Jolt construction shape updates, runs shape/vertex `ContactCheck`, dispatches ContactLeft/Right/Top/Bottom and Hit/Hit2/Hit3 in C++ order, applies redirect/friction, clamps landscape and layer `TargetBounds`, overlays active DefCore solid masks as `MCVehic` contact density with sprite-alpha bitmap transparency, supports `Shape.Attach`, forces Jump/default on attach loss, rolls back per-degree rotation, and uses C++ density levels for background/material/vehicle contact checks (`C4M_Background=0`, material `Density`, closed side bounds and solid masks `C4M_Vehicle=100`). **Missing:** rotated solid-mask put-buffer semantics, `SetSolidMask`/solid-mask update lifetime, attached-object pushback. | `lib.rs`, `landscape.rs` |
 | **objects-core** | partial | `AtObject()` exists; collection auto-check is sector-backed. Full `CrossCheck()` (919-LOC inter-object loop: Tick3/5/10/35 incineration/fight/collection/hit-damage) absent. OCF computes ~8 vs ~30 checks (`ocf.rs:46-76` vs `lib.rs:527-666`); object list is `Vec` vs category/ID-sorted. | `lib.rs`, `ocf.rs`, `compat.rs` |
@@ -204,11 +204,11 @@ SortObject; `ocf compute` (`ocf.rs:46`) no dynamic updates.
 
 **weather-sky** — `tick_weather_events` (`lib.rs:7811`) lightning only.
 
-**particles** — `create_particle()` (`compat.rs:8355-8485`) registers, no exec;
-`apply_particle_commands()` (`lib.rs:12163-12209`) add/remove only;
-`tick_particles()` (`:12540-12548`) no environment interaction.
-`CastParticles`/`CastBackParticles`/`PushParticles` unregistered (calling them
-errors) → both particles and the `Random`/`RandomCount` stream desync.
+**particles** — RESOLVED for the sim side (see GAP LIST row): full
+`C4ParticleSystem` port in `particles.rs`, host functions registered with C++
+return semantics, def-based exec wired into the engine tick. Remaining:
+Particle.txt group loading, draw procs (presentation), position-dependent
+wind, object-death particle cleanup.
 
 **config-info** — `Audio/DisplayOptions::apply_config()` (`settings.rs:60-105,
 331-371`) load subset, skip validation; `Config::get_bool()` (`std_config.rs:134`)
@@ -292,9 +292,13 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
     per-pixel thrust/insert.
 11. **TODO** — `CrossMapActMap()` in definition loading (`definition.rs:35,
     486-619`): procedure→numeric, `next_action`→indices per `C4Def.cpp:773-799`.
-12. **TODO** — Full particle physics processor: `fxStdExec` (`C4Particles.cpp:
-    614-697`) gravity/wind+friction/alpha/collision/animation; `Cast()`, `Push()`,
-    `fx*` maps, `C4ParticleDef::Load()`, `SafeRandom`.
+12. **DONE (sim side; 2026-06-09)** — Full particle physics processor in
+    `particles.rs`: `fxStdExec`/`fxSmokeExec`/collision procs, `Cast()`,
+    `Push()`, proc maps, `Load` adjustments, `SafeRandom` stand-in (`SafeRng`).
+    NOTE: corrected audit — C4Particles is non-sync-relevant by C++ design;
+    the determinism-critical part was host-function registration/returns.
+    Remaining: Particle.txt group loading + Graphics.png-derived length/aspect,
+    draw procs, position-dependent wind, object-death cleanup.
 13. **TODO** — Frame-tick gating: Tick10/35/1000 (weather), Tick2/5/35 (commands),
     `ControlRate`/`ControlTick`/`SyncRate` modulo (`ffi.rs:451-489`); + meteor/
     earthquake/volcano with `Random(60)`/`Random(100)`.
@@ -309,6 +313,38 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
 ---
 
 ## Completed (changelog)
+
+**Particle system — item 12 (sim side) (2026-06-09).** Ported C4Particles into
+`lc-engine/src/particles.rs` and corrected the audit's risk model: the C++
+header declares the system "everything, that is not sync-relevant"
+(C4Particles.h:18-27); all randomness is `SafeRandom` (wall-clock-seeded libc
+`rand()`, C4Random.h:35,71-75) and `Create` scales MaxCount by the *local*
+`Config.Graphics.SmokeLevel` (C4Particles.cpp:389), so particles cannot desync
+the simulation. The genuine parity bug was script-visible: the cast/push host
+functions were unregistered, aborting scripts where C++ returns `true`.
+- `ParticleDefCore` (ctor + CompileFunc defaults), `ParticleDef` with
+  `C4ParticleDef::Load` derivations (FadeOutLen length clamp, FadeOutDelay
+  default, single-phase Reverse reset), def registry with GetDef order and
+  particle-overload replacement, proc maps with GetProc-failure load errors.
+- `Create` (C4Particles.cpp:378-419): SmokeLevel-scaled MaxCount, room check +
+  SafeRandom rejection, Attach offset, init-proc dispatch, per-def counts.
+- `Cast` (:421-443): exact per-particle draw order (xdir, ydir, a, 4 b-bytes),
+  a-range ×100 swap, byte-split b-delta. `Push` (:494-519) with def filter.
+- `fxStdInit`/`fxStdExec` (:600-697): vertex collision → collision proc
+  (Bounce/BounceY/Stop/Die), RByV=2 no-move, gravity `fixtof(GravAccel*acc)/100`,
+  WindDrift relaxation `/800`, AlphaFade (incl. negative periodic + the C++
+  `iAlpha += AlphaFade` quirk), delay-phase lifetime with fade-out decay
+  (post-decrement compare), off-landscape kill rules — pinned by an exact
+  C++-derived trace. `fxSmokeInit`/`fxSmokeExec` (:521-576) with high-word
+  init-status, `LightenClrBy` color ramp, wind/float behavior — exact trace.
+- `SafeRng`: structural stand-in documented as deliberately unsynced.
+- Engine: `particle_system` field; exec order object Back→Front then Global
+  (C4Object.cpp:1071-1072, C4Game.cpp:814); snapshot/save-load round trip;
+  def registry exposed to host contexts (script + scenario paths).
+- Host fns: `CastParticles`/`CastBackParticles`/`PushParticles` registered;
+  `CreateParticle`/`ClearParticles` get GetDef-failure → false when a registry
+  is attached (C4Script.cpp:4874,4893,4917,4932); legacy def-less fixture path
+  preserved and documented.
 
 **Script value object identity — item 7 (partial) (2026-06-05).** Replaced the
 old object-reference proplist shim as the primary representation with typed

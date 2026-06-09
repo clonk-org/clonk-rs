@@ -349,6 +349,13 @@ pub(crate) struct HostWorldContext {
     crew_selection: Rc<HashMap<i32, CrewSelectionState>>,
     next_object_id: u64,
     team_home_base_rule: bool,
+    /// Names of loaded particle defs (C4ParticleSystem::GetDef,
+    /// C4Particles.cpp:465-473). `None` = no registry attached (legacy
+    /// fixture contexts): name lookups behave permissively. `Some` = engine
+    /// attached its registry: unknown names make the particle host functions
+    /// return false exactly like the C++ GetDef-failure paths
+    /// (C4Script.cpp:4874,4893,4917,4932).
+    particle_defs: Option<Rc<std::collections::HashSet<String>>>,
 }
 
 impl Default for HostWorldContext {
@@ -365,6 +372,7 @@ impl Default for HostWorldContext {
             crew_selection: Rc::new(HashMap::new()),
             next_object_id: 1,
             team_home_base_rule: false,
+            particle_defs: None,
         }
     }
 }
@@ -449,7 +457,23 @@ impl HostWorldContext {
             crew_selection: Rc::new(crew_selection),
             next_object_id,
             team_home_base_rule,
+            particle_defs: None,
         }
+    }
+
+    /// Attach the engine's particle def registry (names from
+    /// `C4ParticleSystem` defs). See the `particle_defs` field docs.
+    pub(crate) fn with_particle_defs(
+        mut self,
+        defs: std::collections::HashSet<String>,
+    ) -> Self {
+        self.particle_defs = Some(Rc::new(defs));
+        self
+    }
+
+    /// `Some(known?)` when a registry is attached, `None` otherwise.
+    pub(crate) fn particle_def_known(&self, name: &str) -> Option<bool> {
+        self.particle_defs.as_ref().map(|defs| defs.contains(name))
     }
 
     pub(crate) fn get(&self, id: ObjectId) -> Option<&HostWorldObject> {
@@ -2262,6 +2286,9 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("CreateObject", create_object);
     script.register_host_function("CreateConstruction", create_construction);
     script.register_host_function("CreateParticle", create_particle);
+    script.register_host_function("CastParticles", cast_particles);
+    script.register_host_function("CastBackParticles", cast_back_particles);
+    script.register_host_function("PushParticles", push_particles);
     script.register_host_function("ClearParticles", clear_particles);
     script.register_host_function("CustomMessage", custom_message);
     script.register_host_function("Message", message);
@@ -8637,6 +8664,11 @@ fn create_particle(args: &[Value]) -> Result<Value, RuntimeError> {
             ParticleLayer::Global
         };
 
+        // GetDef failure → false (C4Script.cpp:4874)
+        if context.particle_def_known(&definition) == Some(false) {
+            return Ok(Value::Bool(false));
+        }
+
         let config = ParticleConfig {
             definition_id: definition,
             position: FloatVector2::new(world_x as f32, world_y as f32),
@@ -8648,6 +8680,143 @@ fn create_particle(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         context.register_particle(ParticleCommand::Create(config));
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnCastAParticles (C4Script.cpp:4881-4898), shared by CastParticles and
+/// CastBackParticles. Args: name, amount, level, x, y, a0, a1, b0, b1, obj.
+fn cast_a_particles(args: &[Value], back: bool, fn_name: &str) -> Result<Value, RuntimeError> {
+    let definition = match args.first() {
+        Some(Value::String(name)) if !name.is_empty() => name.clone(),
+        Some(Value::String(_)) | Some(Value::Nil) | None => return Ok(Value::Bool(false)),
+        Some(other) => {
+            return Err(RuntimeError::new(format!(
+                "{fn_name}: expected string for name, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let int_arg = |index: usize, label: &str| -> Result<i32, RuntimeError> {
+        args.get(index)
+            .map(|arg| value_to_i32(arg, fn_name, label))
+            .transpose()
+            .map(|value| value.unwrap_or(0))
+    };
+    let amount = int_arg(1, "amount")?;
+    let level = int_arg(2, "level")?;
+    let x = int_arg(3, "x")?;
+    let y = int_arg(4, "y")?;
+    let a0 = int_arg(5, "a0")?;
+    let a1 = int_arg(6, "a1")?;
+    let b0 = int_arg(7, "b0")? as u32;
+    let b1 = int_arg(8, "b1")? as u32;
+
+    let target_object = args
+        .get(9)
+        .map(|arg| parse_object_reference_argument(arg, fn_name, "object"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new(format!("{fn_name} requires an active engine context")))?;
+
+        // safety: pObj && !pObj->Status → false (C4Script.cpp:4884)
+        let layer = if let Some(target) = target_object {
+            let world_object = match context.get_world_object(target) {
+                Some(object) => object,
+                None => return Ok(Value::Bool(false)),
+            };
+            if !world_object.status().is_active() {
+                return Ok(Value::Bool(false));
+            }
+            if back {
+                ParticleLayer::ObjectBack(target)
+            } else {
+                ParticleLayer::ObjectFront(target)
+            }
+        } else {
+            ParticleLayer::Global
+        };
+
+        // GetDef failure → false (C4Script.cpp:4893)
+        if context.particle_def_known(&definition) == Some(false) {
+            return Ok(Value::Bool(false));
+        }
+
+        // local offset (C4Script.cpp:4886-4890)
+        let base_position = context
+            .object_context()
+            .map(|object| object.effective_position())
+            .unwrap_or(Vector2::ZERO);
+
+        context.register_particle(ParticleCommand::Cast {
+            definition_id: definition,
+            amount,
+            x: base_position.x.saturating_add(x) as f32,
+            y: base_position.y.saturating_add(y) as f32,
+            level,
+            a0: a0 as f32 / 10.0,
+            b0,
+            a1: a1 as f32 / 10.0,
+            b1,
+            layer,
+        });
+        Ok(Value::Bool(true))
+    })
+}
+
+fn cast_particles(args: &[Value]) -> Result<Value, RuntimeError> {
+    cast_a_particles(args, false, "CastParticles")
+}
+
+fn cast_back_particles(args: &[Value]) -> Result<Value, RuntimeError> {
+    cast_a_particles(args, true, "CastBackParticles")
+}
+
+/// FnPushParticles (C4Script.cpp:4910-4923): name nil → push all particles;
+/// a named def that is not loaded → false.
+fn push_particles(args: &[Value]) -> Result<Value, RuntimeError> {
+    let definition = match args.first() {
+        Some(Value::String(name)) if !name.is_empty() => Some(name.clone()),
+        Some(Value::String(_)) | Some(Value::Nil) | None => None,
+        Some(other) => {
+            return Err(RuntimeError::new(format!(
+                "PushParticles: expected string or nil for name, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let ax = args
+        .get(1)
+        .map(|arg| value_to_i32(arg, "PushParticles", "xdir"))
+        .transpose()?
+        .unwrap_or(0);
+    let ay = args
+        .get(2)
+        .map(|arg| value_to_i32(arg, "PushParticles", "ydir"))
+        .transpose()?
+        .unwrap_or(0);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("PushParticles requires an active engine context")
+        })?;
+        if let Some(name) = &definition {
+            if context.particle_def_known(name) == Some(false) {
+                return Ok(Value::Bool(false));
+            }
+        }
+        context.register_particle(ParticleCommand::Push {
+            definition_id: definition,
+            dxdir: ax as f32 / 10.0,
+            dydir: ay as f32 / 10.0,
+        });
         Ok(Value::Bool(true))
     })
 }
@@ -8688,6 +8857,13 @@ fn clear_particles(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(context) => context,
             None => return Ok(Value::Bool(false)),
         };
+
+        // a named def that is not loaded → false (C4Script.cpp:4932)
+        if let Some(name) = &definition {
+            if context.particle_def_known(name) == Some(false) {
+                return Ok(Value::Bool(false));
+            }
+        }
 
         let scope = if let Some(target) = target_object {
             if context.get_world_object(target).is_none() {
@@ -10366,6 +10542,12 @@ impl EffectHostContext {
         self.pending_particles.push(command);
     }
 
+    /// `Some(known?)` when the engine attached its particle def registry,
+    /// `None` for legacy fixture contexts. See `HostWorldContext`.
+    fn particle_def_known(&self, name: &str) -> Option<bool> {
+        self.world.particle_def_known(name)
+    }
+
     fn register_transfer_zone_command(&mut self, command: TransferZoneCommand) {
         self.transfer_zone_commands.push(command);
     }
@@ -11307,6 +11489,8 @@ mod tests {
         "AppendCommand",
         "BlastFree",
         "BoundBy",
+        "CastBackParticles",
+        "CastParticles",
         "ClearParticles",
         "Contained",
         "Contents",
@@ -11404,6 +11588,7 @@ mod tests {
         "PlayerMessage",
         "PlrMessage",
         "Pow",
+        "PushParticles",
         "Random",
         "RemoveEffect",
         "RemoveObject",
@@ -16172,6 +16357,162 @@ mod tests {
         let (result, outcome) = with_object_host_context(|| create_particle(&args));
         let value = result.expect("CreateParticle handles missing object");
         assert_eq!(value, Value::Bool(false));
+        assert!(outcome.particles.is_empty());
+    }
+
+    #[test]
+    fn cast_particles_registers_cast_command_and_checks_def_registry() {
+        // FnCastParticles (C4Script.cpp:4881-4903): args are
+        // (name, amount, level, x, y, a0, a1, b0, b1, obj); a-values are
+        // script ints /10; GetDef failure → false.
+        let defs: std::collections::HashSet<String> =
+            ["Mist".to_string()].into_iter().collect();
+        let world = HostWorldContext::from_objects(vec![]).with_particle_defs(defs.clone());
+        let args = [
+            Value::String("Mist".into()),
+            Value::Int(12),
+            Value::Int(20),
+            Value::Int(5),
+            Value::Int(6),
+            Value::Int(10),
+            Value::Int(20),
+            Value::Int(0x11223344),
+            Value::Int(0x55667788),
+        ];
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || cast_particles(&args));
+        assert_eq!(result.expect("CastParticles succeeds"), Value::Bool(true));
+        assert_eq!(outcome.particles.len(), 1);
+        match &outcome.particles[0] {
+            ParticleCommand::Cast {
+                definition_id,
+                amount,
+                x,
+                y,
+                level,
+                a0,
+                b0,
+                a1,
+                b1,
+                layer,
+            } => {
+                assert_eq!(definition_id, "Mist");
+                assert_eq!(*amount, 12);
+                assert_eq!(*level, 20);
+                assert_eq!(x.to_bits(), 5.0f32.to_bits());
+                assert_eq!(y.to_bits(), 6.0f32.to_bits());
+                assert_eq!(a0.to_bits(), 1.0f32.to_bits());
+                assert_eq!(a1.to_bits(), 2.0f32.to_bits());
+                assert_eq!(*b0, 0x11223344);
+                assert_eq!(*b1, 0x55667788);
+                assert!(matches!(layer, ParticleLayer::Global));
+            }
+            other => panic!("unexpected particle command {other:?}"),
+        }
+
+        // Unknown def with a registry attached → false, no command
+        // (C4Script.cpp:4893).
+        let world = HostWorldContext::from_objects(vec![]).with_particle_defs(defs);
+        let args = [
+            Value::String("NoSuchDef".into()),
+            Value::Int(1),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+        ];
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || cast_particles(&args));
+        assert_eq!(result.expect("CastParticles succeeds"), Value::Bool(false));
+        assert!(outcome.particles.is_empty());
+
+        // No registry attached (legacy fixture context) → permissive.
+        let args = [
+            Value::String("Anything".into()),
+            Value::Int(1),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+        ];
+        let (result, outcome) = with_object_host_context(|| cast_particles(&args));
+        assert_eq!(result.expect("CastParticles succeeds"), Value::Bool(true));
+        assert_eq!(outcome.particles.len(), 1);
+    }
+
+    #[test]
+    fn cast_back_particles_targets_back_layer() {
+        // FnCastBackParticles (C4Script.cpp:4905-4908) = FnCastAParticles
+        // with fBack = true → the object's BackParticles list.
+        let target_id = ObjectId::new(9);
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            target_id,
+            "Engine",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )]);
+        let args = [
+            Value::String("Exhaust".into()),
+            Value::Int(3),
+            Value::Int(10),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(0),
+            object_reference_value(target_id),
+        ];
+        let (result, outcome) =
+            with_object_host_context_with_world(world, || cast_back_particles(&args));
+        assert_eq!(result.expect("CastBackParticles succeeds"), Value::Bool(true));
+        match &outcome.particles[0] {
+            ParticleCommand::Cast { layer, .. } => {
+                assert!(matches!(layer, ParticleLayer::ObjectBack(id) if *id == target_id));
+            }
+            other => panic!("unexpected particle command {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_particles_registers_push_command_and_checks_def_registry() {
+        // FnPushParticles (C4Script.cpp:4910-4923): nil name pushes all
+        // particles; deltas are script ints /10; a named def that is not
+        // loaded → false.
+        let (result, outcome) = with_object_host_context(|| {
+            push_particles(&[Value::Nil, Value::Int(15), Value::Int(-5)])
+        });
+        assert_eq!(result.expect("PushParticles succeeds"), Value::Bool(true));
+        match &outcome.particles[0] {
+            ParticleCommand::Push {
+                definition_id,
+                dxdir,
+                dydir,
+            } => {
+                assert!(definition_id.is_none());
+                assert_eq!(dxdir.to_bits(), 1.5f32.to_bits());
+                assert_eq!(dydir.to_bits(), (-0.5f32).to_bits());
+            }
+            other => panic!("unexpected particle command {other:?}"),
+        }
+
+        let defs: std::collections::HashSet<String> =
+            ["Spark".to_string()].into_iter().collect();
+        let world = HostWorldContext::from_objects(vec![]).with_particle_defs(defs);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            push_particles(&[Value::String("Missing".into()), Value::Int(0), Value::Int(0)])
+        });
+        assert_eq!(result.expect("PushParticles succeeds"), Value::Bool(false));
         assert!(outcome.particles.is_empty());
     }
 
