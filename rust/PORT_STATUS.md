@@ -280,11 +280,18 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
    exact tamper rechecks; collection moved onto the Tick3 gate (Collection
    rect, marker dedup, per-candidate scan order). HitSpeed1-4 OCF bits now
    computed from fixed speed in `object_ocf_at_index` (SetOCF
-   C4Object.cpp:588-592). **Open:** pass 1 (Tick5 fight + Tick35
-   `!Random(ContactIncinerate)` contact incineration — needs hostility model,
-   ObjectActionFight, object OnFire/Incinerate) and pass 3 (Tick10
-   contained fight); engine-side DoEnergy lacks the physical max clamp and
-   `AssignDeath` (no death model yet).
+   C4Object.cpp:588-592). **Pass 1 fight + pass 3 DONE (2026-06-09):** Tick5
+   AtObject fight with `C4PlayerList::Hostile` (one-way declarations count
+   both ways, C4PlayerList.cpp:82-92; `Player.hostility` persisted sorted in
+   `PlayerState`), RejectFight vetoes on both sides, `ObjectActionFight` =
+   SetActionByName("Fight", target); Tick10 contained fight (no RejectFight,
+   C4GameObjects.cpp:199-230) with tamper rechecks. **Open:** the Tick35
+   contact-incineration arm (`!Random(ContactIncinerate)`) needs the fire
+   model (object OnFire state + Incinerate + ContactIncinerate DefCore field —
+   no Rust object carries OCF_OnFire yet, so C++ consumes no draws for it
+   either); engine-side DoEnergy lacks the physical max clamp and
+   `AssignDeath` (no death model yet); fight has no ongoing combat exec
+   (DFA_FIGHT procedure).
 7. **PARTIAL** — `script-values`. **Done:** `C4ScriptCnvMap` 81-cell table +
    `ConvertTo` dispatch (`C4Value.cpp:431-598`; differential-locked
    `script_value_convert` — 81-cell grid + per-(value,target,#strict) result);

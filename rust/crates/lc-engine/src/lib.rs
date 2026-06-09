@@ -7804,6 +7804,22 @@ impl Engine {
         Ok(())
     }
 
+    /// Declare or revoke hostility between two players
+    /// (C4Player::Hostility; queried by `C4PlayerList::Hostile`).
+    pub fn set_hostility(
+        &mut self,
+        player: i32,
+        opponent: i32,
+        hostile: bool,
+    ) -> Result<(), EngineError> {
+        let plr = self
+            .players
+            .get_mut(&player)
+            .ok_or(EngineError::UnknownPlayer(player))?;
+        plr.set_hostile_towards(opponent, hostile);
+        Ok(())
+    }
+
     pub fn remove_player(&mut self, id: i32) -> Result<Player, EngineError> {
         let team = match self.players.get(&id) {
             Some(player) => player.team(),
@@ -13591,6 +13607,225 @@ impl Engine {
     /// (Tick5 fight / Tick35 contact incineration) and pass 3 (contained
     /// fight) still need the hostility and fire models.
     fn cross_check(&mut self, frame: u64) -> Result<(), EngineError> {
+        self.cross_check_at_object_pass(frame)?;
+        self.cross_check_reverse_area_pass(frame)?;
+        self.cross_check_contained_pass(frame)
+    }
+
+    /// CrossCheck pass 3: Contained check (C4GameObjects.cpp:199-230). On
+    /// Tick10 frames, contained FightReady objects fight hostile FightReady
+    /// company sharing their container — directly, with no RejectFight veto.
+    fn cross_check_contained_pass(&mut self, frame: u64) -> Result<(), EngineError> {
+        if frame % 10 != 0 {
+            return Ok(());
+        }
+        let focf = crate::ocf::FIGHT_READY;
+        let tocf = crate::ocf::FIGHT_READY;
+        let object_ids: Vec<ObjectId> = self.objects.iter().map(|object| object.id).collect();
+        'outer: for obj1_id in object_ids {
+            let Some(idx) = self.find_object_index(obj1_id) else {
+                continue;
+            };
+            let container = {
+                let obj1 = &self.objects[idx];
+                if obj1.destroyed || !obj1.state.status.is_active() {
+                    continue;
+                }
+                match obj1.state.container {
+                    Some(container) => container,
+                    None => continue,
+                }
+            };
+            if self.object_ocf_at_index(idx) & focf == 0 {
+                continue;
+            }
+            let obj1_layer = self.objects[idx].state.layer;
+            let contents = match self
+                .find_object_index(container)
+                .map(|container_idx| self.objects[container_idx].state.contents.clone())
+            {
+                Some(contents) => contents,
+                None => continue,
+            };
+            for obj2_id in contents {
+                if obj2_id == obj1_id {
+                    continue;
+                }
+                let Some(idx) = self.find_object_index(obj1_id) else {
+                    continue 'outer;
+                };
+                let Some(obj2_idx) = self.find_object_index(obj2_id) else {
+                    continue;
+                };
+                {
+                    let obj2 = &self.objects[obj2_idx];
+                    if obj2.destroyed
+                        || !obj2.state.status.is_active()
+                        || obj2.state.container.is_none()
+                        || obj2.state.layer != obj1_layer
+                    {
+                        continue;
+                    }
+                }
+                if self.object_ocf_at_index(obj2_idx) & tocf == 0 {
+                    continue;
+                }
+                let ocf1 = self.object_ocf_at_index(idx);
+                // Fight (C4GameObjects.cpp:218-227)
+                if ocf1 & crate::ocf::FIGHT_READY != 0 {
+                    let owner1 = self.objects[idx].state.owner;
+                    let owner2 = self.objects[obj2_idx].state.owner;
+                    if self.players_hostile(owner1, owner2) {
+                        self.object_action_fight(obj1_id, obj2_id);
+                        self.object_action_fight(obj2_id, obj1_id);
+                        // obj1 might have been tampered with
+                        let Some(idx) = self.find_object_index(obj1_id) else {
+                            continue 'outer;
+                        };
+                        let obj1 = &self.objects[idx];
+                        if obj1.destroyed
+                            || !obj1.state.status.is_active()
+                            || obj1.state.container.is_none()
+                            || self.object_ocf_at_index(idx) & focf == 0
+                        {
+                            continue 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// CrossCheck pass 1: AtObject check (C4GameObjects.cpp:97-138). On Tick5
+    /// frames FightReady objects standing at a hostile FightReady object
+    /// start fighting both ways after the RejectFight callbacks. The Tick35
+    /// contact-incineration arm (OCF_OnFire vs OCF_Inflammable with the
+    /// `!Random(ContactIncinerate)` draw) still needs the fire model — no
+    /// Rust object ever carries OCF_OnFire yet, so the C++ stream consumes no
+    /// draws for it either.
+    fn cross_check_at_object_pass(&mut self, frame: u64) -> Result<(), EngineError> {
+        let tick5 = frame % 5 == 0;
+        let mut focf = crate::ocf::NONE;
+        let mut tocf = crate::ocf::NONE;
+        if tick5 {
+            focf |= crate::ocf::FIGHT_READY;
+            tocf |= crate::ocf::FIGHT_READY;
+        }
+        if focf == 0 || tocf == 0 {
+            return Ok(());
+        }
+        let object_ids: Vec<ObjectId> = self.objects.iter().map(|object| object.id).collect();
+        for obj1_id in object_ids {
+            let Some(idx) = self.find_object_index(obj1_id) else {
+                continue;
+            };
+            {
+                let obj1 = &self.objects[idx];
+                if obj1.destroyed
+                    || !obj1.state.status.is_active()
+                    || obj1.state.container.is_some()
+                {
+                    continue;
+                }
+            }
+            let ocf1 = self.object_ocf_at_index(idx);
+            if ocf1 & focf == 0 {
+                continue;
+            }
+            let position = self.objects[idx].state.position;
+            let Some((obj2_idx, obj2_id, ocf2)) = self.at_object(position, tocf, Some(obj1_id))
+            else {
+                continue;
+            };
+            // Fight (C4GameObjects.cpp:126-136)
+            if ocf1 & crate::ocf::FIGHT_READY != 0 && ocf2 & crate::ocf::FIGHT_READY != 0 {
+                let owner1 = self.objects[idx].state.owner;
+                let owner2 = self.objects[obj2_idx].state.owner;
+                if !self.players_hostile(owner1, owner2) {
+                    continue;
+                }
+                // RejectFight callbacks (C4GameObjects.cpp:131-132)
+                let reject1 = self.call_object_function(
+                    idx,
+                    "RejectFight",
+                    vec![object_reference_value(obj2_id)],
+                )?;
+                if reject1.as_bool() {
+                    continue;
+                }
+                let Some(obj2_idx) = self.find_object_index(obj2_id) else {
+                    continue;
+                };
+                let reject2 = self.call_object_function(
+                    obj2_idx,
+                    "RejectFight",
+                    vec![object_reference_value(obj1_id)],
+                )?;
+                if reject2.as_bool() {
+                    continue;
+                }
+                self.object_action_fight(obj1_id, obj2_id);
+                self.object_action_fight(obj2_id, obj1_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// `ObjectActionFight` (C4ObjectCom.cpp:157-160):
+    /// `SetActionByName("Fight", target)`.
+    fn object_action_fight(&mut self, object_id: ObjectId, target_id: ObjectId) {
+        let Some(idx) = self.find_object_index(object_id) else {
+            return;
+        };
+        let definition_id = self.objects[idx].definition_id.clone();
+        let Some(library) = self
+            .definitions
+            .get(&definition_id)
+            .map(|definition| definition.action_library().clone())
+        else {
+            return;
+        };
+        if !library.contains("Fight") {
+            return;
+        }
+        let previous = self.objects[idx].state.action.clone();
+        let update = ActionUpdate {
+            name: Some("Fight".to_string()),
+            phase: Some(0),
+            ticks: Some(0),
+            force: true,
+            data: None,
+            target: Some(Some(target_id)),
+            target2: Some(None),
+        };
+        let object = &mut self.objects[idx];
+        let result = object
+            .state
+            .action
+            .apply_update_with_library(&update, &library);
+        if matches!(result, ActionUpdateResult::Applied)
+            && previous.name != object.state.action.name
+        {
+            object.record_action_event(previous, ActionTransitionKind::Forced);
+        }
+    }
+
+    /// `C4PlayerList::Hostile` (C4PlayerList.cpp:82-92): false for missing or
+    /// identical players; one-way declarations count both ways.
+    fn players_hostile(&self, player1: i32, player2: i32) -> bool {
+        let (Some(plr1), Some(plr2)) = (self.players.get(&player1), self.players.get(&player2))
+        else {
+            return false;
+        };
+        if plr1.id() == plr2.id() {
+            return false;
+        }
+        plr1.is_hostile_towards(plr2.id()) || plr2.is_hostile_towards(plr1.id())
+    }
+
+    /// CrossCheck pass 2: reverse area check (C4GameObjects.cpp:140-197).
+    fn cross_check_reverse_area_pass(&mut self, frame: u64) -> Result<(), EngineError> {
         let tick3 = frame % 3 == 0;
         let mut focf = crate::ocf::ALIVE;
         let mut tocf = crate::ocf::HIT_SPEED2;
@@ -17718,6 +17953,185 @@ mod tests {
             engine.objects[victim_idx].fixed_velocity.y,
             math::C4Fixed::ZERO
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cross_check_fight_pass_engages_hostile_fight_ready_objects() -> Result<(), EngineError> {
+        // CrossCheck pass 1 (C4GameObjects.cpp:97-138): on Tick5 frames,
+        // FightReady objects standing at a hostile FightReady object's shape
+        // start fighting both ways (ObjectActionFight = SetActionByName
+        // "Fight" with target, C4ObjectCom.cpp:157-160), unless a RejectFight
+        // callback vetoes (C4GameObjects.cpp:131-132).
+        fn fighter_def(id: &str, script: &str) -> Result<Definition, EngineError> {
+            let mut definition = Definition::from_script(id, id, script)?;
+            definition.set_crew_member(true);
+            definition.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 16)));
+            let mut specs = HashMap::new();
+            specs.insert("Idle".to_string(), ActionSpec::default());
+            specs.insert("Fight".to_string(), ActionSpec::default());
+            definition.configure_actions(Some("Idle".to_string()), specs);
+            Ok(definition)
+        }
+        const PLAIN: &str = r#"
+        global func Initialize(state, random) { return nil; }
+        "#;
+
+        let mut engine = Engine::with_seed(50);
+        engine.register_definition(fighter_def("KnightA", PLAIN)?)?;
+        engine.register_definition(fighter_def("KnightB", PLAIN)?)?;
+        engine.register_player(PlayerConfig::new(1, "P1"))?;
+        engine.register_player(PlayerConfig::new(2, "P2"))?;
+        engine.set_hostility(1, 2, true)?;
+
+        let knight_a = engine.spawn_object(
+            SpawnConfig::new("KnightA")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_alive(true)
+                .with_position(Vector2::new(50, 50)),
+        )?;
+        let knight_b = engine.spawn_object(
+            SpawnConfig::new("KnightB")
+                .with_owner(2)
+                .with_crew_member(true)
+                .with_alive(true)
+                .with_position(Vector2::new(52, 50)),
+        )?;
+
+        // Frame 4 is not a Tick5 frame: nothing happens.
+        engine.cross_check(4)?;
+        let idx_a = engine.find_object_index(knight_a).expect("knight A");
+        assert_ne!(engine.objects[idx_a].state.action.name, "Fight");
+
+        engine.cross_check(5)?;
+        let idx_a = engine.find_object_index(knight_a).expect("knight A");
+        let idx_b = engine.find_object_index(knight_b).expect("knight B");
+        assert_eq!(engine.objects[idx_a].state.action.name, "Fight");
+        assert_eq!(engine.objects[idx_b].state.action.name, "Fight");
+        assert_eq!(engine.objects[idx_a].state.action.target, Some(knight_b));
+        assert_eq!(engine.objects[idx_b].state.action.target, Some(knight_a));
+
+        // Friendly players never fight (C4PlayerList::Hostile,
+        // C4PlayerList.cpp:82-92).
+        let mut engine = Engine::with_seed(51);
+        engine.register_definition(fighter_def("KnightA", PLAIN)?)?;
+        engine.register_definition(fighter_def("KnightB", PLAIN)?)?;
+        engine.register_player(PlayerConfig::new(1, "P1"))?;
+        engine.register_player(PlayerConfig::new(2, "P2"))?;
+        let knight_a = engine.spawn_object(
+            SpawnConfig::new("KnightA")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_alive(true)
+                .with_position(Vector2::new(50, 50)),
+        )?;
+        let _knight_b = engine.spawn_object(
+            SpawnConfig::new("KnightB")
+                .with_owner(2)
+                .with_crew_member(true)
+                .with_alive(true)
+                .with_position(Vector2::new(52, 50)),
+        )?;
+        engine.cross_check(5)?;
+        let idx_a = engine.find_object_index(knight_a).expect("knight A");
+        assert_ne!(engine.objects[idx_a].state.action.name, "Fight");
+
+        // A truthy RejectFight callback on either side vetoes the fight.
+        let mut engine = Engine::with_seed(52);
+        engine.register_definition(fighter_def(
+            "KnightA",
+            r#"
+            func RejectFight(enemy) { return 1; }
+            "#,
+        )?)?;
+        engine.register_definition(fighter_def("KnightB", PLAIN)?)?;
+        engine.register_player(PlayerConfig::new(1, "P1"))?;
+        engine.register_player(PlayerConfig::new(2, "P2"))?;
+        engine.set_hostility(1, 2, true)?;
+        let knight_a = engine.spawn_object(
+            SpawnConfig::new("KnightA")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_alive(true)
+                .with_position(Vector2::new(50, 50)),
+        )?;
+        let _knight_b = engine.spawn_object(
+            SpawnConfig::new("KnightB")
+                .with_owner(2)
+                .with_crew_member(true)
+                .with_alive(true)
+                .with_position(Vector2::new(52, 50)),
+        )?;
+        engine.cross_check(5)?;
+        let idx_a = engine.find_object_index(knight_a).expect("knight A");
+        assert_ne!(engine.objects[idx_a].state.action.name, "Fight");
+        Ok(())
+    }
+
+    #[test]
+    fn cross_check_contained_fight_runs_on_tick10() -> Result<(), EngineError> {
+        // CrossCheck pass 3 (C4GameObjects.cpp:199-230): contained FightReady
+        // objects in the same container fight hostile company on Tick10
+        // frames — with no RejectFight veto. Pass 1 explicitly skips
+        // contained objects (C4GameObjects.cpp:114), so frame 5 does nothing.
+        fn fighter_def(id: &str) -> Result<Definition, EngineError> {
+            let mut definition = Definition::from_script(
+                id,
+                id,
+                r#"
+                global func Initialize(state, random) { return nil; }
+                "#,
+            )?;
+            definition.set_crew_member(true);
+            definition.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 16)));
+            let mut specs = HashMap::new();
+            specs.insert("Idle".to_string(), ActionSpec::default());
+            specs.insert("Fight".to_string(), ActionSpec::default());
+            definition.configure_actions(Some("Idle".to_string()), specs);
+            Ok(definition)
+        }
+
+        let mut engine = Engine::with_seed(60);
+        engine.register_definition(fighter_def("KnightA")?)?;
+        engine.register_definition(fighter_def("KnightB")?)?;
+        engine.register_definition(simple_definition("Hut"))?;
+        engine.register_player(PlayerConfig::new(1, "P1"))?;
+        engine.register_player(PlayerConfig::new(2, "P2"))?;
+        engine.set_hostility(1, 2, true)?;
+
+        let hut = engine
+            .spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(50, 50)))?;
+        let knight_a = engine.spawn_object(
+            SpawnConfig::new("KnightA")
+                .with_owner(1)
+                .with_crew_member(true)
+                .with_alive(true)
+                .with_position(Vector2::new(50, 50))
+                .with_container(hut),
+        )?;
+        let knight_b = engine.spawn_object(
+            SpawnConfig::new("KnightB")
+                .with_owner(2)
+                .with_crew_member(true)
+                .with_alive(true)
+                .with_position(Vector2::new(50, 50))
+                .with_container(hut),
+        )?;
+
+        // Tick5 frame: pass 1 skips contained objects.
+        engine.cross_check(5)?;
+        let idx_a = engine.find_object_index(knight_a).expect("knight A");
+        assert_ne!(engine.objects[idx_a].state.action.name, "Fight");
+
+        // Tick10 frame: contained fight engages both ways.
+        engine.cross_check(10)?;
+        let idx_a = engine.find_object_index(knight_a).expect("knight A");
+        let idx_b = engine.find_object_index(knight_b).expect("knight B");
+        assert_eq!(engine.objects[idx_a].state.action.name, "Fight");
+        assert_eq!(engine.objects[idx_b].state.action.name, "Fight");
+        assert_eq!(engine.objects[idx_a].state.action.target, Some(knight_b));
+        assert_eq!(engine.objects[idx_b].state.action.target, Some(knight_a));
         Ok(())
     }
 

@@ -98,6 +98,11 @@ pub struct PlayerState {
     pub production_unit: u32,
     #[serde(default)]
     pub color: Option<RgbColor>,
+    /// Players this player declared hostility against (C4Player::Hostility,
+    /// queried by C4PlayerList::Hostile, C4PlayerList.cpp:82-92). Sorted for
+    /// deterministic serialization.
+    #[serde(default)]
+    pub hostility: Vec<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +129,7 @@ pub struct Player {
     production_delay: u32,
     production_unit: u32,
     color: Option<RgbColor>,
+    hostility: HashSet<i32>,
 }
 
 impl Player {
@@ -151,6 +157,7 @@ impl Player {
             production_delay: 0,
             production_unit: 0,
             color: None,
+            hostility: HashSet::new(),
         }
     }
 
@@ -201,6 +208,7 @@ impl Player {
             production_delay,
             production_unit,
             color,
+            hostility: HashSet::new(),
         };
         player.sort_crew();
         player
@@ -230,6 +238,7 @@ impl Player {
             production_delay,
             production_unit,
             color,
+            hostility,
         } = state;
         let mut player = Self {
             id,
@@ -254,6 +263,7 @@ impl Player {
             production_delay,
             production_unit,
             color,
+            hostility: hostility.into_iter().collect(),
         };
         player.sort_crew();
         player
@@ -285,7 +295,26 @@ impl Player {
             production_delay: self.production_delay,
             production_unit: self.production_unit,
             color: self.color,
+            hostility: {
+                let mut hostility: Vec<i32> = self.hostility.iter().copied().collect();
+                hostility.sort_unstable();
+                hostility
+            },
         }
+    }
+
+    /// Declare or revoke hostility toward another player
+    /// (C4Player::Hostility set, fed into C4PlayerList::Hostile).
+    pub fn set_hostile_towards(&mut self, opponent: i32, hostile: bool) {
+        if hostile {
+            self.hostility.insert(opponent);
+        } else {
+            self.hostility.remove(&opponent);
+        }
+    }
+
+    pub fn is_hostile_towards(&self, opponent: i32) -> bool {
+        self.hostility.contains(&opponent)
     }
 
     pub fn id(&self) -> i32 {
