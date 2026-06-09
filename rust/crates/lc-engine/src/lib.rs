@@ -578,6 +578,9 @@ impl RgbColor {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum WeatherEvent {
     Lightning { position: i32 },
+    Meteorite { x: i32 },
+    Earthquake { x: i32, y: i32 },
+    Volcano { x: i32, y: i32, size: i32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -9627,30 +9630,147 @@ impl Engine {
         Ok(true)
     }
 
+    /// Disaster launch from `C4Weather::Execute` (C4Weather.cpp:104-148),
+    /// run on Tick10 frames. The gate Random draws are unconditional — the
+    /// configured levels only decide whether a launch follows — so the synced
+    /// RNG stream advances identically whether or not disasters are enabled.
     fn tick_weather_events(&mut self, frame: u64) -> Result<(), EngineError> {
         if frame % 10 != 0 {
             return Ok(());
         }
+        let width = self
+            .landscape
+            .as_ref()
+            .map(|landscape| landscape.width() as i32)
+            .unwrap_or(0);
+        let height = self
+            .landscape
+            .as_ref()
+            .map(|landscape| landscape.estimated_height())
+            .unwrap_or(0);
 
-        if self.environment.lightning > 0
-            && self.rng.random(35) == 0
-            && self.rng.random(100) < self.environment.lightning
-        {
-            if let Some(width) = self
-                .landscape
-                .as_ref()
-                .map(|landscape| landscape.width() as i32)
-            {
-                if width > 0 {
-                    let position = self.rng.random(width);
-                    if self.trigger_lightning(position)? {
-                        self.weather_events
-                            .push(WeatherEvent::Lightning { position });
-                    }
-                }
+        // Meteorite (C4Weather.cpp:106-120)
+        if self.rng.random(60) == 0 && self.rng.random(100) < self.environment.meteorite {
+            // force argument evaluation order (C4Weather.cpp:113-115)
+            let r2 = self.rng.random(100 + 1);
+            let r1 = self.rng.random(width);
+            if self.trigger_meteorite(r1, r2)? {
+                self.weather_events.push(WeatherEvent::Meteorite { x: r1 });
+            }
+        }
+        // Lightning (C4Weather.cpp:122-127)
+        if self.rng.random(35) == 0 && self.rng.random(100) < self.environment.lightning {
+            let position = self.rng.random(width);
+            if self.trigger_lightning(position)? {
+                self.weather_events
+                    .push(WeatherEvent::Lightning { position });
+            }
+        }
+        // Earthquake (C4Weather.cpp:129-136)
+        if self.rng.random(50) == 0 && self.rng.random(100) < self.environment.earthquake {
+            // force argument evaluation order (C4Weather.cpp:132-134)
+            let r2 = self.rng.random(height);
+            let r1 = self.rng.random(width);
+            if self.trigger_earthquake(r1, r2)? {
+                self.weather_events
+                    .push(WeatherEvent::Earthquake { x: r1, y: r2 });
+            }
+        }
+        // Volcano (C4Weather.cpp:138-147)
+        if self.rng.random(60) == 0 && self.rng.random(100) < self.environment.volcano {
+            // force argument evaluation order (C4Weather.cpp:141-143)
+            let r2 = self.rng.random(10);
+            let r1 = self.rng.random(width);
+            let size = (15 * height / 500 + r2).clamp(10, 60);
+            if self.trigger_volcano(r1, height - 1, size)? {
+                self.weather_events.push(WeatherEvent::Volcano {
+                    x: r1,
+                    y: height - 1,
+                    size,
+                });
             }
         }
         Ok(())
+    }
+
+    /// Meteor creation (C4Weather.cpp:110-119): "METO" at y = -20 (TopOpen;
+    /// the cave-landscape y = 5 variant needs the scenario TopOpen flag,
+    /// which the engine does not carry yet) with xdir = itofix(r2-50)/10,
+    /// ydir = 0, rdir = itofix(1)/5.
+    fn trigger_meteorite(&mut self, x: i32, r2: i32) -> Result<bool, EngineError> {
+        const METEOR_DEFINITION: &str = "METO";
+        if !self.definitions.contains_key(METEOR_DEFINITION) {
+            return Ok(false);
+        }
+        let config =
+            SpawnConfig::new(METEOR_DEFINITION).with_position(Vector2::new(x.max(0), -20));
+        let meteor_id = match self.spawn_object(config) {
+            Ok(id) => id,
+            Err(EngineError::UnknownDefinition(_)) => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        let Some(index) = self.find_object_index(meteor_id) else {
+            return Ok(false);
+        };
+        let object = &mut self.objects[index];
+        object.fixed_velocity = FixedVec2::new(
+            C4Fixed::from_raw(itofix(r2 - 50).val() / 10),
+            C4Fixed::ZERO,
+        );
+        object.rotation_velocity = C4Fixed::from_raw(itofix(1).val() / 5);
+        Ok(true)
+    }
+
+    /// `LaunchEarthquake` (C4Weather.cpp:196-203): FXQ1 + Activate().
+    fn trigger_earthquake(&mut self, x: i32, y: i32) -> Result<bool, EngineError> {
+        const EARTHQUAKE_DEFINITION: &str = "FXQ1";
+        if !self.definitions.contains_key(EARTHQUAKE_DEFINITION) {
+            return Ok(false);
+        }
+        let config = SpawnConfig::new(EARTHQUAKE_DEFINITION)
+            .with_position(Vector2::new(x.max(0), y.max(0)));
+        let quake_id = match self.spawn_object(config) {
+            Ok(id) => id,
+            Err(EngineError::UnknownDefinition(_)) => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        let Some(index) = self.find_object_index(quake_id) else {
+            return Ok(false);
+        };
+        let _ = self.call_object_function(index, "Activate", Vec::new())?;
+        Ok(true)
+    }
+
+    /// `LaunchVolcano` (C4Weather.cpp:178-184): FXV1 + Activate(x, y, size,
+    /// mat) with mat = Material "Lava" (C4Weather.cpp:144).
+    fn trigger_volcano(&mut self, x: i32, y: i32, size: i32) -> Result<bool, EngineError> {
+        const VOLCANO_DEFINITION: &str = "FXV1";
+        if !self.definitions.contains_key(VOLCANO_DEFINITION) {
+            return Ok(false);
+        }
+        let config = SpawnConfig::new(VOLCANO_DEFINITION)
+            .with_position(Vector2::new(x.max(0), y.max(0)));
+        let volcano_id = match self.spawn_object(config) {
+            Ok(id) => id,
+            Err(EngineError::UnknownDefinition(_)) => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        let Some(index) = self.find_object_index(volcano_id) else {
+            return Ok(false);
+        };
+        let lava = self
+            .materials
+            .id_of("Lava")
+            .map(|id| id.index() as i32)
+            .unwrap_or(-1);
+        let args = vec![
+            Value::Int(x),
+            Value::Int(y),
+            Value::Int(size),
+            Value::Int(lava),
+        ];
+        let _ = self.call_object_function(index, "Activate", args)?;
+        Ok(true)
     }
 
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
@@ -17382,6 +17502,105 @@ mod tests {
             "blast operation should emit earth particles"
         );
         Ok(())
+    }
+
+    #[test]
+    fn weather_disaster_rng_draw_order_matches_cpp() {
+        // C4Weather::Execute disaster block (C4Weather.cpp:104-148): on every
+        // Tick10 frame the gates Random(60) [meteorite], Random(35)
+        // [lightning], Random(50) [earthquake], Random(60) [volcano] are
+        // drawn UNCONDITIONALLY — the configured levels only gate the
+        // follow-up Random(100) comparison, never the gate draw itself.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut engine = Engine::with_seed(123);
+        engine.set_materials(materials.clone());
+        engine.set_landscape(Landscape::flat_with_material(64, 40, Some(earth)));
+        let mut mirror = engine.rng.clone();
+
+        engine
+            .tick_weather_events(10)
+            .expect("weather tick succeeds");
+        // levels all default to 0: each zero gate still draws Random(100)
+        if mirror.random(60) == 0 {
+            mirror.random(100);
+        }
+        if mirror.random(35) == 0 {
+            mirror.random(100);
+        }
+        if mirror.random(50) == 0 {
+            mirror.random(100);
+        }
+        if mirror.random(60) == 0 {
+            mirror.random(100);
+        }
+        assert_eq!(engine.rng, mirror, "gate draws are level-independent");
+
+        // Non-Tick10 frame: no draws at all (C4Weather.cpp:104).
+        let before = engine.rng.clone();
+        engine
+            .tick_weather_events(11)
+            .expect("weather tick succeeds");
+        assert_eq!(engine.rng, before);
+
+        // With a level at 100, a zero gate launches: lightning consumes
+        // Random(GBackWdt) for its position (C4Weather.cpp:125); earthquake
+        // consumes Random(GBackHgt) then Random(GBackWdt) (:133-134);
+        // volcano consumes Random(10) then Random(GBackWdt) (:142-143);
+        // meteorite consumes Random(101) then Random(GBackWdt) (:114-115).
+        // No FX definitions are registered, so object creation is skipped,
+        // but the synced draws must still happen.
+        let mut engine = Engine::with_seed(7);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(64, 40, Some(earth)));
+        let mut environment = engine.environment();
+        environment.meteorite = 100;
+        environment.lightning = 100;
+        environment.earthquake = 100;
+        environment.volcano = 100;
+        engine.set_environment(environment);
+        let height = engine
+            .landscape
+            .as_ref()
+            .map(|landscape| landscape.estimated_height())
+            .unwrap_or(0);
+
+        for frame in 1..=400u64 {
+            let mut mirror = engine.rng.clone();
+            engine
+                .tick_weather_events(frame)
+                .expect("weather tick succeeds");
+            if frame % 10 != 0 {
+                assert_eq!(engine.rng, mirror);
+                continue;
+            }
+            if mirror.random(60) == 0 && mirror.random(100) < 100 {
+                mirror.random(100 + 1);
+                mirror.random(64);
+            }
+            if mirror.random(35) == 0 && mirror.random(100) < 100 {
+                mirror.random(64);
+            }
+            if mirror.random(50) == 0 && mirror.random(100) < 100 {
+                mirror.random(height);
+                mirror.random(64);
+            }
+            if mirror.random(60) == 0 && mirror.random(100) < 100 {
+                mirror.random(10);
+                mirror.random(64);
+            }
+            assert_eq!(engine.rng, mirror, "frame {frame}");
+        }
     }
 
     #[test]

@@ -315,9 +315,26 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
     the determinism-critical part was host-function registration/returns.
     Remaining: Particle.txt group loading + Graphics.png-derived length/aspect,
     draw procs, position-dependent wind, object-death cleanup.
-13. **TODO** — Frame-tick gating: Tick10/35/1000 (weather), Tick2/5/35 (commands),
-    `ControlRate`/`ControlTick`/`SyncRate` modulo (`ffi.rs:451-489`); + meteor/
-    earthquake/volcano with `Random(60)`/`Random(100)`.
+13. **PARTIAL (disaster block DONE 2026-06-09)** — Frame-tick gating. **Done:**
+    the C4Weather Tick10 disaster launch (C4Weather.cpp:104-148) with the
+    exact synced draw order — gates `Random(60)`/`Random(35)`/`Random(50)`/
+    `Random(60)` drawn unconditionally (levels only gate the follow-up
+    `Random(100)`), forced argument-evaluation order for the meteor
+    (`Random(101)` then `Random(GBackWdt)`), earthquake
+    (`Random(GBackHgt)` then `Random(GBackWdt)`), and volcano (`Random(10)`
+    then `Random(GBackWdt)`, size `BoundBy(15*GBackHgt/500+r2,10,60)`);
+    launches spawn METO (fixed xdir `itofix(r2-50)/10`, rdir `itofix(1)/5`),
+    FXQ1 + `Activate()`, FXV1 + `Activate(x,y,size,mat)`. New
+    `WeatherEvent::{Meteorite,Earthquake,Volcano}` variants. **Remaining:**
+    stateful weather Tick35 season/temperature + Tick1000/Tick10 wind (needs
+    replacing the functional `EnvironmentSettings::wind_force(frame)` model
+    with C++ mutable Wind/TargetWind/Season state); command Tick2/5/35
+    throttles (`PathChecked` Tick35 reset C4Command.cpp:255, swim-steer
+    Tick2 :372, Transfer Tick5 :1931 — blocked on the larger command-AI
+    rework, the Rust interval model is structurally different);
+    `ControlRate`/`ControlTick`/`SyncRate` modulo (`ffi.rs:451-489`); meteor
+    cave-landscape y offset needs the scenario `TopOpen` flag carried onto
+    the engine landscape.
 14. **TODO** — Sync-check state machine + binary record: `DoSync`/`SyncRate`,
     queue + `RemoveOldSyncChecks` (`C4GameControl.cpp:441-468`), varint frame-diff
     (`C4Record.cpp:243-264`), `+37` end-marker (`:196`).
