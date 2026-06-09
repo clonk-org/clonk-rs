@@ -10421,7 +10421,6 @@ impl Engine {
 
             self.apply_landscape_at_index(idx);
             self.update_sector_for_index(idx);
-            self.cross_check_at_index(idx)?;
 
             let object_id = self.objects[idx].id;
             let state_snapshot = self.objects[idx].state.clone();
@@ -10623,7 +10622,6 @@ impl Engine {
 
             self.apply_landscape_at_index(idx);
             self.update_sector_for_index(idx);
-            self.cross_check_at_index(idx)?;
             let (procedure, line_connect, ocf_base, collectible) = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
@@ -10677,6 +10675,10 @@ impl Engine {
             );
             spawn_requests.extend(spawns.into_iter());
         }
+
+        // C4GameObjects::CrossCheck runs once per frame after object
+        // execution (C4Game.cpp ExecObjects → Objects.CrossCheck()).
+        self.cross_check(frame)?;
 
         self.detach_destroyed_objects()?;
         self.objects.retain(|object| !object.destroyed);
@@ -13580,137 +13582,278 @@ impl Engine {
         }
     }
 
-    fn cross_check_at_index(&mut self, idx: usize) -> Result<(), EngineError> {
-        self.auto_collect_at_index(idx)
-    }
-
-    fn auto_collect_at_index(&mut self, idx: usize) -> Result<(), EngineError> {
-        if idx >= self.objects.len() {
-            return Ok(());
+    /// `C4GameObjects::CrossCheck` reverse area check
+    /// (C4GameObjects.cpp:140-197), run once per frame after object
+    /// execution: every frame an OCF_Alive victim takes OCF_HitSpeed2 hits
+    /// from C4D_Object projectiles inside its shape; on Tick3 frames
+    /// collection runs (OCF_Collection vs OCF_Carryable, Collection rect).
+    /// Candidates are deduplicated per victim like the C++ Marker. Pass 1
+    /// (Tick5 fight / Tick35 contact incineration) and pass 3 (contained
+    /// fight) still need the hostility and fire models.
+    fn cross_check(&mut self, frame: u64) -> Result<(), EngineError> {
+        let tick3 = frame % 3 == 0;
+        let mut focf = crate::ocf::ALIVE;
+        let mut tocf = crate::ocf::HIT_SPEED2;
+        if tick3 {
+            focf |= crate::ocf::COLLECTION;
+            tocf |= crate::ocf::CARRYABLE;
         }
-        if self.objects[idx].destroyed {
-            return Ok(());
-        }
-        if !self.objects[idx].state.status.is_active()
-            || self.objects[idx].state.container.is_some()
-        {
-            return Ok(());
-        }
-
-        let initial_contents = self.objects[idx].state.contents.len();
-        let collector_position = self.objects[idx].state.position;
-        let ocf = self.object_ocf_at_index(idx);
-        if ocf & crate::ocf::COLLECTION == 0 {
-            return Ok(());
-        }
-
-        let collector_id = self.objects[idx].id;
-        let definition_id = self.objects[idx].definition_id.clone();
-        let (collection_rect, shape_rect, collection_limit) = {
-            let definition = self
+        let object_ids: Vec<ObjectId> = self.objects.iter().map(|object| object.id).collect();
+        'outer: for obj1_id in object_ids {
+            let Some(idx) = self.find_object_index(obj1_id) else {
+                continue;
+            };
+            {
+                let obj1 = &self.objects[idx];
+                if obj1.destroyed
+                    || !obj1.state.status.is_active()
+                    || obj1.state.container.is_some()
+                {
+                    continue;
+                }
+            }
+            if self.object_ocf_at_index(idx) & focf == 0 {
+                continue;
+            }
+            let (definition_id, obj1_layer) = {
+                let obj1 = &self.objects[idx];
+                (obj1.definition_id.clone(), obj1.state.layer)
+            };
+            let (shape_rect, collection_rect, obj1_mass) = self
                 .definitions
                 .get(&definition_id)
-                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-            (
-                definition.collection_rect(),
-                definition.shape_rect(),
-                definition.collection_limit(),
-            )
-        };
-
-        let Some(collection_rect) = collection_rect.filter(|rect| rect.is_positive()) else {
-            return Ok(());
-        };
-
-        if let Some(limit) = collection_limit {
-            if initial_contents >= limit as usize {
-                return Ok(());
-            }
-        }
-
-        let fallback_half_extents = if shape_rect.is_none() {
-            let (half_w, half_h) = Self::object_half_extents(&self.objects[idx]);
-            Some((half_w, half_h))
-        } else {
-            None
-        };
-
-        let collector_shape_rect = self.object_shape_rect(&self.objects[idx]);
-        let candidate_ids = self
-            .sectors
-            .as_ref()
-            .map(|sectors| {
-                let area = sectors.area(collector_shape_rect);
-                sectors.object_ids_in_area(&area)
-            })
-            .unwrap_or_else(|| self.objects.iter().map(|object| object.id).collect());
-
-        let mut candidates = Vec::new();
-        for candidate_id in candidate_ids {
-            let Some(candidate_idx) = self.find_object_index(candidate_id) else {
-                continue;
+                .map(|definition| {
+                    (
+                        definition.shape_rect(),
+                        definition.collection_rect(),
+                        definition.mass(),
+                    )
+                })
+                .unwrap_or((None, None, 0));
+            let fallback_half_extents = if shape_rect.is_none() {
+                Some(Self::object_half_extents(&self.objects[idx]))
+            } else {
+                None
             };
-            let candidate = &self.objects[candidate_idx];
-            if candidate_idx == idx || candidate.destroyed {
-                continue;
-            }
-            let candidate_state = &candidate.state;
-            if !candidate_state.status.is_active() || candidate_state.container.is_some() {
-                continue;
-            }
-            let candidate_ocf = self.object_ocf_at_index(candidate_idx);
-            if candidate_ocf & crate::ocf::CARRYABLE == 0 {
-                continue;
-            }
-            let dx = candidate_state.position.x - collector_position.x;
-            let dy = candidate_state.position.y - collector_position.y;
-            if let Some(shape) = shape_rect {
-                if !shape.contains_offset(dx, dy) {
+            // obj1->Area: candidates from the sector lists under the shape
+            let collector_shape_rect = self.object_shape_rect(&self.objects[idx]);
+            let candidate_ids = self
+                .sectors
+                .as_ref()
+                .map(|sectors| {
+                    let area = sectors.area(collector_shape_rect);
+                    sectors.object_ids_in_area(&area)
+                })
+                .unwrap_or_else(|| self.objects.iter().map(|object| object.id).collect());
+            // handle collision only once (Marker, C4GameObjects.cpp:163-165)
+            let mut marker: HashSet<ObjectId> = HashSet::new();
+            for candidate_id in candidate_ids {
+                let Some(idx) = self.find_object_index(obj1_id) else {
+                    continue 'outer;
+                };
+                let Some(candidate_idx) = self.find_object_index(candidate_id) else {
+                    continue;
+                };
+                if candidate_idx == idx {
                     continue;
                 }
-            } else if let Some((half_w, half_h)) = fallback_half_extents {
-                if dx < -half_w || dx >= half_w || dy < -half_h || dy >= half_h {
+                {
+                    let candidate = &self.objects[candidate_idx];
+                    if candidate.destroyed
+                        || !candidate.state.status.is_active()
+                        || candidate.state.container.is_some()
+                        || candidate.state.layer != obj1_layer
+                    {
+                        continue;
+                    }
+                }
+                let ocf2 = self.object_ocf_at_index(candidate_idx);
+                if ocf2 & tocf == 0 {
                     continue;
                 }
-            }
-            if !collection_rect.contains_offset(dx, dy) {
-                continue;
-            }
-            candidates.push(candidate.id);
-        }
-
-        if candidates.is_empty() {
-            return Ok(());
-        }
-
-        for candidate_id in candidates {
-            let collector_index = match self.find_object_index(collector_id) {
-                Some(index) => index,
-                None => return Err(EngineError::UnknownObject(collector_id)),
-            };
-            if let Some(limit) = collection_limit {
-                if self.objects[collector_index].state.contents.len() >= limit as usize {
-                    break;
+                let obj1_position = self.objects[idx].state.position;
+                let candidate_position = self.objects[candidate_idx].state.position;
+                let dx = candidate_position.x - obj1_position.x;
+                let dy = candidate_position.y - obj1_position.y;
+                // Inside(obj2->x - (obj1->x + Shape.x), 0, Shape.Wdt - 1)
+                if let Some(shape) = shape_rect {
+                    if !shape.contains_offset(dx, dy) {
+                        continue;
+                    }
+                } else if let Some((half_w, half_h)) = fallback_half_extents {
+                    if dx < -half_w || dx >= half_w || dy < -half_h || dy >= half_h {
+                        continue;
+                    }
+                }
+                if !marker.insert(candidate_id) {
+                    continue;
+                }
+                let ocf1 = self.object_ocf_at_index(idx);
+                // Hit (C4GameObjects.cpp:167-184)
+                if ocf2 & crate::ocf::HIT_SPEED2 != 0
+                    && ocf1 & crate::ocf::ALIVE != 0
+                    && self.objects[candidate_idx].state.category & CATEGORY_OBJECT != 0
+                {
+                    let by_value = object_reference_value(candidate_id);
+                    let query = self.call_object_function(
+                        idx,
+                        "QueryCatchBlow",
+                        vec![by_value.clone()],
+                    )?;
+                    if !query.as_bool() {
+                        // "realistic" hit energy (C4GameObjects.cpp:171-173)
+                        let v1 = self.objects[idx].fixed_velocity;
+                        let v2 = self.objects[candidate_idx].fixed_velocity;
+                        let dx_dir = v2.x - v1.x;
+                        let dy_dir = v2.y - v1.y;
+                        let candidate_mass = self
+                            .definitions
+                            .get(&self.objects[candidate_idx].definition_id)
+                            .map(|definition| definition.mass())
+                            .unwrap_or(0);
+                        let hit_energy =
+                            fixtoi((dx_dir * dx_dir + dy_dir * dy_dir) * candidate_mass / 5);
+                        // reduced to 1/3rd, but never dropped to zero by it
+                        let hit_energy = (hit_energy / 3).max(i32::from(hit_energy != 0));
+                        self.change_object_energy(idx, -(hit_energy / 5));
+                        let tmass = obj1_mass.max(50);
+                        let candidate_velocity = self.objects[candidate_idx].fixed_velocity;
+                        // fling unless airborne off-Tick3 (C4GameObjects.cpp:176)
+                        let procedure = self
+                            .definitions
+                            .get(&definition_id)
+                            .map(|definition| {
+                                definition
+                                    .action_library()
+                                    .procedure_for_action(&self.objects[idx].state.action.name)
+                            })
+                            .unwrap_or_default();
+                        let has_action = !self.objects[idx].state.action.name.is_empty();
+                        if tick3 || (has_action && procedure != ActionProcedure::Flight) {
+                            let txdir = C4Fixed::from_raw(
+                                candidate_velocity.x.val().wrapping_mul(50) / tmass,
+                            );
+                            let tydir = C4Fixed::from_raw(
+                                -(candidate_velocity.y.val() / 2).abs().wrapping_mul(50) / tmass,
+                            );
+                            self.fling_object(idx, txdir, tydir);
+                        }
+                        let _ = self.call_object_function(
+                            idx,
+                            "CatchBlow",
+                            vec![Value::Int(-(hit_energy / 5)), by_value],
+                        )?;
+                        // obj1 might have been tampered with
+                        let Some(idx) = self.find_object_index(obj1_id) else {
+                            continue 'outer;
+                        };
+                        let obj1 = &self.objects[idx];
+                        if obj1.destroyed
+                            || !obj1.state.status.is_active()
+                            || obj1.state.container.is_some()
+                            || self.object_ocf_at_index(idx) & focf == 0
+                        {
+                            continue 'outer;
+                        }
+                        continue;
+                    }
+                }
+                // Collection (C4GameObjects.cpp:185-194)
+                if ocf1 & crate::ocf::COLLECTION != 0 && ocf2 & crate::ocf::CARRYABLE != 0 {
+                    let Some(collection_rect) =
+                        collection_rect.filter(|rect| rect.is_positive())
+                    else {
+                        continue;
+                    };
+                    if !collection_rect.contains_offset(dx, dy) {
+                        continue;
+                    }
+                    let update = ObjectUpdate::new()
+                        .with_container(obj1_id)
+                        .with_position(obj1_position)
+                        .with_velocity(Vector2::ZERO);
+                    match self.apply_object_update(candidate_id, update) {
+                        Ok(_) => {}
+                        Err(EngineError::UnknownObject(_)) => continue,
+                        Err(err) => return Err(err),
+                    }
+                    // obj1 might have been tampered with
+                    let Some(idx) = self.find_object_index(obj1_id) else {
+                        continue 'outer;
+                    };
+                    let obj1 = &self.objects[idx];
+                    if obj1.destroyed
+                        || !obj1.state.status.is_active()
+                        || obj1.state.container.is_some()
+                        || self.object_ocf_at_index(idx) & focf == 0
+                    {
+                        continue 'outer;
+                    }
                 }
             }
-            if self.objects[collector_index].destroyed
-                || !self.objects[collector_index].state.status.is_active()
-            {
-                break;
-            }
-            let collector_position = self.objects[collector_index].state.position;
-            let update = ObjectUpdate::new()
-                .with_container(collector_id)
-                .with_position(collector_position)
-                .with_velocity(Vector2::ZERO);
-            match self.apply_object_update(candidate_id, update) {
-                Ok(_) => {}
-                Err(EngineError::UnknownObject(_)) => continue,
-                Err(err) => return Err(err),
-            }
         }
-
         Ok(())
+    }
+
+    /// Engine-side `C4Object::DoEnergy` slice (C4Object.cpp:1345-1365) in the
+    /// engine's percent-point energy units: clamp at zero; the physical
+    /// energy maximum and death-on-zero (`AssignDeath`) belong to the still
+    /// unported physical/death model.
+    fn change_object_energy(&mut self, idx: usize, change: i32) {
+        let object = &mut self.objects[idx];
+        object.state.energy = object.state.energy.saturating_add(change).max(0);
+    }
+
+    /// `C4Object::Fling` (C4Object.cpp:1612-1625) without fAddSpeed: try the
+    /// Tumble action, then Jump (ObjectActionTumble/Jump,
+    /// C4ObjectCom.cpp:48-80), else set the velocity directly.
+    fn fling_object(&mut self, idx: usize, txdir: C4Fixed, tydir: C4Fixed) {
+        let definition_id = self.objects[idx].definition_id.clone();
+        let library = self
+            .definitions
+            .get(&definition_id)
+            .map(|definition| definition.action_library().clone());
+        if let Some(library) = library {
+            for action in ["Tumble", "Jump"] {
+                if !library.contains(action) {
+                    continue;
+                }
+                let previous = self.objects[idx].state.action.clone();
+                let update = ActionUpdate {
+                    name: Some(action.to_string()),
+                    phase: Some(0),
+                    ticks: Some(0),
+                    force: true,
+                    data: None,
+                    target: Some(None),
+                    target2: Some(None),
+                };
+                let object = &mut self.objects[idx];
+                let result = object
+                    .state
+                    .action
+                    .apply_update_with_library(&update, &library);
+                if matches!(result, ActionUpdateResult::Applied) {
+                    if previous.name != object.state.action.name {
+                        object.record_action_event(previous, ActionTransitionKind::Forced);
+                    }
+                    // Tumble also turns the object (SetDir, C4ObjectCom.cpp:77)
+                    if action == "Tumble" {
+                        object.state.direction = if txdir < C4Fixed::ZERO {
+                            Direction::Left
+                        } else {
+                            Direction::Right
+                        };
+                    }
+                    object.fixed_velocity = FixedVec2::new(txdir, tydir);
+                    object.refresh_velocity_from_fixed();
+                    return;
+                }
+            }
+        }
+        let object = &mut self.objects[idx];
+        object.fixed_velocity = FixedVec2::new(txdir, tydir);
+        object.refresh_velocity_from_fixed();
     }
 
     fn apply_landscape_temperature_conversions(&mut self) {
@@ -13825,7 +13968,8 @@ impl Engine {
 
     fn object_ocf_at_index(&self, index: usize) -> u32 {
         let object = &self.objects[index];
-        self.definitions
+        let ocf = self
+            .definitions
             .get(&object.definition_id)
             .map(|definition| definition.compute_ocf(&object.state))
             .unwrap_or_else(|| {
@@ -13837,7 +13981,10 @@ impl Engine {
                     object.state.container.is_some(),
                     object.state.construction,
                 )
-            })
+            });
+        // HitSpeeds from the fixed speed |xdir| + |ydir| (SetOCF,
+        // C4Object.cpp:588-592)
+        ocf | movement_hit_speed_flags(object.fixed_velocity)
     }
 
     fn object_has_ocf(&self, index: usize, mask: u32) -> bool {
@@ -17515,6 +17662,108 @@ mod tests {
                 .iter()
                 .any(|particle| particle.definition_id == "material/pxs/earth"),
             "blast operation should emit earth particles"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cross_check_hit_damages_and_flings_like_cpp() -> Result<(), EngineError> {
+        // CrossCheck reverse area check, Hit branch (C4GameObjects.cpp:148,
+        // 167-184): an OCF_HitSpeed2 object of category C4D_Object overlapping
+        // an alive object deals "realistic" hit energy
+        // fixtoi((dX²+dY²)*Mass/5), reduced to 1/3 (min 1); the victim takes
+        // DoEnergy(-e/5) and is flung by (xdir*50/tmass, -|ydir/2|*50/tmass)
+        // with tmass = max(victim mass, 50).
+        let mut engine = Engine::with_seed(40);
+        let mut victim_def = simple_definition("Clonk");
+        victim_def.set_mass(100);
+        engine.register_definition(victim_def)?;
+        let mut rock_def = simple_definition("Rock");
+        rock_def.set_category(CATEGORY_OBJECT);
+        rock_def.set_mass(50);
+        engine.register_definition(rock_def)?;
+
+        let victim = engine.spawn_object(
+            SpawnConfig::new("Clonk")
+                .with_position(Vector2::new(50, 50))
+                .with_alive(true)
+                .with_energy(100),
+        )?;
+        let _rock = engine.spawn_object(
+            SpawnConfig::new("Rock")
+                .with_position(Vector2::new(50, 50))
+                .with_velocity(Vector2::new(5, 0)),
+        )?;
+
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        let energy_before = engine.objects[victim_idx].state.energy;
+        engine.cross_check(1)?;
+
+        // dX = itofix(5): hit energy = fixtoi(itofix(25)*50/5) = 250,
+        // reduced: max(250/3, 1) = 83, energy change = -(83/5) = -16.
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].state.energy,
+            energy_before - 16,
+            "hit energy applied"
+        );
+        // fling: xdir = itofix(5)*50/100 = itofix(2.5), ydir = 0; no
+        // Tumble/Jump actions on the def → raw velocity (C4Object.cpp:1612-1625)
+        assert_eq!(
+            engine.objects[victim_idx].fixed_velocity.x,
+            math::C4Fixed::from_raw(math::itofix(5).val() * 50 / 100),
+            "flung horizontally"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].fixed_velocity.y,
+            math::C4Fixed::ZERO
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cross_check_hit_respects_query_catch_blow() -> Result<(), EngineError> {
+        // C4GameObjects.cpp:168: a truthy QueryCatchBlow callback on the
+        // victim suppresses the hit entirely.
+        let mut engine = Engine::with_seed(41);
+        let mut victim_def = Definition::from_script(
+            "Guard",
+            "Guard",
+            r#"
+            func QueryCatchBlow(by) { return 1; }
+            "#,
+        )
+        .expect("script compiles");
+        victim_def.set_mass(100);
+        engine.register_definition(victim_def)?;
+        let mut rock_def = simple_definition("Rock");
+        rock_def.set_category(CATEGORY_OBJECT);
+        rock_def.set_mass(50);
+        engine.register_definition(rock_def)?;
+
+        let victim = engine.spawn_object(
+            SpawnConfig::new("Guard")
+                .with_position(Vector2::new(50, 50))
+                .with_alive(true)
+                .with_energy(100),
+        )?;
+        let _rock = engine.spawn_object(
+            SpawnConfig::new("Rock")
+                .with_position(Vector2::new(50, 50))
+                .with_velocity(Vector2::new(5, 0)),
+        )?;
+
+        engine.cross_check(1)?;
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(
+            engine.objects[victim_idx].state.energy,
+            100,
+            "QueryCatchBlow rejected the blow"
+        );
+        assert_eq!(
+            engine.objects[victim_idx].fixed_velocity.x,
+            math::C4Fixed::ZERO,
+            "no fling on rejected blow"
         );
         Ok(())
     }
@@ -23589,7 +23838,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let item =
             engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(115, 20)))?;
 
-        let _ = engine.tick()?;
+        // Collection runs on Tick3 frames only (C4GameObjects.cpp:144-148).
+        for _ in 0..3 {
+            let _ = engine.tick()?;
+        }
 
         let item_snapshot = engine.object_snapshot(item).expect("item snapshot");
         assert_eq!(item_snapshot.container, Some(crew));
@@ -25587,7 +25839,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let item =
             engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(2, 0)))?;
 
-        let _ = engine.tick()?;
+        // Collection runs on Tick3 frames only (C4GameObjects.cpp:144-148).
+        for _ in 0..3 {
+            let _ = engine.tick()?;
+        }
 
         let item_snapshot = engine.object_snapshot(item).expect("item snapshot");
         assert_eq!(item_snapshot.container, Some(crew));
@@ -25619,7 +25874,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let second =
             engine.spawn_object(SpawnConfig::new("Gem").with_position(Vector2::new(-3, 0)))?;
 
-        let _ = engine.tick()?;
+        // Collection runs on Tick3 frames only (C4GameObjects.cpp:144-148).
+        for _ in 0..3 {
+            let _ = engine.tick()?;
+        }
 
         let first_snapshot = engine.object_snapshot(first).expect("first item snapshot");
         let second_snapshot = engine

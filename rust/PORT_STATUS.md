@@ -268,9 +268,23 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
    object pushback.
 5. **DONE** (infra + current consumers) — `C4LSectors`/`C4LArea` (see GAP LIST).
    Open: separate `C4Region` UI rectangles.
-6. **TODO** — Remaining `CrossCheck()` inter-object loop (919 LOC): Tick3/5/10/35
-   scheduling, `RejectFight`/`CatchBlow`, hit energy/fling, contained-object fight,
-   contact incineration, exact post-callback recheck.
+6. **PARTIAL (pass 2 DONE 2026-06-09)** — `CrossCheck()` inter-object loop
+   (C4GameObjects.cpp:92-230). **Done:** the reverse area check (pass 2,
+   :140-197) as `Engine::cross_check`, run once per frame after object
+   execution like C++ ExecObjects: OCF_Alive victims take OCF_HitSpeed2 hits
+   from C4D_Object projectiles inside their shape every frame — QueryCatchBlow
+   veto, hit energy `fixtoi((dX²+dY²)*Mass/5)` reduced `/3` (min 1),
+   `DoEnergy(-e/5)`, `Fling(xdir*50/tmass, -|ydir/2|*50/tmass)` with the
+   Tick3/DFA_FLIGHT gate and the Tumble→Jump→raw-velocity chain
+   (C4Object.cpp:1612-1625, C4ObjectCom.cpp:48-80), CatchBlow callback, and the
+   exact tamper rechecks; collection moved onto the Tick3 gate (Collection
+   rect, marker dedup, per-candidate scan order). HitSpeed1-4 OCF bits now
+   computed from fixed speed in `object_ocf_at_index` (SetOCF
+   C4Object.cpp:588-592). **Open:** pass 1 (Tick5 fight + Tick35
+   `!Random(ContactIncinerate)` contact incineration — needs hostility model,
+   ObjectActionFight, object OnFire/Incinerate) and pass 3 (Tick10
+   contained fight); engine-side DoEnergy lacks the physical max clamp and
+   `AssignDeath` (no death model yet).
 7. **PARTIAL** — `script-values`. **Done:** `C4ScriptCnvMap` 81-cell table +
    `ConvertTo` dispatch (`C4Value.cpp:431-598`; differential-locked
    `script_value_convert` — 81-cell grid + per-(value,target,#strict) result);
