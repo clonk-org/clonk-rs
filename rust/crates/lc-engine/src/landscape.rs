@@ -184,7 +184,7 @@ impl Landscape {
             .expect("flat landscape constructs")
     }
 
-    fn with_default_material(
+    pub(crate) fn with_default_material(
         width: u32,
         surface: Vec<i32>,
         default_material: Option<MaterialId>,
@@ -874,6 +874,58 @@ impl Landscape {
             Some(surface_y) => y >= surface_y,
             None => false,
         }
+    }
+
+    /// `C4Landscape::FindMatSlide` (C4Landscape.cpp:1260-1290): find the
+    /// closest immediate slide position for a material of density `mdens`.
+    /// Straight down first, then per `cslide` ring check left before right; a
+    /// side is clogged only when both its cells are >= `mdens`; a slide fires
+    /// when the side's down-cell is free. Mutates `fx`/`fy` on success.
+    pub fn find_mat_slide(
+        &self,
+        fx: &mut i32,
+        fy: &mut i32,
+        ydir: i32,
+        mdens: i32,
+        mslide: i32,
+        materials: &MaterialSet,
+    ) -> bool {
+        // One downwards
+        if self.density_at(*fx, *fy + ydir, materials) < mdens {
+            *fy += ydir;
+            return true;
+        }
+        // Find downwards slide path
+        let (mut left, mut right) = (true, true);
+        let mut cslide = 1;
+        while cslide <= mslide && (left || right) {
+            // Check left
+            if left {
+                if self.density_at(*fx - cslide, *fy, materials) >= mdens
+                    && self.density_at(*fx - cslide, *fy + ydir, materials) >= mdens
+                {
+                    left = false;
+                } else if self.density_at(*fx - cslide, *fy + ydir, materials) < mdens {
+                    *fx -= cslide;
+                    *fy += ydir;
+                    return true;
+                }
+            }
+            // Check right
+            if right {
+                if self.density_at(*fx + cslide, *fy, materials) >= mdens
+                    && self.density_at(*fx + cslide, *fy + ydir, materials) >= mdens
+                {
+                    right = false;
+                } else if self.density_at(*fx + cslide, *fy + ydir, materials) < mdens {
+                    *fx += cslide;
+                    *fy += ydir;
+                    return true;
+                }
+            }
+            cslide += 1;
+        }
+        false
     }
 
     pub fn insert_material_at(&mut self, x: i32, y: i32, material: MaterialId) -> bool {
@@ -1574,6 +1626,63 @@ mod tests {
         landscape.set_liquid_column(3, vec![LiquidSegment::new(4, 6)]);
         LandscapeCommand::ClearLiquidColumn { column: 3 }.apply(&mut landscape);
         assert!(landscape.liquids()[3].segments().is_empty());
+    }
+
+    #[test]
+    fn find_mat_slide_matches_cpp_search_order() {
+        // C4Landscape::FindMatSlide (C4Landscape.cpp:1260-1290): straight
+        // down first; then per cslide = 1..=mslide check LEFT before RIGHT;
+        // a side is clogged only when both (±cslide, fy) and (±cslide, fy+1)
+        // are >= mdens; a slide fires when (±cslide, fy+1) is free.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=50
+            Friction=20
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mdens = 25;
+
+        // Straight down free → move one down.
+        let landscape = Landscape::with_default_material(3, vec![10, 10, 10], Some(earth))
+            .expect("landscape builds");
+        let (mut fx, mut fy) = (1, 8);
+        assert!(landscape.find_mat_slide(&mut fx, &mut fy, 1, mdens, 1, &materials));
+        assert_eq!((fx, fy), (1, 9));
+
+        // Down blocked, both sides open → LEFT wins (checked first).
+        let landscape = Landscape::with_default_material(3, vec![11, 10, 11], Some(earth))
+            .expect("landscape builds");
+        let (mut fx, mut fy) = (1, 9);
+        assert!(landscape.find_mat_slide(&mut fx, &mut fy, 1, mdens, 1, &materials));
+        assert_eq!((fx, fy), (0, 10));
+
+        // Left clogged (both side cells solid) → slides right.
+        let landscape = Landscape::with_default_material(3, vec![9, 10, 11], Some(earth))
+            .expect("landscape builds");
+        let (mut fx, mut fy) = (1, 9);
+        assert!(landscape.find_mat_slide(&mut fx, &mut fy, 1, mdens, 1, &materials));
+        assert_eq!((fx, fy), (2, 10));
+
+        // Slide target two columns out: found with mslide = 2, not with 1.
+        let landscape =
+            Landscape::with_default_material(5, vec![11, 10, 10, 10, 11], Some(earth))
+                .expect("landscape builds");
+        let (mut fx, mut fy) = (2, 9);
+        assert!(!landscape.find_mat_slide(&mut fx, &mut fy, 1, mdens, 1, &materials));
+        assert_eq!((fx, fy), (2, 9), "no move on failure");
+        assert!(landscape.find_mat_slide(&mut fx, &mut fy, 1, mdens, 2, &materials));
+        assert_eq!((fx, fy), (0, 10));
+
+        // Fully enclosed → false.
+        let landscape = Landscape::with_default_material(3, vec![9, 10, 9], Some(earth))
+            .expect("landscape builds");
+        let (mut fx, mut fy) = (1, 9);
+        assert!(!landscape.find_mat_slide(&mut fx, &mut fy, 1, mdens, 3, &materials));
     }
 
     #[test]

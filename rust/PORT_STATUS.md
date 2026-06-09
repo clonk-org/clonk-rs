@@ -281,11 +281,19 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
    sync wiring.
 8. **DONE** — C4Script VM operator parity + `Expr::This` + Var/Local slots (see
    Completed).
-9. **PARTIAL** — Material reaction execution. Mass-mover path runs
-   `MaterialReactionKind` with event masks, `mrfCorrode` `Random(100)` ordering +
-   effect RNG, `mrfPoof` `Rnd3()`, shared `ExtractMaterial`/`InsertMaterial`.
-   Remaining: full `mrfInsertCheck` splash (8× damping) + slide for PXS
-   (`C4Material.cpp:570-604`) and script reactions.
+9. **PARTIAL (splash/slide DONE 2026-06-09)** — Material reaction execution.
+   Mass-mover path runs `MaterialReactionKind` with event masks, `mrfCorrode`
+   `Random(100)` ordering + effect RNG, `mrfPoof` `Rnd3()`, shared
+   `ExtractMaterial`/`InsertMaterial`. **New:** `mrfInsertCheck`
+   (`C4Material.cpp:567-610`) ported as `Engine::mrf_insert_check` — splash
+   (`-fYDir/8`, `fXDir/8 + FIXED100(Random(200)-100)`, exact Random order),
+   incendiary `Random(25)`+`Rnd3()` smoke, `FindMatSlide`
+   (`C4Landscape.cpp:1260-1290`, exact left-first/clog rules, on `Landscape`),
+   same-mat absorb, slide accel `(fXDir*10+Sign)/11 + FIXED10(Random(5)-2)`,
+   in-range jump + `fYDir<=0` zeroing — wired into the PXS-move
+   Insert/Poof/Corrode/Incinerate arms with the C++ contact-adjacent check
+   position (`C4PXS.cpp:96-117`). Remaining: script reactions (`mrfScript`),
+   full fixed-point `C4PXS::Execute` step loop (item 10).
 10. **PARTIAL** — Mass-mover parity. Down/L/R corrosion, two-pass reverse exec,
     immediate spawned-mover exec, `LandscapeInsertThrust` plumbing, `Random(10)`
     before `Rnd3()` order landed. Remaining: exact `CreatePtr` slot reuse, richer

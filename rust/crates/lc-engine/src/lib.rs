@@ -128,7 +128,7 @@ use std::ops::AddAssign;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::math::{fixed100, fixtoi, fixtoi_prec, itofix, C4Fixed, FixedVec2};
+use crate::math::{fixed10, fixed100, fixtoi, fixtoi_prec, itofix, C4Fixed, FixedVec2};
 pub use crate::rng::LcgRng;
 use lc_resources::definition::{
     ActionFacet as ResourceActionFacet, TargetRect as ResourceTargetRect,
@@ -14667,6 +14667,114 @@ impl Engine {
         self.material_particles = survivors;
     }
 
+    /// `Smoke()` (C4Effect.cpp:859-865): create a "Smoke" particle if the def
+    /// is loaded. (The FXS1 object fallback for missing particle defs is not
+    /// ported.) `level/2` is integer division like the C++ call.
+    fn spawn_smoke(&mut self, x: i32, y: i32, level: i32) {
+        self.particle_system.create(
+            "Smoke",
+            x as f32,
+            y as f32 - (level / 2) as f32,
+            0.0,
+            0.0,
+            level as f32,
+            0,
+            ParticleLayer::Global,
+            None,
+        );
+    }
+
+    /// `mrfInsertCheck` (C4Material.cpp:567-610): splash/slide preamble run by
+    /// the default Poof/Corrode/Incinerate/Insert reactions on the PXS-move
+    /// event. Returns true when insertion may proceed; false keeps the PXS
+    /// alive (splashed or sliding). Mutates pos/speed like the C++ by-ref
+    /// parameters.
+    #[allow(clippy::too_many_arguments)]
+    fn mrf_insert_check(
+        &mut self,
+        x: &mut i32,
+        y: &mut i32,
+        xdir: &mut C4Fixed,
+        ydir: &mut C4Fixed,
+        pxs_mat: MaterialId,
+        ls_mat: Option<MaterialId>,
+        pos_changed: &mut bool,
+    ) -> bool {
+        // always manipulating pos/speed here (C4Material.cpp:570)
+        *pos_changed = true;
+        let Some(material) = self.materials.get_by_id(pxs_mat) else {
+            return true;
+        };
+        let splash_rate = material.splash_rate();
+        let incindiary = material.incindiary();
+        let density = material.density();
+        let max_slide = material.max_slide();
+
+        // Rough contact? May splash (C4Material.cpp:572-579)
+        if *ydir > itofix(1)
+            && splash_rate != 0
+            && self.rng.random(splash_rate) == 0
+        {
+            *ydir = -*ydir / 8;
+            *xdir = *xdir / 8 + fixed100(self.rng.random(200) - 100);
+            if ydir.is_nonzero() {
+                return false;
+            }
+        }
+
+        // Contact: Stop (C4Material.cpp:581-582)
+        *ydir = C4Fixed::ZERO;
+
+        // Incindiary mats smoke on contact even before doing their slide
+        // (C4Material.cpp:584-586). Rnd3 is consumed as the call argument.
+        if incindiary != 0 && self.rng.random(25) == 0 {
+            let level = 4 + self.rng.rnd3();
+            self.spawn_smoke(*x, *y, level);
+        }
+
+        // Move by mat path/slide (C4Material.cpp:588-607)
+        let gravity_sign = self.physics.gravity_as_c4fixed().val().signum();
+        let (mut slide_x, mut slide_y) = (*x, *y);
+        let found_slide = self
+            .landscape
+            .as_ref()
+            .map(|landscape| {
+                landscape.find_mat_slide(
+                    &mut slide_x,
+                    &mut slide_y,
+                    gravity_sign,
+                    density,
+                    max_slide,
+                    &self.materials,
+                )
+            })
+            .unwrap_or(false);
+        if found_slide {
+            if Some(pxs_mat) == ls_mat {
+                *x = slide_x;
+                *y = slide_y;
+                *xdir = C4Fixed::ZERO;
+                return false;
+            }
+            // Accelerate into the direction (C4Material.cpp:597)
+            *xdir = C4Fixed::from_raw(
+                (xdir.val().wrapping_mul(10) + itofix((slide_x - *x).signum()).val()) / 11,
+            ) + fixed10(self.rng.random(5) - 2);
+            // Slide target in range? Move there directly. (C4Material.cpp:599-604)
+            if (*x - slide_x).abs() <= fixtoi(*xdir).abs() {
+                *x = slide_x;
+                *y = slide_y;
+                if *ydir <= C4Fixed::ZERO {
+                    *xdir = C4Fixed::ZERO;
+                }
+            }
+            // Continue existance
+            return false;
+        }
+        // insertion OK
+        true
+    }
+
     fn resolve_material_particle_collision(
         &mut self,
         particle: &mut MaterialParticle,
@@ -14684,6 +14792,45 @@ impl Engine {
         let reaction = self
             .materials
             .reaction(Some(particle.material), landscape_material);
+        // The default Insert/Poof/Corrode/Incinerate reactions all run the
+        // mrfInsertCheck splash/slide preamble on the PXS-move event
+        // (C4Material.cpp:678,721,760,785).
+        if matches!(
+            reaction,
+            MaterialReactionKind::Insert
+                | MaterialReactionKind::Poof
+                | MaterialReactionKind::Incinerate
+                | MaterialReactionKind::Corrode { .. }
+        ) {
+            // C++ runs the check with iX/iY at the step-loop's current cell —
+            // the last free cell adjacent to the contact (C4PXS.cpp:96-117) —
+            // not at the start of the movement line.
+            let start_x = particle.position.x.floor() as i32;
+            let start_y = particle.position.y.floor() as i32;
+            let mut check_x = hit.x - (hit.x - start_x).signum();
+            let mut check_y = hit.y - (hit.y - start_y).signum();
+            let mut xdir = math::ftofix(particle.velocity.x);
+            let mut ydir = math::ftofix(particle.velocity.y);
+            let mut pos_changed = false;
+            if !self.mrf_insert_check(
+                &mut check_x,
+                &mut check_y,
+                &mut xdir,
+                &mut ydir,
+                particle.material,
+                landscape_material,
+                &mut pos_changed,
+            ) {
+                // splash or slide prevented interaction: the PXS keeps
+                // existing, snapped to its integer position like
+                // fStopMovement (C4PXS.cpp:106-112).
+                particle.position = FloatVector2::new(check_x as f32, check_y as f32);
+                particle.velocity = FloatVector2::new(math::fixtof(xdir), math::fixtof(ydir));
+                return true;
+            }
+            // insertion approved: keep the mutated dirs (ydir zeroed).
+            particle.velocity = FloatVector2::new(math::fixtof(xdir), math::fixtof(ydir));
+        }
         match reaction {
             MaterialReactionKind::None => {
                 let mut deposited = false;
@@ -17235,6 +17382,309 @@ mod tests {
             "blast operation should emit earth particles"
         );
         Ok(())
+    }
+
+    #[test]
+    fn mrf_insert_check_splash_matches_cpp() {
+        // mrfInsertCheck splash (C4Material.cpp:572-579): with fYDir >
+        // itofix(1) and SplashRate set, !Random(SplashRate) bounces the PXS:
+        // fYDir = -fYDir/8 (raw int division), fXDir = fXDir/8 +
+        // FIXED100(Random(200)-100), and the nonzero fYDir keeps it alive.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+            SplashRate=1
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(7);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(9, 10, Some(earth)));
+
+        let mut mirror = engine.rng.clone();
+        assert_eq!(mirror.random(1), 0, "SplashRate=1 always splashes");
+        let expected_xdir =
+            math::itofix(8) / 8 + math::fixed100(mirror.random(200) - 100);
+
+        let (mut x, mut y) = (4, 9);
+        let mut xdir = math::itofix(8);
+        let mut ydir = math::itofix(16);
+        let mut pos_changed = false;
+        let insert_ok = engine.mrf_insert_check(
+            &mut x,
+            &mut y,
+            &mut xdir,
+            &mut ydir,
+            water,
+            Some(earth),
+            &mut pos_changed,
+        );
+        assert!(!insert_ok, "splash keeps the PXS alive");
+        assert!(pos_changed);
+        assert_eq!(ydir, -math::itofix(16) / 8);
+        assert_eq!(xdir, expected_xdir);
+        assert_eq!((x, y), (4, 9), "splash does not move the pixel");
+        assert_eq!(engine.rng, mirror, "exactly two synced draws");
+    }
+
+    #[test]
+    fn mrf_insert_check_incendiary_smokes_and_allows_insert_like_cpp() {
+        // mrfInsertCheck (C4Material.cpp:584-586): incendiary materials
+        // consume Random(25) and, on zero, Rnd3() for the smoke level
+        // (Smoke(x, y, 4+Rnd3()), C4Effect.cpp:859-863); with no slide
+        // available the check returns true (insertion OK,
+        // C4Material.cpp:608-609).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Lava]
+            Name=Lava
+            Density=30
+            Friction=20
+            Incindiary=1
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let lava = materials.id_of("Lava").expect("lava exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(2);
+        engine.set_materials(materials);
+        // Deep inside flat earth: no slide target anywhere.
+        engine.set_landscape(Landscape::flat_with_material(9, 5, Some(earth)));
+        // Force the Random(25) == 0 branch deterministically.
+        let smoke_seed = (0u32..)
+            .find(|&seed| LcgRng::new(seed).random(25) == 0)
+            .expect("seed exists");
+        engine.rng = LcgRng::new(smoke_seed);
+        engine
+            .register_particle_definition(
+                particles::ParticleDefCore {
+                    name: "Smoke".into(),
+                    init_fn: "SmokeInit".into(),
+                    exec_fn: "SmokeExec".into(),
+                    draw_fn: "Smoke".into(),
+                    min_lifetime: 10,
+                    max_lifetime: 10,
+                    ..Default::default()
+                },
+                4,
+                1.0,
+            )
+            .expect("smoke def registers");
+
+        let mut mirror = engine.rng.clone();
+        assert_eq!(mirror.random(25), 0);
+        let expected_level = 4 + mirror.rnd3();
+
+        let (mut x, mut y) = (4, 20);
+        let mut xdir = math::C4Fixed::ZERO;
+        let mut ydir = math::C4Fixed::ZERO;
+        let mut pos_changed = false;
+        let insert_ok = engine.mrf_insert_check(
+            &mut x,
+            &mut y,
+            &mut xdir,
+            &mut ydir,
+            lava,
+            Some(earth),
+            &mut pos_changed,
+        );
+        assert!(insert_ok, "no slide target → insertion OK");
+        assert_eq!(ydir, math::C4Fixed::ZERO);
+        assert_eq!(engine.rng, mirror, "Random(25) then Rnd3 consumed");
+        let smoke: Vec<_> = engine
+            .particle_system()
+            .particles()
+            .iter()
+            .filter(|particle| particle.def_name == "Smoke")
+            .collect();
+        assert_eq!(smoke.len(), 1, "smoke particle spawned");
+        assert_eq!(smoke[0].x.to_bits(), 4.0f32.to_bits());
+        assert_eq!(
+            smoke[0].y.to_bits(),
+            (20.0f32 - (expected_level / 2) as f32).to_bits()
+        );
+        assert_eq!(smoke[0].a.to_bits(), (expected_level as f32).to_bits());
+    }
+
+    #[test]
+    fn mrf_insert_check_slide_accelerates_or_absorbs_like_cpp() {
+        // mrfInsertCheck slide (C4Material.cpp:588-607): FindMatSlide with
+        // Sign(GravAccel), the PXS material's density and MaxSlide. Same
+        // material → absorb (move there, fXDir = 0). Different material →
+        // fXDir = (fXDir*10 + Sign(slide_x - x))/11 + FIXED10(Random(5)-2),
+        // with the direct jump only when the target is within |fixtoi(fXDir)|.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Sand]
+            Name=Sand
+            Density=25
+            Friction=10
+            MaxSlide=2
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let sand = materials.id_of("Sand").expect("sand exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        // Slide target two columns left: |x - slide_x| = 2 > |fixtoi(xdir')|
+        // → no direct jump; the acceleration stays observable.
+        let mut engine = Engine::with_seed(13);
+        engine.set_materials(materials.clone());
+        engine.set_landscape(
+            Landscape::with_default_material(5, vec![11, 10, 10, 10, 11], Some(earth))
+                .expect("landscape builds"),
+        );
+        let mut mirror = engine.rng.clone();
+        let expected_xdir = math::C4Fixed::from_raw(
+            (math::itofix(1).val() * 10 + math::itofix(-1).val()) / 11,
+        ) + math::fixed10(mirror.random(5) - 2);
+
+        let (mut x, mut y) = (2, 9);
+        let mut xdir = math::itofix(1);
+        let mut ydir = math::C4Fixed::ZERO;
+        let mut pos_changed = false;
+        let insert_ok = engine.mrf_insert_check(
+            &mut x,
+            &mut y,
+            &mut xdir,
+            &mut ydir,
+            sand,
+            Some(earth),
+            &mut pos_changed,
+        );
+        assert!(!insert_ok, "slide keeps the PXS alive");
+        assert_eq!((x, y), (2, 9), "target out of reach → no jump");
+        assert_eq!(xdir, expected_xdir);
+        assert_eq!(engine.rng, mirror, "exactly one Random(5) draw");
+
+        // Same material at the slide target → absorb without any draw.
+        let mut engine = Engine::with_seed(13);
+        engine.set_materials(materials);
+        engine.set_landscape(
+            Landscape::with_default_material(3, vec![11, 10, 11], Some(earth))
+                .expect("landscape builds"),
+        );
+        let mirror = engine.rng.clone();
+        let (mut x, mut y) = (1, 9);
+        let mut xdir = math::itofix(1);
+        let mut ydir = math::C4Fixed::ZERO;
+        let mut pos_changed = false;
+        let insert_ok = engine.mrf_insert_check(
+            &mut x,
+            &mut y,
+            &mut xdir,
+            &mut ydir,
+            sand,
+            Some(sand),
+            &mut pos_changed,
+        );
+        assert!(!insert_ok);
+        assert_eq!((x, y), (0, 10), "absorbed at the slide target");
+        assert_eq!(xdir, math::C4Fixed::ZERO);
+        assert_eq!(engine.rng, mirror, "no synced draws on same-mat slide");
+    }
+
+    #[test]
+    fn pxs_insert_reaction_runs_insert_check_like_cpp() {
+        // mrfInsert on meePXSMove runs mrfInsertCheck before inserting
+        // (C4Material.cpp:781-790): a PXS with a slide path keeps existing
+        // (snapped to its int position, fStopMovement C4PXS.cpp:106-112);
+        // an enclosed PXS inserts and dies.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Sand]
+            Name=Sand
+            Density=25
+            Friction=10
+            MaxSlide=2
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let sand = materials.id_of("Sand").expect("sand exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut engine = Engine::with_seed(21);
+        engine.set_materials(materials.clone());
+        engine.set_landscape(
+            Landscape::with_default_material(5, vec![11, 10, 10, 10, 11], Some(earth))
+                .expect("landscape builds"),
+        );
+        let mut mirror = engine.rng.clone();
+        let expected_xdir = math::C4Fixed::from_raw(
+            (math::ftofix(1.0).val() * 10 + math::itofix(-1).val()) / 11,
+        ) + math::fixed10(mirror.random(5) - 2);
+
+        let mut particle = MaterialParticle::new(
+            sand,
+            FloatVector2::new(2.0, 9.0),
+            FloatVector2::new(1.0, 0.0),
+        );
+        let keep = engine.resolve_material_particle_collision(
+            &mut particle,
+            Vector2::new(2, 10),
+            FloatVector2::new(3.0, 9.5),
+        );
+        assert!(keep, "slide path keeps the PXS alive");
+        assert_eq!(particle.position.x.to_bits(), 2.0f32.to_bits());
+        assert_eq!(particle.position.y.to_bits(), 9.0f32.to_bits());
+        assert_eq!(
+            particle.velocity.x.to_bits(),
+            math::fixtof(expected_xdir).to_bits()
+        );
+        assert_eq!(particle.velocity.y.to_bits(), 0.0f32.to_bits());
+        assert_eq!(
+            engine
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.surface_height(2)),
+            Some(10),
+            "nothing inserted while sliding"
+        );
+
+        // Enclosed: no slide → insertion proceeds and the PXS dies.
+        let mut engine = Engine::with_seed(21);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(5, 10, Some(earth)));
+        let mut particle = MaterialParticle::new(
+            sand,
+            FloatVector2::new(2.0, 20.0),
+            FloatVector2::new(0.0, 1.0),
+        );
+        let keep = engine.resolve_material_particle_collision(
+            &mut particle,
+            Vector2::new(2, 21),
+            FloatVector2::new(2.0, 21.0),
+        );
+        assert!(!keep, "enclosed PXS inserts and dies");
     }
 
     #[test]
