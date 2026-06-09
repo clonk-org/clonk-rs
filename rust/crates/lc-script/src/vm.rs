@@ -1251,6 +1251,7 @@ impl<'a> Vm<'a> {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
             (Value::C4Id(a), Value::C4Id(b)) => a == b,
+            (Value::Object(a), Value::Object(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Proplist(a), Value::Proplist(b)) => a == b,
             (Value::Nil, Value::Nil) => true,

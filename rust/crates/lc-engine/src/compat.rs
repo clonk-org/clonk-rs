@@ -54,6 +54,7 @@ const C4V_ANY: i32 = 0;
 const C4V_INT: i32 = 1;
 const C4V_BOOL: i32 = 2;
 const C4V_ID: i32 = 3;
+const C4V_OBJECT: i32 = 4;
 const C4V_STRING: i32 = 5;
 const C4V_ARRAY: i32 = 6;
 const C4V_MAP: i32 = 7;
@@ -687,9 +688,18 @@ fn ensure_single_flag(flags: u32, mask: u32, error: &str) -> Result<(), RuntimeE
 }
 
 pub(crate) fn object_reference_value(id: ObjectId) -> Value {
-    let mut map = HashMap::new();
-    map.insert("id".into(), Value::Int(truncate_to_i32(id.as_u64())));
-    Value::Proplist(map)
+    Value::Object(id.as_u64())
+}
+
+fn object_id_from_value(value: &Value) -> Option<ObjectId> {
+    match value {
+        Value::Object(id) if *id != 0 => Some(ObjectId::new(*id)),
+        Value::Proplist(map) => match map.get("id") {
+            Some(Value::Int(id)) if *id > 0 => Some(ObjectId::new(*id as u64)),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn parse_object_reference_argument(
@@ -698,19 +708,33 @@ fn parse_object_reference_argument(
     parameter: &str,
 ) -> Result<Option<ObjectId>, RuntimeError> {
     match value {
-        Value::Proplist(map) => match map.get("id") {
-            Some(Value::Int(id)) if *id >= 0 => Ok(Some(ObjectId::new(*id as u64))),
-            _ => Ok(None),
-        },
+        Value::Object(_) | Value::Proplist(_) => Ok(object_id_from_value(value)),
         Value::Nil => Ok(None),
         Value::Int(id) if *id == 0 => Ok(None),
         other => Err(RuntimeError::new(format!(
-            "{}: expected proplist, nil, or 0 for {}, got {}",
+            "{}: expected object, proplist, nil, or 0 for {}, got {}",
             function,
             parameter,
             other.type_name()
         ))),
     }
+}
+
+fn consume_optional_object_reference_argument(
+    args: &[Value],
+    index: &mut usize,
+    function: &str,
+    parameter: &str,
+) -> Result<Option<ObjectId>, RuntimeError> {
+    let Some(value) = args.get(*index) else {
+        return Ok(None);
+    };
+    if !matches!(value, Value::Object(_) | Value::Proplist(_) | Value::Nil) {
+        return Ok(None);
+    }
+    let object_id = parse_object_reference_argument(value, function, parameter)?;
+    *index += 1;
+    Ok(object_id)
 }
 
 fn value_to_i32(value: &Value, function: &str, parameter: &str) -> Result<i32, RuntimeError> {
@@ -1790,15 +1814,15 @@ fn parse_container_filter(
             Ok(ContainerFilter::RequiresNoContainer)
         }
         Some(Value::Int(raw)) if *raw == 0 => Ok(ContainerFilter::Any),
-        Some(Value::Proplist(map)) => match map.get("id") {
-            Some(Value::Int(id)) if *id > 0 => {
-                Ok(ContainerFilter::Exact(ObjectId::new(*id as u64)))
+        Some(value @ (Value::Object(_) | Value::Proplist(_))) => {
+            match object_id_from_value(value) {
+                Some(id) => Ok(ContainerFilter::Exact(id)),
+                None => Err(RuntimeError::new(format!(
+                    "{}: expected nonzero object reference for container",
+                    function
+                ))),
             }
-            _ => Err(RuntimeError::new(format!(
-                "{}: expected object reference proplist for container",
-                function
-            ))),
-        },
+        }
         Some(other) => Err(RuntimeError::new(format!(
             "{}: expected object reference or container sentinel, got {}",
             function,
@@ -2329,6 +2353,7 @@ fn value_to_data_string(value: &Value) -> String {
         Value::Bool(false) => "false".to_string(),
         Value::String(text) => format!("\"{text}\""),
         Value::C4Id(id) => id.clone(),
+        Value::Object(id) => format!("<object {id}>"),
         Value::Array(values) => {
             let inner = values
                 .iter()
@@ -2910,6 +2935,7 @@ fn get_type(args: &[Value]) -> Result<Value, RuntimeError> {
         Value::Bool(_) => C4V_BOOL,
         Value::String(_) => C4V_STRING,
         Value::C4Id(_) => C4V_ID,
+        Value::Object(_) => C4V_OBJECT,
         Value::Array(_) => C4V_ARRAY,
         Value::Proplist(_) => C4V_MAP,
         Value::Nil => C4V_ANY,
@@ -3953,10 +3979,10 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     let scope = determine_scope_from_state(&args[1])?;
     if matches!(scope, EffectScope::Object) {
         match &args[1] {
-            Value::Proplist(_) => {}
+            Value::Object(_) | Value::Proplist(_) => {}
             other => {
                 return Err(RuntimeError::new(format!(
-                    "AddEffect: expected proplist for object state, got {}",
+                    "AddEffect: expected object or proplist for object state, got {}",
                     other.type_name()
                 )))
             }
@@ -4003,7 +4029,7 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
 
     if idx < len {
         match &args[idx] {
-            Value::Proplist(_) | Value::Nil => {
+            Value::Object(_) | Value::Proplist(_) | Value::Nil => {
                 command_target = parse_command_target(&args[idx])?;
                 idx += 1;
             }
@@ -4124,10 +4150,10 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     let scope = determine_scope_from_state(&args[1])?;
     if matches!(scope, EffectScope::Object) {
         match &args[1] {
-            Value::Proplist(_) => {}
+            Value::Object(_) | Value::Proplist(_) => {}
             other => {
                 return Err(RuntimeError::new(format!(
-                    "RemoveEffect: expected proplist for object state, got {}",
+                    "RemoveEffect: expected object or proplist for object state, got {}",
                     other.type_name()
                 )))
             }
@@ -5253,12 +5279,8 @@ fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
 
     if let Some(arg) = args.get(index) {
         match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
+            Value::Object(_) | Value::Proplist(_) => {
+                target_id = object_id_from_value(arg);
                 index += 1;
             }
             Value::Nil => {
@@ -5427,12 +5449,8 @@ fn do_damage(args: &[Value]) -> Result<Value, RuntimeError> {
 
     if let Some(arg) = args.get(index) {
         match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
+            Value::Object(_) | Value::Proplist(_) => {
+                target_id = object_id_from_value(arg);
                 index += 1;
             }
             Value::Nil => {
@@ -5527,12 +5545,8 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
 
     if let Some(arg) = args.get(index) {
         match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
+            Value::Object(_) | Value::Proplist(_) => {
+                target_id = object_id_from_value(arg);
                 index += 1;
             }
             Value::Nil => {
@@ -5847,24 +5861,8 @@ fn set_action_targets(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
-                index += 1;
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {}
-        }
-    }
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "GetAction", "target")?;
 
     if index < args.len() {
         return Err(RuntimeError::new(
@@ -5921,24 +5919,8 @@ fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn get_act_time(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
-                index += 1;
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {}
-        }
-    }
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "GetActTime", "target")?;
 
     if index < args.len() {
         return Err(RuntimeError::new(
@@ -5983,24 +5965,8 @@ fn get_act_time(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn get_phase(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
-                index += 1;
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {}
-        }
-    }
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "GetPhase", "target")?;
 
     if index < args.len() {
         return Err(RuntimeError::new(
@@ -6059,24 +6025,8 @@ fn set_phase(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     let mut index = 1;
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
-                index += 1;
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {}
-        }
-    }
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "SetPhase", "target")?;
 
     if index < args.len() {
         return Err(RuntimeError::new(
@@ -6107,24 +6057,8 @@ fn set_phase(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn get_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
-                index += 1;
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {}
-        }
-    }
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "GetActionData", "target")?;
 
     if index < args.len() {
         return Err(RuntimeError::new(
@@ -6164,24 +6098,8 @@ fn get_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn get_procedure(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
-                index += 1;
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {}
-        }
-    }
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "GetProcedure", "target")?;
 
     if index < args.len() {
         return Err(RuntimeError::new(
@@ -7132,24 +7050,8 @@ fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     let mut index = 1;
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
-                index += 1;
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {}
-        }
-    }
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "SetDir", "target")?;
 
     if index < args.len() {
         return Err(RuntimeError::new(
@@ -7180,24 +7082,8 @@ fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn get_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
-                index += 1;
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {}
-        }
-    }
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "GetDir", "target")?;
 
     if index < args.len() {
         return Err(RuntimeError::new(
@@ -7329,24 +7215,8 @@ fn set_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     let mut index = 1;
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
-                index += 1;
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {}
-        }
-    }
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "SetComDir", "target")?;
 
     if index < args.len() {
         return Err(RuntimeError::new(
@@ -7377,24 +7247,8 @@ fn set_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn get_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
-                index += 1;
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {}
-        }
-    }
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "GetComDir", "target")?;
 
     if index < args.len() {
         return Err(RuntimeError::new(
@@ -7729,7 +7583,10 @@ fn get_velocity_component(
     let mut index = 0;
     let mut target_id: Option<ObjectId> = None;
     if let Some(arg) = args.get(index) {
-        if matches!(arg, Value::Proplist(_) | Value::Nil | Value::Int(0)) {
+        if matches!(
+            arg,
+            Value::Object(_) | Value::Proplist(_) | Value::Nil | Value::Int(0)
+        ) {
             target_id =
                 parse_object_reference_argument(arg, component.get_function_name(), "target")?;
             index += 1;
@@ -7805,7 +7662,10 @@ fn set_velocity_component(
     let mut target_id: Option<ObjectId> = None;
 
     if let Some(arg) = args.get(index) {
-        if matches!(arg, Value::Proplist(_) | Value::Nil | Value::Int(0)) {
+        if matches!(
+            arg,
+            Value::Object(_) | Value::Proplist(_) | Value::Nil | Value::Int(0)
+        ) {
             target_id =
                 parse_object_reference_argument(arg, component.set_function_name(), "target")?;
             index += 1;
@@ -7886,7 +7746,10 @@ fn set_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 1;
     let mut target_id: Option<ObjectId> = None;
     if let Some(arg) = args.get(index) {
-        if matches!(arg, Value::Proplist(_) | Value::Nil | Value::Int(0)) {
+        if matches!(
+            arg,
+            Value::Object(_) | Value::Proplist(_) | Value::Nil | Value::Int(0)
+        ) {
             target_id = parse_object_reference_argument(arg, "SetRDir", "target")?;
             index += 1;
         }
@@ -7938,7 +7801,10 @@ fn get_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let mut target_id: Option<ObjectId> = None;
     if let Some(arg) = args.get(index) {
-        if matches!(arg, Value::Proplist(_) | Value::Nil | Value::Int(0)) {
+        if matches!(
+            arg,
+            Value::Object(_) | Value::Proplist(_) | Value::Nil | Value::Int(0)
+        ) {
             target_id = parse_object_reference_argument(arg, "GetRDir", "target")?;
             index += 1;
         }
@@ -9886,24 +9752,8 @@ fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let mut index = 1;
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
-                index += 1;
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {}
-        }
-    }
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "SetObjectStatus", "target")?;
 
     if let Some(arg) = args.get(index) {
         match arg {
@@ -9953,25 +9803,11 @@ fn get_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let mut target_id: Option<ObjectId> = None;
-    if let Some(arg) = args.first() {
-        match arg {
-            Value::Proplist(map) => {
-                if let Some(Value::Int(id)) = map.get("id") {
-                    if *id >= 0 {
-                        target_id = Some(ObjectId::new(*id as u64));
-                    }
-                }
-            }
-            Value::Nil => {}
-            other => {
-                return Err(RuntimeError::new(format!(
-                    "GetObjectStatus: expected proplist or nil for target, got {}",
-                    other.type_name()
-                )))
-            }
-        }
-    }
+    let target_id = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "GetObjectStatus",
+        "target",
+    )?;
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -10001,11 +9837,11 @@ fn snapshot_effects_from_context(scope: EffectScope) -> Option<Vec<EffectState>>
 
 fn determine_scope_from_state(value: &Value) -> Result<EffectScope, RuntimeError> {
     match value {
-        Value::Proplist(_) => Ok(EffectScope::Object),
+        Value::Object(_) | Value::Proplist(_) => Ok(EffectScope::Object),
         Value::Nil => Ok(EffectScope::Global),
         Value::Int(id) if *id == 0 => Ok(EffectScope::Global),
         other => Err(RuntimeError::new(format!(
-            "effect host functions expected proplist, nil, or 0 for state, got {}",
+            "effect host functions expected object, proplist, nil, or 0 for state, got {}",
             other.type_name()
         ))),
     }
@@ -10014,10 +9850,11 @@ fn determine_scope_from_state(value: &Value) -> Result<EffectScope, RuntimeError
 fn extract_effects_from_state(state: &Value) -> Result<Vec<EffectState>, RuntimeError> {
     let map = match state {
         Value::Proplist(map) => map,
+        Value::Object(_) => return Ok(Vec::new()),
         Value::Nil => return Ok(Vec::new()),
         other => {
             return Err(RuntimeError::new(format!(
-                "GetEffect: expected proplist or nil for state, got {}",
+                "GetEffect: expected object, proplist, or nil for state, got {}",
                 other.type_name()
             )))
         }
@@ -10115,6 +9952,7 @@ fn value_to_effect_var(value: &Value) -> EffectVarValue {
         Value::Bool(value) => EffectVarValue::Bool(*value),
         Value::String(value) => EffectVarValue::String(value.clone()),
         Value::C4Id(id) => EffectVarValue::String(id.clone()),
+        Value::Object(id) => EffectVarValue::Object(*id),
         Value::Array(entries) => {
             let vars = entries.iter().map(value_to_effect_var).collect();
             EffectVarValue::Array(vars)
@@ -10135,6 +9973,7 @@ fn effect_var_to_value(value: &EffectVarValue) -> Value {
         EffectVarValue::Int(value) => Value::Int(*value),
         EffectVarValue::Bool(value) => Value::Bool(*value),
         EffectVarValue::String(value) => Value::String(value.clone()),
+        EffectVarValue::Object(id) => Value::Object(*id),
         EffectVarValue::Array(entries) => {
             let vars = entries.iter().map(effect_var_to_value).collect();
             Value::Array(vars)
@@ -10152,6 +9991,7 @@ fn effect_var_to_value(value: &EffectVarValue) -> Value {
 
 fn parse_command_target(value: &Value) -> Result<Option<i32>, RuntimeError> {
     match value {
+        Value::Object(_) => Ok(object_id_from_value(value).map(|id| truncate_to_i32(id.as_u64()))),
         Value::Proplist(map) => match map.get("id") {
             Some(Value::Int(id)) => Ok(Some(*id)),
             _ => Err(RuntimeError::new(
@@ -10161,7 +10001,7 @@ fn parse_command_target(value: &Value) -> Result<Option<i32>, RuntimeError> {
         Value::Nil => Ok(None),
         Value::Int(value) if *value == 0 => Ok(None),
         other => Err(RuntimeError::new(format!(
-            "AddEffect: expected proplist, nil, or 0 for command target, got {}",
+            "AddEffect: expected object, proplist, nil, or 0 for command target, got {}",
             other.type_name()
         ))),
     }
@@ -14643,12 +14483,7 @@ mod tests {
         });
 
         let value = result.expect("GetActionTarget succeeds");
-        match value {
-            Value::Proplist(map) => {
-                assert_eq!(map.get("id"), Some(&Value::Int(12)));
-            }
-            other => panic!("expected proplist, got {:?}", other),
-        }
+        assert_eq!(value, object_reference_value(ObjectId::new(12)));
 
         let update = outcome.object_update.expect("object update recorded");
         let action = update.action.expect("action update exists");
@@ -14677,18 +14512,11 @@ mod tests {
         );
         let world = HostWorldContext::from_objects(vec![other]);
         let (result, _) = with_object_host_context_with_world(world, || {
-            let mut target = HashMap::new();
-            target.insert("id".into(), Value::Int(99));
-            get_action_target(&[Value::Int(0), Value::Proplist(target)])
+            get_action_target(&[Value::Int(0), object_reference_value(ObjectId::new(99))])
         });
 
         let value = result.expect("GetActionTarget succeeds");
-        match value {
-            Value::Proplist(map) => {
-                assert_eq!(map.get("id"), Some(&Value::Int(77)));
-            }
-            other => panic!("expected proplist, got {:?}", other),
-        }
+        assert_eq!(value, object_reference_value(ObjectId::new(77)));
     }
 
     #[test]
@@ -15491,23 +15319,27 @@ mod tests {
                 Value::Nil,
                 Value::Nil,
                 Value::Int(3),
+                object_reference_value(ObjectId::new(44)),
             ])?;
 
             let initial = effect_var(&[Value::Int(0), state.clone(), Value::Int(1)])?;
             assert_eq!(initial, Value::Int(3));
 
-            let unset = effect_var(&[Value::Int(1), state.clone(), Value::Int(1)])?;
+            let object = effect_var(&[Value::Int(1), state.clone(), Value::Int(1)])?;
+            assert_eq!(object, object_reference_value(ObjectId::new(44)));
+
+            let unset = effect_var(&[Value::Int(2), state.clone(), Value::Int(1)])?;
             assert_eq!(unset, Value::Nil);
 
             let updated = effect_var(&[
-                Value::Int(1),
+                Value::Int(2),
                 state.clone(),
                 Value::Int(1),
                 Value::String("beam".into()),
             ])?;
             assert_eq!(updated, Value::String("beam".into()));
 
-            let reread = effect_var(&[Value::Int(1), state.clone(), Value::Int(1)])?;
+            let reread = effect_var(&[Value::Int(2), state.clone(), Value::Int(1)])?;
             assert_eq!(reread, Value::String("beam".into()));
 
             Ok(Value::Nil)
@@ -15517,9 +15349,10 @@ mod tests {
         assert_eq!(outcome.object.len(), 2);
         match &outcome.object[1] {
             EffectCommand::Add(effect) => {
-                assert_eq!(effect.vars().len(), 2);
+                assert_eq!(effect.vars().len(), 3);
                 assert_eq!(effect.vars()[0], EffectVarValue::Int(3));
-                assert_eq!(effect.vars()[1], EffectVarValue::String("beam".into()));
+                assert_eq!(effect.vars()[1], EffectVarValue::Object(44));
+                assert_eq!(effect.vars()[2], EffectVarValue::String("beam".into()));
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -16474,15 +16307,7 @@ mod tests {
         );
         let (result, _) = with_effect_context(Some(context), &[], world, 100, || contained(&[]));
         let value = result.expect("Contained with container succeeds");
-        match value {
-            Value::Proplist(map) => {
-                assert_eq!(
-                    map.get("id"),
-                    Some(&Value::Int(container_id.as_u64() as i32))
-                );
-            }
-            other => panic!("expected proplist for container reference, got {other:?}"),
-        }
+        assert_eq!(value, object_reference_value(container_id));
     }
 
     #[test]
@@ -16574,12 +16399,7 @@ mod tests {
 
         let (result, _) = with_effect_context(Some(context), &[], world, 200, || contents(&[]));
         let value = result.expect("Contents succeeds");
-        match value {
-            Value::Proplist(map) => {
-                assert_eq!(map.get("id"), Some(&Value::Int(item_id.as_u64() as i32)));
-            }
-            other => panic!("expected proplist result for contents, got {other:?}"),
-        }
+        assert_eq!(value, object_reference_value(item_id));
     }
 
     #[test]
@@ -16652,15 +16472,7 @@ mod tests {
         let args = [Value::Nil, Value::Nil, Value::Bool(true)];
         let (result, _) = with_effect_context(Some(context), &[], world, 200, || contents(&args));
         let value = result.expect("Contents with attachments succeeds");
-        match value {
-            Value::Proplist(map) => {
-                assert_eq!(
-                    map.get("id"),
-                    Some(&Value::Int(attached_id.as_u64() as i32))
-                );
-            }
-            other => panic!("expected proplist result for contents, got {other:?}"),
-        }
+        assert_eq!(value, object_reference_value(attached_id));
     }
 
     #[test]
@@ -16876,12 +16688,7 @@ mod tests {
         let (result, _) =
             with_effect_context(Some(context), &[], world, 400, || find_contents(&args));
         let value = result.expect("FindContents succeeds");
-        match value {
-            Value::Proplist(map) => {
-                assert_eq!(map.get("id"), Some(&Value::Int(gem_id.as_u64() as i32)));
-            }
-            other => panic!("expected proplist from FindContents, got {other:?}"),
-        }
+        assert_eq!(value, object_reference_value(gem_id));
     }
 
     #[test]
@@ -16976,12 +16783,7 @@ mod tests {
             find_other_contents(&args)
         });
         let value = result.expect("FindOtherContents succeeds");
-        match value {
-            Value::Proplist(map) => {
-                assert_eq!(map.get("id"), Some(&Value::Int(hammer_id.as_u64() as i32)));
-            }
-            other => panic!("expected proplist from FindOtherContents, got {other:?}"),
-        }
+        assert_eq!(value, object_reference_value(hammer_id));
     }
 
     #[test]
@@ -17222,15 +17024,7 @@ mod tests {
         ];
         let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
         let value = result.expect("FindObject succeeds");
-        let map = match value {
-            Value::Proplist(map) => map,
-            other => panic!("expected object reference, got {other:?}"),
-        };
-        let id_value = map.get("id").expect("object reference contains id");
-        let Value::Int(id) = id_value else {
-            panic!("expected integer id, got {id_value:?}");
-        };
-        assert_eq!(*id, matching_id.as_u64() as i32);
+        assert_eq!(value, object_reference_value(matching_id));
     }
 
     #[test]

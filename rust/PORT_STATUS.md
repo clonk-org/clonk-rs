@@ -97,7 +97,7 @@ audited subsystems are determinism-critical.
 
 | Subsystem | Coverage | Key Parity Risk | Rust Location |
 |---|---|---|---|
-| **script-values** | partial | **Done:** `C4ScriptCnvMap` 81-cell conversion table + `ConvertTo` dispatch (differential-locked `script_value_convert`); boost `hashCombine` + libc++ `std::hash<C4Value>` map-key hash (`script_value_hash`); recursive FFI marshalling for `C4Id`/`Array`/`Proplist` through `LcScriptValueKind` + `LcScriptMapEntry`; VM-visible reference semantics for `&` params, `func &` returns, Local/Var slots, and array/map element refs. **Open:** raw `C4V_C4Object` value identity (still host-opaque), `GuessType()` data-nonzero path (unreachable in the eager Rust value model — types are always known), C++ string-table interning/refcounts. Save/load + net sync still incomplete. | `lc-script/src/value.rs`, `lc-script/src/vm.rs` |
+| **script-values** | partial | **Done:** `C4ScriptCnvMap` 81-cell conversion table + `ConvertTo` dispatch (differential-locked `script_value_convert`); boost `hashCombine` + libc++ `std::hash<C4Value>` map-key hash (`script_value_hash`); typed `C4V_C4Object` identity as `Value::Object(u64)` through VM equality/truthiness/type/hash, FFI, host `this`, object-returning helpers, and effect vars; recursive FFI marshalling for `C4Id`/`Array`/`Proplist` through `LcScriptValueKind` + `LcScriptMapEntry`; VM-visible reference semantics for `&` params, `func &` returns, Local/Var slots, and array/map element refs. **Open:** `GuessType()` data-nonzero path (unreachable in the eager Rust value model — types are always known), C++ string-table interning/refcounts. Save/load + net sync still incomplete. | `lc-script/src/value.rs`, `lc-script/src/vm.rs`, `lc-engine/src/compat.rs` |
 | **particles** | **stub (420 vs 808)** | `ActiveParticle::tick()` is `pos+=vel; life-=1` only — no gravity, wind, collision, alpha fade, animation, or `SafeRandom` variation. `Cast()`, `Push()`, all `fx*` procs, `C4ParticleDef::Load()` absent. Any particle scenario desyncs RNG + state. | `lib.rs:669-860,12136-12547`; `compat.rs:8355-8539` |
 | **findobject-ocf** | **stub (35%, 280 vs 956)** | No `CreateByValue()` condition-tree factory (nested `C4FO_And/Or/Not` fail silently), no `C4SortObject` (`Random/Speed/Mass/Value` unsorted → desync), no `C4FO_AtRect`/`UseShapes()` beyond the legacy rectangle path. | `compat.rs:1667-1835,6784-6931`; `ocf.rs` |
 | **movement-physics** | partial | Central motion accumulates sub-pixel fixed velocity, steps x/y per pixel, consumes DefCore/current owned vertices and `StretchGrowth`/Jolt construction shape updates, runs shape/vertex `ContactCheck`, dispatches ContactLeft/Right/Top/Bottom and Hit/Hit2/Hit3 in C++ order, applies redirect/friction, clamps landscape and layer `TargetBounds`, overlays active DefCore solid masks as `MCVehic` contact density with sprite-alpha bitmap transparency, supports `Shape.Attach`, forces Jump/default on attach loss, rolls back per-degree rotation, and uses C++ density levels for background/material/vehicle contact checks (`C4M_Background=0`, material `Density`, closed side bounds and solid masks `C4M_Vehicle=100`). **Missing:** rotated solid-mask put-buffer semantics, `SetSolidMask`/solid-mask update lifetime, attached-object pushback. | `lib.rs`, `landscape.rs` |
@@ -142,11 +142,11 @@ array indices/dispatch; `forward_rest` variadic TODO (`vm.rs:464,484`);
 (`:493-496`) by-name, no inheritance/overload chain. (`Expr::This`, div-by-zero,
 slots, stack limit — fixed; see Completed.)
 
-**script-values** — `C4ScriptCnvMap`/`ConvertTo` and the map-key hash are no
-longer stubs (ported + differential-locked). VM-visible references for `&`
-params/returns and container lvalues are implemented. Still stubbed: raw
-`C4V_C4Object` value identity is represented by host-opaque values, and strings
-are owned Rust strings rather than C++ string-table entries.
+**script-values** — `C4ScriptCnvMap`/`ConvertTo`, the map-key hash, typed
+`C4V_C4Object` identity, VM-visible references for `&` params/returns and
+container lvalues, and C4Id/Array/Proplist/Object FFI marshalling are no longer
+stubs. Still stubbed: strings are owned Rust strings rather than C++ string-table
+entries.
 
 **objects-core** — `reset_action_to_default` (`lib.rs:10629`) no `SetActionByName`
 enforcement; `apply_*_procedure` (`:10244+`) no ObjectCom transitions;
@@ -275,9 +275,10 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
    boost `hashCombine` + `std::hash<C4Value>` (`:923-1029`; `script_value_hash`);
    recursive C4Id/Array/Proplist FFI marshalling in `rust_value_to_lc()` +
    `lc_value_to_rust()` (`ffi.rs`); VM-visible reference semantics for `&`
-   params, `func &` returns, Local/Var slots, and array/map element refs.
-   **Remaining:** raw `C4V_C4Object` identity, C++ string-table interning/
-   refcounts, full save/load + net sync wiring.
+   params, `func &` returns, Local/Var slots, and array/map element refs; typed
+   `C4V_C4Object` identity as `Value::Object(u64)` through VM/FFI/host helpers.
+   **Remaining:** C++ string-table interning/refcounts, full save/load + net
+   sync wiring.
 8. **DONE** — C4Script VM operator parity + `Expr::This` + Var/Local slots (see
    Completed).
 9. **PARTIAL** — Material reaction execution. Mass-mover path runs
@@ -308,6 +309,24 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
 ---
 
 ## Completed (changelog)
+
+**Script value object identity — item 7 (partial) (2026-06-05).** Replaced the
+old object-reference proplist shim as the primary representation with typed
+object values:
+- Added `Value::Object(u64)` for `C4V_C4Object`, including VM equality,
+  truthiness, `type_name() == "object"`, `c4v_type()`, and deterministic
+  `std::hash<C4Value>` parity hashing under the object type tag.
+- Extended FFI with `LcScriptValueKind::Object` and an object-id payload, while
+  preserving the existing Array/Proplist marshalling fields.
+- Changed engine object-returning helpers (`object_reference_value`, contents,
+  find-object/content helpers, action targets, `Contained`, etc.) to return typed
+  objects; host parsers accept typed objects and the legacy `{id = ...}` proplist
+  shim for compatibility.
+- Effect variables now preserve object identity as `EffectVarValue::Object(u64)`
+  instead of collapsing objects into lossy integers.
+- Covered by `this` identity tests, FFI nested round trips, object-returning host
+  helper tests, effect-var object round trips, full `lc-script --features ffi`,
+  and full `lc-engine`.
 
 **Script value references — item 7 (partial) (2026-06-05).** Replaced the VM's
 synthetic `__funcref_*` placeholder with internal lvalue handles:
@@ -340,9 +359,10 @@ Extended the C ABI value shape beyond Nil/Int/Bool/String:
   classes from the C4Value.cpp:481-486 macros; `Warn` derived since it is a pure
   function of the class), and the table transcribed cell-for-cell into
   `value.rs` (`C4_SCRIPT_CNV_MAP`).
-- `Value::c4v_type()` (the eager Rust model only maps `Nil`→`C4V_Any`; no
-  `C4V_C4Object`/`C4V_pC4Value` *value* yet) and `Value::convert_to(to, strict)`
-  mirroring `ConvertTo`: `CnvOK`→true, `FnCnvError`→false,
+- `Value::c4v_type()` (the eager Rust model only maps `Nil`→`C4V_Any`;
+  `C4V_pC4Value` remains internal VM reference state) and
+  `Value::convert_to(to, strict)` mirroring `ConvertTo`: `CnvOK`→true,
+  `FnCnvError`→false,
   `FnCnvDirectOld`→`!strict`, `FnCnvInt2Id`→int in `0..=9999`, `FnCnvGuess`→true
   (nil "is every type except a reference"; the Game-dependent `GuessType`
   data-nonzero path is unreachable because types are always known),

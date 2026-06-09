@@ -5,6 +5,7 @@ const C4V_ANY: usize = 0;
 const C4V_INT: usize = 1;
 const C4V_BOOL: usize = 2;
 const C4V_C4ID: usize = 3;
+const C4V_C4OBJECT: usize = 4;
 const C4V_STRING: usize = 5;
 const C4V_ARRAY: usize = 6;
 const C4V_MAP: usize = 7;
@@ -127,6 +128,7 @@ pub enum Value {
     Bool(bool),
     String(String),
     C4Id(String),
+    Object(u64),
     Array(Vec<Value>),
     Proplist(HashMap<String, Value>),
     Nil,
@@ -143,6 +145,7 @@ impl Value {
             Value::Int(i) => *i != 0,
             Value::String(_) => true,
             Value::C4Id(id) => !id.is_empty(),
+            Value::Object(id) => *id != 0,
             Value::Array(_) => true,
             Value::Proplist(_) => true,
             Value::Nil => false,
@@ -172,6 +175,7 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::String(_) => "string",
             Value::C4Id(_) => "id",
+            Value::Object(_) => "object",
             Value::Array(_) => "array",
             Value::Proplist(_) => "map",
             Value::Nil => "nil",
@@ -189,6 +193,7 @@ impl Value {
                 c4_hash_typed(C4V_STRING, cpp_string_view_hash(value.as_bytes()))
             }
             Value::C4Id(value) => c4_hash_typed(C4V_C4ID, hash_i32(c4_id_raw(value) as i32)),
+            Value::Object(id) => c4_hash_typed(C4V_C4OBJECT, *id as usize),
             Value::Array(values) => values.iter().fold(C4V_ARRAY, |hash, value| {
                 c4_hash_combine(hash, value.c4_value_hash())
             }),
@@ -209,14 +214,16 @@ impl Value {
     /// The `C4V_Type` this value presents to the conversion table
     /// (`C4ScriptCnvMap`, indexed by `C4V_Type`, C4Value.h:37-54). The Rust
     /// value model tags every value with its concrete type, so the only value
-    /// that maps to `C4V_Any` is `Nil` (a C++ `C4V_Any` whose `Data == 0`);
-    /// there is no `C4V_C4Object`/`C4V_pC4Value` *value* representation yet.
+    /// that maps to `C4V_Any` is `Nil` (a C++ `C4V_Any` whose `Data == 0`).
+    /// `C4V_pC4Value` is represented internally by VM lvalue handles, not as a
+    /// public [`Value`] variant.
     pub fn c4v_type(&self) -> C4VType {
         match self {
             Value::Nil => C4VType::Any,
             Value::Int(_) => C4VType::Int,
             Value::Bool(_) => C4VType::Bool,
             Value::C4Id(_) => C4VType::C4Id,
+            Value::Object(_) => C4VType::C4Object,
             Value::String(_) => C4VType::String,
             Value::Array(_) => C4VType::Array,
             Value::Proplist(_) => C4VType::Map,
@@ -624,6 +631,7 @@ impl fmt::Display for Value {
             Value::Bool(b) => write!(f, "{b}"),
             Value::String(s) => write!(f, "\"{}\"", s),
             Value::C4Id(id) => write!(f, "{id}"),
+            Value::Object(id) => write!(f, "<object {id}>"),
             Value::Array(values) => {
                 let mut first = true;
                 write!(f, "[")?;
@@ -661,16 +669,22 @@ mod cnv_tests {
 
     // Each Rust value presents the `C4V_Type` the conversion table is indexed
     // by (C4Value.h:37-54). The eager Rust value model only ever maps `Nil` to
-    // `C4V_Any`; there is no `C4V_C4Object`/`C4V_pC4Value` *value* yet.
+    // `C4V_Any`; there is no `C4V_pC4Value` public value representation.
     #[test]
     fn value_reports_its_c4v_type() {
         assert_eq!(Value::Nil.c4v_type(), C4VType::Any);
         assert_eq!(Value::Int(0).c4v_type(), C4VType::Int);
         assert_eq!(Value::Bool(true).c4v_type(), C4VType::Bool);
         assert_eq!(Value::C4Id("CLNK".into()).c4v_type(), C4VType::C4Id);
+        assert_eq!(Value::Object(42).c4v_type(), C4VType::C4Object);
         assert_eq!(Value::String("x".into()).c4v_type(), C4VType::String);
         assert_eq!(Value::Array(vec![]).c4v_type(), C4VType::Array);
         assert_eq!(Value::Proplist(HashMap::new()).c4v_type(), C4VType::Map);
+    }
+
+    #[test]
+    fn object_values_report_cpp_type_name() {
+        assert_eq!(Value::Object(42).type_name(), "object");
     }
 
     // Representative cells of C4ScriptCnvMap (C4Value.cpp:488-598).
@@ -734,10 +748,14 @@ mod cnv_tests {
         assert!(Value::C4Id("CLNK".into()).convert_to(Int, false));
         assert!(!Value::String("x".into()).convert_to(Int, true));
         assert!(Value::String("x".into()).convert_to(Int, false));
+        assert!(!Value::Object(42).convert_to(Int, true));
+        assert!(Value::Object(42).convert_to(Int, false));
         // FnCnvError is absolute regardless of #strict (C4Value.cpp:439-443).
         assert!(!Value::Array(vec![]).convert_to(Int, false));
         assert!(!Value::Int(5).convert_to(String, false));
         // same-type and "to bool" are always OK for non-references.
+        assert!(Value::Object(42).convert_to(C4Object, true));
+        assert!(Value::Object(42).convert_to(Bool, true));
         assert!(Value::Array(vec![]).convert_to(Array, true));
         assert!(Value::Proplist(HashMap::new()).convert_to(Bool, true));
     }

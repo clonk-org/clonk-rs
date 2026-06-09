@@ -6,6 +6,7 @@ pub enum EffectVarValue {
     Int(i32),
     Bool(bool),
     String(String),
+    Object(u64),
     Array(Vec<EffectVarValue>),
     Proplist(BTreeMap<String, EffectVarValue>),
     #[default]

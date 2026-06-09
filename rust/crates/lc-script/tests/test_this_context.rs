@@ -5,17 +5,12 @@
 // (vm.rs), so any script that reads `this` as a value (e.g. `var me = this;`,
 // passing `this` to a function, or `this == other`) diverged.
 //
-// lc-script stays host-agnostic: the engine provides an opaque `this` Value
-// (in this port an object reference is `Proplist {"id": <number>}`), and the
-// VM threads it through the call and returns it for `Expr::This`. Plain nested
-// calls inherit the same `this` (they run on the same object).
+// lc-script stays host-agnostic: the engine provides an opaque typed object id,
+// and the VM threads it through the call and returns it for `Expr::This`. Plain
+// nested calls inherit the same `this` (they run on the same object).
 
 use lc_script::{Engine, Value};
 use std::collections::HashMap;
-
-fn object_ref(id: i32) -> Value {
-    Value::Proplist(HashMap::from([("id".to_string(), Value::Int(id))]))
-}
 
 #[test]
 fn this_returns_the_provided_object_context() {
@@ -23,7 +18,7 @@ fn this_returns_the_provided_object_context() {
     engine
         .load_script("func Test() { return this; }")
         .expect("loads");
-    let this = object_ref(42);
+    let this = Value::Object(42);
     let (result, _) = engine
         .call_with_locals_and_this("Test", &[], &HashMap::new(), this.clone())
         .expect("call succeeds");
@@ -45,9 +40,37 @@ fn this_is_inherited_by_nested_plain_calls() {
     engine
         .load_script("func Inner() { return this; } func Test() { return Inner(); }")
         .expect("loads");
-    let this = object_ref(7);
+    let this = Value::Object(7);
     let (result, _) = engine
         .call_with_locals_and_this("Test", &[], &HashMap::new(), this.clone())
         .expect("call succeeds");
     assert_eq!(result, this);
+}
+
+#[test]
+fn object_values_compare_by_identity() {
+    let mut engine = Engine::new();
+    engine
+        .load_script(
+            r#"
+            func Same(other) { return this == other; }
+            func Different(other) { return this != other; }
+            "#,
+        )
+        .expect("loads");
+    let this = Value::Object(7);
+    assert_eq!(
+        engine
+            .call_with_locals_and_this("Same", &[Value::Object(7)], &HashMap::new(), this.clone())
+            .expect("call succeeds")
+            .0,
+        Value::Bool(true)
+    );
+    assert_eq!(
+        engine
+            .call_with_locals_and_this("Different", &[Value::Object(8)], &HashMap::new(), this)
+            .expect("call succeeds")
+            .0,
+        Value::Bool(true)
+    );
 }

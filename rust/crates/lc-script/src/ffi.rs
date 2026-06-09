@@ -17,6 +17,7 @@ pub enum LcScriptValueKind {
     C4Id = 4,
     Array = 5,
     Proplist = 6,
+    Object = 7,
 }
 
 #[repr(C)]
@@ -29,6 +30,7 @@ pub struct LcScriptValue {
     pub array_len: usize,
     pub proplist_entries: *mut LcScriptMapEntry,
     pub proplist_len: usize,
+    pub object_id_value: u64,
 }
 
 #[repr(C)]
@@ -48,6 +50,7 @@ impl Default for LcScriptValue {
             array_len: 0,
             proplist_entries: ptr::null_mut(),
             proplist_len: 0,
+            object_id_value: 0,
         }
     }
 }
@@ -151,6 +154,7 @@ fn lc_value_to_rust(value: &LcScriptValue) -> Result<Value, ()> {
             let c_str = unsafe { CStr::from_ptr(value.string_value) };
             Ok(Value::C4Id(c_str.to_string_lossy().into_owned()))
         }
+        LcScriptValueKind::Object => Ok(Value::Object(value.object_id_value)),
         LcScriptValueKind::Array => {
             let values = lc_value_slice(value)?
                 .iter()
@@ -203,6 +207,11 @@ fn rust_value_to_lc(value: &Value) -> LcScriptValue {
                 ..LcScriptValue::default()
             },
             Err(_) => LcScriptValue::default(),
+        },
+        Value::Object(id) => LcScriptValue {
+            kind: LcScriptValueKind::Object,
+            object_id_value: *id,
+            ..LcScriptValue::default()
         },
         Value::Array(values) => {
             let (array_values, array_len) =
@@ -333,6 +342,7 @@ mod tests {
             Value::Int(7),
             Value::Bool(true),
             Value::C4Id("ROCK".to_string()),
+            Value::Object(42),
             Value::Array(vec![Value::String("nested".to_string())]),
             Value::Array(Vec::new()),
         ]);
@@ -353,6 +363,7 @@ mod tests {
                 Value::Array(vec![Value::Int(1), Value::String("two".to_string())]),
             ),
             ("id".to_string(), Value::C4Id("ROCK".to_string())),
+            ("object".to_string(), Value::Object(42)),
             (
                 "nested".to_string(),
                 Value::Proplist(HashMap::from([("answer".to_string(), Value::Int(42))])),

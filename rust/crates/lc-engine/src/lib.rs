@@ -16075,6 +16075,13 @@ fn value_to_object_reference(
                 Ok(Some(ObjectId::new(id as u64)))
             }
         }
+        Value::Object(id) => {
+            if id == 0 {
+                Ok(None)
+            } else {
+                Ok(Some(ObjectId::new(id)))
+            }
+        }
         Value::Proplist(map) => match map.get("id") {
             Some(Value::Int(id)) if *id >= 0 => Ok(Some(ObjectId::new(*id as u64))),
             Some(other) => Err(EngineError::InvalidScriptOutput {
@@ -16092,7 +16099,7 @@ fn value_to_object_reference(
             definition: definition.to_string(),
             function,
             detail: format!(
-                "expected int, proplist, or nil for action.{field}, got {}",
+                "expected object, int, proplist, or nil for action.{field}, got {}",
                 other.type_name()
             ),
         }),

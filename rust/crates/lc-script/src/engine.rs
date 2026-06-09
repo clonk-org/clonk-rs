@@ -172,8 +172,8 @@ impl Engine {
     }
 
     /// Like [`call_with_locals`], but also provides the `this` object context
-    /// returned by `Expr::This`. The value is host-opaque (lc-engine passes an
-    /// object reference proplist); pass `Value::Nil` for no context.
+    /// returned by `Expr::This`. Pass `Value::Object(id)` for an object context
+    /// or `Value::Nil` for no context.
     pub fn call_with_locals_and_this(
         &self,
         name: &str,
