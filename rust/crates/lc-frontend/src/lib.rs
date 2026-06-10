@@ -7,6 +7,8 @@
 )]
 
 pub mod clonk_fonts;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod input;
 mod startup_about;
 mod startup_main_menu;
