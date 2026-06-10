@@ -1,17 +1,21 @@
 # LegacyClonk Rust Port — Status & GAP LIST
 
-> Living document. Last updated 2026-06-05. The C++ engine in `../src/` is the
+> Living document. Last updated 2026-06-09. The C++ engine in `../src/` is the
 > **golden oracle**; parity = bit-for-bit match on simulation state. This file
 > tracks every divergence from that goal.
 
 ## State: broadly scaffolded, not yet lockstep-parity-capable
 
 The port reproduces the engine's *shape* (structs, enums, command dispatch, FFI,
-~1217 tests) and the two original headline determinism breaks — fixed-point math
-and the RNG — are now correct for the **currently ported paths**. Lockstep parity
-is still blocked by downstream stateful systems (`CrossCheck`, script-values,
-particles, materials) and residual movement systems outside the now-ported
-per-pixel contact-loop slices.
+~1300 tests) and the two original headline determinism breaks — fixed-point math
+and the RNG — are now correct for the **currently ported paths**. All Top-15
+action items are done or partial-with-documented-remainder. Lockstep parity is
+still blocked by the remaining epics: host→VM reentrancy (Find_Func/mrfScript/
+effect callbacks), C++ string interning + full save/load + binary packet
+encoding, the command-AI per-frame rework, position-dependent GBackWind/IFT,
+`ValByPhysical` limits across the non-fight action procedures + the
+C4ObjectInfo model — and proven only by the live C++↔Rust full-scenario
+shadow-diff (see Parity harnesses).
 
 ### The two foundational breaks — current status
 
@@ -99,17 +103,17 @@ audited subsystems are determinism-critical.
 |---|---|---|---|
 | **script-values** | partial | **Done:** `C4ScriptCnvMap` 81-cell conversion table + `ConvertTo` dispatch (differential-locked `script_value_convert`); boost `hashCombine` + libc++ `std::hash<C4Value>` map-key hash (`script_value_hash`); typed `C4V_C4Object` identity as `Value::Object(u64)` through VM equality/truthiness/type/hash, FFI, host `this`, object-returning helpers, and effect vars; recursive FFI marshalling for `C4Id`/`Array`/`Proplist` through `LcScriptValueKind` + `LcScriptMapEntry`; VM-visible reference semantics for `&` params, `func &` returns, Local/Var slots, and array/map element refs. **Open:** `GuessType()` data-nonzero path (unreachable in the eager Rust value model — types are always known), C++ string-table interning/refcounts. Save/load + net sync still incomplete. | `lc-script/src/value.rs`, `lc-script/src/vm.rs`, `lc-engine/src/compat.rs` |
 | **particles** | mostly done (sim side) | **Corrected risk model:** C4Particles is *non-sync-relevant by design* (C4Particles.h:18-27) — every draw is `SafeRandom` (wall-clock-seeded libc `rand()`, C4Random.h:35,71-75), never the synced LCG, and counts scale with local `SmokeLevel`. The real parity risk was script-visible behavior: `CastParticles`/`CastBackParticles`/`PushParticles` were unregistered (script abort vs C++ `true`). **Done:** `particles.rs` ports `C4ParticleDefCore`+`Load` adjustments, def registry/overload, `Create` (room check, Attach offset), `Cast` draw structure, `Push`, `fxStdInit/Exec` (move/collision/RByV/gravity/WindDrift/AlphaFade/delay-phase/fadeout/offscreen), `fxSmokeInit/Exec`, Bounce/BounceY/Stop/Die; host fns with C++ return semantics incl. GetDef-failure → false; engine exec order object Back→Front then Global; snapshot/restore. **Open:** Particle.txt group loading (lc-resources) + gfx length/aspect from Graphics.png, draw procs (presentation), position-dependent `GBackWind`, clearing object-layer particles on object death. | `lc-engine/src/particles.rs`; `lib.rs`, `compat.rs` |
-| **findobject-ocf** | **stub (35%, 280 vs 956)** | No `CreateByValue()` condition-tree factory (nested `C4FO_And/Or/Not` fail silently), no `C4SortObject` (`Random/Speed/Mass/Value` unsorted → desync), no `C4FO_AtRect`/`UseShapes()` beyond the legacy rectangle path. | `compat.rs:1667-1835,6784-6931`; `ocf.rs` |
+| **findobject-ocf** | mostly done (2026-06-09) | **Done:** the full `CreateByValue()` condition-tree factory + `C4SortObject` with C++ cache semantics (see item 15) — `C4SO_Random` draws the synced `Random(1<<16)` once per object in collection order. **Open:** `Find_Func`/`Sort_Func` (host→VM reentrancy), `Controller` compares owner, `Layer` never matches, sector-bounds FindMany traversal order. | `compat.rs`; `ocf.rs` |
 | **movement-physics** | partial | Central motion accumulates sub-pixel fixed velocity, steps x/y per pixel, consumes DefCore/current owned vertices and `StretchGrowth`/Jolt construction shape updates, runs shape/vertex `ContactCheck`, dispatches ContactLeft/Right/Top/Bottom and Hit/Hit2/Hit3 in C++ order, applies redirect/friction, clamps landscape and layer `TargetBounds`, overlays active DefCore solid masks as `MCVehic` contact density with sprite-alpha bitmap transparency, supports `Shape.Attach`, forces Jump/default on attach loss, rolls back per-degree rotation, and uses C++ density levels for background/material/vehicle contact checks (`C4M_Background=0`, material `Density`, closed side bounds and solid masks `C4M_Vehicle=100`). **Missing:** rotated solid-mask put-buffer semantics, `SetSolidMask`/solid-mask update lifetime, attached-object pushback. | `lib.rs`, `landscape.rs` |
-| **objects-core** | partial | `AtObject()` exists; collection auto-check is sector-backed. Full `CrossCheck()` (919-LOC inter-object loop: Tick3/5/10/35 incineration/fight/collection/hit-damage) absent. OCF computes ~8 vs ~30 checks (`ocf.rs:46-76` vs `lib.rs:527-666`); object list is `Vec` vs category/ID-sorted. | `lib.rs`, `ocf.rs`, `compat.rs` |
-| **game-control-record** | partial (35%) | No varint frame-delta encoding (`C4Record.cpp:243-264`) — JSON snapshots instead. No `ControlRate`/`ControlTick` throttle, no `SyncRate` sync-check state machine, no `+37` end-marker (`:196`), no `Prepare()` pre-validation. | `lib.rs`, `control.rs`, `record.rs`, `ffi.rs` |
+| **objects-core** | mostly done (2026-06-09) | **Done:** full `CrossCheck()` — all three passes (Tick5 hostile fight + Tick35 contact incineration, every-frame hit-damage/fling + Tick3 collection, Tick10 contained fight; see Completed); fire model + `AssignDeath`; **C4PhysicalInfo physicals** (`[Physical]` parsing, `GetPhysical` override→def fallback, `TrainPhysical`, `ValByPhysical`, DoEnergy Energy-ceiling clamp) + the C++ DFA_FIGHT exec (see item 6). **Open:** OCF computes a subset of the ~30 C++ checks (`ocf.rs` vs `lib.rs:527-666`); object list is `Vec` vs category/ID-sorted; C4ObjectInfo (permanent training/experience) unmodeled. | `lib.rs`, `ocf.rs`, `compat.rs` |
+| **game-control-record** | mostly done (2026-06-09) | **Done:** the real C4ControlSyncCheck digest (Random3/RandomCount/AllCrewPosX/SectShapeSum/MassMoverIndex via `CreatePtr` slots), `ControlRate`/`ControlTick`/`SyncRate` state machine, `BinaryControlRecord` 2-byte chunk-head stream with `RCT_Frame` fillers and the `frame+37` `RCT_End` (see item 14). **Open:** control-packet payload serialization (`DecompileToBuf<StdCompilerBinWrite>`), lc-network DoInput/queue wiring for host sync-check broadcast, `Prepare()` pre-validation. | `lib.rs`, `control.rs`, `record.rs`, `ffi.rs` |
 | **material** | partial (40%) | Reaction *execution* partly missing: `mrfInsertCheck` splash/slide physics (`C4Material.cpp:570-604`) and script reactions unported. `MaterialReactionKind` classifies; mass-mover path now executes corrode/poof (see item 9). No full `ExtractMaterial/InsertMaterial` semantics. | `lc-engine/material.rs`, `lc-resources/material.rs` |
 | **pxs-massmover** | mostly done (2026-06-09) | **Done:** full `C4PXS::Execute` port — `pxs.rs` chunk/slot storage with `New()` lowest-free-slot reuse and chunk-major execution order (`C4PXS.cpp:175-234`), out-of-bounds rules, meePXSPos/meePXSMove reaction dispatch (`execute_pxs_reaction` mirrors mrfConvert/Poof/Corrode/Incinerate/Insert incl. depth-checked conversion and `Landscape.Incinerate`-at-position semantics), free-fall wind drift with the synced `Random(1200)` pair and `WindDrift_Factor`, coarse `_PathFree` (17×15 `PixCnt` cells, on-demand occupancy), step-loop with `fStopMovement` snap; `PXS.Cast` draw order (`r2` before `r1`, C4PXS.cpp:303-316) wired into blast (`level=60`, C4Landscape.cpp:1075-1078); dig spill as zero-velocity `PXS.Create`; raw-fixed save/load (`ParticleSnapshot.pxs_fixed`). Mass-mover side: down/L/R corrosion, two-pass reverse exec, `Random(10)` before `Rnd3()`. **Open:** mass-move `Convert` → `PXS.Create` handoff (C4Material.cpp:654-657; `MaterialReactionExecution::Converted` is produced but unconsumed), position-dependent `GBackWind`, exact `BlastFree` material accounting around the cast. The invented PXS→object friction coupling was REMOVED (C++ PXS never touch objects). | `pxs.rs`, `mass_mover.rs`, `lib.rs`, `landscape.rs` |
 | **landscape** | partial (25%) | Batch `apply_temperature_conversions` vs C++ incremental `ExecuteScan/DoScan` with `ScanX` cursor (scan order desyncs). No `PRETTY_TEMP_CONV`, no map creation (`ChunkyRandom`/`MapToLandscape`), no `DigFree/BlastFree`, no pixel ops, no Save/Load. Liquid model is segment- vs pixel-based. | `landscape.rs`, `material.rs` |
 | **effects** | partial (35%, 195 vs 921) | Builtin fire effect (300+ LOC) + helper effects (Splash/Smoke/Explosion/BubbleOut) missing. No `Check()` priority-conflict, no `TempRemove/TempReadd`. `advance_tick()` uses saturation vs modulo `iTime % iIntervall` → timing drift. Dispatch infra exists but never invoked for builtins. | `effect.rs`, `lib.rs:5175+,5272+` |
 | **commands** | partial (55%) | AI determinism: MoveTo lacks Jump/Flight/Swim control; Get missing `Random(15)-7` offset (`C4Command.cpp:1290`) + side-jump (`:1272`). Tick2/5/35 throttling absent → continuous exec breaks tick-sync. Scale/Hangle let-go thresholds missing. | `command.rs` |
-| **players-crew-teams** | partial (770 vs 5747) | Wealth clamp divergence (10k `adjust` vs 100k `set`, `player.rs:344,349`). Team home-base production sync missing (`C4RULE_TeamHombase`, `C4Player.cpp:1637`) → players advance independently. No `CheckElimination`, no hostility model, asset value is a caller stub. | `player.rs` |
-| **definitions-id** | partial (4319 LOC) | `CrossMapActMap()` procedure→numeric NOT done (`definition.rs:35` keeps actions as strings) → runtime action behavior diverges. No `GetComponents` override, no `CalcDefValue()`. C4ID byte extraction differs. Many DefCore flags unparsed. | `lc-resources/definition.rs`; `compat.rs` |
+| **players-crew-teams** | partial (770 vs 5747) | Wealth clamp divergence (10k `adjust` vs 100k `set`, `player.rs:344,349`). Team home-base production sync missing (`C4RULE_TeamHombase`, `C4Player.cpp:1637`) → players advance independently. No `CheckElimination`, asset value is a caller stub. Hostility model DONE (2026-06-09): `PlayerState.hostility` + `C4PlayerList::Hostile` one-way-counts-both-ways for the CrossCheck fight pass. | `player.rs` |
+| **definitions-id** | partial (4319 LOC) | `CrossMapActMap()` load-time mapping DONE (2026-06-09, item 11) but the engine runtime still dispatches on procedure strings, not the numeric indices. `[Physical]` section + ContactIncinerate/NoBurnDecay/NoBurnDamage/BurnTurnTo/IncompleteActivity now parsed (2026-06-09). No `GetComponents` override, no `CalcDefValue()`. C4ID byte extraction differs. Other DefCore flags still unparsed. | `lc-resources/definition.rs`; `compat.rs` |
 | **weather-sky** | mostly done (2026-06-09) | **Done:** the full Tick10 disaster block (meteor/lightning/earthquake/volcano, exact synced draw order — see item 13); stateful weather per `C4Weather::Execute` (C4Weather.cpp:72-101): Tick35 season/temperature, Tick1000 `TargetWind = C4SVal::Evaluate` (ONE synced `Random(2*Rnd+1)` draw, `BoundBy(Std+…−Rnd, Min, Max)` with the C4S Wind defaults `(0, 70, −100, 100)`), Tick10 ±1 wind step — replacing both the per-frame `gen_range` interval model and the invented sinusoidal `wind_force(frame)` (now a stateful-wind accessor). Engine snapshots regenerated. **Open:** position-dependent `GBackWind` (tunnel check), `SetSeasonGamma`, season Min/Max wrap from scenario StartSeason (mod-100 wrap used), sky parallax `wind/100` vs FIXED100. | `lib.rs`, `sky.rs` |
 | **config-info** | partial (49%) | `GetAName()` random name uses `Random()` — no Rust equivalent. No `PromotionUpdate()`. `RandomSeed = time(nullptr)` (`:425`) ties determinism to wall-clock. Default init differs (locale, control prefs). | `lc-core/std_config.rs`, `lc-app/settings.rs`, `scenario.rs` |
 | **resources-groups** | partial (43%) | Read-only: no group write/create (`Save/Add/Move/Delete`), no gzip, no CRC32 at open (`C4Group.cpp:791`). Path normalization (Rust `components()`) and WalkDir order may differ from C++ `DirectoryIterator`. | `group.rs`, `scenario.rs` |
@@ -308,12 +312,30 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
    for blasted-in-extinguisher; `AssignDeath` core (Dead action, command
    clear, contents ejection, Death callback with the tracked
    LastEnergyLossCausePlayer) fired by DoEnergy on first-zero energy.
-   **Open:** attach detach at fire start (needs the DFA_ATTACH action scan);
-   fire modes/sounds; Tick5 base extinguish (base model); SmokeRate smoke
-   (visual); DoEnergy physical max clamp and **DFA_FIGHT combat exec — both
-   blocked on the C4PhysicalInfo physicals model** (`ValByPhysical`,
-   `TrainPhysical`, GetPhysical()->Energy/Walk/Fight; the fight exec at
-   C4Object.cpp:5200-5241 derives its approach speed from physical Walk);
+   **Physicals model DONE (2026-06-09):** `C4PhysicalInfo` (21 fields,
+   C4InfoCore.h:34-63) parsed from the DefCore `[Physical]` section via the
+   `C4PhysInfoNameMap` names into `DefCore.physical` (defaults all zero);
+   `ValByPhysical` = `itofix(physical*(percent/5), C4MaxPhysical*20)` with
+   integer `percent/5` (C4InfoCore.h:224-227) + `Towards` snap-within-step
+   (C4Object.cpp:4561-4566) in `math.rs`; `Engine::object_physical` =
+   GetPhysical's override→definition fallback (C4Object.cpp:2118-2134);
+   `train_physical`/`TrainValue` only-nonzero/cap/never-decrease
+   (C4InfoCore.cpp:279-285) cloning the definition physicals on first
+   training; DoEnergy now clamps to the physical Energy ceiling
+   (C4Object.cpp:1361; zero-physical fixture definitions keep the legacy
+   unclamped ceiling — documented deviation); **DFA_FIGHT exec**
+   (C4Object.cpp:5200-5241): target-valid checks, Tick5
+   `TrainPhysical(Fight,1,C4MaxPhysical)`, facing by target x, stand-beside
+   at `target.x ± (Shape.Wdt/2+2)` with `lLimit = ValByPhysical(95, Walk)`
+   `Towards` stepping, own-shape distance check after the approach, grounded
+   `ydir=0`. **Open:** attach detach at fire start (needs the DFA_ATTACH
+   action scan); fire modes/sounds; Tick5 base extinguish (base model);
+   SmokeRate smoke (visual); `ValByPhysical` speed limits across the OTHER
+   action procedures (walk/swim/scale/hangle/dig still use the invented
+   `MovementProfile`); Breath/`ExecLife` asphyxiation; the C4ObjectInfo model
+   (permanent training, DoExperience — the fight exec skips the Tick35
+   `DoExperience(+2)`); temporary physicals + `SetPhysical`/`TrainPhysical`/
+   `ResetPhysical` host fns; `physical_override` and
    `last_energy_loss_cause` not yet snapshot-persisted; effect ClearAll
    revival abort and player pointer/view cleanup in AssignDeath.
 7. **PARTIAL** — `script-values`. **Done:** `C4ScriptCnvMap` 81-cell table +
@@ -374,16 +396,15 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
     then `Random(GBackWdt)`, size `BoundBy(15*GBackHgt/500+r2,10,60)`);
     launches spawn METO (fixed xdir `itofix(r2-50)/10`, rdir `itofix(1)/5`),
     FXQ1 + `Activate()`, FXV1 + `Activate(x,y,size,mat)`. New
-    `WeatherEvent::{Meteorite,Earthquake,Volcano}` variants. **Remaining:**
-    stateful weather Tick35 season/temperature + Tick1000/Tick10 wind (needs
-    replacing the functional `EnvironmentSettings::wind_force(frame)` model
-    with C++ mutable Wind/TargetWind/Season state); command Tick2/5/35
-    throttles (`PathChecked` Tick35 reset C4Command.cpp:255, swim-steer
-    Tick2 :372, Transfer Tick5 :1931 — blocked on the larger command-AI
-    rework, the Rust interval model is structurally different);
-    `ControlRate`/`ControlTick`/`SyncRate` modulo (`ffi.rs:451-489`); meteor
-    cave-landscape y offset needs the scenario `TopOpen` flag carried onto
-    the engine landscape.
+    `WeatherEvent::{Meteorite,Earthquake,Volcano}` variants. **Stateful
+    weather DONE (2026-06-09):** Tick35 season/temperature, Tick1000
+    `TargetWind = C4SVal::Evaluate`, Tick10 ±1 wind step (see the
+    weather-sky GAP row). `ControlRate`/`ControlTick`/`SyncRate` DONE with
+    item 14. **Remaining:** command Tick2/5/35 throttles (`PathChecked`
+    Tick35 reset C4Command.cpp:255, swim-steer Tick2 :372, Transfer Tick5
+    :1931 — blocked on the larger command-AI rework, the Rust interval model
+    is structurally different); meteor cave-landscape y offset needs the
+    scenario `TopOpen` flag carried onto the engine landscape.
 14. **MOSTLY DONE (2026-06-09)** — Sync-check state machine + binary record.
     **Done:** the C4ControlSyncCheck digest now carries the real C++ fields
     (`Random3` = the Rnd3 ring pointer, `RandomCount`, `AllCrewPosX` =
@@ -399,9 +420,10 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
     `BinaryControlRecord` with the exact 2-byte `C4RecordChunkHead` stream,
     `RCT_Frame` filler chunks past 0xff frame diffs, no-rewind diff clamp,
     and the truncated `frame + 37` `RCT_End` marker (C4Record.cpp:194-264).
-    **Open:** `MassMoverIndex` is still a signature hash (needs C++
-    `CreatePtr` slots); control-packet payload serialization into the binary
-    stream (`DecompileToBuf<StdCompilerBinWrite>` packet encoding) and the
+    `MassMoverIndex` now reports the real `CreatePtr` cursor over the
+    fixed-slot C4MassMoverSet model (2026-06-09). **Open:** control-packet
+    payload serialization into the binary stream
+    (`DecompileToBuf<StdCompilerBinWrite>` packet encoding) and the
     lc-network DoInput/queue wiring for host sync-check broadcast.
 15. **MOSTLY DONE (2026-06-09)** — `FindObject` condition-tree factory
     (`CreateByValue()`, C4FindObject.cpp:37-162) + `C4SortObject`
@@ -425,6 +447,27 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
 ---
 
 ## Completed (changelog)
+
+**C4PhysicalInfo physicals model + DFA_FIGHT exec (2026-06-09).** First of the
+five remaining epics. `lc-resources`: `PhysicalInfo` (21 i32 fields,
+C4InfoCore.h:34-63) with `C4PhysInfoNameMap` name lookup, parsed from the
+DefCore `[Physical]` section (defaults zero, C4InfoCore.cpp:181-205), and
+`TrainValue` only-nonzero/cap/never-decrease (C4InfoCore.cpp:279-285).
+`lc-engine/math.rs`: `val_by_physical` = `itofix(physical*(percent/5),
+C4MaxPhysical*20)` with integer `percent/5` (C4InfoCore.h:224-227);
+`towards` snap-within-step (C4Object.cpp:4561-4566). Engine:
+`Definition.physical`, `Object.physical_override`, `object_physical` =
+GetPhysical override→definition fallback (C4Object.cpp:2118-2134),
+`train_physical` cloning the definition physicals on first training
+(C4Object.cpp:2136-2146); `change_object_energy` clamps to the physical
+Energy ceiling (C4Object.cpp:1361) scaled to percent points — zero-physical
+fixture definitions keep the legacy unclamped ceiling (documented deviation).
+DFA_FIGHT exec rewritten to C4Object.cpp:5200-5241: Tick5 fight training,
+facing by target x, stand-beside `target.x ± (Shape.Wdt/2+2)` approach with
+`lLimit = ValByPhysical(95, Walk)` `Towards` stepping (replacing the invented
+MovementProfile-based approach), own-shape distance check after the approach,
+grounded `ydir=0`; the Tick35 `DoExperience(+2)` waits on the C4ObjectInfo
+model. Opens tracked in item 6.
 
 **Particle system — item 12 (sim side) (2026-06-09).** Ported C4Particles into
 `lc-engine/src/particles.rs` and corrected the audit's risk model: the C++
