@@ -6,6 +6,7 @@
     clippy::too_many_arguments
 )]
 
+pub mod clonk_fonts;
 mod input;
 mod startup_about;
 mod startup_main_menu;
@@ -34,6 +35,7 @@ pub use lc_gui::{
     GuiError as StartupMenuError, GuiResult as StartupMenuResult, ImageData, KeyCode,
     Point as GuiPoint, ScenarioEntry, ScenarioKind,
 };
+pub use clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 pub use startup_about::{AboutAction, StartupAboutDialog};
 pub use startup_main_menu::{MainMenuAction, MainMenuItem, StartupMainMenu};
 pub use startup_menu::{ScenarioSummary, StartupMenu, StartupMenuAction};
@@ -3397,9 +3399,24 @@ fn bilinear_sample(image: &ImageData, rect: &GuiRect, dx: u32, dy: u32) -> [f32;
     })
 }
 
+/// Encodes a filtered colour channel the way the C++ blit shader does:
+/// through the gamma 1D-texture lookup when a ramp is given
+/// (StdGL.cpp:1082-1086), else round-to-nearest.
+fn encode_channel(gamma: Option<&lc_graphics::GammaRamp>, x: f32) -> f32 {
+    gamma
+        .map(|ramp| f32::from(ramp.encode_float(x)))
+        .unwrap_or_else(|| x.round().clamp(0.0, 255.0))
+}
+
 /// Stretches `image` into `rect` with GL_LINEAR-equivalent bilinear sampling
-/// and normal alpha-over blending.
-pub fn draw_image_bilinear(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
+/// and normal alpha-over blending. `gamma` mirrors the per-fragment gamma
+/// lookup of the C++ blit shader.
+pub fn draw_image_bilinear(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    image: &ImageData,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 || image.width() == 0 || image.height() == 0
     {
         return;
@@ -3419,14 +3436,15 @@ pub fn draw_image_bilinear(surface: &mut Surface, rect: &GuiRect, image: &ImageD
                 continue;
             }
             let s = bilinear_sample(image, rect, dx, dy);
-            let a = s[3].round().clamp(0.0, 255.0);
-            if a <= 0.0 {
+            if s[3] <= 0.0 {
                 continue;
             }
             let dst = surface.get_pixel(tx as u32, ty as u32).unwrap_or_default();
-            let af = a / 255.0;
+            let af = (s[3] / 255.0).clamp(0.0, 1.0);
             let blend = |src: f32, dst: u8| -> u8 {
-                (src * af + dst as f32 * (1.0 - af)).round().clamp(0.0, 255.0) as u8
+                (encode_channel(gamma, src) * af + f32::from(dst) * (1.0 - af))
+                    .round()
+                    .clamp(0.0, 255.0) as u8
             };
             let out = Color::new(
                 blend(s[0], dst.r),
@@ -3442,7 +3460,12 @@ pub fn draw_image_bilinear(surface: &mut Surface, rect: &GuiRect, image: &ImageD
 /// Stretches `image` into `rect` with bilinear sampling and additive blending
 /// (`dst + src*alpha`, StdGL.cpp:908 `glBlendFunc(GL_SRC_ALPHA, GL_ONE)`), as
 /// used for the GUI button focus highlight (C4GuiButton.cpp:94-98).
-pub fn draw_image_bilinear_additive(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
+pub fn draw_image_bilinear_additive(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    image: &ImageData,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 || image.width() == 0 || image.height() == 0
     {
         return;
@@ -3468,7 +3491,9 @@ pub fn draw_image_bilinear_additive(surface: &mut Surface, rect: &GuiRect, image
             }
             let dst = surface.get_pixel(tx as u32, ty as u32).unwrap_or_default();
             let add = |src: f32, dst: u8| -> u8 {
-                (dst as f32 + src * af).round().clamp(0.0, 255.0) as u8
+                (f32::from(dst) + encode_channel(gamma, src) * af)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
             };
             let out = Color::new(add(s[0], dst.r), add(s[1], dst.g), add(s[2], dst.b), dst.a);
             let _ = surface.set_pixel(tx as u32, ty as u32, out);
@@ -3560,7 +3585,7 @@ mod tests {
         let pixels: Vec<u8> = [0u8, 255].iter().flat_map(|v| [*v, *v, *v, 255]).collect();
         let image = ImageData::new(2, 1, pixels);
         let mut surface = Surface::new(4, 1, PixelFormat::Rgba8888);
-        draw_image_bilinear(&mut surface, &GuiRect::new(0.0, 0.0, 4.0, 1.0), &image);
+        draw_image_bilinear(&mut surface, &GuiRect::new(0.0, 0.0, 4.0, 1.0), &image, None);
         assert_eq!(surface.get_pixel(0, 0), Some(gray(0)));
         assert_eq!(surface.get_pixel(1, 0), Some(gray(64)));
         assert_eq!(surface.get_pixel(2, 0), Some(gray(191)));
@@ -3575,7 +3600,7 @@ mod tests {
         let image = ImageData::new(1, 1, pixels);
         let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
         surface.set_pixel(0, 0, gray(200)).unwrap();
-        draw_image_bilinear_additive(&mut surface, &GuiRect::new(0.0, 0.0, 1.0, 1.0), &image);
+        draw_image_bilinear_additive(&mut surface, &GuiRect::new(0.0, 0.0, 1.0, 1.0), &image, None);
         // 200 + round(100*128/255) = 200 + 50 = 250
         assert_eq!(surface.get_pixel(0, 0), Some(Color::new(250, 250, 250, 255)));
     }

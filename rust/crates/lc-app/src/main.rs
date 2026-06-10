@@ -8,6 +8,7 @@
     clippy::too_many_arguments
 )]
 
+mod clonk_fonts;
 mod control_options;
 mod game_over;
 mod gamepad;
@@ -292,6 +293,8 @@ struct FrontendAssets {
     scenario_browser_background: Option<ImageData>,
     options_background: Option<ImageData>,
     about_background: Option<ImageData>,
+    /// CStdFont-faithful GUI fonts for pixel-parity startup text.
+    clonk_fonts: Option<Arc<lc_frontend::ClonkFontSet>>,
     logo: Option<ImageData>,
     button_textures: Option<ButtonTextures>,
     /// GUIButtonHighlight.png — additive focus/hover overlay for GUI buttons
@@ -305,6 +308,7 @@ struct FrontendAssets {
 impl FrontendAssets {
     fn load(paths: Option<&AppPaths>) -> Self {
         let font = Self::load_font(paths);
+        let clonk_fonts = Self::load_clonk_fonts(paths);
         let mut menu_background = None;
         let mut scenario_browser_background = None;
         let mut options_background = None;
@@ -371,6 +375,7 @@ impl FrontendAssets {
 
         Self {
             font,
+            clonk_fonts,
             menu_background,
             scenario_browser_background,
             options_background,
@@ -381,6 +386,21 @@ impl FrontendAssets {
             base_sprites: sprites,
             cursor_atlas: Arc::new(cursor_atlas),
             hud_graphics: Arc::new(hud_graphics),
+        }
+    }
+
+    /// Builds the CStdFont-faithful GUI fonts (FreeType + baked shadows) used
+    /// for pixel-parity startup text; falls back to None on any failure.
+    fn load_clonk_fonts(paths: Option<&AppPaths>) -> Option<Arc<lc_frontend::ClonkFontSet>> {
+        let paths = paths?;
+        let group = Group::open(paths.system_group_path()).ok()?;
+        let resource = load_endeavour_font(&group).ok()?;
+        match clonk_fonts::build_font_set(resource.bytes()) {
+            Ok(set) => Some(Arc::new(set)),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to build CStdFont-faithful fonts");
+                None
+            }
         }
     }
 
@@ -4443,6 +4463,8 @@ impl GameApp {
         menu.resize(width as f32, height as f32);
         let mut main_menu = StartupMainMenu::new(assets.font_arc(), button_textures.clone());
         main_menu.set_highlight_texture(assets.button_highlight.clone());
+        main_menu.set_clonk_fonts(assets.clonk_fonts.clone());
+        main_menu.set_gamma_ramp(Some(Arc::new(lc_graphics::GammaRamp::standard())));
         main_menu.resize(width as f32, height as f32);
         let participants_label = load_participants_label(paths);
         let main_menu_state = MainMenuState::new(main_menu, participants_label);
@@ -8366,6 +8388,12 @@ impl GameApp {
     }
 }
 
+/// The startup render gamma ramp (default config: identity + black floor).
+fn startup_gamma() -> &'static lc_graphics::GammaRamp {
+    static STARTUP_GAMMA: std::sync::OnceLock<lc_graphics::GammaRamp> = std::sync::OnceLock::new();
+    STARTUP_GAMMA.get_or_init(lc_graphics::GammaRamp::standard)
+}
+
 fn render_startup_frame(
     graphics: &mut GraphicsSystem,
     assets: &FrontendAssets,
@@ -8395,7 +8423,7 @@ fn render_startup_frame(
                 GuiPoint::new(0.0, 0.0),
                 lc_gui::Size::new(surface.width() as f32, surface.height() as f32),
             );
-            lc_frontend::draw_image_bilinear(surface, &rect, &background);
+            lc_frontend::draw_image_bilinear(surface, &rect, &background, Some(startup_gamma()));
         } else {
             surface.fill(Color::opaque(16, 28, 52));
         }
@@ -8417,26 +8445,42 @@ fn render_startup_frame(
                         logo_w as f32,
                         logo_h as f32,
                     );
-                    lc_frontend::draw_image_bilinear(surface, &logo_rect, &logo);
+                    lc_frontend::draw_image_bilinear(
+                        surface,
+                        &logo_rect,
+                        &logo,
+                        Some(startup_gamma()),
+                    );
 
                     // "Version %s" with C4VERSION = "4.9.11.0 [362] " (trailing
                     // space from empty C4VERSIONEXTRA/C4BUILDOPT, C4Version.h:55),
                     // right-aligned at (Wdt*39/40, Hgt/18 + 0.4*logoHgt) in the
-                    // GUI TextFont, white, markup on.
+                    // GUI TextFont, white, markup on (C4StartupMainDlg.cpp:121).
                     let version_text = "Version 4.9.11.0 [362] ";
-                    let version_x = (width * 39 / 40) as f32;
-                    let version_y = (height / 18 + logo_h) as f32;
-                    let version_color = Color::new(255, 255, 255, 255);
-                    let font = assets.font_arc();
-                    let metrics = font.measure_text(version_text, 14.0);
-                    font.draw_text(
-                        surface,
-                        version_x - metrics.width,
-                        version_y,
-                        version_text,
-                        14.0,
-                        version_color,
-                    );
+                    let version_x = width * 39 / 40;
+                    let version_y = height / 18 + logo_h;
+                    if let Some(fonts) = assets.clonk_fonts.as_ref() {
+                        fonts.text.draw(
+                            surface,
+                            version_x,
+                            version_y,
+                            version_text,
+                            [255, 255, 255, 255],
+                            lc_graphics::clonk_font::TextAlign::Right,
+                            true,
+                        );
+                    } else {
+                        let font = assets.font_arc();
+                        let metrics = font.measure_text(version_text, 14.0);
+                        font.draw_text(
+                            surface,
+                            (version_x as f32) - metrics.width,
+                            version_y as f32,
+                            version_text,
+                            14.0,
+                            Color::new(255, 255, 255, 255),
+                        );
+                    }
                 }
             }
             StartupView::ScenarioBrowser => scenario_menu.menu().render(surface),
@@ -8463,14 +8507,12 @@ fn render_startup_frame(
         }
 
         // The C++ blit shader applies the gamma ramp to every fragment
-        // (StdGL.cpp:1082-1086, UseShaderGamma default on); with the default
-        // ramp this only lifts pure black by one step, so applying it once to
-        // the finished frame is equivalent up to blending rounding.
-        static STARTUP_GAMMA: std::sync::OnceLock<lc_graphics::GammaRamp> =
-            std::sync::OnceLock::new();
-        STARTUP_GAMMA
-            .get_or_init(lc_graphics::GammaRamp::standard)
-            .apply_to_surface(surface);
+        // (StdGL.cpp:1082-1086, UseShaderGamma default on). The filtered
+        // (bilinear) draws already encode through the ramp; this final pass
+        // covers the unfiltered ones (planks, text), where the default ramp
+        // is identity apart from the black floor — so re-applying it to
+        // already-encoded pixels is a no-op.
+        startup_gamma().apply_to_surface(surface);
     }
     let surface = graphics.surface();
     let pixels = surface.pixels();

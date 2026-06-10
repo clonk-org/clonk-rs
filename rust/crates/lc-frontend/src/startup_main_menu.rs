@@ -1,4 +1,6 @@
+use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 use crate::{draw_text, fill_rect, GuiPoint, ImageData, KeyCode};
+use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, Surface, TextFont};
 use lc_gui::{ButtonTextures, Rect as GuiRect, Size as GuiSize};
 use std::sync::Arc;
@@ -138,10 +140,15 @@ pub enum MainMenuAction {
 #[derive(Clone)]
 pub struct StartupMainMenu {
     font: Arc<dyn TextFont>,
+    /// CStdFont-faithful fonts; when set, all menu text renders through them
+    /// for pixel parity with the C++ engine.
+    clonk_fonts: Option<Arc<ClonkFontSet>>,
     textures: Option<ButtonTextures>,
     /// GUIButtonHighlight, blitted additively over focused/hovered buttons
     /// (C4GuiButton.cpp:94-98).
     highlight: Option<ImageData>,
+    /// Per-fragment gamma ramp of the C++ blit shader.
+    gamma: Option<Arc<lc_graphics::GammaRamp>>,
     buttons: Vec<MenuButton>,
     pointer_position: Option<GuiPoint>,
     pressed_index: Option<usize>,
@@ -164,19 +171,21 @@ struct MenuButton {
 impl StartupMainMenu {
     pub fn new(font: Arc<dyn TextFont>, textures: Option<ButtonTextures>) -> Self {
         let buttons = vec![
-            // Labels match the C++ main menu (IDS_BTN_LOCALGAME="&Start Game",
-            // IDS_DLG_NETSTART="Start Network Game" in System.c4g/LanguageUS.txt).
-            MenuButton::new("Start Game", MainMenuItem::LocalGame),
-            MenuButton::new("Start Network Game", MainMenuItem::NetworkGame),
-            MenuButton::new("Player Selection", MainMenuItem::PlayerSelection),
-            MenuButton::new("Options", MainMenuItem::Options),
-            MenuButton::new("About", MainMenuItem::About),
-            MenuButton::new("Exit", MainMenuItem::Quit),
+            // Labels match the C++ main menu, including the `&` hotkey markers
+            // (IDS_BTN_LOCALGAME etc. in System.c4g/LanguageUS.txt:24-537).
+            MenuButton::new("&Start Game", MainMenuItem::LocalGame),
+            MenuButton::new("Start &Network Game", MainMenuItem::NetworkGame),
+            MenuButton::new("&Player Selection", MainMenuItem::PlayerSelection),
+            MenuButton::new("&Options", MainMenuItem::Options),
+            MenuButton::new("&About", MainMenuItem::About),
+            MenuButton::new("E&xit", MainMenuItem::Quit),
         ];
         Self {
             font,
+            clonk_fonts: None,
             textures,
             highlight: None,
+            gamma: None,
             buttons,
             pointer_position: None,
             pressed_index: None,
@@ -190,6 +199,16 @@ impl StartupMainMenu {
     /// Sets the GUIButtonHighlight texture for the focus/hover overlay.
     pub fn set_highlight_texture(&mut self, highlight: Option<ImageData>) {
         self.highlight = highlight;
+    }
+
+    /// Sets the CStdFont-faithful font set used for pixel-parity text.
+    pub fn set_clonk_fonts(&mut self, fonts: Option<Arc<ClonkFontSet>>) {
+        self.clonk_fonts = fonts;
+    }
+
+    /// Sets the gamma ramp the highlight overlay is encoded through.
+    pub fn set_gamma_ramp(&mut self, gamma: Option<Arc<lc_graphics::GammaRamp>>) {
+        self.gamma = gamma;
     }
 
     pub fn resize(&mut self, width: f32, height: f32) {
@@ -318,7 +337,35 @@ impl StartupMainMenu {
 
         // Participants label: white TitleFont (22px), right-aligned at
         // client*(39/40, 9/10) (C4StartupMainDlg.cpp:69-70).
+        // Trademark line: white MiniFont (12px), right-aligned at the client
+        // rect's right edge, half a line above its bottom
+        // (C4StartupMainDlg.cpp:72-74; FANPROJECTTEXT/TRADEMARKTEXT,
+        // C4Version.h:21-22).
+        let trademark = "LegacyClonk is a fan project based on Clonk Rage.   \
+                         'Clonk' is a registered trademark of Matthes Bender.";
         let (anchor_x, anchor_y) = layout.participants_anchor;
+        if let Some(fonts) = self.clonk_fonts.as_ref() {
+            fonts.title.draw(
+                surface,
+                anchor_x,
+                anchor_y,
+                participants_label,
+                [255, 255, 255, 255],
+                TextAlign::Right,
+                false,
+            );
+            fonts.mini.draw(
+                surface,
+                layout.trademark_anchor_x,
+                layout.client.y + layout.client.h - fonts.mini.line_height / 2,
+                trademark,
+                [255, 255, 255, 255],
+                TextAlign::Right,
+                false,
+            );
+            return;
+        }
+
         let font_size = 22.0;
         let metrics = self.font.measure_text(participants_label, font_size);
         let label_rect = GuiRect::new(
@@ -337,12 +384,6 @@ impl StartupMainMenu {
             self.font.as_ref(),
         );
 
-        // Trademark line: white MiniFont (12px), right-aligned at the client
-        // rect's right edge, half a line above its bottom
-        // (C4StartupMainDlg.cpp:72-74; FANPROJECTTEXT/TRADEMARKTEXT,
-        // C4Version.h:21-22).
-        let trademark = "LegacyClonk is a fan project based on Clonk Rage.   \
-                         'Clonk' is a registered trademark of Matthes Bender.";
         let mini_size = 12.0;
         let mini_line_height = 18; // Endeavour 12px: (1303+308)*12/1024 (StdFont.cpp:351)
         let metrics = self.font.measure_text(trademark, mini_size);
@@ -425,7 +466,7 @@ impl StartupMainMenu {
                     rect.size.width - 10.0,
                     rect.size.height - 6.0,
                 );
-                crate::draw_image_bilinear_additive(surface, &overlay, highlight);
+                crate::draw_image_bilinear_additive(surface, &overlay, highlight, self.gamma.as_deref());
             }
         }
 
@@ -439,19 +480,37 @@ impl StartupMainMenu {
         };
         // Caption centred at ((x0+x1)/2, (y0+y1-textHgt)/2), shifted +1,+1 when
         // pressed (C4GuiButton.cpp:90-109).
-        let txt_off = if pressed { 1.0 } else { 0.0 };
+        let txt_off: i32 = if pressed { 1 } else { 0 };
+        if let Some(fonts) = self.clonk_fonts.as_ref() {
+            let font = fonts.button_font(rect.size.height as i32);
+            let (x0, y0) = (rect.origin.x as i32, rect.origin.y as i32);
+            let x1 = x0 + rect.size.width as i32 - 1;
+            let y1 = y0 + rect.size.height as i32 - 1;
+            let (expanded, _) = expand_hotkey_markup(button.label);
+            font.draw(
+                surface,
+                (x0 + x1) / 2 + txt_off,
+                (y0 + y1 - font.line_height) / 2 + txt_off,
+                &expanded,
+                [text_color.r, text_color.g, text_color.b, text_color.a],
+                TextAlign::Center,
+                true,
+            );
+            return;
+        }
+        let label = button.label.replace('&', "");
         let font_size = (rect.size.height * 0.48).clamp(16.0, 32.0);
-        let metrics = self.font.measure_text(button.label, font_size);
+        let metrics = self.font.measure_text(&label, font_size);
         let text_rect = GuiRect::new(
-            rect.origin.x + ((rect.size.width - metrics.width) * 0.5).max(0.0) + txt_off,
-            rect.origin.y + ((rect.size.height - font_size) * 0.5).max(0.0) + txt_off,
+            rect.origin.x + ((rect.size.width - metrics.width) * 0.5).max(0.0) + txt_off as f32,
+            rect.origin.y + ((rect.size.height - font_size) * 0.5).max(0.0) + txt_off as f32,
             metrics.width,
             font_size,
         );
         draw_text(
             surface,
             &text_rect,
-            button.label,
+            &label,
             text_color,
             font_size,
             0.0,
