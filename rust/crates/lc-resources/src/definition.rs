@@ -98,35 +98,48 @@ pub struct PhysicalInfo {
 }
 
 impl PhysicalInfo {
-    /// Assign a value by its `C4PhysInfoNameMap` name (lowercased); returns
-    /// false for unknown names.
+    /// A mutable slot by its `C4PhysInfoNameMap` name (the C++
+    /// `GetOffsetByName`, C4InfoCore.cpp:181-205; case-insensitive); None
+    /// for unknown names.
+    pub fn value_mut_by_name(&mut self, name: &str) -> Option<&mut i32> {
+        match name.to_ascii_lowercase().as_str() {
+            "energy" => Some(&mut self.energy),
+            "breath" => Some(&mut self.breath),
+            "walk" => Some(&mut self.walk),
+            "jump" => Some(&mut self.jump),
+            "scale" => Some(&mut self.scale),
+            "hangle" => Some(&mut self.hangle),
+            "dig" => Some(&mut self.dig),
+            "swim" => Some(&mut self.swim),
+            "throw" => Some(&mut self.throw),
+            "push" => Some(&mut self.push),
+            "fight" => Some(&mut self.fight),
+            "magic" => Some(&mut self.magic),
+            "float" => Some(&mut self.float),
+            "canscale" => Some(&mut self.can_scale),
+            "canhangle" => Some(&mut self.can_hangle),
+            "candig" => Some(&mut self.can_dig),
+            "canconstruct" => Some(&mut self.can_construct),
+            "canchop" => Some(&mut self.can_chop),
+            "canfly" => Some(&mut self.can_fly),
+            "corrosionresist" => Some(&mut self.corrosion_resist),
+            "breathewater" => Some(&mut self.breathe_water),
+            _ => None,
+        }
+    }
+
+    /// Read a value by its `C4PhysInfoNameMap` name; None for unknown names.
+    pub fn value_by_name(&self, name: &str) -> Option<i32> {
+        let mut copy = *self;
+        copy.value_mut_by_name(name).map(|slot| *slot)
+    }
+
+    /// Assign a value by its `C4PhysInfoNameMap` name; returns false for
+    /// unknown names.
     pub fn set_by_name(&mut self, name: &str, value: i32) -> bool {
-        let slot = match name {
-            "energy" => &mut self.energy,
-            "breath" => &mut self.breath,
-            "walk" => &mut self.walk,
-            "jump" => &mut self.jump,
-            "scale" => &mut self.scale,
-            "hangle" => &mut self.hangle,
-            "dig" => &mut self.dig,
-            "swim" => &mut self.swim,
-            "throw" => &mut self.throw,
-            "push" => &mut self.push,
-            "fight" => &mut self.fight,
-            "magic" => &mut self.magic,
-            "float" => &mut self.float,
-            "canscale" => &mut self.can_scale,
-            "canhangle" => &mut self.can_hangle,
-            "candig" => &mut self.can_dig,
-            "canconstruct" => &mut self.can_construct,
-            "canchop" => &mut self.can_chop,
-            "canfly" => &mut self.can_fly,
-            "corrosionresist" => &mut self.corrosion_resist,
-            "breathewater" => &mut self.breathe_water,
-            _ => return false,
-        };
-        *slot = value;
-        true
+        self.value_mut_by_name(name)
+            .map(|slot| *slot = value)
+            .is_some()
     }
 
     /// `C4PhysicalInfo::TrainValue` (C4InfoCore.cpp:279-285): only nonzero

@@ -2547,13 +2547,19 @@ struct Object {
     rotation_velocity: C4Fixed,
     destroyed: bool,
     /// Last energy-loss causing player (C4Object::LastEnergyLossCausePlayer,
-    /// read by AssignDeath for kill attribution). Not yet snapshot-persisted.
+    /// read by AssignDeath for kill attribution).
     last_energy_loss_cause: i32,
-    /// Trained per-object physicals (the C4ObjectInfo::Physical analog —
-    /// the info model is absent, so training clones the def physicals onto
-    /// the object). None = use the definition physicals (GetPhysical
-    /// fallback, C4Object.cpp:2118-2134). Not yet snapshot-persisted.
-    physical_override: Option<PhysicalInfo>,
+    /// `C4ObjectInfo::Physical` surrogate for crew members until the info
+    /// model lands — cloned lazily from the definition physicals on first
+    /// training/permanent write. None = read the definition physicals.
+    info_physical: Option<PhysicalInfo>,
+    /// `PhysicalTemporary`/`TemporaryPhysical` (C4Object.h): the script-set
+    /// temporary physicals, taking precedence in GetPhysical
+    /// (C4Object.cpp:2118-2134). None = temporary mode off.
+    temporary_physical: Option<PhysicalInfo>,
+    /// `C4TempPhysicalInfo::Changes` (C4InfoCore.h:113): PHYS_StackTemporary
+    /// registrations as (physical name, previous value), newest last.
+    physical_changes: Vec<(String, i32)>,
     command_queue: VecDeque<QueuedCommand>,
     commands: CommandStack,
     pending_action_events: VecDeque<ActionTransitionEvent>,
@@ -2648,7 +2654,9 @@ impl Object {
             destroyed: matches!(state.status, ObjectStatus::Deleted),
             state,
             last_energy_loss_cause: OWNER_NONE,
-            physical_override: None,
+            info_physical: None,
+            temporary_physical: None,
+            physical_changes: Vec::new(),
             command_queue: VecDeque::new(),
             commands: CommandStack::new(),
             pending_action_events: VecDeque::new(),
@@ -3435,7 +3443,9 @@ impl Object {
             on_fire: self.state.on_fire,
             fire_phase: self.state.fire_phase,
             fire_caused_by: self.state.fire_caused_by,
-            physical_override: self.physical_override,
+            info_physical: self.info_physical,
+            temporary_physical: self.temporary_physical,
+            physical_changes: self.physical_changes.clone(),
             last_energy_loss_cause: self.last_energy_loss_cause,
             fixed_position: subpixel_or_none(self.fixed_position, position),
             fixed_velocity: subpixel_or_none(self.fixed_velocity, velocity),
@@ -3965,12 +3975,18 @@ pub struct ObjectSnapshot {
     pub fire_phase: i32,
     #[serde(default = "default_owner")]
     pub fire_caused_by: i32,
-    /// Trained per-object physicals; C++ persists the temporary set with the
-    /// object (C4Object.cpp:2777,2798-2801) and info training with the crew
-    /// info — the Rust override stands in for both until the C4ObjectInfo
-    /// model lands.
+    /// `C4ObjectInfo::Physical` surrogate (crew training); C++ persists info
+    /// physicals with the crew file — carried on the object until the
+    /// C4ObjectInfo model lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub physical_override: Option<PhysicalInfo>,
+    pub info_physical: Option<PhysicalInfo>,
+    /// `PhysicalTemporary`/`TemporaryPhysical` (C4Object.cpp:2777,2798-2801).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporary_physical: Option<PhysicalInfo>,
+    /// `C4TempPhysicalInfo::Changes` (C4InfoCore.cpp:306) as
+    /// (physical name, previous value) pairs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub physical_changes: Vec<(String, i32)>,
     /// `LastEngLossPlr` (C4Object.cpp:2740) — kill attribution.
     #[serde(default = "default_owner")]
     pub last_energy_loss_cause: i32,
@@ -12264,7 +12280,9 @@ impl Engine {
                 object.fixed_rotation = fixed_rotation;
                 object.state.rotation = fixtoi(fixed_rotation);
             }
-            object.physical_override = snapshot.physical_override;
+            object.info_physical = snapshot.info_physical;
+            object.temporary_physical = snapshot.temporary_physical;
+            object.physical_changes = snapshot.physical_changes.clone();
             object.last_energy_loss_cause = snapshot.last_energy_loss_cause;
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
             object
@@ -12916,19 +12934,19 @@ impl Engine {
                 ActionProcedure::Scale if physical.scale != 0 && self.frame % 5 == 0 => {
                     let ydir = self.objects[idx].fixed_velocity.y;
                     if ydir.abs() == math::val_by_physical(200, physical.scale) {
-                        self.train_physical(idx, |info| &mut info.scale, 1, C4_MAX_PHYSICAL);
+                        self.train_physical(idx, "Scale", 1, C4_MAX_PHYSICAL);
                     }
                 }
                 ActionProcedure::Hang if physical.hangle != 0 && self.frame % 5 == 0 => {
                     let xdir = self.objects[idx].fixed_velocity.x;
                     if xdir.abs() == math::val_by_physical(160, physical.hangle) {
-                        self.train_physical(idx, |info| &mut info.hangle, 1, C4_MAX_PHYSICAL);
+                        self.train_physical(idx, "Hangle", 1, C4_MAX_PHYSICAL);
                     }
                 }
                 ActionProcedure::Swim if physical.swim != 0 && self.frame % 10 == 0 => {
                     let xdir = self.objects[idx].fixed_velocity.x;
                     if xdir.abs() == math::val_by_physical(160, physical.swim) {
-                        self.train_physical(idx, |info| &mut info.swim, 1, C4_MAX_PHYSICAL);
+                        self.train_physical(idx, "Swim", 1, C4_MAX_PHYSICAL);
                     }
                 }
                 _ => {}
@@ -13928,7 +13946,7 @@ impl Engine {
 
         // Physical training (C4Object.cpp:5214-5216): Tick5 trains Fight.
         if self.frame % 5 == 0 {
-            self.train_physical(idx, |physical| &mut physical.fight, 1, C4_MAX_PHYSICAL);
+            self.train_physical(idx, "Fight", 1, C4_MAX_PHYSICAL);
         }
 
         // Direction (C4Object.cpp:5218-5220): face the target; equal x keeps
@@ -14850,33 +14868,57 @@ impl Engine {
         }
     }
 
-    /// `C4Object::GetPhysical` (C4Object.cpp:2118-2134): the trained
-    /// per-object physicals when present, else the definition's `[Physical]`
-    /// section. (Temporary physicals and the fair-crew info path need the
-    /// C4ObjectInfo model.)
-    fn object_physical(&self, idx: usize) -> PhysicalInfo {
-        self.objects[idx].physical_override.unwrap_or_else(|| {
-            self.definitions
-                .get(&self.objects[idx].definition_id)
-                .map(|definition| *definition.physical())
-                .unwrap_or_default()
-        })
+    /// The definition's `[Physical]` section for the object (the
+    /// `Def->Physical` fallback and the info-clone source).
+    fn definition_physical(&self, idx: usize) -> PhysicalInfo {
+        self.definitions
+            .get(&self.objects[idx].definition_id)
+            .map(|definition| *definition.physical())
+            .unwrap_or_default()
     }
 
-    /// `C4Object::TrainPhysical` (C4Object.cpp:2136-2146) against the
-    /// per-object physicals, cloned from the definition on first training
-    /// (the permanent info physicals need the info model).
-    fn train_physical(
-        &mut self,
-        idx: usize,
-        field: fn(&mut PhysicalInfo) -> &mut i32,
-        train_by: i32,
-        max_train: i32,
-    ) {
-        let base = self.object_physical(idx);
+    /// `C4Object::GetPhysical` (C4Object.cpp:2118-2134): the temporary set
+    /// when temporary mode is on, else the info physicals (crew surrogate),
+    /// else the definition's `[Physical]` section. (The fair-crew path needs
+    /// the C4ObjectInfo model.)
+    fn object_physical(&self, idx: usize) -> PhysicalInfo {
+        let object = &self.objects[idx];
+        object
+            .temporary_physical
+            .or(object.info_physical)
+            .unwrap_or_else(|| self.definition_physical(idx))
+    }
+
+    /// `C4Object::TrainPhysical` (C4Object.cpp:2136-2146): trains the
+    /// temporary set when active — including the stacked previous values for
+    /// the same physical (C4InfoCore.cpp:309-317) — and the info physicals
+    /// when the object carries an info (crew surrogate; cloned lazily from
+    /// the definition). Returns false when the object has neither.
+    fn train_physical(&mut self, idx: usize, name: &str, train_by: i32, max_train: i32) -> bool {
+        let definition_physical = self.definition_physical(idx);
         let object = &mut self.objects[idx];
-        let physical = object.physical_override.get_or_insert(base);
-        PhysicalInfo::train_value(field(physical), train_by, max_train);
+        let mut trained = false;
+        if let Some(temporary) = object.temporary_physical.as_mut() {
+            if let Some(value) = temporary.value_mut_by_name(name) {
+                PhysicalInfo::train_value(value, train_by, max_train);
+            }
+            for (_, previous) in object
+                .physical_changes
+                .iter_mut()
+                .filter(|(changed, _)| changed.eq_ignore_ascii_case(name))
+            {
+                PhysicalInfo::train_value(previous, train_by, max_train);
+            }
+            trained = true;
+        }
+        if object.state.crew_member {
+            let info = object.info_physical.get_or_insert(definition_physical);
+            if let Some(value) = info.value_mut_by_name(name) {
+                PhysicalInfo::train_value(value, train_by, max_train);
+            }
+            trained = true;
+        }
+        trained
     }
 
     /// Engine-side `C4Object::DoEnergy` slice (C4Object.cpp:1345-1365) in the
@@ -23573,7 +23615,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
                 SpawnConfig::new("Fighter")
                     .with_position(Vector2::new(0, 0))
                     .with_vertices(vertices)
-                    .with_action(fight_state),
+                    .with_action(fight_state)
+                    .with_crew_member(true),
             )
             .expect("fighter spawns");
         engine
@@ -23585,7 +23628,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("opponent target update succeeds");
 
         // C4Object.cpp:5214-5216: `if (!Tick5) TrainPhysical(Fight, 1,
-        // C4MaxPhysical)` — the gate fires on frames divisible by 5 only.
+        // C4MaxPhysical)` — the gate fires on frames divisible by 5 only;
+        // only the crew info physicals train (C4Object.cpp:2136-2146).
         for _ in 0..4 {
             engine.tick().expect("tick succeeds");
         }
@@ -23593,13 +23637,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .find_object_index(fighter_id)
             .expect("fighter exists");
         assert_eq!(
-            engine.objects[fighter_idx].physical_override, None,
+            engine.objects[fighter_idx].info_physical, None,
             "no training before the first Tick5 frame"
         );
 
         engine.tick().expect("tick succeeds");
         let trained = engine.objects[fighter_idx]
-            .physical_override
+            .info_physical
             .expect("Tick5 training clones the definition physicals");
         assert_eq!(trained.fight, 20_001);
         assert_eq!(trained.walk, 35_000, "other physicals copied untouched");
@@ -23740,6 +23784,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let id = engine
             .spawn_object(
                 SpawnConfig::new("Climber")
+                    .with_crew_member(true)
                     .with_position(Vector2::new(0, 0))
                     .with_command_direction(CommandDirection::Up),
             )
@@ -23753,7 +23798,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(engine.objects[idx].fixed_velocity.y.val(), -32768);
         engine.tick().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.y.val(), -39321);
-        assert_eq!(engine.objects[idx].physical_override, None);
+        assert_eq!(engine.objects[idx].info_physical, None);
 
         // Tick5 at-limit training (C4Object.cpp:4810-4812): frame 5 sees
         // |ydir| == lLimit and trains Scale by 1.
@@ -23761,7 +23806,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.tick().expect("tick succeeds");
         engine.tick().expect("tick succeeds");
         let trained = engine.objects[idx]
-            .physical_override
+            .info_physical
             .expect("at-limit Tick5 training clones the physicals");
         assert_eq!(trained.scale, 30_001);
     }
@@ -23799,6 +23844,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let id = engine
             .spawn_object(
                 SpawnConfig::new("Hangler")
+                    .with_crew_member(true)
                     .with_position(Vector2::new(0, 0))
                     .with_command_direction(CommandDirection::Right),
             )
@@ -23814,14 +23860,14 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 41943);
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
         assert_eq!(engine.objects[idx].state.direction, Direction::Right);
-        assert_eq!(engine.objects[idx].physical_override, None);
+        assert_eq!(engine.objects[idx].info_physical, None);
 
         // Tick5 at-limit training (C4Object.cpp:4844-4846).
         engine.tick().expect("tick succeeds");
         engine.tick().expect("tick succeeds");
         engine.tick().expect("tick succeeds");
         let trained = engine.objects[idx]
-            .physical_override
+            .info_physical
             .expect("at-limit Tick5 training clones the physicals");
         assert_eq!(trained.hangle, 40_001);
     }
@@ -23861,6 +23907,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let id = engine
             .spawn_object(
                 SpawnConfig::new("Swimmer")
+                    .with_crew_member(true)
                     .with_position(Vector2::new(0, 0))
                     .with_command_direction(CommandDirection::Right),
             )
@@ -23880,14 +23927,14 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 52428);
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
         assert_eq!(engine.objects[idx].state.direction, Direction::Right);
-        assert_eq!(engine.objects[idx].physical_override, None);
+        assert_eq!(engine.objects[idx].info_physical, None);
 
         // Tick10 at-limit training (C4Object.cpp:4924-4926).
         for _ in 0..5 {
             engine.tick().expect("tick succeeds");
         }
         let trained = engine.objects[idx]
-            .physical_override
+            .info_physical
             .expect("at-limit Tick10 training clones the physicals");
         assert_eq!(trained.swim, 50_001);
     }
@@ -23995,11 +24042,59 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
-    fn state_round_trip_preserves_physical_override_and_energy_loss_cause() {
-        // C++ persists both with the object: LastEngLossPlr
-        // (C4Object.cpp:2740) and the trained/temporary physicals
-        // (C4Object.cpp:2777,2798-2801) — kill attribution and physical
-        // training must survive save/load.
+    fn train_physical_requires_info_or_temporary_physicals() {
+        // C4Object::TrainPhysical (C4Object.cpp:2136-2146) trains the
+        // temporary set when active and the info physicals when the object
+        // carries a C4ObjectInfo — an object with neither trains NOTHING.
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let definition = Definition::from_script("Sheep", "Sheep", script).unwrap();
+        let mut engine = Engine::with_seed(9);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let sheep_id = engine
+            .spawn_object(SpawnConfig::new("Sheep"))
+            .expect("sheep spawns");
+        let sheep_idx = engine.find_object_index(sheep_id).expect("sheep exists");
+        assert!(
+            !engine.train_physical(sheep_idx, "Fight", 1, C4_MAX_PHYSICAL),
+            "non-crew object without temporary physicals trains nothing"
+        );
+        assert_eq!(engine.objects[sheep_idx].info_physical, None);
+        assert_eq!(engine.objects[sheep_idx].temporary_physical, None);
+
+        // Crew members carry an info (surrogate: crew_member flag) whose
+        // physicals clone the definition's on first training.
+        let crew_id = engine
+            .spawn_object(SpawnConfig::new("Sheep").with_crew_member(true))
+            .expect("crew spawns");
+        let crew_idx = engine.find_object_index(crew_id).expect("crew exists");
+        assert!(engine.train_physical(crew_idx, "Fight", 1, C4_MAX_PHYSICAL));
+        // The zero fight value stays untrained (TrainValue only-nonzero) but
+        // the info set now exists, cloned from the definition.
+        assert_eq!(
+            engine.objects[crew_idx].info_physical,
+            Some(PhysicalInfo::default())
+        );
+        assert_eq!(engine.objects[crew_idx].temporary_physical, None);
+    }
+
+    #[test]
+    fn state_round_trip_preserves_physicals_and_energy_loss_cause() {
+        // C++ persists with the object: LastEngLossPlr (C4Object.cpp:2740)
+        // and the temporary physicals with their stacked changes
+        // (C4Object.cpp:2777,2798-2801; C4InfoCore.cpp:306); info training
+        // rides on the object until the C4ObjectInfo model lands.
         let script = r#"
         global func Initialize(state, random) {
             return nil;
@@ -24019,11 +24114,16 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .spawn_object(SpawnConfig::new("Clonk").with_energy(40))
             .expect("clonk spawns");
         let idx = engine.find_object_index(id).expect("clonk exists");
-        engine.objects[idx].physical_override = Some(PhysicalInfo {
+        engine.objects[idx].info_physical = Some(PhysicalInfo {
             fight: 12_345,
             walk: 35_000,
             ..PhysicalInfo::default()
         });
+        engine.objects[idx].temporary_physical = Some(PhysicalInfo {
+            walk: 99_000,
+            ..PhysicalInfo::default()
+        });
+        engine.objects[idx].physical_changes = vec![("Walk".to_string(), 35_000)];
         engine.objects[idx].last_energy_loss_cause = 3;
 
         let state = engine.capture_state();
@@ -24036,12 +24136,23 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let idx = restored.find_object_index(id).expect("clonk restored");
         assert_eq!(
-            restored.objects[idx].physical_override,
+            restored.objects[idx].info_physical,
             Some(PhysicalInfo {
                 fight: 12_345,
                 walk: 35_000,
                 ..PhysicalInfo::default()
             })
+        );
+        assert_eq!(
+            restored.objects[idx].temporary_physical,
+            Some(PhysicalInfo {
+                walk: 99_000,
+                ..PhysicalInfo::default()
+            })
+        );
+        assert_eq!(
+            restored.objects[idx].physical_changes,
+            vec![("Walk".to_string(), 35_000)]
         );
         assert_eq!(restored.objects[idx].last_energy_loss_cause, 3);
     }
