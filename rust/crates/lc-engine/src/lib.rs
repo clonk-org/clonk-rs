@@ -140,7 +140,9 @@ use lc_resources::{
     ActionDefinition as ResourceActionDefinition, PhysicalInfo, PictureRect as ResourcePictureRect,
     ResourceDefinition as ResourceDefinitionData, C4_MAX_PHYSICAL,
 };
-use lc_script::{DebuggerHooks, Engine as ScriptEngine, ScriptError, Value};
+pub use lc_script::ScriptError;
+
+use lc_script::{DebuggerHooks, Engine as ScriptEngine, Value};
 use mass_mover::MassMoverSet;
 use rand::Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
