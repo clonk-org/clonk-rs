@@ -11655,7 +11655,7 @@ impl EffectScopeContext {
         }
 
         let mut insert_pos = 0;
-        while insert_pos < self.effects.len() && self.effects[insert_pos].priority > effect.priority
+        while insert_pos < self.effects.len() && self.effects[insert_pos].priority.abs() < effect.priority.abs()
         {
             insert_pos += 1;
         }

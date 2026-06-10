@@ -3569,7 +3569,7 @@ impl Object {
             .map(|pos| self.state.effects.remove(pos));
         let mut insert_pos = 0;
         while insert_pos < self.state.effects.len()
-            && self.state.effects[insert_pos].priority > effect.priority
+            && self.state.effects[insert_pos].priority.abs() < effect.priority.abs()
         {
             insert_pos += 1;
         }
@@ -18227,7 +18227,7 @@ fn insert_effect_into_stack(stack: &mut Vec<EffectState>, mut effect: EffectStat
     }
 
     let mut insert_pos = 0;
-    while insert_pos < stack.len() && stack[insert_pos].priority > effect.priority {
+    while insert_pos < stack.len() && stack[insert_pos].priority.abs() < effect.priority.abs() {
         insert_pos += 1;
     }
 
@@ -21860,11 +21860,12 @@ global func MenuCommand(state, kind, selection)
         let snapshot = engine
             .object_snapshot(id)
             .expect("object snapshot available");
+        // C++ list order ascends by |priority| (C4Effect.cpp:80-94).
         assert_eq!(snapshot.effects.len(), 2);
-        assert_eq!(snapshot.effects[0].name, "Glow");
-        assert_eq!(snapshot.effects[0].priority, 150);
-        assert_eq!(snapshot.effects[1].name, "Spark");
-        assert_eq!(snapshot.effects[1].priority, 60);
+        assert_eq!(snapshot.effects[0].name, "Spark");
+        assert_eq!(snapshot.effects[0].priority, 60);
+        assert_eq!(snapshot.effects[1].name, "Glow");
+        assert_eq!(snapshot.effects[1].priority, 150);
         assert_eq!(snapshot.energy, 365);
     }
 
@@ -21890,8 +21891,8 @@ global func MenuCommand(state, kind, selection)
             .object_snapshot(id)
             .expect("object snapshot available");
         assert_eq!(snapshot.effects.len(), 2);
-        assert_eq!(snapshot.effects[0].name, "Glow");
-        assert_eq!(snapshot.effects[1].name, "Spark");
+        assert_eq!(snapshot.effects[0].name, "Spark");
+        assert_eq!(snapshot.effects[1].name, "Glow");
 
         let first_tick = engine.tick().expect("first tick succeeds");
         let object = first_tick.object(id).expect("object present");
@@ -26485,10 +26486,11 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let snapshot = engine.tick().expect("first tick succeeds");
         let object = snapshot.object(id).expect("object present");
+        // C++ list order ascends by |priority| (C4Effect.cpp:80-94).
         assert_eq!(object.effects.len(), 2);
-        assert_eq!(object.effects[0].name, "Heal");
+        assert_eq!(object.effects[0].name, "Boost");
         assert_eq!(object.effects[0].timer, 1);
-        assert_eq!(object.effects[1].name, "Boost");
+        assert_eq!(object.effects[1].name, "Heal");
         assert_eq!(object.effects[1].timer, 1);
 
         let snapshot = engine.tick().expect("second tick succeeds");
@@ -26675,6 +26677,47 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let calls = call_log.lock().unwrap().clone();
         let stop_calls = calls.iter().filter(|name| *name == "FxDoomedStop").count();
         assert_eq!(stop_calls, 1, "the kill runs the Stop callback");
+    }
+
+    #[test]
+    fn effect_list_orders_ascending_by_priority_magnitude() {
+        // C4Effect registration (C4Effect.cpp:80-94): the new effect is
+        // inserted after all effects with |iPriority| < iPrio and before the
+        // first with |iPriority| >= iPrio — the list (and therefore the
+        // execution order) ascends by priority magnitude, new-before-equal.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [
+                { op = "add", name = "High", priority = 150 },
+                { op = "add", name = "Low", priority = 50 },
+                { op = "add", name = "Mid", priority = 100 },
+                { op = "add", name = "Mid2", priority = 100 }
+            ] };
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        let snapshot = engine.tick().expect("tick succeeds");
+        let object = snapshot.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Low", "Mid2", "Mid", "High"]);
     }
 
     #[test]
