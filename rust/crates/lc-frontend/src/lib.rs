@@ -3430,6 +3430,8 @@ mod tests {
                 on_fire: false,
                 fire_phase: 0,
                 fire_caused_by: -1,
+                physical_override: None,
+                last_energy_loss_cause: -1,
                 fixed_position: None,
                 fixed_velocity: None,
                 rotation_velocity: None,

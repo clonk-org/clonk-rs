@@ -3435,6 +3435,8 @@ impl Object {
             on_fire: self.state.on_fire,
             fire_phase: self.state.fire_phase,
             fire_caused_by: self.state.fire_caused_by,
+            physical_override: self.physical_override,
+            last_energy_loss_cause: self.last_energy_loss_cause,
             fixed_position: subpixel_or_none(self.fixed_position, position),
             fixed_velocity: subpixel_or_none(self.fixed_velocity, velocity),
             rotation_velocity: rotation_state.0,
@@ -3963,6 +3965,15 @@ pub struct ObjectSnapshot {
     pub fire_phase: i32,
     #[serde(default = "default_owner")]
     pub fire_caused_by: i32,
+    /// Trained per-object physicals; C++ persists the temporary set with the
+    /// object (C4Object.cpp:2777,2798-2801) and info training with the crew
+    /// info — the Rust override stands in for both until the C4ObjectInfo
+    /// model lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_override: Option<PhysicalInfo>,
+    /// `LastEngLossPlr` (C4Object.cpp:2740) — kill attribution.
+    #[serde(default = "default_owner")]
+    pub last_energy_loss_cause: i32,
     /// Raw 16.16 fixed-point position, recorded only when it carries sub-pixel
     /// detail beyond the whole-pixel `position` (i.e. `position != fixtoi(fix)`).
     /// `None` ⇒ reconstruct losslessly via `itofix(position)`. Mirrors C++
@@ -12253,6 +12264,8 @@ impl Engine {
                 object.fixed_rotation = fixed_rotation;
                 object.state.rotation = fixtoi(fixed_rotation);
             }
+            object.physical_override = snapshot.physical_override;
+            object.last_energy_loss_cause = snapshot.last_energy_loss_cause;
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
             object
                 .commands
@@ -23979,6 +23992,58 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.tick().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 13107);
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn state_round_trip_preserves_physical_override_and_energy_loss_cause() {
+        // C++ persists both with the object: LastEngLossPlr
+        // (C4Object.cpp:2740) and the trained/temporary physicals
+        // (C4Object.cpp:2777,2798-2801) — kill attribution and physical
+        // training must survive save/load.
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let definition = Definition::from_script("Clonk", "Clonk", script).unwrap();
+        let mut engine = Engine::with_seed(9);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Clonk").with_energy(40))
+            .expect("clonk spawns");
+        let idx = engine.find_object_index(id).expect("clonk exists");
+        engine.objects[idx].physical_override = Some(PhysicalInfo {
+            fight: 12_345,
+            walk: 35_000,
+            ..PhysicalInfo::default()
+        });
+        engine.objects[idx].last_energy_loss_cause = 3;
+
+        let state = engine.capture_state();
+        let mut restored = Engine::with_seed(1);
+        let definition = Definition::from_script("Clonk", "Clonk", script).unwrap();
+        restored
+            .register_definition(definition)
+            .expect("definition registers");
+        restored.restore_state(&state).expect("state restores");
+
+        let idx = restored.find_object_index(id).expect("clonk restored");
+        assert_eq!(
+            restored.objects[idx].physical_override,
+            Some(PhysicalInfo {
+                fight: 12_345,
+                walk: 35_000,
+                ..PhysicalInfo::default()
+            })
+        );
+        assert_eq!(restored.objects[idx].last_energy_loss_cause, 3);
     }
 
     #[test]
