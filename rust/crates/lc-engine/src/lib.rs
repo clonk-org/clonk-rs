@@ -7513,6 +7513,56 @@ fn target_bounds(target: &mut C4Fixed, low: i32, high: i32) -> Option<i32> {
     }
 }
 
+/// DFA_FLOAT ComDir movement with a nonzero Float physical
+/// (C4Object.cpp:5268-5286): `xdir/ydir ± FloatAccel` per ComDir (Stop
+/// drifts — no deceleration case), both axes clamped to
+/// `lLimit = FIXED100(Float)` (not ValByPhysical). DFA_FLOAT never applies
+/// gravity. Physical-less fixture definitions keep the legacy
+/// `MovementProfile` path instead.
+fn apply_float_physical_movement(
+    velocity: &mut FixedVec2,
+    command_direction: CommandDirection,
+    limit: C4Fixed,
+) {
+    match command_direction {
+        CommandDirection::Up => velocity.y -= math::FLOAT_ACCEL,
+        CommandDirection::Down => velocity.y += math::FLOAT_ACCEL,
+        CommandDirection::Right => velocity.x += math::FLOAT_ACCEL,
+        CommandDirection::Left => velocity.x -= math::FLOAT_ACCEL,
+        CommandDirection::UpRight => {
+            velocity.y -= math::FLOAT_ACCEL;
+            velocity.x += math::FLOAT_ACCEL;
+        }
+        CommandDirection::DownRight => {
+            velocity.y += math::FLOAT_ACCEL;
+            velocity.x += math::FLOAT_ACCEL;
+        }
+        CommandDirection::DownLeft => {
+            velocity.y += math::FLOAT_ACCEL;
+            velocity.x -= math::FLOAT_ACCEL;
+        }
+        CommandDirection::UpLeft => {
+            velocity.y -= math::FLOAT_ACCEL;
+            velocity.x -= math::FLOAT_ACCEL;
+        }
+        CommandDirection::Stop => {}
+    }
+
+    // xdir/ydir bounds (C4Object.cpp:5284-5285).
+    if velocity.y < -limit {
+        velocity.y = -limit;
+    }
+    if velocity.y > limit {
+        velocity.y = limit;
+    }
+    if velocity.x > limit {
+        velocity.x = limit;
+    }
+    if velocity.x < -limit {
+        velocity.x = -limit;
+    }
+}
+
 fn apply_float_command_movement(
     velocity: &mut FixedVec2,
     command_direction: CommandDirection,
@@ -7547,6 +7597,43 @@ fn decelerate_fixed_toward_zero(value: C4Fixed, accel: C4Fixed) -> C4Fixed {
     }
 }
 
+/// DFA_WALK ComDir movement with a nonzero Walk physical
+/// (C4Object.cpp:4771-4786): `xdir ± WalkAccel`, clamped per branch to
+/// `lLimit = ValByPhysical(280, Walk)`; Stop/Up/Down decelerate and snap to
+/// zero within WalkAccel. Physical-less fixture definitions keep the legacy
+/// `MovementProfile` path instead.
+fn apply_walk_physical_movement(
+    velocity: &mut FixedVec2,
+    command_direction: CommandDirection,
+    limit: C4Fixed,
+) {
+    match command_direction {
+        CommandDirection::Left | CommandDirection::UpLeft | CommandDirection::DownLeft => {
+            velocity.x -= math::WALK_ACCEL;
+            if velocity.x < -limit {
+                velocity.x = -limit;
+            }
+        }
+        CommandDirection::Right | CommandDirection::UpRight | CommandDirection::DownRight => {
+            velocity.x += math::WALK_ACCEL;
+            if velocity.x > limit {
+                velocity.x = limit;
+            }
+        }
+        CommandDirection::Stop | CommandDirection::Up | CommandDirection::Down => {
+            if velocity.x < C4Fixed::ZERO {
+                velocity.x += math::WALK_ACCEL;
+            }
+            if velocity.x > C4Fixed::ZERO {
+                velocity.x -= math::WALK_ACCEL;
+            }
+            if velocity.x > -math::WALK_ACCEL && velocity.x < math::WALK_ACCEL {
+                velocity.x = C4Fixed::ZERO;
+            }
+        }
+    }
+}
+
 fn apply_walk_command_movement(
     velocity: &mut FixedVec2,
     command_direction: CommandDirection,
@@ -7574,6 +7661,84 @@ fn apply_walk_command_movement(
     }
 
     velocity.x = clamp_fixed_to_limit(velocity.x, limit);
+}
+
+/// DFA_SWIM ComDir movement with a nonzero Swim physical
+/// (C4Object.cpp:4920-4965): `xdir/ydir ± SwimAccel` per ComDir (diagonals
+/// drive both axes), Stop decelerates both axes and snaps, then both axes
+/// clamp to `lLimit = ValByPhysical(160, Swim)`; facing follows the xdir
+/// sign. DFA_SWIM never applies gravity. The InLiquid exit checks and the
+/// surface ydir bound still need the liquid model. Physical-less fixture
+/// definitions keep the legacy `MovementProfile` path instead.
+fn apply_swim_physical_movement(
+    velocity: &mut FixedVec2,
+    command_direction: CommandDirection,
+    limit: C4Fixed,
+) -> Option<Direction> {
+    match command_direction {
+        CommandDirection::Up => velocity.y -= math::SWIM_ACCEL,
+        CommandDirection::UpRight => {
+            velocity.y -= math::SWIM_ACCEL;
+            velocity.x += math::SWIM_ACCEL;
+        }
+        CommandDirection::Right => velocity.x += math::SWIM_ACCEL,
+        CommandDirection::DownRight => {
+            velocity.y += math::SWIM_ACCEL;
+            velocity.x += math::SWIM_ACCEL;
+        }
+        CommandDirection::Down => velocity.y += math::SWIM_ACCEL,
+        CommandDirection::DownLeft => {
+            velocity.y += math::SWIM_ACCEL;
+            velocity.x -= math::SWIM_ACCEL;
+        }
+        CommandDirection::Left => velocity.x -= math::SWIM_ACCEL,
+        CommandDirection::UpLeft => {
+            velocity.y -= math::SWIM_ACCEL;
+            velocity.x -= math::SWIM_ACCEL;
+        }
+        CommandDirection::Stop => {
+            if velocity.x < C4Fixed::ZERO {
+                velocity.x += math::SWIM_ACCEL;
+            }
+            if velocity.x > C4Fixed::ZERO {
+                velocity.x -= math::SWIM_ACCEL;
+            }
+            if velocity.x > -math::SWIM_ACCEL && velocity.x < math::SWIM_ACCEL {
+                velocity.x = C4Fixed::ZERO;
+            }
+            if velocity.y < C4Fixed::ZERO {
+                velocity.y += math::SWIM_ACCEL;
+            }
+            if velocity.y > C4Fixed::ZERO {
+                velocity.y -= math::SWIM_ACCEL;
+            }
+            if velocity.y > -math::SWIM_ACCEL && velocity.y < math::SWIM_ACCEL {
+                velocity.y = C4Fixed::ZERO;
+            }
+        }
+    }
+
+    // xdir/ydir bounds (C4Object.cpp:4959-4960).
+    if velocity.y < -limit {
+        velocity.y = -limit;
+    }
+    if velocity.y > limit {
+        velocity.y = limit;
+    }
+    if velocity.x > limit {
+        velocity.x = limit;
+    }
+    if velocity.x < -limit {
+        velocity.x = -limit;
+    }
+
+    if velocity.x < C4Fixed::ZERO {
+        Some(Direction::Left)
+    } else if velocity.x > C4Fixed::ZERO {
+        Some(Direction::Right)
+    } else {
+        None
+    }
 }
 
 fn apply_swim_command_movement(
@@ -7611,6 +7776,51 @@ fn apply_swim_command_movement(
     velocity.y = clamp_fixed_to_limit(velocity.y, limit);
 }
 
+/// DFA_SCALE ComDir movement with a nonzero Scale physical
+/// (C4Object.cpp:4805-4837): ComDir into the facing wall converts to Up,
+/// `ydir ± WalkAccel` clamped per branch to `lLimit = ValByPhysical(200,
+/// Scale)`, Left/Right/Stop decelerate and snap, `xdir = 0`. Physical-less
+/// fixture definitions keep the legacy `MovementProfile` path instead.
+fn apply_scale_physical_movement(
+    velocity: &mut FixedVec2,
+    command_direction: CommandDirection,
+    limit: C4Fixed,
+    facing: Direction,
+) {
+    let effective_direction = match (facing, command_direction) {
+        (Direction::Left, CommandDirection::Left) | (Direction::Right, CommandDirection::Right) => {
+            CommandDirection::Up
+        }
+        _ => command_direction,
+    };
+    match effective_direction {
+        CommandDirection::Up | CommandDirection::UpRight | CommandDirection::UpLeft => {
+            velocity.y -= math::WALK_ACCEL;
+            if velocity.y < -limit {
+                velocity.y = -limit;
+            }
+        }
+        CommandDirection::Down | CommandDirection::DownRight | CommandDirection::DownLeft => {
+            velocity.y += math::WALK_ACCEL;
+            if velocity.y > limit {
+                velocity.y = limit;
+            }
+        }
+        CommandDirection::Left | CommandDirection::Right | CommandDirection::Stop => {
+            if velocity.y < C4Fixed::ZERO {
+                velocity.y += math::WALK_ACCEL;
+            }
+            if velocity.y > C4Fixed::ZERO {
+                velocity.y -= math::WALK_ACCEL;
+            }
+            if velocity.y > -math::WALK_ACCEL && velocity.y < math::WALK_ACCEL {
+                velocity.y = C4Fixed::ZERO;
+            }
+        }
+    }
+    velocity.x = C4Fixed::ZERO;
+}
+
 fn apply_scale_command_movement(
     velocity: &mut FixedVec2,
     command_direction: CommandDirection,
@@ -7646,6 +7856,67 @@ fn apply_scale_command_movement(
 
     velocity.y = clamp_fixed_to_limit(velocity.y, limit);
     velocity.x = C4Fixed::ZERO;
+}
+
+/// DFA_HANGLE ComDir movement with a nonzero Hangle physical
+/// (C4Object.cpp:4840-4872): `xdir ± WalkAccel` clamped per branch to
+/// `lLimit = ValByPhysical(160, Hangle)`; Up moves in the facing direction
+/// (clamped both sides), Stop/Down decelerate and snap, `ydir = 0`, facing
+/// follows the xdir sign. Physical-less fixture definitions keep the legacy
+/// `MovementProfile` path instead.
+fn apply_hangle_physical_movement(
+    velocity: &mut FixedVec2,
+    command_direction: CommandDirection,
+    limit: C4Fixed,
+    facing: Direction,
+) -> Option<Direction> {
+    match command_direction {
+        CommandDirection::Left | CommandDirection::UpLeft | CommandDirection::DownLeft => {
+            velocity.x -= math::WALK_ACCEL;
+            if velocity.x < -limit {
+                velocity.x = -limit;
+            }
+        }
+        CommandDirection::Right | CommandDirection::UpRight | CommandDirection::DownRight => {
+            velocity.x += math::WALK_ACCEL;
+            if velocity.x > limit {
+                velocity.x = limit;
+            }
+        }
+        CommandDirection::Up => {
+            velocity.x += if matches!(facing, Direction::Left) {
+                -math::WALK_ACCEL
+            } else {
+                math::WALK_ACCEL
+            };
+            if velocity.x < -limit {
+                velocity.x = -limit;
+            }
+            if velocity.x > limit {
+                velocity.x = limit;
+            }
+        }
+        CommandDirection::Stop | CommandDirection::Down => {
+            if velocity.x < C4Fixed::ZERO {
+                velocity.x += math::WALK_ACCEL;
+            }
+            if velocity.x > C4Fixed::ZERO {
+                velocity.x -= math::WALK_ACCEL;
+            }
+            if velocity.x > -math::WALK_ACCEL && velocity.x < math::WALK_ACCEL {
+                velocity.x = C4Fixed::ZERO;
+            }
+        }
+    }
+    velocity.y = C4Fixed::ZERO;
+
+    if velocity.x < C4Fixed::ZERO {
+        Some(Direction::Left)
+    } else if velocity.x > C4Fixed::ZERO {
+        Some(Direction::Right)
+    } else {
+        None
+    }
 }
 
 fn apply_hangle_command_movement(
@@ -7686,6 +7957,72 @@ fn apply_hangle_command_movement(
 
     velocity.x = clamp_fixed_to_limit(velocity.x, limit);
     velocity.y = C4Fixed::ZERO;
+
+    if velocity.x < C4Fixed::ZERO {
+        Some(Direction::Left)
+    } else if velocity.x > C4Fixed::ZERO {
+        Some(Direction::Right)
+    } else {
+        None
+    }
+}
+
+/// DFA_DIG ComDir movement with a nonzero Dig physical
+/// (C4Object.cpp:4888-4915): dirs assigned directly from
+/// `lLimit = ValByPhysical(125, Dig)` — up components are `-lLimit/2`,
+/// COMD_Up digs upward in the facing direction, Stop zeroes both axes;
+/// facing follows the xdir sign. Physical-less fixture definitions keep the
+/// legacy `MovementProfile` path instead.
+fn apply_dig_physical_movement(
+    velocity: &mut FixedVec2,
+    command_direction: CommandDirection,
+    limit: C4Fixed,
+    facing: Direction,
+) -> Option<Direction> {
+    let half_up = -(limit / 2);
+    match command_direction {
+        CommandDirection::Up => {
+            velocity.x = if matches!(facing, Direction::Left) {
+                -limit
+            } else {
+                limit
+            };
+            velocity.y = half_up;
+        }
+        CommandDirection::UpLeft => {
+            velocity.x = -limit;
+            velocity.y = half_up;
+        }
+        CommandDirection::Left => {
+            velocity.x = -limit;
+            velocity.y = C4Fixed::ZERO;
+        }
+        CommandDirection::DownLeft => {
+            velocity.x = -limit;
+            velocity.y = limit;
+        }
+        CommandDirection::Down => {
+            velocity.x = C4Fixed::ZERO;
+            velocity.y = limit;
+        }
+        CommandDirection::DownRight => {
+            velocity.x = limit;
+            velocity.y = limit;
+        }
+        CommandDirection::Right => {
+            velocity.x = limit;
+            velocity.y = C4Fixed::ZERO;
+        }
+        CommandDirection::UpRight => {
+            velocity.x = limit;
+            velocity.y = half_up;
+        }
+        CommandDirection::Stop => {
+            velocity.x = C4Fixed::ZERO;
+            velocity.y = C4Fixed::ZERO;
+            return None;
+        }
+    }
 
     if velocity.x < C4Fixed::ZERO {
         Some(Direction::Left)
@@ -12558,8 +12895,43 @@ impl Engine {
         }
 
         {
+            let physical = self.object_physical(idx);
+            // At-limit physical training before the ComDir movement: Scale
+            // Tick5 (C4Object.cpp:4810-4812), Hangle Tick5 (:4844-4846),
+            // Swim Tick10 (:4924-4926).
+            match procedure {
+                ActionProcedure::Scale if physical.scale != 0 && self.frame % 5 == 0 => {
+                    let ydir = self.objects[idx].fixed_velocity.y;
+                    if ydir.abs() == math::val_by_physical(200, physical.scale) {
+                        self.train_physical(idx, |info| &mut info.scale, 1, C4_MAX_PHYSICAL);
+                    }
+                }
+                ActionProcedure::Hang if physical.hangle != 0 && self.frame % 5 == 0 => {
+                    let xdir = self.objects[idx].fixed_velocity.x;
+                    if xdir.abs() == math::val_by_physical(160, physical.hangle) {
+                        self.train_physical(idx, |info| &mut info.hangle, 1, C4_MAX_PHYSICAL);
+                    }
+                }
+                ActionProcedure::Swim if physical.swim != 0 && self.frame % 10 == 0 => {
+                    let xdir = self.objects[idx].fixed_velocity.x;
+                    if xdir.abs() == math::val_by_physical(160, physical.swim) {
+                        self.train_physical(idx, |info| &mut info.swim, 1, C4_MAX_PHYSICAL);
+                    }
+                }
+                _ => {}
+            }
             let object = &mut self.objects[idx];
-            object.fixed_velocity.y += gravity_component;
+            // DFA_SWIM and DFA_FLOAT never apply gravity (no DoGravity call,
+            // C4Object.cpp:4920-4970/:5268-5287); the legacy halved-gravity
+            // paths keep it for physical-less fixtures.
+            let physical_skips_gravity = match procedure {
+                ActionProcedure::Swim => physical.swim != 0,
+                ActionProcedure::Float => physical.float != 0,
+                _ => false,
+            };
+            if !physical_skips_gravity {
+                object.fixed_velocity.y += gravity_component;
+            }
             if procedure.allows_wind() {
                 self.environment
                     .apply_to_velocity(&mut object.fixed_velocity, self.frame);
@@ -12569,6 +12941,13 @@ impl Engine {
             }
             let mut pending_direction = None;
             match procedure {
+                ActionProcedure::Float if physical.float != 0 => {
+                    apply_float_physical_movement(
+                        &mut object.fixed_velocity,
+                        command_direction,
+                        math::fixed100(physical.float),
+                    );
+                }
                 ActionProcedure::Float | ActionProcedure::Flight => {
                     apply_float_command_movement(
                         &mut object.fixed_velocity,
@@ -12577,43 +12956,86 @@ impl Engine {
                     );
                 }
                 ActionProcedure::Swim => {
-                    apply_swim_command_movement(
-                        &mut object.fixed_velocity,
-                        command_direction,
-                        movement_profile,
-                        gravity_component,
-                    );
+                    if physical.swim != 0 {
+                        pending_direction = apply_swim_physical_movement(
+                            &mut object.fixed_velocity,
+                            command_direction,
+                            math::val_by_physical(160, physical.swim),
+                        );
+                    } else {
+                        apply_swim_command_movement(
+                            &mut object.fixed_velocity,
+                            command_direction,
+                            movement_profile,
+                            gravity_component,
+                        );
+                    }
                 }
                 ActionProcedure::Walk => {
-                    apply_walk_command_movement(
-                        &mut object.fixed_velocity,
-                        command_direction,
-                        movement_profile,
-                    );
+                    if physical.walk != 0 {
+                        apply_walk_physical_movement(
+                            &mut object.fixed_velocity,
+                            command_direction,
+                            math::val_by_physical(280, physical.walk),
+                        );
+                    } else {
+                        apply_walk_command_movement(
+                            &mut object.fixed_velocity,
+                            command_direction,
+                            movement_profile,
+                        );
+                    }
                 }
                 ActionProcedure::Scale => {
-                    apply_scale_command_movement(
-                        &mut object.fixed_velocity,
-                        command_direction,
-                        movement_profile,
-                        object.state.direction,
-                    );
+                    if physical.scale != 0 {
+                        apply_scale_physical_movement(
+                            &mut object.fixed_velocity,
+                            command_direction,
+                            math::val_by_physical(200, physical.scale),
+                            object.state.direction,
+                        );
+                    } else {
+                        apply_scale_command_movement(
+                            &mut object.fixed_velocity,
+                            command_direction,
+                            movement_profile,
+                            object.state.direction,
+                        );
+                    }
                 }
                 ActionProcedure::Hang => {
-                    pending_direction = apply_hangle_command_movement(
-                        &mut object.fixed_velocity,
-                        command_direction,
-                        movement_profile,
-                        object.state.direction,
-                    );
+                    pending_direction = if physical.hangle != 0 {
+                        apply_hangle_physical_movement(
+                            &mut object.fixed_velocity,
+                            command_direction,
+                            math::val_by_physical(160, physical.hangle),
+                            object.state.direction,
+                        )
+                    } else {
+                        apply_hangle_command_movement(
+                            &mut object.fixed_velocity,
+                            command_direction,
+                            movement_profile,
+                            object.state.direction,
+                        )
+                    };
                 }
                 ActionProcedure::Dig => {
-                    pending_direction = apply_dig_command_movement(
-                        &mut object.fixed_velocity,
-                        command_direction,
-                        movement_profile,
-                        object.state.direction,
-                    );
+                    pending_direction = if physical.dig != 0 {
+                        apply_dig_physical_movement(
+                            &mut object.fixed_velocity,
+                            command_direction,
+                            math::val_by_physical(125, physical.dig),
+                            object.state.direction,
+                        )
+                    } else {
+                        apply_dig_command_movement(
+                            &mut object.fixed_velocity,
+                            command_direction,
+                            movement_profile,
+                            object.state.direction,
+                        )
+                    };
                 }
                 ActionProcedure::Push => {
                     if !push_handled {
@@ -12650,7 +13072,7 @@ impl Engine {
                         object.state.direction = Direction::Right;
                     }
                 }
-                ActionProcedure::Hang | ActionProcedure::Dig => {
+                ActionProcedure::Hang | ActionProcedure::Dig | ActionProcedure::Swim => {
                     if let Some(direction) = pending_direction {
                         object.state.direction = direction;
                     } else if object.state.velocity.x < 0 {
@@ -23217,6 +23639,346 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let crate_idx = engine.find_object_index(crate_id).expect("crate exists");
         engine.change_object_energy(crate_idx, 30, -1);
         assert_eq!(engine.objects[crate_idx].state.energy, 70);
+    }
+
+    #[test]
+    fn walk_procedure_uses_walk_physical_limit_and_const_accel() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Walker", "Walker", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Walk".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        definition.configure_actions(Some("Walk".to_string()), actions);
+        definition.set_physical(PhysicalInfo {
+            walk: 35_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Walker")
+                    .with_position(Vector2::new(0, 0))
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("walker spawns");
+        let idx = engine.find_object_index(id).expect("walker exists");
+
+        // DFA_WALK (C4Object.cpp:4771-4786): xdir += WalkAccel = FIXED100(50)
+        // (C4Movement.cpp:34) = raw 32768 per frame, clamped to
+        // lLimit = ValByPhysical(280, 35000) = itofix(35000*56, 2000000)
+        // = raw 64225.
+        engine.tick().expect("tick succeeds");
+        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 32768);
+        engine.tick().expect("tick succeeds");
+        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 64225);
+    }
+
+    #[test]
+    fn scale_procedure_uses_scale_physical_limit_and_trains_at_limit() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Climber", "Climber", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Scale".to_string(),
+            ActionSpec::default().with_procedure("scale"),
+        );
+        definition.configure_actions(Some("Scale".to_string()), actions);
+        definition.set_physical(PhysicalInfo {
+            scale: 30_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Climber")
+                    .with_position(Vector2::new(0, 0))
+                    .with_command_direction(CommandDirection::Up),
+            )
+            .expect("climber spawns");
+        let idx = engine.find_object_index(id).expect("climber exists");
+
+        // DFA_SCALE (C4Object.cpp:4805-4837): ydir -= WalkAccel (raw 32768),
+        // clamped to lLimit = ValByPhysical(200, 30000)
+        // = itofix(30000*40, 2000000) = raw 39321.
+        engine.tick().expect("tick succeeds");
+        assert_eq!(engine.objects[idx].fixed_velocity.y.val(), -32768);
+        engine.tick().expect("tick succeeds");
+        assert_eq!(engine.objects[idx].fixed_velocity.y.val(), -39321);
+        assert_eq!(engine.objects[idx].physical_override, None);
+
+        // Tick5 at-limit training (C4Object.cpp:4810-4812): frame 5 sees
+        // |ydir| == lLimit and trains Scale by 1.
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        let trained = engine.objects[idx]
+            .physical_override
+            .expect("at-limit Tick5 training clones the physicals");
+        assert_eq!(trained.scale, 30_001);
+    }
+
+    #[test]
+    fn hangle_procedure_uses_hangle_physical_limit_and_trains_at_limit() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Hangler", "Hangler", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Hangle".to_string(),
+            ActionSpec::default().with_procedure("hangle"),
+        );
+        definition.configure_actions(Some("Hangle".to_string()), actions);
+        definition.set_physical(PhysicalInfo {
+            hangle: 40_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Hangler")
+                    .with_position(Vector2::new(0, 0))
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("hangler spawns");
+        let idx = engine.find_object_index(id).expect("hangler exists");
+
+        // DFA_HANGLE (C4Object.cpp:4840-4872): xdir += WalkAccel (raw 32768),
+        // clamped to lLimit = ValByPhysical(160, 40000)
+        // = itofix(40000*32, 2000000) = raw 41943; ydir = 0.
+        engine.tick().expect("tick succeeds");
+        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 32768);
+        engine.tick().expect("tick succeeds");
+        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 41943);
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        assert_eq!(engine.objects[idx].state.direction, Direction::Right);
+        assert_eq!(engine.objects[idx].physical_override, None);
+
+        // Tick5 at-limit training (C4Object.cpp:4844-4846).
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        engine.tick().expect("tick succeeds");
+        let trained = engine.objects[idx]
+            .physical_override
+            .expect("at-limit Tick5 training clones the physicals");
+        assert_eq!(trained.hangle, 40_001);
+    }
+
+    #[test]
+    fn swim_procedure_uses_swim_physical_limit_and_trains_on_tick10() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Swimmer", "Swimmer", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Swim".to_string(),
+            ActionSpec::default().with_procedure("swim"),
+        );
+        definition.configure_actions(Some("Swim".to_string()), actions);
+        definition.set_physical(PhysicalInfo {
+            swim: 50_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        // Nonzero gravity pins that DFA_SWIM never applies gravity
+        // (C4Object.cpp:4920-4970 has no DoGravity call).
+        engine.set_physics(PhysicsSettings::new(2, 20, -20));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Swimmer")
+                    .with_position(Vector2::new(0, 0))
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("swimmer spawns");
+        let idx = engine.find_object_index(id).expect("swimmer exists");
+
+        // DFA_SWIM (C4Object.cpp:4920-4960): xdir += SwimAccel = FIXED100(20)
+        // (C4Movement.cpp:34) = raw 13107, clamped to
+        // lLimit = ValByPhysical(160, 50000) = itofix(50000*32, 2000000)
+        // = raw 52428 — reached exactly on the fourth frame.
+        engine.tick().expect("tick succeeds");
+        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 13107);
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        for _ in 0..4 {
+            engine.tick().expect("tick succeeds");
+        }
+        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 52428);
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        assert_eq!(engine.objects[idx].state.direction, Direction::Right);
+        assert_eq!(engine.objects[idx].physical_override, None);
+
+        // Tick10 at-limit training (C4Object.cpp:4924-4926).
+        for _ in 0..5 {
+            engine.tick().expect("tick succeeds");
+        }
+        let trained = engine.objects[idx]
+            .physical_override
+            .expect("at-limit Tick10 training clones the physicals");
+        assert_eq!(trained.swim, 50_001);
+    }
+
+    #[test]
+    fn dig_procedure_uses_dig_physical_speed() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Digger", "Digger", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Dig".to_string(),
+            ActionSpec::default().with_procedure("dig"),
+        );
+        definition.configure_actions(Some("Dig".to_string()), actions);
+        definition.set_physical(PhysicalInfo {
+            dig: 40_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(2, 20, -20));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Digger")
+                    .with_position(Vector2::new(0, 0))
+                    .with_command_direction(CommandDirection::UpRight),
+            )
+            .expect("digger spawns");
+        let idx = engine.find_object_index(id).expect("digger exists");
+
+        // DFA_DIG (C4Object.cpp:4888-4915): direct dirs from
+        // lLimit = ValByPhysical(125, 40000) = itofix(40000*25, 2000000)
+        // = raw 32768; COMD_UpRight sets xdir = +lLimit, ydir = -lLimit/2.
+        engine.tick().expect("tick succeeds");
+        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 32768);
+        assert_eq!(engine.objects[idx].fixed_velocity.y.val(), -16384);
+        assert_eq!(engine.objects[idx].state.direction, Direction::Right);
+    }
+
+    #[test]
+    fn float_procedure_uses_float_physical_limit_and_const_accel() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Boat", "Boat", script).unwrap();
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Float".to_string(),
+            ActionSpec::default().with_procedure("float"),
+        );
+        definition.configure_actions(Some("Float".to_string()), actions);
+        definition.set_physical(PhysicalInfo {
+            float: 20,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        // Nonzero gravity pins that DFA_FLOAT never applies gravity
+        // (C4Object.cpp:5268-5287 has no DoGravity call).
+        engine.set_physics(PhysicsSettings::new(2, 20, -20));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Boat")
+                    .with_position(Vector2::new(0, 0))
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("boat spawns");
+        let idx = engine.find_object_index(id).expect("boat exists");
+
+        // DFA_FLOAT (C4Object.cpp:5268-5286): xdir += FloatAccel = FIXED100(10)
+        // (C4Movement.cpp:33) = raw 6553, clamped to lLimit = FIXED100(Float)
+        // = FIXED100(20) = raw 13107 — NOT ValByPhysical.
+        engine.tick().expect("tick succeeds");
+        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 6553);
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        engine.tick().expect("tick succeeds");
+        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 13106);
+        engine.tick().expect("tick succeeds");
+        assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 13107);
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
     }
 
     #[test]

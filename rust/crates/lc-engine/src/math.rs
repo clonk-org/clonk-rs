@@ -56,6 +56,12 @@ impl C4Fixed {
         r
     }
 
+    /// Absolute value (the C++ `Abs` template over `C4Fixed`).
+    #[inline]
+    pub fn abs(self) -> Self {
+        Self(self.0.abs())
+    }
+
     /// Round to nearest with precision multiplier. Fixed.h:97-105.
     #[inline]
     pub fn to_int_prec(self, prec: i32) -> i32 {
@@ -281,6 +287,12 @@ pub fn itofix_prec(x: i32, prec: i32) -> C4Fixed {
     };
     C4Fixed(val)
 }
+
+/// The constant procedure accelerations (C4Movement.cpp:31-34), `FIXED100`
+/// values with the C++ constructor's truncating division.
+pub const WALK_ACCEL: C4Fixed = C4Fixed(50 * FPF / 100);
+pub const SWIM_ACCEL: C4Fixed = C4Fixed(20 * FPF / 100);
+pub const FLOAT_ACCEL: C4Fixed = C4Fixed(10 * FPF / 100);
 
 /// `ValByPhysical` (C4InfoCore.h:224-227): the percentage of a physical's
 /// maximum as a fixed value — `itofix(physical * (percent/5),
