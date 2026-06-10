@@ -122,6 +122,9 @@ pub enum MaterialReactionKind {
         corrosion_probability: Option<i32>,
     },
     Insert,
+    /// mrfScript (C4Material.cpp:800-835): `func` indexes the set's
+    /// `script_reactions` name table (kept `Copy` for the flattened table).
+    Script { func: u16 },
 }
 
 /// One resolved reaction-table entry — the `C4MaterialReaction` essentials
@@ -159,7 +162,7 @@ pub enum MaterialInteractionEvent {
 impl MaterialInteractionEvent {
     const ALL: [Self; MATERIAL_EVENT_COUNT] = [Self::PxsPos, Self::PxsMove, Self::MassMove];
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self as usize
     }
 
@@ -669,6 +672,10 @@ pub struct MaterialSet {
     materials: Vec<Material>,
     by_name: HashMap<String, MaterialId>,
     custom_reactions_by_event: [Vec<Option<MaterialReaction>>; MATERIAL_EVENT_COUNT],
+    /// `ScriptFunc=` names of `Type=Script` reactions, indexed by
+    /// `MaterialReactionKind::Script::func` (resolved lazily at call time —
+    /// C++ resolves on the global script engine, C4Material.cpp:71-78).
+    script_reactions: Vec<String>,
 }
 
 impl MaterialSet {
@@ -695,12 +702,21 @@ impl MaterialSet {
         for material in &mut materials {
             material.resolve_relations(&by_name);
         }
-        let custom_reactions_by_event = build_custom_reactions(&materials, &by_name);
+        let (custom_reactions_by_event, script_reactions) =
+            build_custom_reactions(&materials, &by_name);
         Self {
             materials,
             by_name,
             custom_reactions_by_event,
+            script_reactions,
         }
+    }
+
+    /// The `ScriptFunc=` name behind a `MaterialReactionKind::Script` entry.
+    pub fn script_reaction_name(&self, func: u16) -> Option<&str> {
+        self.script_reactions
+            .get(usize::from(func))
+            .map(String::as_str)
     }
 
     pub fn push(&mut self, mut material: Material) {
@@ -718,7 +734,10 @@ impl MaterialSet {
     }
 
     fn rebuild_custom_reactions(&mut self) {
-        self.custom_reactions_by_event = build_custom_reactions(&self.materials, &self.by_name);
+        let (entries, script_reactions) =
+            build_custom_reactions(&self.materials, &self.by_name);
+        self.custom_reactions_by_event = entries;
+        self.script_reactions = script_reactions;
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Material> {
@@ -929,6 +948,12 @@ fn execute_mass_move_reaction_kind(
         MaterialReactionKind::None | MaterialReactionKind::Insert => {
             MaterialReactionExecution::Unhandled
         }
+        // OPEN (PORT_STATUS): the mass-mover reaction path has no VM access
+        // (only Landscape + LcgRng are threaded through `MassMover::execute`),
+        // so meeMassMove script reactions cannot run yet; C++ would call the
+        // function and ExtractMaterial on a truthy return
+        // (C4MassMover.cpp:163-167).
+        MaterialReactionKind::Script { .. } => MaterialReactionExecution::Unhandled,
         MaterialReactionKind::Convert {
             target: Some(target),
             ..
@@ -975,11 +1000,15 @@ fn option_to_index(material: Option<MaterialId>) -> usize {
 fn build_custom_reactions(
     materials: &[Material],
     by_name: &HashMap<String, MaterialId>,
-) -> [Vec<Option<MaterialReaction>>; MATERIAL_EVENT_COUNT] {
+) -> (
+    [Vec<Option<MaterialReaction>>; MATERIAL_EVENT_COUNT],
+    Vec<String>,
+) {
     let width = materials.len() + 1;
     let mut entries = std::array::from_fn(|_| vec![None; width * width]);
+    let mut script_reactions = Vec::new();
     if materials.is_empty() {
-        return entries;
+        return (entries, script_reactions);
     }
 
     for material in materials {
@@ -990,7 +1019,9 @@ fn build_custom_reactions(
                 .map(|value| value as u32)
                 .unwrap_or(u32::MAX);
 
-            let Some(kind) = parse_custom_reaction_kind(reaction_def, by_name) else {
+            let Some(kind) =
+                parse_custom_reaction_kind(reaction_def, by_name, &mut script_reactions)
+            else {
                 continue;
             };
             // `CheckSlide=` (fInsertionCheck), default true
@@ -1036,18 +1067,32 @@ fn build_custom_reactions(
         }
     }
 
-    entries
+    (entries, script_reactions)
 }
 
 fn parse_custom_reaction_kind(
     definition: &MaterialReactionDefinition,
     by_name: &HashMap<String, MaterialId>,
+    script_reactions: &mut Vec<String>,
 ) -> Option<MaterialReactionKind> {
     let reaction_type = definition
         .value("type")
         .map(normalize_key)
         .unwrap_or_default();
     match reaction_type.as_str() {
+        // mrfScript (C4Material.cpp:40): the ScriptFunc name is retained
+        // verbatim for call-time resolution. An over-full table degrades to
+        // NoReaction rather than mis-indexing.
+        "script" => {
+            let name = definition
+                .value("scriptfunc")
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string();
+            let index = u16::try_from(script_reactions.len()).ok()?;
+            script_reactions.push(name);
+            Some(MaterialReactionKind::Script { func: index })
+        }
         "convert" => {
             let depth = definition.int("depth").filter(|value| *value > 0);
             let target = definition
@@ -1365,6 +1410,43 @@ mod tests {
             set.evaluate_temperature_conversion(steam, TemperatureDirection::Upwards, 40)
                 .is_none(),
             "temperature above threshold should not trigger below conversion"
+        );
+    }
+
+    #[test]
+    fn script_reaction_type_captures_function_name() {
+        // ReactionFuncMap binds "Script" to mrfScript (C4Material.cpp:40);
+        // the ScriptFunc= name is kept for resolution at call time
+        // (ResolveScriptFuncs resolves on the global script engine,
+        // C4Material.cpp:71-78 — the Rust port resolves lazily against the
+        // scenario script).
+        let set = build_material_set(
+            r#"
+            [Material Goo]
+            Name=Goo
+            Density=25
+
+            [Reaction]
+            Type=Script
+            ScriptFunc=GooHitsEarth
+            TargetSpec=Earth
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+        "#,
+        );
+        let goo = set.id_of("Goo").expect("goo exists");
+        let earth = set.id_of("Earth").expect("earth exists");
+        let reaction = set.reaction(Some(goo), Some(earth));
+        assert!(reaction.user_defined);
+        let MaterialReactionKind::Script { func } = reaction.kind else {
+            panic!("Type=Script parses as a Script reaction");
+        };
+        assert_eq!(
+            set.script_reaction_name(func),
+            Some("GooHitsEarth"),
+            "the ScriptFunc name is retained verbatim"
         );
     }
 

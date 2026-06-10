@@ -7115,6 +7115,106 @@ impl ScenarioScript {
         let audio_state = audio_guard.finish();
         Ok((batch, audio_state, rng))
     }
+
+    /// Raw-value scenario call for engine-internal callbacks (mrfScript):
+    /// returns the script's return VALUE instead of parsing it as a command
+    /// proplist. `fPassErrors=false` semantics (C4Material.cpp:818): script
+    /// errors are logged and yield `None` (C4VNull), while host side effects
+    /// made before the error still fold into the batch.
+    #[allow(clippy::too_many_arguments)]
+    fn call_value(
+        &self,
+        function: &str,
+        args: &[Value],
+        world: HostWorldContext,
+        rng: LcgRng,
+        env_frame: u64,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        audio: AudioRegistry,
+        game_over_triggered: bool,
+    ) -> (Option<Value>, ScenarioBatch, AudioRegistry, LcgRng) {
+        let physics_guard = enter_physics_context(physics);
+        let env_guard = enter_environment_context(environment, env_frame);
+        let guard = enter_random_context(rng);
+        let next_object_id = world.next_object_id();
+        let audio_guard = enter_audio_context(audio);
+        let (result, host_effects) = compat::with_effect_context_with_state(
+            None,
+            global_effects,
+            world,
+            next_object_id,
+            game_over_triggered,
+            || self.script.call(function, args),
+        );
+        let rng = guard.finish();
+        let mut physics_delta = physics_guard.finish();
+        let mut environment_delta = env_guard.finish();
+        let value = match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                tracing::warn!(
+                    script = %self.name,
+                    function,
+                    %error,
+                    "material reaction script error (continuing like C++ fail-safe exec)"
+                );
+                None
+            }
+        };
+
+        let compat::EffectContextOutcome {
+            object: _,
+            global: host_global_effects,
+            object_update: _,
+            object_commands: _,
+            command_operations: _,
+            destroy_object: _,
+            environment: environment_from_host,
+            physics: physics_from_host,
+            spawns: host_spawns,
+            landscape: host_landscape_ops,
+            particles: host_particles,
+            transfer_zones: host_transfer_zones,
+            messages: host_messages,
+            player_commands: host_player_commands,
+            audio: host_audio,
+            trigger_game_over: host_trigger_game_over,
+            next_object_id: _,
+            other_objects,
+        } = host_effects;
+
+        let mut batch = ScenarioBatch {
+            other_objects,
+            ..ScenarioBatch::default()
+        };
+        batch.player_commands.extend(host_player_commands);
+        batch.global_effects.extend(host_global_effects);
+        batch.landscape_ops.extend(host_landscape_ops);
+        if let Some(delta) = environment_from_host {
+            merge_environment_delta(&mut environment_delta, &delta);
+        }
+        if !environment_delta.is_empty() {
+            batch.environment = Some(environment_delta);
+        }
+        if let Some(delta) = physics_from_host {
+            merge_physics_delta(&mut physics_delta, &delta);
+        }
+        if !physics_delta.is_empty() {
+            batch.physics = Some(physics_delta);
+        }
+        batch.spawns.extend(host_spawns);
+        batch.particles.extend(host_particles);
+        batch.transfer_zones.extend(host_transfer_zones);
+        batch.messages.extend(host_messages);
+        batch.audio.extend(host_audio.events);
+        if host_trigger_game_over {
+            batch.trigger_game_over = true;
+        }
+        let audio_state = audio_guard.finish();
+        (value, batch, audio_state, rng)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17488,6 +17588,44 @@ impl Engine {
                 }
                 false
             }
+            // mrfScript (C4Material.cpp:800-835): mrfUserCheck already ran
+            // in the prologue (Script entries are always user-defined); a
+            // missing/unresolvable function is a no-op (null pScriptFunc).
+            // Params are the C++ 9-int set; a truthy return kills the PXS.
+            // OPEN (PORT_STATUS): the C++ by-ref write-back of
+            // X/Y/XDir/YDir/PxsMat after the call needs reference-argument
+            // support in lc-script's public call API.
+            MaterialReactionKind::Script { func } => {
+                let Some(function) = self
+                    .materials
+                    .script_reaction_name(func)
+                    .map(str::to_string)
+                else {
+                    return false;
+                };
+                let args = [
+                    Value::Int(*x),
+                    Value::Int(*y),
+                    Value::Int(ls_x),
+                    Value::Int(ls_y),
+                    // fixtoi(fXDir, 100) (C4Material.cpp:812-813)
+                    Value::Int(math::fixtoi_prec(pixel.xdir, 100)),
+                    Value::Int(math::fixtoi_prec(pixel.ydir, 100)),
+                    Value::Int(pixel.mat.index() as i32),
+                    Value::Int(
+                        ls_mat.map(|id| id.index() as i32).unwrap_or(-1), // MNone
+                    ),
+                    Value::Int(event.index() as i32),
+                ];
+                match self.call_material_reaction_script(&function, &args) {
+                    None => false,
+                    // `if (pScriptFunc->Exec(...)) return true;` — raw
+                    // C4Value truthiness kills the PXS (C4Material.cpp:818)
+                    Some(value) => {
+                        !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false))
+                    }
+                }
+            }
             // mrfInsert (C4Material.cpp:773-798)
             MaterialReactionKind::Insert => {
                 if event != MaterialInteractionEvent::PxsMove {
@@ -17515,6 +17653,48 @@ impl Engine {
                 true
             }
         }
+    }
+
+    /// Runs a `Type=Script` material reaction function (mrfScript,
+    /// C4Material.cpp:800-835). C++ resolves the function on the global
+    /// script engine; the scenario script stands in (PORT_STATUS). Returns
+    /// the raw return value, `None` when the function is unresolvable
+    /// (null `pScriptFunc` → the reaction is a no-op) — script ERRORS return
+    /// `Some(Value::Nil)` semantics via the fail-safe exec.
+    fn call_material_reaction_script(
+        &mut self,
+        function: &str,
+        args: &[Value],
+    ) -> Option<Value> {
+        if function.is_empty()
+            || !self
+                .scenario_script
+                .as_ref()
+                .map(|script| script.has_function(function))
+                .unwrap_or(false)
+        {
+            return None;
+        }
+        let world = self.host_world_context();
+        let rng = self.rng.clone();
+        let (value, batch, audio_state, rng) = self.scenario_script.as_ref()?.call_value(
+            function,
+            args,
+            world,
+            rng,
+            self.frame,
+            &self.global_effects.clone(),
+            self.physics,
+            self.environment,
+            self.audio_registry.clone(),
+            self.game_over_triggered,
+        );
+        self.rng = rng;
+        self.audio_registry = audio_state;
+        if let Err(error) = self.apply_scenario_batch(batch) {
+            tracing::warn!(%error, "material reaction script batch failed to apply");
+        }
+        Some(value.unwrap_or(Value::Nil))
     }
 
     /// `Smoke()` (C4Effect.cpp:859-865): create a "Smoke" particle if the def
@@ -21160,6 +21340,107 @@ mod tests {
         assert_eq!(survivors[0].xdir, math::C4Fixed::ZERO);
         assert_eq!(survivors[0].ydir, math::C4Fixed::ZERO);
         assert_eq!(engine.rng, mirror, "no draws on the conversion path");
+    }
+
+    #[test]
+    fn script_reaction_calls_scenario_function_and_kills_on_truthy_return() {
+        // mrfScript (C4Material.cpp:800-835): the function gets the 9-int
+        // parameter set — X, Y, LSPosX, LSPosY, fixtoi(XDir,100),
+        // fixtoi(YDir,100), PxsMat, LsMat, Event — and a truthy return
+        // deactivates the PXS (C4Material.cpp:818). An unresolvable name is
+        // a no-op (null pScriptFunc, C4Material.cpp:809-811).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Goo]
+            Name=Goo
+            Density=25
+            Friction=10
+
+            [Reaction]
+            Type=Script
+            ScriptFunc=GooHitsEarth
+            TargetSpec=Earth
+            CheckSlide=0
+
+            [Material Ooze]
+            Name=Ooze
+            Density=25
+            Friction=10
+
+            [Reaction]
+            Type=Script
+            ScriptFunc=NoSuchFunction
+            TargetSpec=Earth
+            CheckSlide=0
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let goo = materials.id_of("Goo").expect("goo exists");
+        let ooze = materials.id_of("Ooze").expect("ooze exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut engine = Engine::with_seed(21);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(5, 10, Some(earth)));
+        // The reaction function records its parameters in a global effect
+        // variable store via AddEffect... keep it simpler: return the kill
+        // flag computed from the parameters so the call is observable both
+        // ways (kill for goo's column, survive elsewhere is not reachable
+        // in this fixture — the unresolvable arm covers the no-op path).
+        engine
+            .install_scenario_script(
+                "Scenario",
+                r#"
+                global func GooHitsEarth(x, y, lsx, lsy, xdir, ydir, pxs_mat, ls_mat, event) {
+                    // meePXSMove = 1; falling straight down: xdir 0, ydir 100
+                    if (event != 1) { return 0; }
+                    if (xdir != 0) { return 0; }
+                    if (ydir != 100) { return 0; }
+                    if (ls_mat < 0) { return 0; }
+                    return 1;
+                }
+                "#,
+            )
+            .expect("scenario script installs");
+
+        let mirror = engine.rng.clone();
+        assert!(engine.pxs_system.create(
+            goo,
+            math::itofix(2),
+            math::itofix(9),
+            math::C4Fixed::ZERO,
+            math::itofix(1),
+        ));
+        engine.tick_pxs();
+        assert_eq!(
+            engine.pxs_system.iter().count(),
+            0,
+            "a truthy script return kills the PXS"
+        );
+        assert_eq!(engine.rng, mirror, "no synced draws on this path");
+
+        // Unresolvable ScriptFunc: null pScriptFunc → reaction is a no-op;
+        // the PXS keeps moving per the normal step rules (snapped/stopped by
+        // the contact handling, but alive).
+        assert!(engine.pxs_system.create(
+            ooze,
+            math::itofix(2),
+            math::itofix(9),
+            math::C4Fixed::ZERO,
+            math::itofix(1),
+        ));
+        engine.tick_pxs();
+        assert_eq!(
+            engine.pxs_system.iter().count(),
+            1,
+            "an unresolvable ScriptFunc leaves the PXS alive"
+        );
     }
 
     #[test]
