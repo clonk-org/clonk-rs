@@ -32,7 +32,7 @@ impl EffectState {
         Self {
             name: name.into(),
             priority: 100,
-            interval: 1,
+            interval: 0,
             timer: 0,
             command_target: None,
             command_id: None,

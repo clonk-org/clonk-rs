@@ -3552,15 +3552,14 @@ impl Object {
         self.set_velocity_preserving_subpixel(resolution.velocity);
     }
 
+    // iIntervall/iTime are stored verbatim (C4Effect.cpp:66-67) - a zero
+    // interval means the timer never fires.
     fn insert_effect(&mut self, mut effect: EffectState) -> (EffectState, Option<EffectState>) {
-        if effect.interval <= 0 {
-            effect.interval = 1;
+        if effect.interval < 0 {
+            effect.interval = 0;
         }
         if effect.timer < 0 {
             effect.timer = 0;
-        }
-        if effect.interval > 0 && effect.timer >= effect.interval {
-            effect.timer %= effect.interval;
         }
         let replaced = self
             .state
@@ -6552,7 +6551,7 @@ impl Definition {
         game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
-        self.dispatch_effect_callback(
+        self.dispatch_effect_callback_3(
             state,
             object_id,
             effect,
@@ -6583,7 +6582,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
         self.dispatch_effect_callback(
             state,
             object_id,
@@ -6602,6 +6601,48 @@ impl Definition {
         )
     }
 
+    /// Whether the definition script declares the `Fx<Name><Event>` callback.
+    fn has_effect_callback(&self, effect_name: &str, event: &str) -> bool {
+        self.script.has_effect_callback(effect_name, event)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_effect_callback_3(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        effect: &EffectState,
+        event: &'static str,
+        function_label: &'static str,
+        extras: Vec<Value>,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
+        self.dispatch_effect_callback(
+            state,
+            object_id,
+            effect,
+            event,
+            function_label,
+            extras,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+        )
+        .map(|(outcome, audio, rng, _)| (outcome, audio, rng))
+    }
+
     fn call_effect_stop(
         &self,
         state: &ObjectState,
@@ -6617,7 +6658,7 @@ impl Definition {
         game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
-        self.dispatch_effect_callback(
+        self.dispatch_effect_callback_3(
             state,
             object_id,
             effect,
@@ -6651,13 +6692,14 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
         let next_object_id = world.next_object_id();
         if !self.script.has_effect_callback(&effect.name, event) {
             return Ok((
                 EffectContextOutcome::empty(next_object_id, audio.clone()),
                 audio,
                 rng,
+                None,
             ));
         }
 
@@ -6720,11 +6762,7 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || {
-                self.script
-                    .call_effect_callback(&effect.name, event, &args)
-                    .map(|_| ())
-            },
+            || self.script.call_effect_callback(&effect.name, event, &args),
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -6732,14 +6770,14 @@ impl Definition {
         let audio_state = audio_guard.finish();
 
         result
-            .map(|_| {
+            .map(|callback_result| {
                 if !environment_delta.is_empty() {
                     commands.environment = Some(environment_delta);
                 }
                 if !physics_delta.is_empty() {
                     commands.physics = Some(physics_delta);
                 }
-                (commands, audio_state, rng)
+                (commands, audio_state, rng, callback_result)
             })
             .map_err(|source| EngineError::Script {
                 definition: format!("{}::{}::{}", self.id, effect.name, function_label),
@@ -12554,6 +12592,7 @@ impl Engine {
 
         while let Some(event) = queue.pop_front() {
             let snapshot_for_call = state_snapshot.clone();
+            let mut timer_kill = false;
             let (outcome, audio_state, new_rng) = match event.kind {
                 EffectEventKind::Started => definition.call_effect_start(
                     &snapshot_for_call,
@@ -12568,19 +12607,32 @@ impl Engine {
                     game_over_triggered,
                     current_audio,
                 )?,
-                EffectEventKind::Timer => definition.call_effect_timer(
-                    &snapshot_for_call,
-                    object_id,
-                    &event.effect,
-                    frame,
-                    rng,
-                    &global_view,
-                    current_physics,
-                    current_environment,
-                    world.clone(),
-                    game_over_triggered,
-                    current_audio,
-                )?,
+                EffectEventKind::Timer => {
+                    let (outcome, audio_state, new_rng, timer_result) = definition
+                        .call_effect_timer(
+                            &snapshot_for_call,
+                            object_id,
+                            &event.effect,
+                            frame,
+                            rng,
+                            &global_view,
+                            current_physics,
+                            current_environment,
+                            world.clone(),
+                            game_over_triggered,
+                            current_audio,
+                        )?;
+                    // C4Effect::Execute (C4Effect.cpp:342-357): FxTimer
+                    // returning C4Fx_Execute_Kill (-1, C4Effects.h:40) kills
+                    // the effect; so does an elapsed interval with NO timer
+                    // function.
+                    timer_kill = if definition.has_effect_callback(&event.effect.name, "Timer") {
+                        matches!(timer_result, Some(Value::Int(-1)))
+                    } else {
+                        true
+                    };
+                    (outcome, audio_state, new_rng)
+                }
                 EffectEventKind::Stopped(reason) => definition.call_effect_stop(
                     &snapshot_for_call,
                     object_id,
@@ -12598,6 +12650,12 @@ impl Engine {
             };
             rng = new_rng;
             current_audio = audio_state;
+            if timer_kill {
+                if let Some(removed) = object.remove_effect(&event.effect.name) {
+                    queue.push_back(EffectEvent::stopped(removed, EffectStopReason::Removed));
+                }
+                state_snapshot.effects = object.state.effects.clone();
+            }
 
             let compat::EffectContextOutcome {
                 object: object_effect_commands,
@@ -18141,14 +18199,11 @@ fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[Eff
 }
 
 fn insert_effect_into_stack(stack: &mut Vec<EffectState>, mut effect: EffectState) {
-    if effect.interval <= 0 {
-        effect.interval = 1;
+    if effect.interval < 0 {
+        effect.interval = 0;
     }
     if effect.timer < 0 {
         effect.timer = 0;
-    }
-    if effect.interval > 0 && effect.timer >= effect.interval {
-        effect.timer %= effect.interval;
     }
 
     if let Some(index) = stack
@@ -18858,19 +18913,21 @@ fn value_to_effect_commands(
                     None => 100,
                 };
 
+                // A zero interval is valid in C++ (no timer callbacks,
+                // C4Effect.cpp:342).
                 let interval = match map.remove("interval") {
                     Some(value) => {
                         let interval = value_to_int(definition, function, value)?;
-                        if interval <= 0 {
+                        if interval < 0 {
                             return Err(EngineError::InvalidScriptOutput {
                                 definition: definition.to_string(),
                                 function,
-                                detail: "effect interval must be > 0".into(),
+                                detail: "effect interval must be >= 0".into(),
                             });
                         }
                         interval
                     }
-                    None => 1,
+                    None => 0,
                 };
 
                 let timer = match map.remove("timer") {
@@ -26534,11 +26591,85 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn effect_timer_kill_semantics_follow_cpp() {
+        // C4Effect::Execute (C4Effect.cpp:342-357): an FxTimer returning
+        // C4Fx_Execute_Kill (-1, C4Effects.h:40) kills the effect; an
+        // effect whose interval elapses with NO timer function is killed
+        // too; a zero interval never reaches either arm.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [
+                { op = "add", name = "Doomed", interval = 2 },
+                { op = "add", name = "Mute", interval = 3 },
+                { op = "add", name = "Inert", interval = 0 }
+            ] };
+        }
+
+        global func FxDoomedTimer(state, effect, timer) {
+            if (timer >= 4) {
+                return -1;
+            }
+            return nil;
+        }
+
+        global func FxDoomedStop(state, effect, reason) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        let mut last = None;
+        for _ in 0..8 {
+            last = Some(engine.tick().expect("tick succeeds"));
+        }
+        let snapshot = last.expect("snapshot present");
+        let object = snapshot.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Inert"],
+            "Doomed killed by -1 at iTime 4, Mute killed at its first \
+             timerless gate, zero-interval Idle survives"
+        );
+        let calls = call_log.lock().unwrap().clone();
+        let stop_calls = calls.iter().filter(|name| *name == "FxDoomedStop").count();
+        assert_eq!(stop_calls, 1, "the kill runs the Stop callback");
+    }
+
+    #[test]
     fn remove_effect_no_calls_skips_stop_callback() {
         let script = r#"
         global func Initialize(state, random)
         {
-            AddEffect("Pulse", state);
+            AddEffect("Pulse", state, 100, 1);
             return nil;
         }
 

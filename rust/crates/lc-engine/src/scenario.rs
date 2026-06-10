@@ -4471,7 +4471,8 @@ Objects=STNE=1;TREE=1
         assert_eq!(effect.name, "Intoxicated");
         assert_eq!(effect.priority, 150);
         assert_eq!(effect.interval, 3);
-        assert_eq!(effect.timer, 2);
+        // iTime is stored verbatim - C++ never wraps it (C4Effect.cpp:66-67).
+        assert_eq!(effect.timer, 5);
     }
 
     #[test]
