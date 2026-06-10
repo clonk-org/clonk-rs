@@ -286,10 +286,28 @@ impl ClonkFont {
         align: TextAlign,
         markup: bool,
     ) {
+        self.draw_with_gamma(surface, x, y, text, color, align, markup, None);
+    }
+
+    /// [`ClonkFont::draw`] with the blit shader's per-fragment gamma lookup
+    /// (StdGL.cpp:1082-1086) applied to the modulated glyph color before
+    /// blending, exactly like the C++ GL pipeline.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_with_gamma(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        gamma: Option<&crate::GammaRamp>,
+    ) {
         let mut stack: Vec<MarkupTag> = Vec::new(); // src/StdDDraw2.cpp:1037
         let mut line_y = y;
         for line in text.split(|c: char| c == '\n' || (markup && c == '|')) {
-            self.draw_line(surface, x, line_y, line, color, align, markup, &mut stack);
+            self.draw_line(surface, x, line_y, line, color, align, markup, &mut stack, gamma);
             // iTy += fZoom * GetLineHeight() per line (src/StdDDraw2.cpp:1039).
             line_y = line_y.saturating_add(self.line_height);
         }
@@ -307,6 +325,7 @@ impl ClonkFont {
         align: TextAlign,
         markup: bool,
         stack: &mut Vec<MarkupTag>,
+        gamma: Option<&crate::GammaRamp>,
     ) {
         // Alignment uses the markup-aware extent of this line
         // (src/StdFont.cpp:826-839); sx / 2 is integer division.
@@ -343,6 +362,7 @@ impl ClonkFont {
                     y,
                     modulation_rgb(stack, color),
                     color[3],
+                    gamma,
                 );
             }
             // x += w2 + iHSpace (src/StdFont.cpp:927); empty facet → width 0.
@@ -509,6 +529,7 @@ fn parse_color_tag(pars: &str) -> Option<u32> {
 /// (`glColor` modulate, f32 round-to-nearest), then composited with
 /// `glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)`. Clipped to the
 /// surface; malformed `pixels` lengths are tolerated.
+#[allow(clippy::too_many_arguments)]
 fn blit_cell(
     surface: &mut Surface,
     cell: &GlyphCell,
@@ -517,6 +538,7 @@ fn blit_cell(
     y: i32,
     mod_rgb: [u8; 3],
     color_alpha: u8,
+    gamma: Option<&crate::GammaRamp>,
 ) {
     let width = usize::try_from(cell.width).unwrap_or(0);
     let height = usize::try_from(cell_height).unwrap_or(0);
@@ -541,7 +563,12 @@ fn blit_cell(
                 continue; // clipped
             };
             let af = out_a / 255.0;
-            let modulate = |c: u8, m: u8| (c as f32 * m as f32 / 255.0).round();
+            // Modulate in float; with a gamma ramp the result goes through
+            // the shader's gamma texel lookup, else round like before.
+            let modulate = |c: u8, m: u8| -> f32 {
+                let v = c as f32 * m as f32 / 255.0;
+                gamma.map_or_else(|| v.round(), |g| f32::from(g.encode_float(v)))
+            };
             let blend = |src: f32, dst: u8| (src * af + dst as f32 * (1.0 - af)).round() as u8;
             let blended = Color::new(
                 blend(modulate(px.r, mod_rgb[0]), dst.r),

@@ -8460,7 +8460,7 @@ fn render_startup_frame(
                     let version_x = width * 39 / 40;
                     let version_y = height / 18 + logo_h;
                     if let Some(fonts) = assets.clonk_fonts.as_ref() {
-                        fonts.text.draw(
+                        fonts.text.draw_with_gamma(
                             surface,
                             version_x,
                             version_y,
@@ -8468,6 +8468,7 @@ fn render_startup_frame(
                             [255, 255, 255, 255],
                             lc_graphics::clonk_font::TextAlign::Right,
                             true,
+                            Some(startup_gamma()),
                         );
                     } else {
                         let font = assets.font_arc();

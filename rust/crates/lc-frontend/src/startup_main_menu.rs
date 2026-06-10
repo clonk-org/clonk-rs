@@ -85,7 +85,12 @@ pub fn main_menu_layout(w: i32, h: i32) -> MainMenuLayout {
 /// (C4Gui.cpp:283-311) with DynBarFacet slices: begin = left `border` columns,
 /// middle = the remainder tiled, end = right `border` columns drawn last,
 /// where `border` = texture height (C4Gui.cpp:101-107).
-pub fn draw_bar(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
+pub fn draw_bar(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    image: &ImageData,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
     let border = image.height();
     let mid_w = image.width().saturating_sub(2 * border);
     let (x0, y0) = (rect.origin.x as i32, rect.origin.y as i32);
@@ -94,14 +99,14 @@ pub fn draw_bar(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
 
     // begin slice (clipped if the bar is narrower than the slice)
     let begin_w = (border as i32).min(bar_w).max(0) as u32;
-    crate::draw_image_strip(surface, x0, y0, image, 0, 0, begin_w, border);
+    crate::draw_image_strip(surface, x0, y0, image, 0, 0, begin_w, border, gamma);
 
     // middle tiles: advance by the full middle width even when clipped
     if mid_w > 0 {
         let mut ix = border as i32;
         while ix < bar_w - end_show {
             let tile_w = (mid_w as i32).min(bar_w - end_show - ix).max(0) as u32;
-            crate::draw_image_strip(surface, x0 + ix, y0, image, border, 0, tile_w, border);
+            crate::draw_image_strip(surface, x0 + ix, y0, image, border, 0, tile_w, border, gamma);
             ix += mid_w as i32;
         }
     }
@@ -118,6 +123,7 @@ pub fn draw_bar(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
         0,
         end_w,
         border,
+        gamma,
     );
 }
 
@@ -345,7 +351,7 @@ impl StartupMainMenu {
                          'Clonk' is a registered trademark of Matthes Bender.";
         let (anchor_x, anchor_y) = layout.participants_anchor;
         if let Some(fonts) = self.clonk_fonts.as_ref() {
-            fonts.title.draw(
+            fonts.title.draw_with_gamma(
                 surface,
                 anchor_x,
                 anchor_y,
@@ -353,8 +359,9 @@ impl StartupMainMenu {
                 [255, 255, 255, 255],
                 TextAlign::Right,
                 false,
+                self.gamma.as_deref(),
             );
-            fonts.mini.draw(
+            fonts.mini.draw_with_gamma(
                 surface,
                 layout.trademark_anchor_x,
                 layout.client.y + layout.client.h - fonts.mini.line_height / 2,
@@ -362,6 +369,7 @@ impl StartupMainMenu {
                 [255, 255, 255, 255],
                 TextAlign::Right,
                 false,
+                self.gamma.as_deref(),
             );
             return;
         }
@@ -445,7 +453,7 @@ impl StartupMainMenu {
             } else {
                 &textures.normal
             };
-            draw_bar(surface, rect, image);
+            draw_bar(surface, rect, image, self.gamma.as_deref());
         } else {
             let color = match state {
                 ButtonVisualState::Disabled => Color::new(50, 60, 72, 220),
@@ -487,7 +495,7 @@ impl StartupMainMenu {
             let x1 = x0 + rect.size.width as i32 - 1;
             let y1 = y0 + rect.size.height as i32 - 1;
             let (expanded, _) = expand_hotkey_markup(button.label);
-            font.draw(
+            font.draw_with_gamma(
                 surface,
                 (x0 + x1) / 2 + txt_off,
                 (y0 + y1 - font.line_height) / 2 + txt_off,
@@ -495,6 +503,7 @@ impl StartupMainMenu {
                 [text_color.r, text_color.g, text_color.b, text_color.a],
                 TextAlign::Center,
                 true,
+                self.gamma.as_deref(),
             );
             return;
         }
@@ -606,11 +615,7 @@ mod tests {
         // middle = cols 2-3 (30,40), end = cols 4-5 (50,60).
         let image = column_coded_image(6, 2);
         let mut surface = lc_graphics::Surface::new(7, 2, PixelFormat::Rgba8888);
-        draw_bar(
-            &mut surface,
-            &GuiRect::new(0.0, 0.0, 7.0, 2.0),
-            &image,
-        );
+        draw_bar(&mut surface, &GuiRect::new(0.0, 0.0, 7.0, 2.0), &image, None);
         // iRightShowLength = 2/3 = 0; tiles at x=2 (30,40), x=4 (30,40), x=6 (30);
         // end drawn last right-aligned at x=5 -> overwrites cols 5,6 with 50,60.
         assert_eq!(column_values(&surface, 0, 7), vec![10, 20, 30, 40, 30, 50, 60]);

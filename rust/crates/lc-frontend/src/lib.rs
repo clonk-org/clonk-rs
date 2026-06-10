@@ -3325,6 +3325,9 @@ pub fn draw_image(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
 ///
 /// Mirrors a C++ facet blit at native size (no stretch), as used by
 /// `C4GUI::Element::DrawBar`'s begin/middle/end slices (C4Gui.cpp:281-311).
+/// With `gamma`, source fragments are encoded through the blit shader's
+/// gamma lookup and blended in float like the GL blend stage.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_image_strip(
     surface: &mut Surface,
     dest_x: i32,
@@ -3334,6 +3337,7 @@ pub fn draw_image_strip(
     src_y: u32,
     src_w: u32,
     src_h: u32,
+    gamma: Option<&lc_graphics::GammaRamp>,
 ) {
     let pixels = image.pixels();
     let (iw, ih) = (image.width(), image.height());
@@ -3353,43 +3357,84 @@ pub fn draw_image_strip(
             let Some(rgba) = pixels.get(idx..idx + 4) else {
                 continue;
             };
-            let color = Color::new(rgba[0], rgba[1], rgba[2], rgba[3]);
-            if color.a == 0 {
+            if rgba[3] == 0 {
                 continue;
             }
-            let blended = if color.a == 255 {
-                color
-            } else {
+            let blended = if rgba[3] == 255 {
+                Color::new(
+                    encode_channel(gamma, f32::from(rgba[0])) as u8,
+                    encode_channel(gamma, f32::from(rgba[1])) as u8,
+                    encode_channel(gamma, f32::from(rgba[2])) as u8,
+                    255,
+                )
+            } else if gamma.is_none() {
                 let background = surface.get_pixel(tx as u32, ty as u32).unwrap_or_default();
-                blend_colors(color, background)
+                blend_colors(Color::new(rgba[0], rgba[1], rgba[2], rgba[3]), background)
+            } else {
+                let dst = surface.get_pixel(tx as u32, ty as u32).unwrap_or_default();
+                let af = f32::from(rgba[3]) / 255.0;
+                let blend = |src: u8, dst: u8| -> u8 {
+                    (encode_channel(gamma, f32::from(src)) * af + f32::from(dst) * (1.0 - af))
+                        .round()
+                        .clamp(0.0, 255.0) as u8
+                };
+                Color::new(
+                    blend(rgba[0], dst.r),
+                    blend(rgba[1], dst.g),
+                    blend(rgba[2], dst.b),
+                    255,
+                )
             };
             let _ = surface.set_pixel(tx as u32, ty as u32, blended);
         }
     }
 }
 
-/// Bilinearly samples `image` at GL_LINEAR coordinates for a stretch into
-/// `rect`, returning the interpolated RGBA at destination pixel `(dx, dy)`.
+/// The GL texture tile size the C++ engine picks for an image: the next
+/// power of two of min(W, H), capped at the 4096 max texture size
+/// (C4Surface::CreateTextures, C4Surface.cpp:166-189). Images larger than
+/// the tile in either dimension are split across multiple textures, which
+/// produces visible filtering seams at tile boundaries — faithfully
+/// reproduced here.
+fn cpp_tex_size(width: u32, height: u32) -> u32 {
+    let need = width.min(height).max(1);
+    let mut n = 1u32;
+    while (1 << n) < need {
+        n += 1;
+    }
+    (1u32 << n).min(4096)
+}
+
+/// Bilinearly samples one `tile_size` texture tile of `image` at GL_LINEAR
+/// coordinates `(u_rel, v_rel)` relative to the tile origin
+/// `(tile_x, tile_y)` in image texels.
 ///
-/// GL samples at `(d + 0.5) * src/dst - 0.5` with edge clamping; the C++
-/// engine stretches facets this way whenever scale != 1 and point filtering
-/// is off (StdGL.cpp:528-532, Config default PointFiltering=false).
-fn bilinear_sample(image: &ImageData, rect: &GuiRect, dx: u32, dy: u32) -> [f32; 4] {
+/// The engine sets GL_CLAMP_TO_EDGE at texture creation
+/// (C4Surface.cpp:1102-1103), so the two taps clamp to the tile's edge
+/// texels; texels inside the tile but outside the image are padding.
+fn bilinear_sample_tile(
+    image: &ImageData,
+    tile_x: i32,
+    tile_y: i32,
+    tile_size: i32,
+    u_rel: f32,
+    v_rel: f32,
+) -> [f32; 4] {
     let pixels = image.pixels();
-    let (sw, sh) = (image.width() as f32, image.height() as f32);
-    let texel = |x: i32, y: i32| -> [f32; 4] {
-        let x = x.clamp(0, image.width() as i32 - 1) as u32;
-        let y = y.clamp(0, image.height() as i32 - 1) as u32;
-        let idx = ((y * image.width() + x) * 4) as usize;
+    let texel = |x_rel: i32, y_rel: i32| -> [f32; 4] {
+        let x = tile_x + x_rel.clamp(0, tile_size - 1);
+        let y = tile_y + y_rel.clamp(0, tile_size - 1);
+        if x < 0 || y < 0 || x >= image.width() as i32 || y >= image.height() as i32 {
+            return [0.0; 4]; // tile padding
+        }
+        let idx = ((y as u32 * image.width() + x as u32) * 4) as usize;
         pixels
             .get(idx..idx + 4)
             .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32])
             .unwrap_or([0.0; 4])
     };
-    let u = (dx as f32 + 0.5) * sw / rect.size.width.max(1.0) - 0.5;
-    let v = (dy as f32 + 0.5) * sh / rect.size.height.max(1.0) - 0.5;
-    let (x0, y0) = (u.floor() as i32, v.floor() as i32);
-    let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+    let (x0, y0) = (u_rel.floor() as i32, v_rel.floor() as i32);
+    let (fx, fy) = (u_rel - x0 as f32, v_rel - y0 as f32);
     let (p00, p10) = (texel(x0, y0), texel(x0 + 1, y0));
     let (p01, p11) = (texel(x0, y0 + 1), texel(x0 + 1, y0 + 1));
     std::array::from_fn(|c| {
@@ -3397,6 +3442,101 @@ fn bilinear_sample(image: &ImageData, rect: &GuiRect, dx: u32, dy: u32) -> [f32;
         let bottom = p01[c] * (1.0 - fx) + p11[c] * fx;
         top * (1.0 - fy) + bottom * fy
     })
+}
+
+/// How a stretched blit combines with the framebuffer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BilinearBlend {
+    /// `glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)`.
+    AlphaOver,
+    /// `glBlendFunc(GL_SRC_ALPHA, GL_ONE)` (StdGL.cpp:908, additive blits).
+    Additive,
+}
+
+/// Stretches `image` into `rect` like `CStdDDraw::Blit` (StdDDraw2.cpp:
+/// 637-786): one quad per power-of-two texture tile, GL_LINEAR sampling with
+/// GL_REPEAT wrap per tile, the blit shader's gamma lookup on the fragment
+/// color, and float blending rounded once on store.
+fn draw_image_bilinear_impl(
+    surface: &mut Surface,
+    rect: &GuiRect,
+    image: &ImageData,
+    gamma: Option<&lc_graphics::GammaRamp>,
+    blend_mode: BilinearBlend,
+) {
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || image.width() == 0 || image.height() == 0
+    {
+        return;
+    }
+    let (fw, fh) = (image.width() as f32, image.height() as f32);
+    let (tx, ty) = (rect.origin.x, rect.origin.y);
+    let scale_x = rect.size.width / fw;
+    let scale_y = rect.size.height / fh;
+    let ts = cpp_tex_size(image.width(), image.height()) as i32;
+    let tiles_x = (image.width() as i32 - 1) / ts + 1;
+    let tiles_y = (image.height() as i32 - 1) / ts + 1;
+
+    for tile_iy in 0..tiles_y {
+        for tile_ix in 0..tiles_x {
+            let (blit_x, blit_y) = (tile_ix * ts, tile_iy * ts);
+            // Source range of this tile in image texels (fx = fy = 0 here).
+            let s_left = blit_x as f32;
+            let s_top = blit_y as f32;
+            let s_right = ((blit_x + ts) as f32).min(fw);
+            let s_bottom = ((blit_y + ts) as f32).min(fh);
+            // Destination quad (tTexBlt* in StdDDraw2.cpp:738-741).
+            let t_left = s_left * scale_x + tx;
+            let t_top = s_top * scale_y + ty;
+            let t_right = s_right * scale_x + tx;
+            let t_bottom = s_bottom * scale_y + ty;
+            // Pixels whose centers fall inside the quad.
+            let px0 = (t_left - 0.5).ceil() as i32;
+            let py0 = (t_top - 0.5).ceil() as i32;
+            for py in py0.max(0)..surface.height() as i32 {
+                if (py as f32 + 0.5) >= t_bottom {
+                    break;
+                }
+                for px in px0.max(0)..surface.width() as i32 {
+                    if (px as f32 + 0.5) >= t_right {
+                        break;
+                    }
+                    let u_rel = (px as f32 + 0.5 - tx) / scale_x - 0.5 - blit_x as f32;
+                    let v_rel = (py as f32 + 0.5 - ty) / scale_y - 0.5 - blit_y as f32;
+                    let s = bilinear_sample_tile(image, blit_x, blit_y, ts, u_rel, v_rel);
+                    if s[3] <= 0.0 {
+                        continue;
+                    }
+                    let af = (s[3] / 255.0).clamp(0.0, 1.0);
+                    let dst = surface.get_pixel(px as u32, py as u32).unwrap_or_default();
+                    let out = match blend_mode {
+                        BilinearBlend::AlphaOver => {
+                            let blend = |src: f32, dst: u8| -> u8 {
+                                (encode_channel(gamma, src) * af + f32::from(dst) * (1.0 - af))
+                                    .round()
+                                    .clamp(0.0, 255.0)
+                                    as u8
+                            };
+                            Color::new(
+                                blend(s[0], dst.r),
+                                blend(s[1], dst.g),
+                                blend(s[2], dst.b),
+                                255,
+                            )
+                        }
+                        BilinearBlend::Additive => {
+                            let add = |src: f32, dst: u8| -> u8 {
+                                (f32::from(dst) + encode_channel(gamma, src) * af)
+                                    .round()
+                                    .clamp(0.0, 255.0) as u8
+                            };
+                            Color::new(add(s[0], dst.r), add(s[1], dst.g), add(s[2], dst.b), dst.a)
+                        }
+                    };
+                    let _ = surface.set_pixel(px as u32, py as u32, out);
+                }
+            }
+        }
+    }
 }
 
 /// Encodes a filtered colour channel the way the C++ blit shader does:
@@ -3409,52 +3549,15 @@ fn encode_channel(gamma: Option<&lc_graphics::GammaRamp>, x: f32) -> f32 {
 }
 
 /// Stretches `image` into `rect` with GL_LINEAR-equivalent bilinear sampling
-/// and normal alpha-over blending. `gamma` mirrors the per-fragment gamma
-/// lookup of the C++ blit shader.
+/// (tiled textures, GL_REPEAT) and normal alpha-over blending. `gamma`
+/// mirrors the per-fragment gamma lookup of the C++ blit shader.
 pub fn draw_image_bilinear(
     surface: &mut Surface,
     rect: &GuiRect,
     image: &ImageData,
     gamma: Option<&lc_graphics::GammaRamp>,
 ) {
-    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || image.width() == 0 || image.height() == 0
-    {
-        return;
-    }
-    let dest_x = rect.origin.x.round() as i32;
-    let dest_y = rect.origin.y.round() as i32;
-    let dest_w = rect.size.width.round() as u32;
-    let dest_h = rect.size.height.round() as u32;
-    for dy in 0..dest_h {
-        let ty = dest_y + dy as i32;
-        if ty < 0 || ty >= surface.height() as i32 {
-            continue;
-        }
-        for dx in 0..dest_w {
-            let tx = dest_x + dx as i32;
-            if tx < 0 || tx >= surface.width() as i32 {
-                continue;
-            }
-            let s = bilinear_sample(image, rect, dx, dy);
-            if s[3] <= 0.0 {
-                continue;
-            }
-            let dst = surface.get_pixel(tx as u32, ty as u32).unwrap_or_default();
-            let af = (s[3] / 255.0).clamp(0.0, 1.0);
-            let blend = |src: f32, dst: u8| -> u8 {
-                (encode_channel(gamma, src) * af + f32::from(dst) * (1.0 - af))
-                    .round()
-                    .clamp(0.0, 255.0) as u8
-            };
-            let out = Color::new(
-                blend(s[0], dst.r),
-                blend(s[1], dst.g),
-                blend(s[2], dst.b),
-                255,
-            );
-            let _ = surface.set_pixel(tx as u32, ty as u32, out);
-        }
-    }
+    draw_image_bilinear_impl(surface, rect, image, gamma, BilinearBlend::AlphaOver);
 }
 
 /// Stretches `image` into `rect` with bilinear sampling and additive blending
@@ -3466,39 +3569,7 @@ pub fn draw_image_bilinear_additive(
     image: &ImageData,
     gamma: Option<&lc_graphics::GammaRamp>,
 ) {
-    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || image.width() == 0 || image.height() == 0
-    {
-        return;
-    }
-    let dest_x = rect.origin.x.round() as i32;
-    let dest_y = rect.origin.y.round() as i32;
-    let dest_w = rect.size.width.round() as u32;
-    let dest_h = rect.size.height.round() as u32;
-    for dy in 0..dest_h {
-        let ty = dest_y + dy as i32;
-        if ty < 0 || ty >= surface.height() as i32 {
-            continue;
-        }
-        for dx in 0..dest_w {
-            let tx = dest_x + dx as i32;
-            if tx < 0 || tx >= surface.width() as i32 {
-                continue;
-            }
-            let s = bilinear_sample(image, rect, dx, dy);
-            let af = s[3] / 255.0;
-            if af <= 0.0 {
-                continue;
-            }
-            let dst = surface.get_pixel(tx as u32, ty as u32).unwrap_or_default();
-            let add = |src: f32, dst: u8| -> u8 {
-                (f32::from(dst) + encode_channel(gamma, src) * af)
-                    .round()
-                    .clamp(0.0, 255.0) as u8
-            };
-            let out = Color::new(add(s[0], dst.r), add(s[1], dst.g), add(s[2], dst.b), dst.a);
-            let _ = surface.set_pixel(tx as u32, ty as u32, out);
-        }
-    }
+    draw_image_bilinear_impl(surface, rect, image, gamma, BilinearBlend::Additive);
 }
 
 fn blend_colors(foreground: Color, background: Color) -> Color {
@@ -3573,7 +3644,7 @@ mod tests {
             .collect();
         let image = ImageData::new(4, 1, pixels);
         let mut surface = Surface::new(2, 1, PixelFormat::Rgba8888);
-        draw_image_strip(&mut surface, 0, 0, &image, 2, 0, 2, 1);
+        draw_image_strip(&mut surface, 0, 0, &image, 2, 0, 2, 1, None);
         assert_eq!(surface.get_pixel(0, 0), Some(gray(30)));
         assert_eq!(surface.get_pixel(1, 0), Some(gray(40)));
     }
@@ -3581,7 +3652,8 @@ mod tests {
     #[test]
     fn draw_image_bilinear_matches_gl_linear_sampling() {
         // 2x1 black|white stretched to 4x1: GL_LINEAR samples at texel centres
-        // (i+0.5)*sw/dw - 0.5 with edge clamping -> 0, 64, 191, 255.
+        // (i+0.5)*sw/dw - 0.5 with GL_CLAMP_TO_EDGE (C4Surface.cpp:1102):
+        // 0, 64, 191, 255.
         let pixels: Vec<u8> = [0u8, 255].iter().flat_map(|v| [*v, *v, *v, 255]).collect();
         let image = ImageData::new(2, 1, pixels);
         let mut surface = Surface::new(4, 1, PixelFormat::Rgba8888);
