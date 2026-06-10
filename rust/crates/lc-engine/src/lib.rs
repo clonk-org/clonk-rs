@@ -5338,7 +5338,9 @@ impl Definition {
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             next_object_id,
+            other_objects,
         } = host_effects;
+        batch.other_objects.extend(other_objects);
         batch.audio.extend(host_audio.events);
         if !host_player_commands.is_empty() {
             batch.player_commands.extend(host_player_commands);
@@ -5507,7 +5509,9 @@ impl Definition {
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             next_object_id,
+            other_objects,
         } = host_effects;
+        batch.other_objects.extend(other_objects);
         batch.audio.extend(host_audio.events);
         if !host_player_commands.is_empty() {
             batch.player_commands.extend(host_player_commands);
@@ -5661,7 +5665,9 @@ impl Definition {
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             next_object_id,
+            other_objects,
         } = host_effects;
+        batch.other_objects.extend(other_objects);
         batch.audio.extend(host_audio.events);
         if !host_player_commands.is_empty() {
             batch.player_commands.extend(host_player_commands);
@@ -7049,6 +7055,7 @@ impl ScenarioScript {
             audio: host_audio,
             trigger_game_over: host_trigger_game_over,
             next_object_id: _,
+            other_objects,
         } = host_effects;
 
         if !host_object_effects.is_empty()
@@ -7065,6 +7072,7 @@ impl ScenarioScript {
         }
 
         let mut batch = parse_scenario_command(&self.name, function, result)?;
+        batch.other_objects.extend(other_objects);
         if !host_player_commands.is_empty() {
             batch.player_commands.extend(host_player_commands);
         }
@@ -7138,6 +7146,8 @@ struct CommandBatch {
     commands: Vec<QueuedCommand>,
     command_ops: Vec<CommandOperation>,
     effects: Vec<EffectCommand>,
+    /// Nested-call mutations to other objects (Find_Func reentrancy).
+    other_objects: Vec<compat::NestedObjectOutcome>,
     global_effects: Vec<EffectCommand>,
     environment: Option<EnvironmentDelta>,
     physics: Option<PhysicsDelta>,
@@ -7153,6 +7163,8 @@ struct CommandBatch {
 #[derive(Debug, Default)]
 struct ScenarioBatch {
     spawns: Vec<SpawnConfig>,
+    /// Nested-call mutations to other objects (Find_Func reentrancy).
+    other_objects: Vec<compat::NestedObjectOutcome>,
     global_effects: Vec<EffectCommand>,
     environment: Option<EnvironmentDelta>,
     physics: Option<PhysicsDelta>,
@@ -9371,6 +9383,7 @@ impl Engine {
     fn apply_scenario_batch(&mut self, batch: ScenarioBatch) -> Result<Vec<ObjectId>, EngineError> {
         let ScenarioBatch {
             spawns,
+            other_objects,
             global_effects,
             environment,
             physics,
@@ -9383,6 +9396,8 @@ impl Engine {
             player_commands,
             trigger_game_over,
         } = batch;
+
+        self.apply_nested_object_outcomes(other_objects)?;
 
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
@@ -11257,6 +11272,7 @@ impl Engine {
                 commands,
                 command_ops,
                 effects,
+                other_objects,
                 global_effects,
                 environment,
                 physics,
@@ -11414,6 +11430,8 @@ impl Engine {
                 }
             }
             self.update_sector_for_index(idx);
+
+            self.apply_nested_object_outcomes(other_objects)?;
 
             self.trigger_action_callbacks(idx, Some(previous_action_name))?;
             self.update_sector_for_index(idx);
@@ -11861,6 +11879,7 @@ impl Engine {
             object_commands,
             command_operations,
             destroy_object,
+            other_objects,
             environment,
             physics,
             spawns,
@@ -12053,6 +12072,153 @@ impl Engine {
             self.apply_container_change(object_id, previous, new)?;
         }
 
+        self.apply_nested_object_outcomes(other_objects)?;
+
+        Ok(())
+    }
+
+    /// Applies mutations nested script calls (Find_Func/GameCall reentrancy)
+    /// made to objects other than the outer call's `this`, in first-call
+    /// order. C++ mutates live state mid-call; the copy-in/copy-out model
+    /// commits them here, after the outer object's own update.
+    fn apply_nested_object_outcomes(
+        &mut self,
+        outcomes: Vec<compat::NestedObjectOutcome>,
+    ) -> Result<(), EngineError> {
+        for outcome in outcomes {
+            let Some(index) = self.find_object_index(outcome.object_id) else {
+                continue;
+            };
+            let object_id = outcome.object_id;
+            let definition_id = self.objects[index].definition_id.clone();
+            let action_library = self
+                .definitions
+                .get(&definition_id)
+                .map(|definition| definition.action_library().clone())
+                .unwrap_or_default();
+
+            let mut effect_events = Vec::new();
+            let mut container_changes = Vec::new();
+            let (previous_owner, previous_crew_member) = {
+                let object = &self.objects[index];
+                (object.state.owner, object.state.crew_member)
+            };
+            {
+                let object = &mut self.objects[index];
+                if let Some(update) = outcome.update {
+                    let delta: ObjectDelta = update.into();
+                    let apply_outcome = object.apply_delta(&delta, &action_library);
+                    if let Some(change) = apply_outcome.action_change {
+                        object
+                            .record_action_event(change.previous, ActionTransitionKind::Forced);
+                    }
+                    if let Some(change) = apply_outcome.container_change {
+                        container_changes.push(change);
+                    }
+                }
+                if outcome.destroy {
+                    effect_events.extend(object.mark_destroyed());
+                }
+                if !outcome.command_operations.is_empty() {
+                    object.apply_command_operations(outcome.command_operations);
+                }
+                if !outcome.commands.is_empty() {
+                    object.enqueue_commands(outcome.commands);
+                }
+                if !outcome.effects.is_empty() {
+                    let mut applied = object.apply_effect_commands(&outcome.effects);
+                    effect_events.append(&mut applied);
+                }
+            }
+            self.update_sector_for_index(index);
+
+            let (new_owner, new_crew_member) = {
+                let object = &self.objects[index];
+                (object.state.owner, object.state.crew_member)
+            };
+            if previous_owner != new_owner || previous_crew_member != new_crew_member {
+                self.update_selection_for_state_change(
+                    object_id,
+                    previous_owner,
+                    new_owner,
+                    new_crew_member,
+                );
+            }
+
+            if !effect_events.is_empty() {
+                let previous_container = self.objects[index].state.container;
+                let definition = self
+                    .definitions
+                    .get(&definition_id)
+                    .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                let definitions_ref = &self.definitions;
+                let global_view = self.global_effects.clone();
+                let rng_state = self.rng.clone();
+                let world = self.host_world_context();
+                let object = &mut self.objects[index];
+                let (
+                    global_cmds,
+                    emitted_particles,
+                    physics_delta,
+                    audio_events,
+                    event_messages,
+                    player_commands,
+                    landscape_ops,
+                    triggered_game_over,
+                    audio_state,
+                    new_rng,
+                ) = Self::run_effect_events_for_object(
+                    definition,
+                    definitions_ref,
+                    self.game_over_triggered,
+                    rng_state,
+                    object_id,
+                    object,
+                    effect_events,
+                    global_view,
+                    &mut self.environment,
+                    self.physics,
+                    self.frame,
+                    world.clone(),
+                    self.audio_registry.clone(),
+                )?;
+                self.rng = new_rng;
+                self.audio_registry = audio_state;
+                if !landscape_ops.is_empty() {
+                    self.apply_landscape_operations(landscape_ops);
+                }
+                if !player_commands.is_empty() {
+                    self.apply_player_commands(player_commands)?;
+                }
+                if !audio_events.is_empty() {
+                    self.pending_audio.extend(audio_events);
+                }
+                if !event_messages.is_empty() {
+                    for command in event_messages {
+                        self.messages.apply_command(command);
+                    }
+                }
+                if triggered_game_over {
+                    self.request_game_over()?;
+                }
+                if !physics_delta.is_empty() {
+                    self.apply_physics_delta(physics_delta);
+                }
+                if !global_cmds.is_empty() {
+                    self.apply_global_effect_commands(&global_cmds);
+                }
+                self.apply_particle_commands(emitted_particles);
+                let new_container = self.objects[index].state.container;
+                if previous_container != new_container {
+                    container_changes.push((previous_container, new_container));
+                }
+            }
+            self.update_sector_for_index(index);
+
+            for (previous, new) in container_changes {
+                self.apply_container_change(object_id, previous, new)?;
+            }
+        }
         Ok(())
     }
 
@@ -17759,6 +17925,7 @@ impl Engine {
                     commands,
                     command_ops,
                     effects,
+                    other_objects,
                     global_effects,
                     environment,
                     physics,
@@ -17841,6 +18008,7 @@ impl Engine {
                 object.enqueue_commands(commands);
             }
             additional_spawns.extend(spawns);
+            self.apply_nested_object_outcomes(other_objects)?;
             if !audio.is_empty() {
                 self.pending_audio.extend(audio);
             }
@@ -17867,6 +18035,7 @@ impl Engine {
                     commands,
                     command_ops,
                     effects,
+                    other_objects,
                     global_effects,
                     environment,
                     physics,
@@ -17949,6 +18118,7 @@ impl Engine {
                 object.enqueue_commands(commands);
             }
             additional_spawns = spawns;
+            self.apply_nested_object_outcomes(other_objects)?;
             if !audio.is_empty() {
                 self.pending_audio.extend(audio);
             }
@@ -24530,6 +24700,281 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("Tick5 training clones the definition physicals");
         assert_eq!(trained.fight, 20_001);
         assert_eq!(trained.walk, 35_000, "other physicals copied untouched");
+    }
+
+    #[test]
+    fn find_func_condition_calls_function_on_candidates_like_cpp() {
+        // C4FindObjectFunc (C4FindObject.cpp:124-136, 653-662): a
+        // [C4FO_Func=60, name, pars...] criterion calls `name` on each
+        // candidate object as the call context (`this`, never a parameter),
+        // with array slot 2 -> par 0. An object whose def has no overload of
+        // the function fails the check silently (FindSameNameFunc miss,
+        // C4FindObject.cpp:658-659), and the result converts with raw
+        // C4Value truthiness (C4Value.h:183-185): any nonzero int matches.
+        let finder_script = r#"
+        global func ProbeFind() {
+            return FindObject2([60, "IsHot", 3]);
+        }
+        "#;
+        let probe_script = r#"
+        func IsHot(threshold) {
+            return GetOwner() - threshold; // raw truthiness: nonzero matches
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script)
+                    .expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        // Owner 3 evaluates to 0 (falsy); owner 5 is the first truthy match
+        // in main-list order; the finder's own def has no IsHot at all.
+        let _miss = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(3))
+            .expect("probe spawns");
+        let hit = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(5))
+            .expect("probe spawns");
+        let _late = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(9))
+            .expect("probe spawns");
+        engine.tick().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        let result = engine
+            .call_object_function(finder_idx, "ProbeFind", Vec::new())
+            .expect("ProbeFind runs");
+        assert_eq!(
+            result,
+            Value::Object(hit.as_u64()),
+            "first candidate whose IsHot(3) returns nonzero wins (C4FindObject.cpp:188-194)"
+        );
+    }
+
+    #[test]
+    fn find_func_callback_side_effects_apply_to_candidates() {
+        // C++ takes no precautions against Check side effects
+        // (C4FindObject.cpp:186-199 only re-checks Status): the callback
+        // mutates each candidate live. The copy-in/copy-out port folds the
+        // nested scopes into the outcome and commits them when the outer
+        // call returns — including VM-final local variables.
+        let finder_script = r#"
+        global func TagAll() {
+            return ObjectCount2([60, "Tag"]);
+        }
+        "#;
+        let probe_script = r#"
+        local tagged;
+        func Tag() {
+            tagged = tagged + 1;
+            return 1;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script)
+                    .expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        let p1 = engine
+            .spawn_object(SpawnConfig::new("PROB"))
+            .expect("probe spawns");
+        let p2 = engine
+            .spawn_object(SpawnConfig::new("PROB"))
+            .expect("probe spawns");
+        engine.tick().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        let result = engine
+            .call_object_function(finder_idx, "TagAll", Vec::new())
+            .expect("TagAll runs");
+        assert_eq!(result, Value::Int(2), "both probes match");
+        for id in [p1, p2] {
+            let idx = engine.find_object_index(id).expect("probe exists");
+            assert_eq!(
+                engine.objects[idx].state.local_vars.get("tagged"),
+                Some(&Value::Int(1)),
+                "the callback ran exactly once per candidate and its local-var \
+                 write was committed"
+            );
+        }
+    }
+
+    #[test]
+    fn find_func_callback_error_aborts_calling_script() {
+        // fPassErrors=true (C4FindObject.cpp:661): a runtime error inside
+        // the callback rethrows out of Check/Find and aborts the calling
+        // script (C4AulExec.cpp:1318-1342).
+        let finder_script = r#"
+        global func Boom() {
+            return FindObject2([60, "Explode"]);
+        }
+        "#;
+        let probe_script = r#"
+        func Explode() {
+            return NoSuchFunctionAnywhere();
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script)
+                    .expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        engine
+            .spawn_object(SpawnConfig::new("PROB"))
+            .expect("probe spawns");
+        engine.tick().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        let result = engine.call_object_function(finder_idx, "Boom", Vec::new());
+        assert!(
+            result.is_err(),
+            "the callback's runtime error passes through FindObject2"
+        );
+    }
+
+    #[test]
+    fn find_func_unknown_name_prunes_search_silently() {
+        // IsImpossible = !pFunc (C4FindObject.cpp:664-667): a name unknown
+        // to every script makes the criterion impossible — FindMany returns
+        // an empty array without iterating, and no error is raised.
+        let finder_script = r#"
+        global func Hunt() {
+            return ObjectCount2([60, "NoSuchPredicate"]);
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script)
+                    .expect("finder compiles"),
+            )
+            .expect("finder registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        engine.tick().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        let result = engine
+            .call_object_function(finder_idx, "Hunt", Vec::new())
+            .expect("Hunt runs without error");
+        assert_eq!(result, Value::Int(0));
+    }
+
+    #[test]
+    fn find_func_uses_raw_truthiness_not_get_bool() {
+        // C4Value::operator bool (C4Value.h:76,183-185): the Check result is
+        // raw-data truthiness — a string is true (nonnull pointer), with no
+        // getBool-style type conversion; 0/false/nil are the only falses.
+        let finder_script = r#"
+        global func CountStrings() { return ObjectCount2([60, "GiveString"]); }
+        global func CountZeroes() { return ObjectCount2([60, "GiveZero"]); }
+        global func CountFalses() { return ObjectCount2([60, "GiveFalse"]); }
+        "#;
+        let probe_script = r#"
+        func GiveString() { return "yes"; }
+        func GiveZero() { return 0; }
+        func GiveFalse() { return false; }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script)
+                    .expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        engine
+            .spawn_object(SpawnConfig::new("PROB"))
+            .expect("probe spawns");
+        engine.tick().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        let strings = engine
+            .call_object_function(finder_idx, "CountStrings", Vec::new())
+            .expect("runs");
+        assert_eq!(strings, Value::Int(1), "a string return is raw-truthy");
+        let zeroes = engine
+            .call_object_function(finder_idx, "CountZeroes", Vec::new())
+            .expect("runs");
+        assert_eq!(zeroes, Value::Int(0));
+        let falses = engine
+            .call_object_function(finder_idx, "CountFalses", Vec::new())
+            .expect("runs");
+        assert_eq!(falses, Value::Int(0));
+    }
+
+    #[test]
+    fn find_func_evaluates_the_calling_object_too() {
+        // The C++ Find walks the full object list — the caller is a
+        // candidate like any other (its live scope serves as the call
+        // context when the predicate runs on it).
+        let finder_script = r#"
+        local mark;
+        func AmI() { return 1; }
+        global func HuntSelf() { return ObjectCount2([60, "AmI"]); }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script)
+                    .expect("finder compiles"),
+            )
+            .expect("finder registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        engine.tick().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        let result = engine
+            .call_object_function(finder_idx, "HuntSelf", Vec::new())
+            .expect("HuntSelf runs");
+        assert_eq!(result, Value::Int(1), "the caller matches its own predicate");
     }
 
     #[test]

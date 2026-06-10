@@ -515,6 +515,14 @@ impl HostWorldContext {
         self.definition_scripts.get(id)
     }
 
+    /// Whether any definition script or host function knows `name` — the
+    /// global-function-map lookup of `GetFirstFunc` (C4Aul.cpp:545-552).
+    pub(crate) fn script_function_known(&self, name: &str) -> bool {
+        self.definition_scripts
+            .values()
+            .any(|script| script.has_function(name) || script.has_host_function(name))
+    }
+
     /// Attach the engine's particle def registry (names from
     /// `C4ParticleSystem` defs). See the `particle_defs` field docs.
     pub(crate) fn with_particle_defs(
@@ -675,6 +683,10 @@ trait WorldAccessor {
     fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>>;
     /// Definition mass/value for the C4SO_Mass/C4SO_Value sorts.
     fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata>;
+    /// Whether any definition script (or host function) knows `name` —
+    /// the `Game.ScriptEngine.GetFirstFunc` lookup C4FindObjectFunc does at
+    /// construction (C4Aul.cpp:545-552).
+    fn script_function_known(&self, name: &str) -> bool;
 }
 
 impl WorldAccessor for HostWorldContext {
@@ -701,6 +713,102 @@ impl WorldAccessor for HostWorldContext {
     fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata> {
         HostWorldContext::definition_metadata(self, id).cloned()
     }
+
+    fn script_function_known(&self, name: &str) -> bool {
+        HostWorldContext::script_function_known(self, name)
+    }
+}
+
+/// A borrow-free world view for Func-criterion searches: condition checks
+/// read this clone while the nested-call seam re-borrows the live
+/// HOST_CONTEXT per candidate. Snapshot semantics (mid-search mutations and
+/// callback spawns are not re-read) are part of the documented copy-in/
+/// copy-out divergence.
+struct FuncFindView {
+    world: HostWorldContext,
+    pending_objects: HashMap<ObjectId, HostWorldObject>,
+    pending_order: Vec<ObjectId>,
+}
+
+impl WorldAccessor for FuncFindView {
+    fn get_object(&self, id: ObjectId) -> Option<HostWorldObject> {
+        self.pending_objects
+            .get(&id)
+            .cloned()
+            .or_else(|| self.world.get(id).cloned())
+    }
+
+    fn object_ids(&self) -> Vec<ObjectId> {
+        let mut ids = self.world.object_ids().to_vec();
+        ids.extend(self.pending_order.iter().copied());
+        ids
+    }
+
+    fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
+        if self.pending_objects.contains_key(&object.id) {
+            host_object_shape_rect(object, self.world.definitions.as_ref())
+        } else {
+            self.world.object_shape_rect(object)
+        }
+    }
+
+    fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
+        let mut ids = self.world.object_sector_ids_in_rect(rect)?;
+        let mut seen = ids.iter().copied().collect::<HashSet<_>>();
+        for &id in &self.pending_order {
+            let Some(object) = self.pending_objects.get(&id) else {
+                continue;
+            };
+            if rect.contains_point(object.position.x, object.position.y) && seen.insert(id) {
+                ids.push(id);
+            }
+        }
+        Some(ids)
+    }
+
+    fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
+        let mut ids = self.world.shape_sector_ids_in_rect(rect)?;
+        let mut seen = ids.iter().copied().collect::<HashSet<_>>();
+        for &id in &self.pending_order {
+            let Some(object) = self.pending_objects.get(&id) else {
+                continue;
+            };
+            if self.object_shape_rect(object).overlaps(&rect) && seen.insert(id) {
+                ids.push(id);
+            }
+        }
+        Some(ids)
+    }
+
+    fn definition_metadata(&self, id: &str) -> Option<DefinitionMetadata> {
+        HostWorldContext::definition_metadata(&self.world, id).cloned()
+    }
+
+    fn script_function_known(&self, name: &str) -> bool {
+        self.world.script_function_known(name)
+    }
+}
+
+/// Clones the active context's world view for a Func-criterion search.
+fn snapshot_func_find_view() -> Option<FuncFindView> {
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow().as_ref().map(|context| FuncFindView {
+            world: context.world.clone(),
+            pending_objects: context.pending_objects.clone(),
+            pending_order: context.pending_order.clone(),
+        })
+    })
+}
+
+/// Drops candidates a Func callback destroyed — the C++ Status re-checks
+/// after `Check` (Find: C4FindObject.cpp:186-199; FindMany pre-sort erase:
+/// C4FindObject.cpp:217-218).
+fn retain_live_nested(ids: &mut Vec<ObjectId>) {
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow().as_ref() {
+            ids.retain(|id| !context.nested_object_destroyed(*id));
+        }
+    });
 }
 
 impl WorldAccessor for EffectHostContext {
@@ -710,6 +818,10 @@ impl WorldAccessor for EffectHostContext {
 
     fn object_ids(&self) -> Vec<ObjectId> {
         self.world_object_ids()
+    }
+
+    fn script_function_known(&self, name: &str) -> bool {
+        self.world.script_function_known(name)
     }
 
     fn object_shape_rect(&self, object: &HostWorldObject) -> DefinitionRect {
@@ -3986,6 +4098,20 @@ pub(crate) enum LandscapeOperation {
     },
 }
 
+/// Side effects a nested script call (Find_Func/GameCall reentrancy) made to
+/// an object other than the outer call's `this`. Folded out of the nested
+/// scope in first-call order; the engine applies them after the outer
+/// object's update.
+#[derive(Debug, Clone)]
+pub(crate) struct NestedObjectOutcome {
+    pub object_id: ObjectId,
+    pub effects: Vec<EffectCommand>,
+    pub update: Option<ObjectUpdate>,
+    pub commands: Vec<QueuedCommand>,
+    pub command_operations: Vec<CommandOperation>,
+    pub destroy: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct EffectContextOutcome {
     pub object: Vec<EffectCommand>,
@@ -3994,6 +4120,10 @@ pub(crate) struct EffectContextOutcome {
     pub object_commands: Vec<QueuedCommand>,
     pub command_operations: Vec<CommandOperation>,
     pub destroy_object: bool,
+    /// Mutations nested script calls made to other objects, in first-call
+    /// order. C++ mutates live state during the call; the copy-in/copy-out
+    /// architecture applies them when the outer call commits.
+    pub other_objects: Vec<NestedObjectOutcome>,
     pub environment: Option<EnvironmentDelta>,
     pub physics: Option<PhysicsDelta>,
     pub spawns: Vec<SpawnConfig>,
@@ -4033,6 +4163,7 @@ impl EffectContextOutcome {
             object_commands,
             command_operations,
             destroy_object,
+            other_objects: Vec::new(),
             environment,
             physics,
             spawns,
@@ -4055,6 +4186,7 @@ impl EffectContextOutcome {
             object_commands: Vec::new(),
             command_operations: Vec::new(),
             destroy_object: false,
+            other_objects: Vec::new(),
             environment: None,
             physics: None,
             spawns: Vec::new(),
@@ -7289,10 +7421,9 @@ fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
 // ── C4FindObject / C4SortObject condition trees (C4FindObject.{h,cpp}) ──────
 
 /// C4FO_* constants (C4FindObject.h:27-50) as a parsed condition tree.
-/// Known divergences: `Func` conditions need host→VM reentrancy (treated as
-/// impossible); `Controller` compares the owner (the engine has no separate
-/// controller); `Layer` is unmodeled on host objects (never matches);
-/// shape tests use the vertices bounding box.
+/// Known divergences: `Controller` compares the owner (the engine has no
+/// separate controller); `Layer` is unmodeled on host objects (never
+/// matches); shape tests use the vertices bounding box.
 #[derive(Debug, Clone)]
 enum FindCondition {
     Not(Box<FindCondition>),
@@ -7313,7 +7444,9 @@ enum FindCondition {
     AnyContainer,
     Owner(i32),
     Controller(i32),
-    Func,
+    /// C4FindObjectFunc (C4FindObject.cpp:124-136): calls `name` on each
+    /// candidate via the nested-call seam.
+    Func { name: String, pars: Vec<Value> },
     Layer,
 }
 
@@ -7327,8 +7460,9 @@ enum SortCriterion {
     Speed,
     Mass,
     Value,
-    /// Sort_Func needs host→VM reentrancy; all values compare equal.
-    Func,
+    /// C4SortObjectFunc (C4FindObject.h:521-533). Cached evaluation lands
+    /// with the Sort_Func slice; until then all values compare equal.
+    Func { name: String, pars: Vec<Value> },
 }
 
 enum ParsedCriterion {
@@ -7454,8 +7588,16 @@ impl FindCondition {
             50 => FindCondition::Owner(arg_i32(1)),
             // C4FO_Controller
             51 => FindCondition::Controller(arg_i32(1)),
-            // C4FO_Func
-            60 => FindCondition::Func,
+            // C4FO_Func: Data[1] must convert to a string, else the whole
+            // criterion is dropped (C4FindObject.cpp:127-128); Data[2] →
+            // par 0, capped at 10 pars (SetPar, C4FindObject.cpp:645-651)
+            60 => match data.get(1) {
+                Some(Value::String(name)) => FindCondition::Func {
+                    name: name.clone(),
+                    pars: data.iter().skip(2).take(10).cloned().collect(),
+                },
+                _ => return ParsedCriterion::None,
+            },
             // C4FO_Layer
             70 => FindCondition::Layer,
             _ => return ParsedCriterion::None,
@@ -7463,15 +7605,32 @@ impl FindCondition {
         ParsedCriterion::Condition(condition)
     }
 
-    /// Per-condition Check (C4FindObject.cpp:390-679).
-    fn check(&self, world: &impl WorldAccessor, object: &HostWorldObject) -> bool {
-        match self {
-            FindCondition::Not(child) => !child.check(world, object),
+    /// Per-condition Check (C4FindObject.cpp:390-679). Fallible because a
+    /// `Func` callback error passes through (`fPassErrors=true`,
+    /// C4FindObject.cpp:661); And/Or evaluate children in array order with
+    /// short-circuit, so Func side effects land in C++ order.
+    fn check(
+        &self,
+        world: &impl WorldAccessor,
+        object: &HostWorldObject,
+    ) -> Result<bool, RuntimeError> {
+        Ok(match self {
+            FindCondition::Not(child) => !child.check(world, object)?,
             FindCondition::And(children) => {
-                children.iter().all(|child| child.check(world, object))
+                for child in children {
+                    if !child.check(world, object)? {
+                        return Ok(false);
+                    }
+                }
+                true
             }
             FindCondition::Or(children) => {
-                children.iter().any(|child| child.check(world, object))
+                for child in children {
+                    if child.check(world, object)? {
+                        return Ok(true);
+                    }
+                }
+                false
             }
             FindCondition::Exclude(excluded) => Some(object.id) != *excluded,
             FindCondition::Id(id) => object.definition_id() == id,
@@ -7524,28 +7683,58 @@ impl FindCondition {
             FindCondition::AnyContainer => object.container().is_some(),
             FindCondition::Owner(owner) => object.owner() == *owner,
             FindCondition::Controller(controller) => object.owner() == *controller,
-            FindCondition::Func | FindCondition::Layer => false,
-        }
+            // C4FindObjectFunc::Check (C4FindObject.cpp:653-662): no
+            // overload visible to the object's def → silently false; the
+            // result converts with raw C4Value truthiness, not getBool.
+            FindCondition::Func { name, pars } => {
+                match call_world_object_function(object.id, name, pars) {
+                    None => false,
+                    Some(result) => value_raw_truthy(&result?),
+                }
+            }
+            FindCondition::Layer => false,
+        })
     }
 
-    /// IsImpossible/IsEnsured pruning (C4FindObject.cpp:453-590).
-    fn is_impossible(&self) -> bool {
+    /// IsImpossible/IsEnsured pruning (C4FindObject.cpp:453-590). `Func` is
+    /// impossible only when the name is unknown to every script
+    /// (GetFirstFunc miss at construction, C4FindObject.cpp:640-643,
+    /// 664-667); Not swaps the two (C4FindObject.h:116-117).
+    fn is_impossible(&self, world: &impl WorldAccessor) -> bool {
         match self {
+            FindCondition::Not(child) => child.is_ensured(world),
             FindCondition::And(children) => {
-                children.iter().any(FindCondition::is_impossible)
+                children.iter().any(|child| child.is_impossible(world))
             }
             FindCondition::Or(children) => {
-                !children.iter().any(|child| !child.is_impossible())
+                !children.iter().any(|child| !child.is_impossible(world))
             }
             FindCondition::InRect(rect) => rect.width == 0 || rect.height == 0,
             FindCondition::Ocf(mask) => *mask == 0,
-            FindCondition::Func => true,
+            FindCondition::Func { name, .. } => !world.script_function_known(name),
             _ => false,
         }
     }
 
-    fn is_ensured(&self) -> bool {
-        matches!(self, FindCondition::Category(category) if *category == 0)
+    fn is_ensured(&self, world: &impl WorldAccessor) -> bool {
+        match self {
+            FindCondition::Not(child) => child.is_impossible(world),
+            FindCondition::Category(category) => *category == 0,
+            _ => false,
+        }
+    }
+
+    /// Whether any node needs the nested-call seam (drives the borrow-free
+    /// snapshot-view evaluation path in the drivers).
+    fn uses_func(&self) -> bool {
+        match self {
+            FindCondition::Not(child) => child.uses_func(),
+            FindCondition::And(children) | FindCondition::Or(children) => {
+                children.iter().any(FindCondition::uses_func)
+            }
+            FindCondition::Func { .. } => true,
+            _ => false,
+        }
     }
 }
 
@@ -7609,10 +7798,27 @@ impl SortCriterion {
             140 => SortCriterion::Mass,
             // C4SO_Value
             150 => SortCriterion::Value,
-            // C4SO_Func
-            160 => SortCriterion::Func,
+            // C4SO_Func: string name required, else nullptr
+            // (C4FindObject.cpp:743-755); pars capped at 10
+            160 => match data.get(1) {
+                Some(Value::String(name)) => SortCriterion::Func {
+                    name: name.clone(),
+                    pars: data.iter().skip(2).take(10).cloned().collect(),
+                },
+                _ => return None,
+            },
             _ => return None,
         })
+    }
+
+    /// Whether any node needs the nested-call seam.
+    fn uses_func(&self) -> bool {
+        match self {
+            SortCriterion::Reverse(child) => child.uses_func(),
+            SortCriterion::Multiple(children) => children.iter().any(SortCriterion::uses_func),
+            SortCriterion::Func { .. } => true,
+            _ => false,
+        }
     }
 
     fn parse(value: &Value) -> Option<SortCriterion> {
@@ -7657,7 +7863,7 @@ impl SortCriterion {
                     .map(|metadata| metadata.value)
                     .unwrap_or(0),
             ),
-            SortCriterion::Func => 0,
+            SortCriterion::Func { .. } => 0,
             SortCriterion::Reverse(_) | SortCriterion::Multiple(_) => 0,
         }
     }
@@ -7726,8 +7932,10 @@ fn parse_criterions(args: &[Value]) -> Option<(FindCondition, Option<SortCriteri
     let mut conditions = Vec::new();
     let mut sorts = Vec::new();
     for arg in args {
+        // The first nil parameter ends the criteria list
+        // (`if (!Data) break;`, C4Script.cpp:1996).
         if matches!(arg, Value::Nil) {
-            continue;
+            break;
         }
         match FindCondition::parse(arg) {
             ParsedCriterion::Condition(condition) => conditions.push(condition),
@@ -7758,9 +7966,9 @@ fn parse_criterions(args: &[Value]) -> Option<(FindCondition, Option<SortCriteri
 fn find_condition_matches(
     world: &impl WorldAccessor,
     condition: &FindCondition,
-) -> Vec<ObjectId> {
-    if condition.is_impossible() {
-        return Vec::new();
+) -> Result<Vec<ObjectId>, RuntimeError> {
+    if condition.is_impossible(world) {
+        return Ok(Vec::new());
     }
     let mut matches = Vec::new();
     for object_id in world.object_ids() {
@@ -7770,11 +7978,16 @@ fn find_condition_matches(
         if !object.status().is_active() {
             continue;
         }
-        if condition.check(world, &object) {
+        if condition.check(world, &object)? {
             matches.push(object_id);
         }
     }
-    matches
+    Ok(matches)
+}
+
+/// Whether the criteria need the borrow-free Func evaluation path.
+fn criterions_use_func(condition: &FindCondition, sort: Option<&SortCriterion>) -> bool {
+    condition.uses_func() || sort.map(SortCriterion::uses_func).unwrap_or(false)
 }
 
 /// FnFindObject2 (C4Script.cpp:2052-2067).
@@ -7784,12 +7997,26 @@ fn find_object2(args: &[Value]) -> Result<Value, RuntimeError> {
             "FindObject: No valid search criterions supplied!",
         ));
     };
+    if criterions_use_func(&condition, sort.as_ref()) {
+        let Some(view) = snapshot_func_find_view() else {
+            return Ok(Value::Nil);
+        };
+        let mut matches = find_condition_matches(&view, &condition)?;
+        retain_live_nested(&mut matches);
+        if let Some(sort) = sort {
+            sort.sort(&view, &mut matches);
+        }
+        return Ok(matches
+            .first()
+            .map(|id| object_reference_value(*id))
+            .unwrap_or(Value::Nil));
+    }
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
-        let mut matches = find_condition_matches(context, &condition);
+        let mut matches = find_condition_matches(context, &condition)?;
         if let Some(sort) = sort {
             sort.sort(context, &mut matches);
         }
@@ -7807,12 +8034,25 @@ fn find_objects2(args: &[Value]) -> Result<Value, RuntimeError> {
             "FindObjects: No valid search criterions supplied!",
         ));
     };
+    if criterions_use_func(&condition, sort.as_ref()) {
+        let Some(view) = snapshot_func_find_view() else {
+            return Ok(Value::Array(Vec::new()));
+        };
+        let mut matches = find_condition_matches(&view, &condition)?;
+        retain_live_nested(&mut matches);
+        if let Some(sort) = sort {
+            sort.sort(&view, &mut matches);
+        }
+        return Ok(Value::Array(
+            matches.into_iter().map(object_reference_value).collect(),
+        ));
+    }
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Array(Vec::new()));
         };
-        let mut matches = find_condition_matches(context, &condition);
+        let mut matches = find_condition_matches(context, &condition)?;
         if let Some(sort) = sort {
             sort.sort(context, &mut matches);
         }
@@ -7829,18 +8069,25 @@ fn object_count2(args: &[Value]) -> Result<Value, RuntimeError> {
             "ObjectCount: No valid search criterions supplied!",
         ));
     };
+    if criterions_use_func(&condition, None) {
+        let Some(view) = snapshot_func_find_view() else {
+            return Ok(Value::Int(0));
+        };
+        let matches = find_condition_matches(&view, &condition)?;
+        return Ok(Value::Int(truncate_to_i32(matches.len() as u64)));
+    }
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Int(0));
         };
-        if condition.is_ensured() {
+        if condition.is_ensured(context) {
             return Ok(Value::Int(truncate_to_i32(
                 context.world_object_ids().len() as u64,
             )));
         }
         Ok(Value::Int(truncate_to_i32(
-            find_condition_matches(context, &condition).len() as u64,
+            find_condition_matches(context, &condition)?.len() as u64,
         )))
     })
 }
@@ -11344,6 +11591,86 @@ fn normalize_sound_name(name: &str) -> String {
     name.to_ascii_lowercase()
 }
 
+/// A completed nested call's scope plus its VM-final local variables, kept so
+/// a later nested call on the same object resumes from the accumulated state
+/// (C++ mutates live state, so repeat calls see earlier changes).
+struct NestedScopeState {
+    scope: ObjectScopeContext,
+    local_vars: HashMap<String, Value>,
+}
+
+/// Where a nested call's scope came from (and must return to).
+enum NestedScopeOrigin {
+    /// `dormant_scopes[index]` — the target is an in-flight outer call.
+    Dormant(usize),
+    /// The completed-call map (or a fresh snapshot scope).
+    Completed,
+}
+
+/// Phase-1 result of [`EffectHostContext::prepare_nested_call`]: everything
+/// the caller needs to run the nested VM after releasing the borrow.
+/// `origin: None` means the target was already the active scope.
+struct NestedCallPrep {
+    script: Arc<ScriptEngine>,
+    local_vars: HashMap<String, Value>,
+    origin: Option<NestedScopeOrigin>,
+}
+
+/// Runs `function` on `target`'s definition script from inside a running VM
+/// call — the host→VM reentrancy seam (C4FindObjectFunc::Check,
+/// C4FindObject.cpp:653-662: `pCallFunc->Exec(pObj, Pars, true)`): the
+/// target object is the call context (`this`), never a parameter. Returns
+/// `None` when the function is not visible to the target (C++ fails the
+/// check silently) and `Some(Err(_))` for runtime errors (`fPassErrors=true`
+/// — the caller rethrows, aborting the calling script).
+pub(crate) fn call_world_object_function(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    let prep = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .and_then(|context| context.prepare_nested_call(target, function))
+    })?;
+    let NestedCallPrep {
+        script,
+        local_vars,
+        origin,
+    } = prep;
+    // The HOST_CONTEXT borrow is released here: the nested VM's host
+    // functions re-borrow it against the swapped-in scope.
+    let call = script.call_with_locals_and_this(
+        function,
+        args,
+        &local_vars,
+        object_reference_value(target),
+    );
+    let (result, stored_locals) = match call {
+        Ok((value, updated)) => (Ok(value), updated),
+        // Partial side effects before the error still fold (C++ mutates
+        // live state); the VM-final locals are lost with the unwind, so the
+        // pre-call locals stand in.
+        Err(lc_script::ScriptError::Runtime(err)) => (Err(err), local_vars),
+        Err(other) => (Err(RuntimeError::new(other.to_string())), local_vars),
+    };
+    if let Some(origin) = origin {
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                context.finish_nested_call(target, origin, stored_locals);
+            }
+        });
+    }
+    Some(result)
+}
+
+/// `C4Value::operator bool` (C4Value.h:76,183-185): raw-data truthiness —
+/// false only for nil, 0 and false; non-empty-ness is NOT required for
+/// strings/arrays/maps, and no type conversion happens (unlike `getBool`).
+fn value_raw_truthy(value: &Value) -> bool {
+    !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false))
+}
+
 struct EffectHostContext {
     object: Option<ObjectScopeContext>,
     global: Option<EffectScopeContext>,
@@ -11362,6 +11689,15 @@ struct EffectHostContext {
     next_object_id: u64,
     trigger_game_over: bool,
     game_over_triggered: bool,
+    /// Saved `object` scopes of in-flight nested calls, one per nesting
+    /// level (`None` = the level had no object scope). The active scope is
+    /// always `object`; scopes move between locations by identity, so one
+    /// object never has two scopes (no double-apply on fold).
+    dormant_scopes: Vec<Option<ObjectScopeContext>>,
+    /// Completed nested-call scopes by target, resumed on repeat calls and
+    /// folded into `EffectContextOutcome::other_objects` in first-call order.
+    nested_objects: HashMap<ObjectId, NestedScopeState>,
+    nested_order: Vec<ObjectId>,
 }
 
 impl EffectHostContext {
@@ -11466,6 +11802,9 @@ impl EffectHostContext {
             next_object_id,
             trigger_game_over: false,
             game_over_triggered,
+            dormant_scopes: Vec::new(),
+            nested_objects: HashMap::new(),
+            nested_order: Vec::new(),
         }
     }
 
@@ -11530,6 +11869,145 @@ impl EffectHostContext {
         } else {
             self.world.get(id).cloned()
         }
+    }
+
+    /// Phase 1 of a nested call (borrow held): resolve the target's script
+    /// and move its scope to active. Function resolution follows
+    /// `FindSameNameFunc` (C4Aul.cpp:130-148): the target def's own script
+    /// function wins, engine (host) functions are the fallback, anything
+    /// else is a silent miss (`None`).
+    fn prepare_nested_call(&mut self, target: ObjectId, function: &str) -> Option<NestedCallPrep> {
+        let world_object = self.get_world_object(target)?;
+        let script = self
+            .world
+            .definition_script(world_object.definition_id())?
+            .clone();
+        if !script.has_function(function) && !script.has_host_function(function) {
+            return None;
+        }
+        // VM sessions own their locals, so a call onto an in-flight scope
+        // reads the pre-call snapshot (divergence noted in PORT_STATUS).
+        let snapshot_locals = world_object
+            .full_state()
+            .map(|state| state.local_vars.clone())
+            .unwrap_or_default();
+        if self.object.as_ref().map(ObjectScopeContext::id) == Some(target) {
+            return Some(NestedCallPrep {
+                script,
+                local_vars: snapshot_locals,
+                origin: None,
+            });
+        }
+        if let Some(index) = self
+            .dormant_scopes
+            .iter()
+            .position(|slot| slot.as_ref().map(ObjectScopeContext::id) == Some(target))
+        {
+            let scope = self.dormant_scopes[index].take();
+            self.dormant_scopes.push(self.object.take());
+            self.object = scope;
+            return Some(NestedCallPrep {
+                script,
+                local_vars: snapshot_locals,
+                origin: Some(NestedScopeOrigin::Dormant(index)),
+            });
+        }
+        let (scope, local_vars) = match self.nested_objects.remove(&target) {
+            Some(state) => (state.scope, state.local_vars),
+            None => self.nested_scope_for(&world_object)?,
+        };
+        self.dormant_scopes.push(self.object.take());
+        self.object = Some(scope);
+        Some(NestedCallPrep {
+            script,
+            local_vars,
+            origin: Some(NestedScopeOrigin::Completed),
+        })
+    }
+
+    /// A fresh nested scope from the world snapshot. `None` for objects
+    /// without a full-state snapshot (pending spawns of the same call).
+    fn nested_scope_for(
+        &self,
+        object: &HostWorldObject,
+    ) -> Option<(ObjectScopeContext, HashMap<String, Value>)> {
+        let metadata = self.world.definition_metadata(object.definition_id())?;
+        let state = object.full_state()?;
+        let scope = ObjectScopeContext::new(
+            object.id,
+            state.container,
+            state.status,
+            state.energy,
+            state.damage,
+            state.construction,
+            state.alive,
+            state.owner,
+            state.category,
+            state.position,
+            state.velocity,
+            state.rotation,
+            state.effects.clone(),
+            metadata.action_library.clone(),
+            state.action.name.clone(),
+            state.action.ticks,
+            state.action.data,
+            state.action.phase,
+            state.direction,
+            state.command_direction,
+            0,
+            state.action.target,
+            state.action.target2,
+            state.vertices.clone(),
+            metadata.ocf_base,
+            metadata.crew_member,
+            state.graphics_overlays.clone(),
+            state.base_graphics.clone(),
+            state.draw_transform,
+            state.info_physical,
+            state.temporary_physical,
+            state.physical_changes.clone(),
+            metadata.physical,
+        );
+        Some((scope, state.local_vars.clone()))
+    }
+
+    /// Phase 3 of a nested call (borrow re-taken): move the finished scope
+    /// back to where it came from. Completed scopes keep `local_vars` for
+    /// resumption and the outcome fold.
+    fn finish_nested_call(
+        &mut self,
+        target: ObjectId,
+        origin: NestedScopeOrigin,
+        local_vars: HashMap<String, Value>,
+    ) {
+        let finished = self.object.take();
+        self.object = self.dormant_scopes.pop().unwrap_or(None);
+        match origin {
+            NestedScopeOrigin::Dormant(index) => {
+                if let Some(slot) = self.dormant_scopes.get_mut(index) {
+                    *slot = finished;
+                }
+            }
+            NestedScopeOrigin::Completed => {
+                if let Some(scope) = finished {
+                    if !self.nested_order.contains(&target) {
+                        self.nested_order.push(target);
+                    }
+                    self.nested_objects
+                        .insert(target, NestedScopeState { scope, local_vars });
+                }
+            }
+        }
+    }
+
+    /// Whether a nested call removed the object — the C++ Status re-check
+    /// after `Check` (C4FindObject.cpp:186-199) against the deferred-destroy
+    /// model.
+    fn nested_object_destroyed(&self, id: ObjectId) -> bool {
+        self.nested_objects
+            .get(&id)
+            .map(|state| state.scope.destroy || !state.scope.status.is_active())
+            .unwrap_or(false)
     }
 
     fn world_object_ids(&self) -> Vec<ObjectId> {
@@ -11611,6 +12089,29 @@ impl EffectHostContext {
     }
 
     fn into_commands(mut self) -> EffectContextOutcome {
+        debug_assert!(
+            self.dormant_scopes.is_empty(),
+            "all nested calls must have finished before the context closes"
+        );
+        let mut other_objects = Vec::new();
+        for id in mem::take(&mut self.nested_order) {
+            let Some(NestedScopeState { scope, local_vars }) = self.nested_objects.remove(&id)
+            else {
+                continue;
+            };
+            let mut update = scope.pending_update;
+            // Mirror the outer call's unconditional local-vars store
+            // (Definition::call_object_function).
+            update.local_vars = Some(local_vars);
+            other_objects.push(NestedObjectOutcome {
+                object_id: id,
+                effects: scope.effects.into_commands(),
+                update: Some(update),
+                commands: scope.queued_commands,
+                command_operations: scope.command_operations,
+                destroy: scope.destroy,
+            });
+        }
         let (object_effects, object_update, object_commands, command_operations, destroy) =
             match self.object {
                 Some(object) => {
@@ -11658,6 +12159,7 @@ impl EffectHostContext {
             self.next_object_id,
         );
         outcome.particles = self.pending_particles;
+        outcome.other_objects = other_objects;
         outcome
     }
 }
@@ -17822,6 +18324,31 @@ mod tests {
             0,
             None,
         )
+    }
+
+    #[test]
+    fn criterion_parsing_stops_at_first_nil_par_like_cpp() {
+        // CreateCriterionsFromPars stops at the first nil parameter
+        // (`if (!Data) break;`, C4Script.cpp:1996): criteria after a nil
+        // argument are never parsed.
+        let world = HostWorldContext::from_objects(vec![
+            find_world_object(1, "ROCK", 10, 10, 1),
+            find_world_object(2, "TREE", 50, 10, 2),
+            find_world_object(3, "ROCK", 90, 10, 2),
+        ]);
+        // [ID ROCK], nil, [Owner 2]: C++ uses only the ROCK criterion, so
+        // the first rock (object 1) wins — not the owner-2 rock (object 3).
+        let args = vec![
+            Value::Array(vec![Value::Int(20), Value::String("ROCK".into())]),
+            Value::Nil,
+            Value::Array(vec![Value::Int(50), Value::Int(2)]),
+        ];
+        let (result, _) =
+            with_object_host_context_with_world(world.clone(), || find_object2(&args));
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject2 succeeds")),
+            Some(ObjectId::new(1))
+        );
     }
 
     #[test]

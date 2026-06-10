@@ -196,6 +196,10 @@ impl Engine {
         self.functions.contains_key(name)
     }
 
+    pub fn has_host_function(&self, name: &str) -> bool {
+        self.host_functions.contains_key(name)
+    }
+
     pub fn call_effect_callback(
         &self,
         effect_name: &str,
