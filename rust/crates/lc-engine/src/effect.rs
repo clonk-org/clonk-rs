@@ -45,19 +45,17 @@ impl EffectState {
         self
     }
 
+    /// `iIntervall` is stored verbatim (C4Effect.cpp:67) — zero means the
+    /// timer never fires.
     pub fn with_interval(mut self, interval: i32) -> Self {
-        self.interval = interval.max(1);
-        if self.timer >= self.interval {
-            self.timer %= self.interval;
-        }
+        self.interval = interval.max(0);
         self
     }
 
+    /// `iTime` is stored verbatim — C++ persists it monotonically
+    /// (C4Effect.cpp:523).
     pub fn with_timer(mut self, timer: i32) -> Self {
         self.timer = timer.max(0);
-        if self.interval > 0 && self.timer >= self.interval {
-            self.timer %= self.interval;
-        }
         self
     }
 
@@ -79,18 +77,13 @@ impl EffectState {
         self
     }
 
+    /// One frame of effect time (C4Effect.cpp:339-342): `iTime` increments
+    /// every frame and is never reset (script-visible via the Fx*Timer
+    /// `iTime` argument); the timer fires when `iIntervall != 0` and
+    /// `iTime % iIntervall == 0` — a zero interval never fires.
     pub fn advance_tick(&mut self) -> bool {
-        if self.interval <= 0 {
-            self.timer = self.timer.saturating_add(1);
-            return true;
-        }
-        self.timer += 1;
-        if self.timer >= self.interval {
-            self.timer = 0;
-            true
-        } else {
-            false
-        }
+        self.timer = self.timer.saturating_add(1);
+        self.interval > 0 && self.timer % self.interval == 0
     }
 
     pub fn set_var(&mut self, index: usize, value: EffectVarValue) {
@@ -186,5 +179,31 @@ impl EffectEvent {
             effect,
             kind: EffectEventKind::Stopped(reason),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effect_timer_follows_cpp_modulo_semantics() {
+        // C4Effect::Execute (C4Effect.cpp:339-357): iTime increments every
+        // frame and is never reset (script-visible via the Fx*Timer iTime
+        // argument); the timer fires when iIntervall != 0 and
+        // iTime % iIntervall == 0; iIntervall == 0 NEVER fires.
+        let mut effect = EffectState::new("Glow").with_interval(3);
+        let fired: Vec<bool> = (0..7).map(|_| effect.advance_tick()).collect();
+        assert_eq!(
+            fired,
+            vec![false, false, true, false, false, true, false],
+            "fires on iTime 3 and 6"
+        );
+        assert_eq!(effect.timer, 7, "iTime is monotonic");
+
+        let mut inert = EffectState::new("Inert").with_interval(0);
+        let fired: Vec<bool> = (0..5).map(|_| inert.advance_tick()).collect();
+        assert_eq!(fired, vec![false; 5], "iIntervall == 0 never fires");
+        assert_eq!(inert.timer, 5, "time still elapses");
     }
 }
