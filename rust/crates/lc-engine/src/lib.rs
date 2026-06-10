@@ -2545,6 +2545,9 @@ struct Object {
     /// frame (`C4Movement.cpp:376`).
     rotation_velocity: C4Fixed,
     destroyed: bool,
+    /// Last energy-loss causing player (C4Object::LastEnergyLossCausePlayer,
+    /// read by AssignDeath for kill attribution). Not yet snapshot-persisted.
+    last_energy_loss_cause: i32,
     command_queue: VecDeque<QueuedCommand>,
     commands: CommandStack,
     pending_action_events: VecDeque<ActionTransitionEvent>,
@@ -2638,6 +2641,7 @@ impl Object {
             rotation_velocity: C4Fixed::ZERO,
             destroyed: matches!(state.status, ObjectStatus::Deleted),
             state,
+            last_energy_loss_cause: OWNER_NONE,
             command_queue: VecDeque::new(),
             commands: CommandStack::new(),
             pending_action_events: VecDeque::new(),
@@ -14127,7 +14131,7 @@ impl Engine {
                             fixtoi((dx_dir * dx_dir + dy_dir * dy_dir) * candidate_mass / 5);
                         // reduced to 1/3rd, but never dropped to zero by it
                         let hit_energy = (hit_energy / 3).max(i32::from(hit_energy != 0));
-                        self.change_object_energy(idx, -(hit_energy / 5));
+                        self.change_object_energy(idx, -(hit_energy / 5), self.objects[candidate_idx].state.owner);
                         let tmass = obj1_mass.max(50);
                         let candidate_velocity = self.objects[candidate_idx].fixed_velocity;
                         // fling unless airborne off-Tick3 (C4GameObjects.cpp:176)
@@ -14292,7 +14296,7 @@ impl Engine {
         }
         // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:782)
         if frame % 5 == 0 {
-            self.change_object_energy(idx, -1);
+            self.change_object_energy(idx, -1, self.objects[idx].state.fire_caused_by);
         }
         // Background effects: Tick5 over valid landscape material
         // (C4Object.cpp:791-806) — extinguish in extinguisher material, then
@@ -14323,12 +14327,95 @@ impl Engine {
     }
 
     /// Engine-side `C4Object::DoEnergy` slice (C4Object.cpp:1345-1365) in the
-    /// engine's percent-point energy units: clamp at zero; the physical
-    /// energy maximum and death-on-zero (`AssignDeath`) belong to the still
-    /// unported physical/death model.
-    fn change_object_energy(&mut self, idx: usize, change: i32) {
+    /// engine's percent-point energy units: clamp at zero, track the last
+    /// energy-loss cause (C4Object.cpp:1353), and assign death when an alive
+    /// object's energy first reaches zero (C4Object.cpp:1363). The physical
+    /// energy maximum (GetPhysical()->Energy) still needs the physicals
+    /// model.
+    fn change_object_energy(&mut self, idx: usize, change: i32, caused_by: i32) {
+        let was_zero = {
+            let object = &mut self.objects[idx];
+            if change < 0 {
+                object.last_energy_loss_cause = caused_by;
+            }
+            let was_zero = object.state.energy == 0;
+            object.state.energy = object.state.energy.saturating_add(change).max(0);
+            was_zero
+        };
+        if self.objects[idx].state.alive && self.objects[idx].state.energy == 0 && !was_zero {
+            let _ = self.assign_death(idx, false);
+        }
+    }
+
+    /// `C4Object::AssignDeath` core (C4Object.cpp:1137-1177): alive objects
+    /// only; set the "Dead" action, clear commands, eject contents at the
+    /// object's position, run the Death script callback with the death
+    /// causing player. Still open: effect ClearAll with the revival abort,
+    /// player crew/cursor/view cleanup, Info death counters.
+    fn assign_death(&mut self, idx: usize, _forced: bool) -> Result<(), EngineError> {
+        if !self.objects[idx].state.alive {
+            return Ok(());
+        }
+        let death_causing_player = self.objects[idx].last_energy_loss_cause;
+        self.objects[idx].state.alive = false;
+        // SetActionByName("Dead") (C4Object.cpp:1153)
+        let object_id = self.objects[idx].id;
+        self.force_action_by_name(idx, "Dead");
+        // ClearCommands (C4Object.cpp:1157)
+        self.objects[idx].command_queue.clear();
+        // Lose contents (C4Object.cpp:1165)
+        let contents = std::mem::take(&mut self.objects[idx].state.contents);
+        let position = self.objects[idx].state.position;
+        for content_id in contents {
+            let update = ObjectUpdate::new()
+                .clear_container()
+                .with_position(position);
+            let _ = self.apply_object_update(content_id, update);
+        }
+        // Engine script call (C4Object.cpp:1173)
+        if let Some(idx) = self.find_object_index(object_id) {
+            let _ = self.call_object_function(
+                idx,
+                "Death",
+                vec![Value::Int(death_causing_player)],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// `SetActionByName` for engine-forced transitions (Dead, etc.).
+    fn force_action_by_name(&mut self, idx: usize, action: &str) {
+        let definition_id = self.objects[idx].definition_id.clone();
+        let Some(library) = self
+            .definitions
+            .get(&definition_id)
+            .map(|definition| definition.action_library().clone())
+        else {
+            return;
+        };
+        if !library.contains(action) {
+            return;
+        }
+        let previous = self.objects[idx].state.action.clone();
+        let update = ActionUpdate {
+            name: Some(action.to_string()),
+            phase: Some(0),
+            ticks: Some(0),
+            force: true,
+            data: None,
+            target: Some(None),
+            target2: Some(None),
+        };
         let object = &mut self.objects[idx];
-        object.state.energy = object.state.energy.saturating_add(change).max(0);
+        let result = object
+            .state
+            .action
+            .apply_update_with_library(&update, &library);
+        if matches!(result, ActionUpdateResult::Applied)
+            && previous.name != object.state.action.name
+        {
+            object.record_action_event(previous, ActionTransitionKind::Forced);
+        }
     }
 
     /// `C4Object::Fling` (C4Object.cpp:1612-1625) without fAddSpeed: try the
@@ -18248,6 +18335,66 @@ mod tests {
             engine.objects[victim_idx].fixed_velocity.y,
             math::C4Fixed::ZERO
         );
+        Ok(())
+    }
+
+    #[test]
+    fn energy_loss_to_zero_assigns_death_like_cpp() -> Result<(), EngineError> {
+        // C4Object::DoEnergy (C4Object.cpp:1361-1363): an alive object whose
+        // energy first reaches zero dies. AssignDeath (C4Object.cpp:1137-1177)
+        // sets the "Dead" action, clears commands, ejects contents at the
+        // object's position, and runs the Death callback with the death
+        // causing player (the last energy-loss cause).
+        let mut engine = Engine::with_seed(90);
+        let mut clonk_def = Definition::from_script(
+            "Clonk",
+            "Clonk",
+            r#"
+            func Death(by) { return 1; }
+            "#,
+        )?;
+        clonk_def.set_crew_member(true);
+        let mut specs = HashMap::new();
+        specs.insert("Idle".to_string(), ActionSpec::default());
+        specs.insert("Dead".to_string(), ActionSpec::default());
+        clonk_def.configure_actions(Some("Idle".to_string()), specs);
+        engine.register_definition(clonk_def)?;
+        engine.register_definition(simple_definition("Gem"))?;
+
+        let clonk = engine.spawn_object(
+            SpawnConfig::new("Clonk")
+                .with_position(Vector2::new(50, 50))
+                .with_alive(true)
+                .with_energy(5),
+        )?;
+        let gem = engine.spawn_object(
+            SpawnConfig::new("Gem")
+                .with_position(Vector2::new(50, 50))
+                .with_container(clonk),
+        )?;
+
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        engine.change_object_energy(idx, -3, 7);
+        assert!(engine.objects[idx].state.alive, "energy 2 left");
+        engine.change_object_energy(idx, -2, 7);
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert!(!engine.objects[idx].state.alive, "dead at zero energy");
+        assert_eq!(engine.objects[idx].state.action.name, "Dead");
+        assert!(
+            engine.objects[idx].state.contents.is_empty(),
+            "contents lost"
+        );
+        let gem_idx = engine.find_object_index(gem).expect("gem exists");
+        assert_eq!(engine.objects[gem_idx].state.container, None, "gem ejected");
+        assert_eq!(
+            engine.objects[gem_idx].state.position,
+            Vector2::new(50, 50),
+            "ejected at the dying object's position"
+        );
+
+        // Death is not re-assigned (already dead, C4Object.cpp:1141)
+        engine.change_object_energy(idx, -1, 9);
+        assert_eq!(engine.objects[idx].last_energy_loss_cause, 9);
         Ok(())
     }
 
