@@ -299,10 +299,23 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
    `OCF_OnFire`/`OCF_Inflammable` per SetOCF (dead livings excluded); the
    Tick35 arm consumes `Random(ContactIncinerate)` whenever the OCF pair
    matches and attributes via GetFireCausePlr's ValidPlr filter
-   (C4Object.cpp:6193-6203). **Open:** fxFireStart's BurnTurnTo ChangeDef,
-   contents ejection, attach detach, fire modes/sounds, IncinerationEx; Tick5
-   base extinguish (base model); SmokeRate smoke (visual); DoEnergy physical
-   max clamp + `AssignDeath` (death model); DFA_FIGHT combat exec.
+   (C4Object.cpp:6193-6203). **Trimmings + death model DONE (2026-06-09):**
+   BurnTurnTo ChangeDef (minimal `change_object_def`: def swap, default
+   action, shape template/vertices refresh, rotation reset for
+   non-rotateables, C4Object.cpp:1180-1228), contents ejection at fire start
+   (into the container when contained, C4Effect.cpp:586-594, honoring
+   IncompleteActivity/NoBurnDecay — both now DefCore-parsed), IncinerationEx
+   for blasted-in-extinguisher; `AssignDeath` core (Dead action, command
+   clear, contents ejection, Death callback with the tracked
+   LastEnergyLossCausePlayer) fired by DoEnergy on first-zero energy.
+   **Open:** attach detach at fire start (needs the DFA_ATTACH action scan);
+   fire modes/sounds; Tick5 base extinguish (base model); SmokeRate smoke
+   (visual); DoEnergy physical max clamp and **DFA_FIGHT combat exec — both
+   blocked on the C4PhysicalInfo physicals model** (`ValByPhysical`,
+   `TrainPhysical`, GetPhysical()->Energy/Walk/Fight; the fight exec at
+   C4Object.cpp:5200-5241 derives its approach speed from physical Walk);
+   `last_energy_loss_cause` not yet snapshot-persisted; effect ClearAll
+   revival abort and player pointer/view cleanup in AssignDeath.
 7. **PARTIAL** — `script-values`. **Done:** `C4ScriptCnvMap` 81-cell table +
    `ConvertTo` dispatch (`C4Value.cpp:431-598`; differential-locked
    `script_value_convert` — 81-cell grid + per-(value,target,#strict) result);
