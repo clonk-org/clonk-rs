@@ -95,6 +95,11 @@ pub struct DefCore {
     pub no_burn_decay: bool,
     /// NoBurnDamage=1: burning deals no damage (C4Object.cpp:780).
     pub no_burn_damage: bool,
+    /// BurnTurnTo=ID: definition change on incineration (C4Effect.cpp:580-585).
+    pub burn_turn_to: Option<String>,
+    /// IncompleteActivity=1: keeps contents on incineration and allows
+    /// collection below FullCon (C4Effect.cpp:588, SetOCF C4Object.cpp:594).
+    pub incomplete_activity: bool,
     pub collectible: bool,
     pub constructable: bool,
     pub con_size_off: i32,
@@ -328,6 +333,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut contact_incinerate: i32 = 0;
     let mut no_burn_decay = false;
     let mut no_burn_damage = false;
+    let mut burn_turn_to: Option<String> = None;
+    let mut incomplete_activity = false;
     let mut collectible = false;
     let mut constructable = false;
     let mut con_size_off: i32 = 0;
@@ -440,6 +447,14 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "noburndamage" => {
                 no_burn_damage = parse_bool(value);
             }
+            "burnturnto" => {
+                if !value.is_empty() {
+                    burn_turn_to = Some(value.to_string());
+                }
+            }
+            "incompleteactivity" => {
+                incomplete_activity = parse_bool(value);
+            }
             "collectionlimit" => {
                 collection_limit = match parse_i32(value) {
                     Some(limit) if limit > 0 => Some(limit as u32),
@@ -514,6 +529,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         contact_incinerate,
         no_burn_decay,
         no_burn_damage,
+        burn_turn_to,
+        incomplete_activity,
         collectible,
         constructable,
         con_size_off,

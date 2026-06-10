@@ -4474,6 +4474,8 @@ pub struct Definition {
     contact_incinerate: i32,
     no_burn_decay: bool,
     no_burn_damage: bool,
+    burn_turn_to: Option<String>,
+    incomplete_activity: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4560,6 +4562,8 @@ impl Definition {
             contact_incinerate: 0,
             no_burn_decay: false,
             no_burn_damage: false,
+            burn_turn_to: None,
+            incomplete_activity: false,
         })
     }
 
@@ -4665,6 +4669,8 @@ impl Definition {
             resource.core.no_burn_decay,
             resource.core.no_burn_damage,
         );
+        definition.set_burn_turn_to(resource.core.burn_turn_to.clone());
+        definition.set_incomplete_activity(resource.core.incomplete_activity);
         definition.set_collectible(resource.core.collectible);
         definition.set_constructable(resource.core.constructable);
         definition.set_construction_offset(resource.core.con_size_off);
@@ -5019,6 +5025,22 @@ impl Definition {
         self.contact_incinerate = contact_incinerate.max(0);
         self.no_burn_decay = no_burn_decay;
         self.no_burn_damage = no_burn_damage;
+    }
+
+    pub fn burn_turn_to(&self) -> Option<&str> {
+        self.burn_turn_to.as_deref()
+    }
+
+    pub fn incomplete_activity(&self) -> bool {
+        self.incomplete_activity
+    }
+
+    pub fn set_burn_turn_to(&mut self, target: Option<String>) {
+        self.burn_turn_to = target;
+    }
+
+    pub fn set_incomplete_activity(&mut self, enabled: bool) {
+        self.incomplete_activity = enabled;
     }
 
     pub fn set_collection_limit(&mut self, limit: Option<u32>) {
@@ -14224,7 +14246,7 @@ impl Engine {
         &mut self,
         idx: usize,
         caused_by: i32,
-        _blasted: bool,
+        blasted: bool,
         _incinerating: Option<ObjectId>,
     ) -> Result<bool, EngineError> {
         {
@@ -14247,7 +14269,48 @@ impl Engine {
             .and_then(|material_id| self.materials.get_by_id(material_id))
             .map(|material| material.extinguisher() > 0)
             .unwrap_or(false);
-        if in_extinguisher {
+        let fire_caused = !in_extinguisher;
+        let (burn_turn_to, incomplete_activity, no_burn_decay) = self
+            .definitions
+            .get(&self.objects[idx].definition_id)
+            .map(|definition| {
+                (
+                    definition.burn_turn_to().map(str::to_string),
+                    definition.incomplete_activity(),
+                    definition.no_burn_decay(),
+                )
+            })
+            .unwrap_or((None, false, false));
+        // BurnTurnTo: blasts changedef in water too (C4Effect.cpp:579-585)
+        if let Some(target) = burn_turn_to.filter(|_| fire_caused || blasted) {
+            self.change_object_def(idx, &target);
+        }
+        // eject contents (C4Effect.cpp:586-594): into the burning object's
+        // container when contained, else exit at the object's position
+        if !incomplete_activity && !no_burn_decay {
+            let container = self.objects[idx].state.container;
+            let contents = std::mem::take(&mut self.objects[idx].state.contents);
+            for content_id in contents {
+                let update = match container {
+                    Some(parent) => ObjectUpdate::new().with_container(parent),
+                    None => ObjectUpdate::new()
+                        .clear_container()
+                        .with_position(position),
+                };
+                let _ = self.apply_object_update(content_id, update);
+            }
+        }
+        // (attached-object detach, C4Effect.cpp:595-600: needs the
+        // DFA_ATTACH action scan — open)
+        if !fire_caused {
+            // blasted but not incinerated: IncinerationEx (C4Effect.cpp:602-607)
+            if blasted {
+                let _ = self.call_object_function(
+                    idx,
+                    "IncinerationEx",
+                    vec![Value::Int(caused_by)],
+                )?;
+            }
             return Ok(false);
         }
         // Set values (C4Effect.cpp:632-634)
@@ -14382,6 +14445,41 @@ impl Engine {
             )?;
         }
         Ok(())
+    }
+
+    /// Minimal `C4Object::ChangeDef` (C4Object.cpp:1180-1228): swap the
+    /// definition, reset the action to the new library's default, refresh
+    /// the shape template and vertices from the new definition. Graphics,
+    /// mass, color, and effect-pointer updates are still open.
+    fn change_object_def(&mut self, idx: usize, new_def: &str) {
+        let Some(definition) = self.definitions.get(new_def) else {
+            return;
+        };
+        let action_state = definition.default_action_state();
+        let vertices = definition.shape_vertices().to_vec();
+        let template = ObjectShapeTemplate::new(
+            vertices.clone(),
+            definition.shape_rect(),
+            definition.stretch_growth(),
+            definition.rotateable(),
+        );
+        let category = definition.category();
+        let rotateable = definition.rotateable();
+        let material_capacity = self.materials.len();
+        let object = &mut self.objects[idx];
+        object.definition_id = new_def.to_string();
+        object.state.action = action_state;
+        object.state.category = category;
+        object.state.vertices = vertices;
+        object.shape_template = template;
+        object.own_shape_vertices = None;
+        // Non-rotateable defs reset rotation (C4Object.cpp:1211)
+        if rotateable == 0 {
+            object.state.rotation = 0;
+            object.fixed_rotation = C4Fixed::ZERO;
+            object.rotation_velocity = C4Fixed::ZERO;
+        }
+        object.ensure_material_capacity(material_capacity);
     }
 
     /// `SetActionByName` for engine-forced transitions (Dead, etc.).
@@ -18476,6 +18574,59 @@ mod tests {
         let mut tampered = local;
         tampered.random_count += 1;
         assert!(!machine.register_remote_sync_check(tampered));
+        Ok(())
+    }
+
+    #[test]
+    fn incinerate_burn_turn_to_and_contents_ejection_match_cpp() -> Result<(), EngineError> {
+        // fxFireStart (C4Effect.cpp:579-594): BurnTurnTo changes the
+        // definition when fire is caused; contents are ejected at the
+        // object's position unless IncompleteActivity or NoBurnDecay.
+        let mut engine = Engine::with_seed(95);
+        let mut hut_def = simple_definition("Hut");
+        hut_def.set_burn_turn_to(Some("Ruin".to_string()));
+        engine.register_definition(hut_def)?;
+        engine.register_definition(simple_definition("Ruin"))?;
+        engine.register_definition(simple_definition("Gem"))?;
+
+        let hut = engine.spawn_object(
+            SpawnConfig::new("Hut").with_position(Vector2::new(30, 30)),
+        )?;
+        let gem = engine.spawn_object(
+            SpawnConfig::new("Gem")
+                .with_position(Vector2::new(30, 30))
+                .with_container(hut),
+        )?;
+
+        let idx = engine.find_object_index(hut).expect("hut exists");
+        assert!(engine.incinerate_object(idx, 1, false, None)?);
+        let idx = engine.find_object_index(hut).expect("hut exists");
+        assert_eq!(
+            engine.objects[idx].definition_id, "Ruin",
+            "BurnTurnTo changed the definition"
+        );
+        assert!(engine.objects[idx].state.on_fire);
+        assert!(engine.objects[idx].state.contents.is_empty());
+        let gem_idx = engine.find_object_index(gem).expect("gem exists");
+        assert_eq!(engine.objects[gem_idx].state.container, None, "ejected");
+        assert_eq!(engine.objects[gem_idx].state.position, Vector2::new(30, 30));
+
+        // NoBurnDecay keeps the contents (C4Effect.cpp:588).
+        let mut keeper_def = simple_definition("Chest");
+        keeper_def.set_fire_properties(0, true, false);
+        engine.register_definition(keeper_def)?;
+        let chest = engine.spawn_object(
+            SpawnConfig::new("Chest").with_position(Vector2::new(50, 30)),
+        )?;
+        let coin = engine.spawn_object(
+            SpawnConfig::new("Gem")
+                .with_position(Vector2::new(50, 30))
+                .with_container(chest),
+        )?;
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert!(engine.incinerate_object(chest_idx, 1, false, None)?);
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(engine.objects[chest_idx].state.contents, vec![coin]);
         Ok(())
     }
 
