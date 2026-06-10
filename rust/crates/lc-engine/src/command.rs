@@ -1,11 +1,13 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::transfer::{TransferZone, TransferZoneTable};
+use crate::math::{self, FixedVec2};
 use crate::{
     ocf, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, Direction, ObjectId,
     ObjectStatus, ObjectUpdate, PlayerStatus, Vector2, CATEGORY_OBJECT, CATEGORY_STATIC_BACK,
     CATEGORY_STRUCTURE, CATEGORY_VEHICLE, FULL_CON, LINE_CONNECT_POWER_INPUT, OWNER_NONE,
 };
+use lc_resources::PhysicalInfo;
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of commands that may be queued for an object.
@@ -33,6 +35,10 @@ pub struct CommandObjectSnapshot {
     pub action_procedure: ActionProcedure,
     pub command_direction: CommandDirection,
     pub construction: i32,
+    /// Facing (C4Object Action.Dir) for ComDir-less jump direction.
+    pub direction: Direction,
+    /// The resolved GetPhysical view (temporary→info→definition).
+    pub physical: PhysicalInfo,
     pub owner: i32,
     pub crew_member: bool,
     pub selected: bool,
@@ -222,6 +228,8 @@ mod tests {
             action_procedure: ActionProcedure::Undefined,
             command_direction: CommandDirection::Stop,
             construction: 0,
+            direction: Direction::Left,
+            physical: PhysicalInfo::default(),
             owner: OWNER_NONE,
             crew_member: false,
             selected: false,
@@ -2196,6 +2204,81 @@ mod tests {
         assert_eq!(update.direction, Some(Direction::Right));
         let action = update.action.expect("jump should trigger action");
         assert_eq!(action.name.as_deref(), Some("Jump"));
+    }
+
+    #[test]
+    fn jump_launches_with_con_scaled_walk_and_jump_physicals() {
+        // ObjectComJump (C4ObjectCom.cpp:284-296): TXDir = ±ValByPhysical(280,
+        // Walk)*Con/FullCon, ydir = -ValByPhysical(1000, Jump)*Con/FullCon,
+        // applied with the Jump action (ObjectActionJump, :48-61).
+        let actor_id = ObjectId::new(402);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.action_procedure = ActionProcedure::Walk;
+        actor.construction = FULL_CON;
+        actor.physical = PhysicalInfo {
+            walk: 35_000,
+            jump: 40_000,
+            ..PhysicalInfo::default()
+        };
+
+        let mut objects = HashMap::new();
+        objects.insert(actor.id, actor.clone());
+
+        let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
+        let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            frame: 6,
+            position: actor.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+
+        let mut state = JumpState::from_request(
+            &CommandRequest::new(CommandId::Jump).with_tx(Some(actor.position.x + 10)),
+        );
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Completed);
+        let update = result.update.expect("jump should update actor");
+        let velocity = update.fixed_velocity.expect("launch velocity set");
+        // Full Con: TXDir = +ValByPhysical(280, 35000) = raw 64225,
+        // ydir = -ValByPhysical(1000, 40000) = raw -262144.
+        assert_eq!(velocity.x.val(), 64225);
+        assert_eq!(velocity.y.val(), -262144);
+
+        // Half Con scales both (C4ObjectCom.cpp:287-288).
+        let mut small = actor.clone();
+        small.construction = FULL_CON / 2;
+        let mut objects = HashMap::new();
+        objects.insert(small.id, small.clone());
+        let ctx = CommandRuntimeContext {
+            frame: 6,
+            position: small.position,
+            object: objects.get(&actor_id).expect("actor present"),
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        };
+        let mut state = JumpState::from_request(
+            &CommandRequest::new(CommandId::Jump).with_tx(Some(small.position.x + 10)),
+        );
+        let result = state.step(&ctx);
+        let update = result.update.expect("jump should update actor");
+        let velocity = update.fixed_velocity.expect("launch velocity set");
+        assert_eq!(velocity.x.val(), 32112);
+        assert_eq!(velocity.y.val(), -131072);
     }
 
     #[test]
@@ -8069,6 +8152,29 @@ impl JumpState {
                 .with_ticks(0)
                 .with_force(true);
             object_update = object_update.with_action_update(action_update);
+            // ObjectComJump launch velocities (C4ObjectCom.cpp:284-296) with
+            // a Jump physical: TXDir = ±ValByPhysical(280, Walk)·Con/FullCon
+            // by ComDir, else by facing; ydir = -ValByPhysical(1000,
+            // Jump)·Con/FullCon (applied by ObjectActionJump, :48-61). The
+            // dive try (SimFlightHitsLiquid) and the OnActionJump scripted
+            // jump are still open.
+            if ctx.object.physical.jump != 0 {
+                let con_scale = math::itofix_prec(ctx.object.construction, FULL_CON);
+                let physical_walk =
+                    math::val_by_physical(280, ctx.object.physical.walk) * con_scale;
+                let physical_jump =
+                    math::val_by_physical(1000, ctx.object.physical.jump) * con_scale;
+                let facing = self.desired_direction(ctx).unwrap_or(ctx.object.direction);
+                let txdir = match ctx.object.command_direction {
+                    CommandDirection::Left | CommandDirection::UpLeft => -physical_walk,
+                    CommandDirection::Right | CommandDirection::UpRight => physical_walk,
+                    _ => match facing {
+                        Direction::Left => -physical_walk,
+                        Direction::Right => physical_walk,
+                    },
+                };
+                object_update.fixed_velocity = Some(FixedVec2::new(txdir, -physical_jump));
+            }
             update = Some(object_update);
         }
 

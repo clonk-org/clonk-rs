@@ -10514,6 +10514,13 @@ impl Engine {
                     action_procedure: procedure,
                     command_direction: object.state.command_direction,
                     construction: object.state.construction,
+                    direction: object.state.direction,
+                    physical: object
+                        .state
+                        .temporary_physical
+                        .or(object.state.info_physical)
+                        .or_else(|| self.definitions.get(&object.definition_id).map(|definition| *definition.physical()))
+                        .unwrap_or_default(),
                     owner: object.state.owner,
                     crew_member: object.state.crew_member,
                     selected: selected_objects.contains(&object.id),
@@ -11301,6 +11308,8 @@ impl Engine {
                     action_procedure: procedure,
                     command_direction: self.objects[idx].state.command_direction,
                     construction: self.objects[idx].state.construction,
+                    direction: self.objects[idx].state.direction,
+                    physical: self.object_physical(idx),
                     owner: self.objects[idx].state.owner,
                     crew_member: self.objects[idx].state.crew_member,
                     selected: selected_objects.contains(&object_id),
