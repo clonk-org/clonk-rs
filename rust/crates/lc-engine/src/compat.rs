@@ -4082,6 +4082,25 @@ impl Drop for RandomContextGuard {
     }
 }
 
+/// Effect-name parameter shared by AddEffect/RemoveEffect/GetEffect/
+/// GetEffectCount: C++ declares it `C4String *`, and pre-#strict-3 callers
+/// legally pass falsy values that CheckConvertFunctionParameters Set0()s to
+/// nil before conversion (C4AulExec.cpp:1370-1374); the empty string also
+/// means "match all" (C4Script.cpp:5561). Truthy non-strings throw in C++.
+fn effect_name_filter<'a>(
+    function: &str,
+    value: &'a Value,
+) -> Result<Option<&'a str>, RuntimeError> {
+    match value {
+        Value::String(name) if !name.is_empty() => Ok(Some(name.as_str())),
+        Value::String(_) | Value::Nil | Value::Int(0) | Value::Bool(false) => Ok(None),
+        other => Err(RuntimeError::new(format!(
+            "{function}: expected string or nil for name, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() < 2 {
         return Err(RuntimeError::new(
@@ -4089,15 +4108,9 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let name = match &args[0] {
-        Value::String(name) if !name.is_empty() => name.clone(),
-        Value::String(_) | Value::Nil => return Ok(Value::Int(0)),
-        other => {
-            return Err(RuntimeError::new(format!(
-                "AddEffect: expected string or nil for name, got {}",
-                other.type_name()
-            )))
-        }
+    let name = match effect_name_filter("AddEffect", &args[0])? {
+        Some(name) => name.to_owned(),
+        None => return Ok(Value::Int(0)),
     };
 
     let scope = determine_scope_from_state(&args[1])?;
@@ -4259,17 +4272,7 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let name_filter = match &args[0] {
-        Value::String(name) if !name.is_empty() => Some(name.clone()),
-        Value::String(_) | Value::Nil => None,
-        Value::Int(value) if *value == 0 => None,
-        other => {
-            return Err(RuntimeError::new(format!(
-                "RemoveEffect: expected string, nil, or 0 for name, got {}",
-                other.type_name()
-            )))
-        }
-    };
+    let name_filter = effect_name_filter("RemoveEffect", &args[0])?.map(str::to_owned);
 
     let scope = determine_scope_from_state(&args[1])?;
     if matches!(scope, EffectScope::Object) {
@@ -4327,16 +4330,7 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let name_filter = match &args[0] {
-        Value::String(name) if !name.is_empty() => Some(name.as_str()),
-        Value::String(_) | Value::Nil => None,
-        other => {
-            return Err(RuntimeError::new(format!(
-                "GetEffect: expected string or nil for name, got {}",
-                other.type_name()
-            )))
-        }
-    };
+    let name_filter = effect_name_filter("GetEffect", &args[0])?;
 
     let scope = determine_scope_from_state(&args[1])?;
     let effects = match snapshot_effects_from_context(scope) {
@@ -4438,16 +4432,7 @@ fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let name_filter = match &args[0] {
-        Value::String(name) if !name.is_empty() => Some(name.as_str()),
-        Value::String(_) | Value::Nil => None,
-        other => {
-            return Err(RuntimeError::new(format!(
-                "GetEffectCount: expected string or nil for name, got {}",
-                other.type_name()
-            )))
-        }
-    };
+    let name_filter = effect_name_filter("GetEffectCount", &args[0])?;
 
     let scope = determine_scope_from_state(&args[1])?;
     let effects = match snapshot_effects_from_context(scope) {
@@ -16615,6 +16600,51 @@ mod tests {
         });
         let value = result.expect("GetEffectCount with priority succeeds");
         assert_eq!(value, Value::Int(2));
+    }
+
+    #[test]
+    fn get_effect_count_accepts_falsy_name_like_cpp_set0() {
+        // Pre-#strict-3 scripts pass falsy values where a C4String* is
+        // expected; C4AulExec.cpp:1370-1374 Set0()s them to nil before
+        // conversion, so `GetEffectCount(0, this())` (Clonk.c4d Script.c:863
+        // Control2Effect) counts all effects like a nil name.
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
+            add_effect(&[Value::String("Spark".into()), state.clone(), Value::Int(80)])?;
+            get_effect_count(&[Value::Int(0), state.clone()])
+        });
+        let value = result.expect("GetEffectCount with falsy int name succeeds");
+        assert_eq!(value, Value::Int(2));
+
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
+            get_effect_count(&[Value::Bool(false), state.clone()])
+        });
+        let value = result.expect("GetEffectCount with falsy bool name succeeds");
+        assert_eq!(value, Value::Int(1));
+
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            get_effect_count(&[Value::Int(7), state.clone()])
+        });
+        result.expect_err("GetEffectCount with truthy int name errors like C++ ConvertTo");
+    }
+
+    #[test]
+    fn get_and_remove_effect_accept_falsy_name_like_cpp_set0() {
+        // Same Set0 path as above: `GetEffect(0, this(), i)` follows the
+        // GetEffectCount(0, …) call in Control2Effect (Clonk.c4d Script.c:868)
+        // and JumpAndRun.c:86 calls `RemoveEffect(0, this(), number)`.
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(120)])?;
+            let number = get_effect(&[Value::Int(0), state.clone()])?;
+            assert!(matches!(number, Value::Int(n) if n > 0));
+            remove_effect(&[Value::Int(0), state.clone()])?;
+            get_effect_count(&[Value::Nil, state.clone()])
+        });
+        let value = result.expect("falsy-name GetEffect/RemoveEffect chain succeeds");
+        assert_eq!(value, Value::Int(0));
     }
 
     #[test]
