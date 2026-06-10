@@ -293,6 +293,11 @@ pub fn itofix_prec(x: i32, prec: i32) -> C4Fixed {
 pub const WALK_ACCEL: C4Fixed = C4Fixed(50 * FPF / 100);
 pub const SWIM_ACCEL: C4Fixed = C4Fixed(20 * FPF / 100);
 pub const FLOAT_ACCEL: C4Fixed = C4Fixed(10 * FPF / 100);
+pub const ROTATE_ACCEL: C4Fixed = C4Fixed(20 * FPF / 100);
+
+/// `StableRange` (C4Physics.h:23): degrees within which an object counts
+/// as upright.
+pub const STABLE_RANGE: i32 = 10;
 
 /// `ValByPhysical` (C4InfoCore.h:224-227): the percentage of a physical's
 /// maximum as a fixed value — `itofix(physical * (percent/5),

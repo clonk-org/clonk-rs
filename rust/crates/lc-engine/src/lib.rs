@@ -4251,7 +4251,7 @@ impl From<ResourcePictureRect> for DefinitionPicture {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DefinitionRect {
     pub x: i32,
     pub y: i32,
@@ -4541,6 +4541,8 @@ pub struct Definition {
     no_burn_damage: bool,
     /// NoBreath=1: exempt from the ExecLife breathing check (C4Object.cpp:880).
     no_breath: bool,
+    /// Grab DefCore value: 0 none, 1 grab+push, 2 grab-only (C4Object.cpp:1763).
+    grab: i32,
     burn_turn_to: Option<String>,
     incomplete_activity: bool,
     /// The [Physical] DefCore section (C4Def::Physical).
@@ -4631,6 +4633,7 @@ impl Definition {
             contact_incinerate: 0,
             no_burn_decay: false,
             no_breath: false,
+            grab: 0,
             no_burn_damage: false,
             burn_turn_to: None,
             incomplete_activity: false,
@@ -4743,6 +4746,7 @@ impl Definition {
         definition.set_burn_turn_to(resource.core.burn_turn_to.clone());
         definition.set_incomplete_activity(resource.core.incomplete_activity);
         definition.set_no_breath(resource.core.no_breath);
+        definition.set_grab(resource.core.grab);
         definition.set_physical(resource.core.physical);
         definition.set_collectible(resource.core.collectible);
         definition.set_constructable(resource.core.constructable);
@@ -4891,11 +4895,15 @@ impl Definition {
     }
 
     pub fn ocf_base(&self) -> u32 {
+        let mut ocf = self.ocf_base;
         if self.rotateable > 0 {
-            self.ocf_base | crate::ocf::ROTATE
-        } else {
-            self.ocf_base
+            ocf |= crate::ocf::ROTATE;
         }
+        // OCF_Grab from the Grab DefCore value (C4Object SetOCF).
+        if self.grab > 0 {
+            ocf |= crate::ocf::GRAB;
+        }
+        ocf
     }
 
     pub fn set_ocf_base(&mut self, ocf: u32) {
@@ -4962,6 +4970,16 @@ impl Definition {
 
     pub fn set_mass(&mut self, mass: i32) {
         self.mass = mass.max(0);
+    }
+
+    /// `Grab` DefCore value (C4Def.h): 0 = not grabbable, 1 = grab and
+    /// push, 2 = grab only (C4Object.cpp:1763).
+    pub fn grab(&self) -> i32 {
+        self.grab
+    }
+
+    pub fn set_grab(&mut self, grab: i32) {
+        self.grab = grab.max(0);
     }
 
     pub fn picture(&self) -> Option<DefinitionPicture> {
@@ -13858,6 +13876,119 @@ impl Engine {
         true
     }
 
+    /// DFA_PULL with a nonzero Walk physical (C4Object.cpp:5099-5170):
+    /// pull-position math, target force via `C4Object::Push`, ComDir
+    /// transfer onto walking/pulling targets, pulling-range check with
+    /// GrabLost and target loss, own move toward the pulling position. The
+    /// controller transfer (C4Object.cpp:5134) needs the controller model.
+    fn apply_pull_procedure_physical(
+        &mut self,
+        idx: usize,
+        target_idx: usize,
+        command_direction: CommandDirection,
+        definition_id: &DefinitionId,
+    ) -> bool {
+        let physical = self.object_physical(idx);
+        let position = self.objects[idx].state.position;
+        let target_position = self.objects[target_idx].state.position;
+        let own_width = self.objects[idx]
+            .current_shape_rect()
+            .map(|rect| rect.width)
+            .unwrap_or(0);
+        let target_rect = self.objects[target_idx]
+            .current_shape_rect()
+            .unwrap_or_default();
+        // Pulling positions (C4Object.cpp:5110-5118).
+        let pull_distance = target_rect.width / 2 + own_width / 2;
+        let mut target_x = position.x;
+        let mut pull_x = target_position.x;
+        match command_direction {
+            CommandDirection::Right => {
+                target_x = target_position.x + pull_distance;
+                pull_x = position.x - pull_distance;
+            }
+            CommandDirection::Left => {
+                target_x = target_position.x - pull_distance;
+                pull_x = position.x + pull_distance;
+            }
+            _ => {}
+        }
+        // Target pulling force (C4Object.cpp:5120-5126).
+        let walk = math::val_by_physical(280, physical.walk);
+        let movement = match command_direction {
+            CommandDirection::Right => walk,
+            CommandDirection::Left => -walk,
+            _ => C4Fixed::ZERO,
+        };
+        let txdir =
+            movement + walk * (pull_x - target_position.x).clamp(-10, 10) / 10;
+        // Push object (C4Object.cpp:5129-5132).
+        if !self.push_object(
+            target_idx,
+            txdir,
+            math::val_by_physical(250, physical.push),
+            false,
+        ) {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+        // Train pulling: ComDir transfer (C4Object.cpp:5137-5143).
+        let target_procedure = self
+            .definitions
+            .get(&self.objects[target_idx].definition_id)
+            .map(|definition| {
+                definition
+                    .action_library()
+                    .procedure_for_action(&self.objects[target_idx].state.action.name)
+            })
+            .unwrap_or_default();
+        if matches!(
+            target_procedure,
+            ActionProcedure::Walk | ActionProcedure::Pull
+        ) {
+            let mut transfer = CommandDirection::Stop;
+            if txdir < C4Fixed::ZERO {
+                transfer = CommandDirection::Left;
+            }
+            if txdir > C4Fixed::ZERO {
+                transfer = CommandDirection::Right;
+            }
+            self.objects[target_idx].state.command_direction = transfer;
+        }
+        // Pulling range (C4Object.cpp:5146-5161).
+        let push_distance = (own_width / 2 - 8).max(0);
+        let push_range = push_distance + 20;
+        let sax = target_position.x + target_rect.x;
+        let say = target_position.y + target_rect.y;
+        let sawdt = target_rect.width;
+        let sahgt = target_rect.height;
+        if !(-push_range..=sawdt - 1 + push_range).contains(&(position.x - sax))
+            || !(-push_range..=sahgt - 1 + push_range).contains(&(position.y - say))
+        {
+            self.reset_action_to_default(idx, definition_id, true);
+            let _ = self.call_object_function(target_idx, "GrabLost", Vec::new());
+            // Lose target (C4Object.cpp:5158).
+            self.objects[idx].state.action.target = None;
+            return false;
+        }
+        // Move to pulling position (C4Object.cpp:5164), facing by xdir,
+        // grounded.
+        let xdir = movement + walk * (target_x - position.x).clamp(-10, 10) / 10;
+        let physics = self.physics;
+        let object = &mut self.objects[idx];
+        object.fixed_velocity.x = xdir;
+        if xdir < C4Fixed::ZERO {
+            object.state.direction = Direction::Left;
+        }
+        if xdir > C4Fixed::ZERO {
+            object.state.direction = Direction::Right;
+        }
+        object.fixed_velocity.y = C4Fixed::ZERO;
+        physics.clamp_fixed_velocity(&mut object.fixed_velocity);
+        object.refresh_velocity_from_fixed();
+        true
+    }
+
     fn apply_pull_procedure(
         &mut self,
         idx: usize,
@@ -13898,6 +14029,15 @@ impl Engine {
         if self.objects[target_idx].state.container.is_some() {
             self.reset_action_to_default(idx, definition_id, true);
             return false;
+        }
+
+        if self.object_physical(idx).walk != 0 {
+            return self.apply_pull_procedure_physical(
+                idx,
+                target_idx,
+                command_direction,
+                definition_id,
+            );
         }
 
         let walk_speed = movement_profile.walk_speed.max(0);
@@ -14107,6 +14247,170 @@ impl Engine {
         true
     }
 
+    /// `C4Object::Push` (C4Object.cpp:1758-1808): grab/containment checks,
+    /// force scaled against the target mass, facing from the current motion,
+    /// xdir worked toward the push speed (close-enough-set), straightening
+    /// for upright pushes. Still open: the pre-mobilization velocity zeroing
+    /// (no Mobile flag) and the Tick35 stuck check (contact + Stuck
+    /// callback + message).
+    fn push_object(
+        &mut self,
+        target_idx: usize,
+        txdir: C4Fixed,
+        dforce: C4Fixed,
+        straighten: bool,
+    ) -> bool {
+        {
+            let target = &self.objects[target_idx];
+            if target.destroyed
+                || !target.state.status.is_active()
+                || target.state.container.is_some()
+            {
+                return false;
+            }
+        }
+        if self.object_ocf_at_index(target_idx) & ocf::GRAB == 0 {
+            return false;
+        }
+        let (grab, mass) = self
+            .definitions
+            .get(&self.objects[target_idx].definition_id)
+            .map(|definition| (definition.grab(), definition.mass()))
+            .unwrap_or((0, 0));
+        // Grabbing okay, no pushing (C4Object.cpp:1763).
+        if grab == 2 {
+            return true;
+        }
+        // General pushing force vs. object mass (C4Object.cpp:1770).
+        let dforce = dforce * 100 / mass.max(1);
+        let target = &mut self.objects[target_idx];
+        // Set dir by the current motion (C4Object.cpp:1772-1773).
+        if target.fixed_velocity.x < C4Fixed::ZERO {
+            target.state.direction = Direction::Left;
+        }
+        if target.fixed_velocity.x > C4Fixed::ZERO {
+            target.state.direction = Direction::Right;
+        }
+        // Work towards txdir (C4Object.cpp:1775-1783).
+        let mut xdir = target.fixed_velocity.x;
+        math::towards(&mut xdir, txdir, dforce);
+        target.fixed_velocity.x = xdir;
+        // Straighten (C4Object.cpp:1785-1794); the normalized rotation maps
+        // back to the C++ signed range.
+        if straighten {
+            let rotation = target.state.rotation;
+            let signed = if rotation > 180 {
+                rotation - 360
+            } else {
+                rotation
+            };
+            if (-math::STABLE_RANGE..=math::STABLE_RANGE).contains(&signed) {
+                target.rotation_velocity = C4Fixed::ZERO;
+            } else if signed > 0 {
+                if target.rotation_velocity > -math::ROTATE_ACCEL {
+                    target.rotation_velocity -= dforce;
+                }
+            } else if target.rotation_velocity < math::ROTATE_ACCEL {
+                target.rotation_velocity += dforce;
+            }
+        }
+        target.refresh_velocity_from_fixed();
+        true
+    }
+
+    /// DFA_PUSH with a nonzero Walk physical (C4Object.cpp:5040-5097):
+    /// target force `ValByPhysical(250, Push)` toward `±ValByPhysical(280,
+    /// Walk)` per ComDir, got-hold area check with the GrabLost callback,
+    /// follow xdir at the full walk limit. The controller transfer
+    /// (C4Object.cpp:5064) needs the controller model.
+    fn apply_push_procedure_physical(
+        &mut self,
+        idx: usize,
+        target_idx: usize,
+        command_direction: CommandDirection,
+        definition_id: &DefinitionId,
+    ) -> bool {
+        let physical = self.object_physical(idx);
+        let limit = math::val_by_physical(280, physical.walk);
+        // ComDir → target speed and straightening (C4Object.cpp:5049-5057).
+        let (txdir, straighten) = match command_direction {
+            CommandDirection::Left | CommandDirection::DownLeft => (-limit, false),
+            CommandDirection::UpLeft => (-limit, true),
+            CommandDirection::Right | CommandDirection::DownRight => (limit, false),
+            CommandDirection::UpRight => (limit, true),
+            CommandDirection::Up => (C4Fixed::ZERO, true),
+            CommandDirection::Stop | CommandDirection::Down => (C4Fixed::ZERO, false),
+        };
+        // Push object (C4Object.cpp:5059-5062).
+        if !self.push_object(
+            target_idx,
+            txdir,
+            math::val_by_physical(250, physical.push),
+            straighten,
+        ) {
+            self.reset_action_to_default(idx, definition_id, true);
+            return false;
+        }
+        // Got-hold check (C4Object.cpp:5066-5080).
+        let own_width = self.objects[idx]
+            .current_shape_rect()
+            .map(|rect| rect.width)
+            .unwrap_or(0);
+        let push_distance = (own_width / 2 - 8).max(0);
+        let push_range = push_distance + 10;
+        let target_position = self.objects[target_idx].state.position;
+        let target_rect = self.objects[target_idx]
+            .current_shape_rect()
+            .unwrap_or_default();
+        let mut sax = target_position.x + target_rect.x;
+        let say = target_position.y + target_rect.y;
+        let mut sawdt = target_rect.width;
+        let sahgt = target_rect.height;
+        let position = self.objects[idx].state.position;
+        if !(-push_range..=sawdt - 1 + push_range).contains(&(position.x - sax))
+            || !(-push_range..=sahgt - 1 + push_range).contains(&(position.y - say))
+        {
+            // Grab lost: GrabLost script call on the target
+            // (C4Object.cpp:4251-4254).
+            self.reset_action_to_default(idx, definition_id, true);
+            let _ = self.call_object_function(target_idx, "GrabLost", Vec::new());
+            return false;
+        }
+        // Vertical follow (C4Object.cpp:5083).
+        if position.y - push_distance > say + sahgt && txdir != C4Fixed::ZERO {
+            if txdir > C4Fixed::ZERO {
+                sax += sawdt / 2;
+            }
+            sawdt /= 2;
+        }
+        // Horizontal follow with the full xdir reset (C4Object.cpp:5085-5087).
+        let target_x = position
+            .x
+            .max(sax - push_distance)
+            .min(sax + sawdt - 1 + push_distance);
+        let physics = self.physics;
+        let object = &mut self.objects[idx];
+        let mut xdir = C4Fixed::ZERO;
+        if position.x < target_x {
+            xdir = limit;
+        }
+        if position.x > target_x {
+            xdir = -limit;
+        }
+        object.fixed_velocity.x = xdir;
+        // SetDir by xdir (C4Object.cpp:5089-5090), grounded (5092).
+        if xdir < C4Fixed::ZERO {
+            object.state.direction = Direction::Left;
+        }
+        if xdir > C4Fixed::ZERO {
+            object.state.direction = Direction::Right;
+        }
+        object.fixed_velocity.y = C4Fixed::ZERO;
+        physics.clamp_fixed_velocity(&mut object.fixed_velocity);
+        object.refresh_velocity_from_fixed();
+        true
+    }
+
     fn apply_push_procedure(
         &mut self,
         idx: usize,
@@ -14137,6 +14441,15 @@ impl Engine {
         if self.objects[target_idx].state.container == Some(self.objects[idx].id) {
             self.reset_action_to_default(idx, definition_id, true);
             return false;
+        }
+
+        if self.object_physical(idx).walk != 0 {
+            return self.apply_push_procedure_physical(
+                idx,
+                target_idx,
+                command_direction,
+                definition_id,
+            );
         }
 
         let push_speed = movement_profile.walk_speed.max(0);
@@ -24222,10 +24535,198 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
     }
 
+    fn push_pull_fixture() -> (Engine, ObjectId, ObjectId) {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut pusher_definition = Definition::from_script("Pusher", "Pusher", script).unwrap();
+        let mut pusher_actions = HashMap::new();
+        pusher_actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default().with_procedure("walk"),
+        );
+        pusher_actions.insert(
+            "Push".to_string(),
+            ActionSpec::default().with_procedure("push"),
+        );
+        pusher_actions.insert(
+            "Pull".to_string(),
+            ActionSpec::default().with_procedure("pull"),
+        );
+        pusher_definition.configure_actions(Some("Idle".to_string()), pusher_actions);
+        pusher_definition.set_physical(PhysicalInfo {
+            walk: 35_000,
+            push: 45_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut crate_definition = Definition::from_script("Crate", "Crate", script).unwrap();
+        crate_definition.set_grab(1);
+        crate_definition.set_mass(200);
+
+        let mut engine = Engine::with_seed(18);
+        engine
+            .register_definition(pusher_definition)
+            .expect("pusher registers");
+        engine
+            .register_definition(crate_definition)
+            .expect("crate registers");
+        engine.set_physics(
+            PhysicsSettings::new(0, 20, -20)
+                .with_max_horizontal_speed(20)
+                .expect("horizontal speed valid"),
+        );
+
+        let vertices = vec![
+            ObjectVertex::new(-8, -8),
+            ObjectVertex::new(8, -8),
+            ObjectVertex::new(8, 8),
+            ObjectVertex::new(-8, 8),
+        ];
+        let crate_id = engine
+            .spawn_object(
+                SpawnConfig::new("Crate")
+                    .with_position(Vector2::new(10, 0))
+                    .with_vertices(vertices.clone()),
+            )
+            .expect("crate spawns");
+        (engine, crate_id, ObjectId::new(0))
+    }
+
+    #[test]
+    fn push_procedure_uses_walk_and_push_physicals() {
+        // DFA_PUSH (C4Object.cpp:5040-5097): the target is pushed via
+        // C4Object::Push (C4Object.cpp:1758-1808) with
+        // dforce = ValByPhysical(250, Push)*100/Mass, the pusher follows at
+        // the full lLimit = ValByPhysical(280, Walk).
+        let (mut engine, crate_id, _) = push_pull_fixture();
+        let vertices = vec![
+            ObjectVertex::new(-8, -8),
+            ObjectVertex::new(8, -8),
+            ObjectVertex::new(8, 8),
+            ObjectVertex::new(-8, 8),
+        ];
+        let mut push_state = ActionState::new("Push");
+        push_state.target = Some(crate_id);
+        let pusher_id = engine
+            .spawn_object(
+                SpawnConfig::new("Pusher")
+                    .with_position(Vector2::new(0, 0))
+                    .with_vertices(vertices)
+                    .with_action(push_state)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("pusher spawns");
+
+        engine.tick().expect("tick succeeds");
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
+        let crate_idx = engine.find_object_index(crate_id).expect("crate exists");
+        // Target: Towards(0, +64225) by dforce = 73728*100/200 = raw 36864
+        // (ValByPhysical(250, 45000) = itofix(45000*50, 2000000) = 73728).
+        assert_eq!(engine.objects[crate_idx].fixed_velocity.x.val(), 36864);
+        // Pusher: follow-x BoundBy(0, 2, 17) = 2 → xdir = +lLimit
+        // = ValByPhysical(280, 35000) = raw 64225 (C4Object.cpp:5085-5087).
+        assert_eq!(engine.objects[pusher_idx].fixed_velocity.x.val(), 64225);
+        assert_eq!(engine.objects[pusher_idx].fixed_velocity.y, C4Fixed::ZERO);
+        assert_eq!(engine.objects[pusher_idx].state.direction, Direction::Right);
+        assert_eq!(engine.objects[pusher_idx].state.action.name, "Push");
+    }
+
+    #[test]
+    fn push_procedure_resets_without_grab_ocf() {
+        // C4Object::Push refuses targets without OCF_Grab
+        // (C4Object.cpp:1761) → StopActionDelayCommand.
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+        let (mut engine, _, _) = push_pull_fixture();
+        let plain = Definition::from_script("Rock", "Rock", script).unwrap();
+        engine.register_definition(plain).expect("rock registers");
+        let rock_id = engine
+            .spawn_object(SpawnConfig::new("Rock").with_position(Vector2::new(10, 0)))
+            .expect("rock spawns");
+        let mut push_state = ActionState::new("Push");
+        push_state.target = Some(rock_id);
+        let pusher_id = engine
+            .spawn_object(
+                SpawnConfig::new("Pusher")
+                    .with_position(Vector2::new(0, 0))
+                    .with_action(push_state)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("pusher spawns");
+
+        engine.tick().expect("tick succeeds");
+        let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
+        let rock_idx = engine.find_object_index(rock_id).expect("rock exists");
+        assert_ne!(engine.objects[pusher_idx].state.action.name, "Push");
+        assert_eq!(engine.objects[rock_idx].fixed_velocity.x, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn pull_procedure_uses_walk_and_push_physicals() {
+        // DFA_PULL (C4Object.cpp:5099-5170): puller right-pulls — target
+        // force iTXDir = fMove + fWalk*BoundBy(iPullX-target.x,-10,10)/10,
+        // own xdir from the pulling position, ComDir transfer onto walking
+        // targets.
+        let (mut engine, crate_id, _) = push_pull_fixture();
+        // Reposition the crate for the pull geometry.
+        engine
+            .apply_object_update(
+                crate_id,
+                ObjectUpdate::new().with_position(Vector2::new(12, 0)),
+            )
+            .expect("crate moves");
+        let vertices = vec![
+            ObjectVertex::new(-8, -8),
+            ObjectVertex::new(8, -8),
+            ObjectVertex::new(8, 8),
+            ObjectVertex::new(-8, 8),
+        ];
+        let mut pull_state = ActionState::new("Pull");
+        pull_state.target = Some(crate_id);
+        let puller_id = engine
+            .spawn_object(
+                SpawnConfig::new("Pusher")
+                    .with_position(Vector2::new(0, 0))
+                    .with_vertices(vertices)
+                    .with_action(pull_state)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("puller spawns");
+
+        engine.tick().expect("tick succeeds");
+        let puller_idx = engine.find_object_index(puller_id).expect("puller exists");
+        let crate_idx = engine.find_object_index(crate_id).expect("crate exists");
+        // iPullDistance = 8+8; iPullX = 0-16 = -16; iTXDir = 64225 +
+        // 64225*BoundBy(-28,-10,10)/10 = 0 → target velocity stays zero.
+        assert_eq!(engine.objects[crate_idx].fixed_velocity.x, C4Fixed::ZERO);
+        // Own move: iTargetX = 12+16 = 28; xdir = 64225 +
+        // 64225*BoundBy(28,-10,10)/10 = raw 128450 (C4Object.cpp:5164).
+        assert_eq!(engine.objects[puller_idx].fixed_velocity.x.val(), 128450);
+        assert_eq!(engine.objects[puller_idx].fixed_velocity.y, C4Fixed::ZERO);
+        assert_eq!(engine.objects[puller_idx].state.direction, Direction::Right);
+        assert_eq!(engine.objects[puller_idx].state.action.name, "Pull");
+    }
+
     #[test]
     fn train_physical_requires_info_or_temporary_physicals() {
         // C4Object::TrainPhysical (C4Object.cpp:2136-2146) trains the
-        // temporary set when active and the info physicals when the object        // carries a C4ObjectInfo — an object with neither trains NOTHING.
+        // temporary set when active and the info physicals when the object
+        // carries a C4ObjectInfo — an object with neither trains NOTHING.
         let script = r#"
         global func Initialize(state, random) {
             return nil;
