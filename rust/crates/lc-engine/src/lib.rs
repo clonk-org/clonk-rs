@@ -1672,13 +1672,6 @@ impl EnvironmentSettings {
         self.wind
     }
 
-    fn apply_to_velocity(&self, velocity: &mut FixedVec2, frame: u64) {
-        let wind_force = self.wind_force(frame);
-        if wind_force != 0 {
-            velocity.x += fixed100(wind_force);
-        }
-    }
-
     fn normalize_time_of_day(time_of_day: i32) -> u16 {
         let cycle = i32::from(Self::TIME_CYCLE);
         time_of_day.rem_euclid(cycle) as u16
@@ -13098,10 +13091,8 @@ impl Engine {
             if !physical_skips_gravity {
                 object.fixed_velocity.y += gravity_component;
             }
-            if procedure.allows_wind() {
-                self.environment
-                    .apply_to_velocity(&mut object.fixed_velocity, self.frame);
-            }
+            // C++ wind reaches only PXS and particles via GBackWind
+            // (C4Wrappers.h:189-192) — object motion never reads it.
             if procedure.locks_vertical_velocity() {
                 object.fixed_velocity.y = C4Fixed::ZERO;
             }
@@ -15365,6 +15356,21 @@ impl Engine {
         }
     }
 
+    /// `GBackWind` (C4Wrappers.h:189-192): zero inside tunnel-background
+    /// (IFT) pixels, else the weather wind.
+    fn wind_at(&self, x: i32, y: i32) -> i32 {
+        let in_tunnel = self
+            .landscape
+            .as_ref()
+            .map(|landscape| landscape.is_tunnel_at(x, y))
+            .unwrap_or(false);
+        if in_tunnel {
+            0
+        } else {
+            self.environment.wind_force(self.frame)
+        }
+    }
+
     /// The definition's `[Physical]` section for the object (the
     /// `Def->Physical` fallback and the info-clone source).
     fn definition_physical(&self, idx: usize) -> PhysicalInfo {
@@ -16659,15 +16665,14 @@ impl Engine {
         pixel.ydir += self.physics.gravity_as_c4fixed();
         // Free fall: wind drift with synced jitter (C4PXS.cpp:62-74). The
         // Random(1200) draws are unconditional in free fall; WindDrift only
-        // scales the result. GBackWind(x, y) is approximated by the global
-        // wind force (the Rust environment model is not position-dependent).
+        // scales the result.
         let below_density = self
             .landscape
             .as_ref()
             .map(|landscape| landscape.density_at(ix, iy + 1, &self.materials))
             .unwrap_or(0);
         if below_density < density {
-            let wind = self.environment.wind_force(self.frame);
+            let wind = self.wind_at(ix, iy);
             let txdir = itofix_prec(wind, 15) + fixed256(self.rng.random(1200) - 600);
             let tydir = fixed256(self.rng.random(1200) - 600);
             let wind_drift = (wind_drift_param - 20).max(0);
@@ -22540,6 +22545,44 @@ global func MenuCommand(state, kind, selection)
     }
 
     #[test]
+    fn object_motion_ignores_wind() {
+        // C++ wind reaches only PXS and particles via GBackWind
+        // (C4PXS.cpp:67, C4Particles.cpp:652, C4Wrappers.h:189-192) —
+        // nothing in C4Movement.cpp/C4Object.cpp ever applies the weather
+        // wind to object velocities.
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let definition = Definition::from_script("Crate", "Crate", script).unwrap();
+
+        let mut engine = Engine::with_seed(4);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine.set_environment(EnvironmentSettings::new(80));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(0, 0)))
+            .expect("crate spawns");
+        let idx = engine.find_object_index(id).expect("crate exists");
+
+        engine.tick().expect("tick succeeds");
+        assert_eq!(
+            engine.objects[idx].fixed_velocity.x,
+            C4Fixed::ZERO,
+            "weather wind never drives object motion"
+        );
+    }
+
+    #[test]
     fn kneel_procedure_locks_vertical_velocity_and_blocks_wind() {
         let mut definition =
             Definition::from_script("Kneeler", "Kneeler", PROCEDURE_MOVEMENT_SCRIPT)
@@ -23431,73 +23474,6 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(object.position, Vector2::new(3, 0));
         assert_eq!(object.velocity, Vector2::new(3, 0));
     }
-
-    #[test]
-    fn applies_environment_wind_to_velocity() {
-        let script = r#"
-        global func Initialize(state, random) {
-            return nil;
-        }
-
-        global func Step(state, frame, random) {
-            return nil;
-        }
-        "#;
-        let mut engine = Engine::with_seed(42);
-        engine
-            .register_definition(Definition::from_script("Drift", "Drift", script).unwrap())
-            .expect("definition registers");
-        engine.set_physics(PhysicsSettings::new(0, 20, -20));
-
-        let id = engine
-            .spawn_object(
-                SpawnConfig::new("Drift")
-                    .with_position(Vector2::new(0, 0))
-                    .with_velocity(Vector2::new(0, 0)),
-            )
-            .expect("spawn succeeds");
-
-        engine.set_environment(EnvironmentSettings::new(2));
-
-        let snapshot = engine.tick().expect("tick succeeds");
-        let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity, Vector2::ZERO);
-        assert_eq!(object.position, Vector2::ZERO);
-        assert_eq!(
-            object                .fixed_velocity
-                .expect("wind should remain sub-pixel")
-                .x
-                .val(),
-            1310
-        );
-        assert_eq!(
-            object                .fixed_position
-                .expect("wind movement should remain sub-pixel")
-                .x
-                .val(),
-            1310
-        );
-
-        let snapshot = engine.tick().expect("second tick succeeds");
-        let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.velocity, Vector2::ZERO);
-        assert_eq!(object.position, Vector2::ZERO);
-        assert_eq!(
-            object                .fixed_velocity
-                .expect("wind should accumulate in fixed velocity")
-                .x
-                .val(),
-            2620
-        );
-        assert_eq!(
-            object                .fixed_position
-                .expect("wind movement should accumulate in fixed position")
-                .x
-                .val(),
-            3930
-        );
-    }
-
     #[test]
     fn push_procedure_without_target_resets_to_default() {
         let script = r#"
@@ -24440,6 +24416,69 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .info_physical
             .expect("at-limit Tick10 training clones the physicals");
         assert_eq!(trained.swim, 50_001);
+    }
+
+    #[test]
+    fn pxs_wind_drift_dies_in_tunnel_background() {
+        // GBackWind (C4Wrappers.h:189-192): IFT pixels read wind 0; the PXS
+        // free-fall drift (C4PXS.cpp:62-74) is position-dependent. The
+        // Random(1200) jitter draws happen either way.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Dust]
+            Name=Dust
+            Density=25
+            WindDrift=30
+            SplashRate=0
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let dust = materials.id_of("Dust").expect("dust exists");
+
+        let build_engine = |tunnel: bool| {
+            let mut engine = Engine::with_seed(21);
+            engine.set_materials(materials.clone());
+            let mut landscape = Landscape::flat(8, 100);
+            if tunnel {
+                landscape.set_tunnel_column(2, vec![(0, 50)]);
+            }
+            engine.set_landscape(landscape);
+            engine.set_environment(EnvironmentSettings::new(80));
+            assert!(engine.pxs_system.create(
+                dust,
+                math::itofix(2),
+                math::itofix(5),
+                math::C4Fixed::ZERO,
+                math::C4Fixed::ZERO,
+            ));
+            engine
+        };
+
+        // Expected in-tunnel xdir: wind 0 ⇒ txdir = FIXED256(r1 - 600),
+        // xdir += (txdir - 0) * (30-20) * itofix(1, 800).
+        let mut tunnel_engine = build_engine(true);
+        let mut mirror = tunnel_engine.rng.clone();
+        let r1 = mirror.random(1200);
+        let _ = mirror.random(1200);
+        let expected_txdir = math::fixed256(r1 - 600);
+        let expected_xdir = expected_txdir * 10 * math::itofix_prec(1, 800);
+        tunnel_engine.tick_pxs();
+        let pixel: Vec<pxs::Pxs> = tunnel_engine.pxs_system.iter().copied().collect();
+        assert_eq!(pixel.len(), 1);
+        assert_eq!(pixel[0].xdir, expected_xdir, "tunnel reads wind 0");
+        assert_eq!(tunnel_engine.rng, mirror, "jitter draws happen either way");
+
+        // Control: the same pixel outside the tunnel picks up the wind term
+        // itofix(80, 15) in txdir.
+        let mut open_engine = build_engine(false);
+        open_engine.tick_pxs();
+        let open_pixel: Vec<pxs::Pxs> = open_engine.pxs_system.iter().copied().collect();
+        assert_eq!(open_pixel.len(), 1);
+        let open_txdir = math::itofix_prec(80, 15) + math::fixed256(r1 - 600);
+        let open_xdir = open_txdir * 10 * math::itofix_prec(1, 800);
+        assert_eq!(open_pixel[0].xdir, open_xdir);
+        assert_ne!(open_pixel[0].xdir, pixel[0].xdir);
     }
 
     #[test]

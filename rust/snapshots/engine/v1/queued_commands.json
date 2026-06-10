@@ -172,6 +172,8 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
           "x": 196608,
           "y": -130941
@@ -997,8 +999,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
     "transfer_zones": [],
     "menu_requests": [],
@@ -1098,6 +1100,8 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
           "x": 393216,
           "y": -327418
@@ -1153,7 +1157,9 @@
         "local_vars": {},
         "on_fire": false,
         "fire_phase": 0,
-        "fire_caused_by": -1
+        "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1
       }
     ],
     "environment": {
@@ -1971,8 +1977,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
     "transfer_zones": [],
     "menu_requests": [],
@@ -2072,6 +2078,8 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
           "x": 589824,
           "y": -523764
@@ -2128,6 +2136,8 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
           "x": 393216,
           "y": -65405
@@ -2953,8 +2963,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
     "transfer_zones": [],
     "menu_requests": [],
@@ -3054,6 +3064,8 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
           "x": 786432,
           "y": -719979
@@ -3110,6 +3122,8 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
           "x": 393216,
           "y": -130679
@@ -3999,6 +4013,8 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
           "x": 393216,
           "y": -195822
@@ -4824,8 +4840,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
     "transfer_zones": [],
     "menu_requests": [],
@@ -4888,6 +4904,8 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
           "x": 393216,
           "y": -260834

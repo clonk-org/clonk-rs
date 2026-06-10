@@ -56,12 +56,14 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
-          "x": 1314652,
+          "x": 1310720,
           "y": 262275
         },
         "fixed_velocity": {
-          "x": 3932,
+          "x": 0,
           "y": 131
         }
       }
@@ -1188,12 +1190,14 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
-          "x": 1322516,
+          "x": 1310720,
           "y": 262537
         },
         "fixed_velocity": {
-          "x": 7864,
+          "x": 0,
           "y": 262
         }
       }
@@ -2320,12 +2324,14 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
-          "x": 1334312,
+          "x": 1310720,
           "y": 262930
         },
         "fixed_velocity": {
-          "x": 11796,
+          "x": 0,
           "y": 393
         }
       }
@@ -3409,7 +3415,7 @@
         "id": 1,
         "definition_id": "Drifter",
         "position": {
-          "x": 21,
+          "x": 20,
           "y": 4
         },
         "velocity": {
@@ -3452,12 +3458,14 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
-          "x": 1350040,
+          "x": 1310720,
           "y": 263454
         },
         "fixed_velocity": {
-          "x": 15728,
+          "x": 0,
           "y": 524
         }
       }
@@ -4541,7 +4549,7 @@
         "id": 1,
         "definition_id": "Drifter",
         "position": {
-          "x": 21,
+          "x": 20,
           "y": 4
         },
         "velocity": {
@@ -4584,12 +4592,14 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
-          "x": 1369700,
+          "x": 1310720,
           "y": 264109
         },
         "fixed_velocity": {
-          "x": 19660,
+          "x": 0,
           "y": 655
         }
       }
@@ -5673,7 +5683,7 @@
         "id": 1,
         "definition_id": "Drifter",
         "position": {
-          "x": 21,
+          "x": 20,
           "y": 4
         },
         "velocity": {
@@ -5716,12 +5726,14 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
-          "x": 1393292,
+          "x": 1310720,
           "y": 264895
         },
         "fixed_velocity": {
-          "x": 23592,
+          "x": 0,
           "y": 786
         }
       }
@@ -6805,7 +6817,7 @@
         "id": 1,
         "definition_id": "Drifter",
         "position": {
-          "x": 22,
+          "x": 20,
           "y": 4
         },
         "velocity": {
@@ -6848,12 +6860,14 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
-          "x": 1420816,
+          "x": 1310720,
           "y": 265812
         },
         "fixed_velocity": {
-          "x": 27524,
+          "x": 0,
           "y": 917
         }
       }
@@ -7937,7 +7951,7 @@
         "id": 1,
         "definition_id": "Drifter",
         "position": {
-          "x": 22,
+          "x": 20,
           "y": 4
         },
         "velocity": {
@@ -7980,12 +7994,14 @@
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
+        "breath": 0,
+        "last_energy_loss_cause": -1,
         "fixed_position": {
-          "x": 1452272,
+          "x": 1310720,
           "y": 266860
         },
         "fixed_velocity": {
-          "x": 31456,
+          "x": 0,
           "y": 1048
         }
       }

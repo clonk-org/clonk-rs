@@ -43,6 +43,13 @@ pub struct Landscape {
     default_solid_material: Option<MaterialId>,
     #[serde(default)]
     default_liquid_material: Option<MaterialId>,
+    /// Tunnel-background (IFT) overlay: per-column inclusive y ranges where
+    /// the landscape pixel carries the IFT bit (C4Landscape `PixColIFT`).
+    /// Wind is dead inside (`GBackWind`, C4Wrappers.h:189-192). The map
+    /// renderer that paints IFT from Landscape.txt still needs the pixel
+    /// landscape; scenarios populate this via `set_tunnel_column`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    tunnels: HashMap<u32, Vec<(i32, i32)>>,
     #[serde(skip)]
     mass_mover_dirty: bool,
 }
@@ -203,6 +210,7 @@ impl Landscape {
             solid_materials: vec![default_material; size],
             default_solid_material: default_material,
             default_liquid_material: None,
+            tunnels: HashMap::new(),
             mass_mover_dirty: false,
         })
     }
@@ -230,6 +238,25 @@ impl Landscape {
                 self.mark_mass_mover_dirty();
             }
         }
+    }
+
+    /// Mark inclusive y ranges of a column as tunnel background (IFT).
+    pub fn set_tunnel_column(&mut self, x: u32, ranges: Vec<(i32, i32)>) {
+        if ranges.is_empty() {
+            self.tunnels.remove(&x);
+        } else {
+            self.tunnels.insert(x, ranges);
+        }
+    }
+
+    /// `GBackIFT` (C4Wrappers.h:159-162): true where the landscape pixel
+    /// carries the tunnel-background bit.
+    pub fn is_tunnel_at(&self, x: i32, y: i32) -> bool {
+        u32::try_from(x)
+            .ok()
+            .and_then(|column| self.tunnels.get(&column))
+            .map(|ranges| ranges.iter().any(|&(top, bottom)| y >= top && y <= bottom))
+            .unwrap_or(false)
     }
 
     pub fn set_liquid_column(&mut self, x: u32, segments: Vec<LiquidSegment>) {
@@ -1467,6 +1494,8 @@ impl<'de> Deserialize<'de> for Landscape {
             default_solid_material: Option<MaterialId>,
             #[serde(default)]
             default_liquid_material: Option<MaterialId>,
+            #[serde(default)]
+            tunnels: HashMap<u32, Vec<(i32, i32)>>,
         }
 
         let mut data = LandscapeData::deserialize(deserializer)?;
@@ -1501,6 +1530,7 @@ impl<'de> Deserialize<'de> for Landscape {
         landscape.liquids = data.liquids;
         landscape.solid_materials = data.solid_materials;
         landscape.default_liquid_material = data.default_liquid_material;
+        landscape.tunnels = data.tunnels;
         landscape.mass_mover_dirty = false;
         Ok(landscape)
     }

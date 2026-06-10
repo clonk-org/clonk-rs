@@ -4845,13 +4845,52 @@ fn get_wind(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
-    ENVIRONMENT_CONTEXT.with(|cell| {
+    let wind = ENVIRONMENT_CONTEXT.with(|cell| {
         let context = cell
             .borrow()
             .as_ref()
             .ok_or_else(|| RuntimeError::new("GetWind requires an active engine context"))?
             .clone();
-        Ok(Value::Int(context.wind_force()))
+        Ok::<i32, RuntimeError>(context.wind_force())
+    })?;
+
+    // Global form (FnGetWind, C4Script.cpp:3001-3004).
+    let global = match args.get(2) {
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::Int(value)) => *value != 0,
+        _ => false,
+    };
+    if global {
+        return Ok(Value::Int(wind));
+    }
+
+    // Positional form: object-relative GBackWind — zero on tunnel
+    // background (C4Script.cpp:3005-3007; C4Wrappers.h:189-192).
+    let local_x = match args.first() {
+        Some(Value::Int(value)) => *value,
+        _ => 0,
+    };
+    let local_y = match args.get(1) {
+        Some(Value::Int(value)) => *value,
+        _ => 0,
+    };
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Int(wind));
+        };
+        let mut global_x = local_x;
+        let mut global_y = local_y;
+        if let Some(object) = context.object_context() {
+            let position = object.effective_position();
+            global_x = global_x.saturating_add(position.x);
+            global_y = global_y.saturating_add(position.y);
+        }
+        let in_tunnel = context
+            .landscape_ref()
+            .map(|landscape| landscape.is_tunnel_at(global_x, global_y))
+            .unwrap_or(false);
+        Ok(Value::Int(if in_tunnel { 0 } else { wind }))
     })
 }
 
@@ -14426,6 +14465,38 @@ mod tests {
         let value = result.expect("SetWind/GetWind succeeds");
         assert_eq!(value, Value::Int(75));
         assert_eq!(delta.wind, Some(75));
+    }
+
+    #[test]
+    fn get_wind_positional_reads_tunnel_background() {
+        // FnGetWind (C4Script.cpp:3001-3008): the global form returns
+        // Weather.Wind; the positional form reads GBackWind — zero inside
+        // tunnel-background (IFT) pixels (C4Wrappers.h:189-192).
+        let mut landscape = Landscape::flat(32, 100);
+        landscape.set_tunnel_column(5, vec![(0, 20)]);
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let (result, _) = with_environment_context(EnvironmentSettings::new(60), 0, || {
+            let (inner, _) = with_effect_context(None, &[], world, 1, || {
+                assert_eq!(get_wind(&[Value::Int(5), Value::Int(10)])?, Value::Int(0));
+                assert_eq!(get_wind(&[Value::Int(6), Value::Int(10)])?, Value::Int(60));
+                assert_eq!(
+                    get_wind(&[Value::Nil, Value::Nil, Value::Bool(true)])?,
+                    Value::Int(60)
+                );
+                Ok(Value::Nil)
+            });
+            inner
+        });
+        result.expect("GetWind positional succeeds");
     }
 
     #[test]
