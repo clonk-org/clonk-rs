@@ -11567,7 +11567,8 @@ impl Engine {
                 .sum()
         };
         let pxs_count = i32::try_from(self.pxs_system.count()).unwrap_or(i32::MAX);
-        let mass_mover_index = self.mass_movers.sync_signature();
+        // MassMover.CreatePtr (C4Control.cpp:454)
+        let mass_mover_index = self.mass_movers.create_ptr();
         let object_count = i32::try_from(self.objects.len()).unwrap_or(i32::MAX);
         let object_enumeration_index = saturating_u64_to_i32(self.next_object_id);
         let sector_shape_sum = self

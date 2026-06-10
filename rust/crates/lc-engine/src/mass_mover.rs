@@ -29,54 +29,76 @@ struct MassMoverSpawn {
     execute_immediately: bool,
 }
 
+/// Mirror of `C4MassMoverSet` (C4MassMover.h:49-70): a fixed array of
+/// `C4MassMoverChunk` (10000) slots with an advancing `CreatePtr` allocation
+/// cursor (C4MassMover.cpp:67-88) — the cursor is part of the sync-check
+/// digest (`MassMoverIndex`, C4Control.cpp:454) and slot positions determine
+/// the descending execution order.
 #[derive(Debug, Default)]
 pub struct MassMoverSet {
-    movers: Vec<MassMover>,
+    slots: Vec<Option<MassMover>>,
+    create_ptr: usize,
+    count: usize,
     spawn_queue: Vec<MassMoverSpawn>,
-    max_movers: usize,
     landscape_insert_thrust: bool,
 }
 
 impl MassMoverSet {
     pub fn new() -> Self {
-        Self {
-            movers: Vec::new(),
-            spawn_queue: Vec::new(),
-            max_movers: MAX_MASS_MOVERS,
-            landscape_insert_thrust: false,
+        Self::default()
+    }
+
+    fn ensure_slots(&mut self) {
+        if self.slots.len() != MAX_MASS_MOVERS {
+            self.slots.resize_with(MAX_MASS_MOVERS, || None);
         }
     }
 
     pub fn clear(&mut self) {
-        self.movers.clear();
+        self.slots.clear();
         self.spawn_queue.clear();
+        self.create_ptr = 0;
+        self.count = 0;
+    }
+
+    /// `C4MassMoverSet::Create`'s slot scan (C4MassMover.cpp:67-88): start
+    /// after `CreatePtr`, wrap, take the first free slot, leave `CreatePtr`
+    /// on it.
+    fn allocate_slot(&mut self, mover: MassMover) -> Option<usize> {
+        if self.count == MAX_MASS_MOVERS {
+            return None;
+        }
+        self.ensure_slots();
+        let mut cptr = self.create_ptr;
+        loop {
+            cptr += 1;
+            if cptr >= MAX_MASS_MOVERS {
+                cptr = 0;
+            }
+            if self.slots[cptr].is_none() {
+                self.slots[cptr] = Some(mover);
+                self.create_ptr = cptr;
+                self.count += 1;
+                return Some(cptr);
+            }
+            if cptr == self.create_ptr {
+                return None;
+            }
+        }
+    }
+
+    /// The C++ `CreatePtr` digest value (C4Control.cpp:454).
+    pub fn create_ptr(&self) -> i32 {
+        self.create_ptr as i32
     }
 
     pub fn set_landscape_insert_thrust(&mut self, enabled: bool) {
         self.landscape_insert_thrust = enabled;
     }
 
-    pub fn sync_signature(&self) -> i32 {
-        let mut hash = FNV_OFFSET_BASIS;
-        hash = fnv_update(hash, &(self.movers.len() as u32).to_le_bytes());
-        for mover in &self.movers {
-            hash = fnv_update(hash, &(mover.material.index() as u32).to_le_bytes());
-            hash = fnv_update(hash, &mover.x.to_le_bytes());
-            hash = fnv_update(hash, &mover.y.to_le_bytes());
-            hash = fnv_update(hash, &[mover.active as u8]);
-        }
-        hash = fnv_update(hash, &(self.spawn_queue.len() as u32).to_le_bytes());
-        for spawn in &self.spawn_queue {
-            hash = fnv_update(hash, &spawn.x.to_le_bytes());
-            hash = fnv_update(hash, &spawn.y.to_le_bytes());
-            hash = fnv_update(hash, &[spawn.execute_immediately as u8]);
-        }
-        (hash & 0xFFFF_FFFF) as i32
-    }
-
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
-        self.movers.len()
+        self.count
     }
 
     pub fn seed_from_landscape(&mut self, landscape: &Landscape, materials: &MaterialSet) {
@@ -95,10 +117,10 @@ impl MassMoverSet {
                 }
                 let (surface_x, surface_y) =
                     landscape.find_liquid_surface(material, x as i32, segment.top, materials);
-                if self.movers.len() < self.max_movers {
-                    self.movers
-                        .push(MassMover::new(material, surface_x, surface_y));
-                } else {
+                if self
+                    .allocate_slot(MassMover::new(material, surface_x, surface_y))
+                    .is_none()
+                {
                     return;
                 }
             }
@@ -120,9 +142,9 @@ impl MassMoverSet {
             y,
             execute_immediately,
         });
-        let previous = self.movers.len();
+        let previous = self.count;
         self.flush_spawn_queue(landscape, materials, rng);
-        self.movers.len() > previous
+        self.count > previous
     }
 
     pub fn execute(
@@ -132,19 +154,28 @@ impl MassMoverSet {
         rng: &mut LcgRng,
     ) {
         self.flush_spawn_queue(landscape, materials, rng);
+        // C4MassMoverSet::Execute (C4MassMover.cpp:50-65): two speed passes,
+        // slots walked DESCENDING from the last chunk entry.
+        self.ensure_slots();
         for _speed in (1..=2).rev() {
-            let mut index = self.movers.len();
+            let mut index = MAX_MASS_MOVERS;
             while index > 0 {
                 index -= 1;
-                if index >= self.movers.len() {
+                if self.slots[index].is_none() {
                     continue;
                 }
                 if !self.execute_mover_at(index, landscape, materials, rng) {
-                    self.movers.swap_remove(index);
+                    self.release_slot(index);
                 }
             }
         }
         self.flush_spawn_queue(landscape, materials, rng);
+    }
+
+    fn release_slot(&mut self, index: usize) {
+        if self.slots.get_mut(index).and_then(Option::take).is_some() {
+            self.count = self.count.saturating_sub(1);
+        }
     }
 
     fn flush_spawn_queue(
@@ -159,7 +190,7 @@ impl MassMoverSet {
             };
             if spawn.execute_immediately && !self.execute_mover_at(index, landscape, materials, rng)
             {
-                self.movers.swap_remove(index);
+                self.release_slot(index);
             }
         }
     }
@@ -171,12 +202,12 @@ impl MassMoverSet {
         materials: &MaterialSet,
         rng: &mut LcgRng,
     ) -> bool {
+        let landscape_insert_thrust = self.landscape_insert_thrust;
         let (alive, spawn) = {
-            let mover = self
-                .movers
-                .get_mut(index)
-                .expect("mass mover index must exist");
-            mover.execute(landscape, materials, rng, self.landscape_insert_thrust)
+            let Some(mover) = self.slots.get_mut(index).and_then(Option::as_mut) else {
+                return false;
+            };
+            mover.execute(landscape, materials, rng, landscape_insert_thrust)
         };
         if let Some(spawn) = spawn {
             self.spawn_mover(landscape, materials, rng, spawn);
@@ -195,7 +226,7 @@ impl MassMoverSet {
             return;
         };
         if spawn.execute_immediately && !self.execute_mover_at(index, landscape, materials, rng) {
-            self.movers.swap_remove(index);
+            self.release_slot(index);
         }
     }
 
@@ -206,18 +237,13 @@ impl MassMoverSet {
         x: i32,
         y: i32,
     ) -> Option<usize> {
-        if self.movers.len() >= self.max_movers {
-            return None;
-        }
         let material_id = landscape.material_at(x, y)?;
         let material = materials.get_by_id(material_id)?;
         if !material.instable() {
             return None;
         }
         let (surface_x, surface_y) = landscape.find_liquid_surface(material_id, x, y, materials);
-        let mover = MassMover::new(material_id, surface_x, surface_y);
-        self.movers.push(mover);
-        Some(self.movers.len() - 1)
+        self.allocate_slot(MassMover::new(material_id, surface_x, surface_y))
     }
 }
 
