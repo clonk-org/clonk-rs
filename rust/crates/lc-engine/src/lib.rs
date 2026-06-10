@@ -137,8 +137,8 @@ use lc_resources::definition::{
     ActionFacet as ResourceActionFacet, TargetRect as ResourceTargetRect,
 };
 use lc_resources::{
-    ActionDefinition as ResourceActionDefinition, PictureRect as ResourcePictureRect,
-    ResourceDefinition as ResourceDefinitionData,
+    ActionDefinition as ResourceActionDefinition, PhysicalInfo, PictureRect as ResourcePictureRect,
+    ResourceDefinition as ResourceDefinitionData, C4_MAX_PHYSICAL,
 };
 use lc_script::{DebuggerHooks, Engine as ScriptEngine, ScriptError, Value};
 use mass_mover::MassMoverSet;
@@ -2549,6 +2549,11 @@ struct Object {
     /// Last energy-loss causing player (C4Object::LastEnergyLossCausePlayer,
     /// read by AssignDeath for kill attribution). Not yet snapshot-persisted.
     last_energy_loss_cause: i32,
+    /// Trained per-object physicals (the C4ObjectInfo::Physical analog —
+    /// the info model is absent, so training clones the def physicals onto
+    /// the object). None = use the definition physicals (GetPhysical
+    /// fallback, C4Object.cpp:2118-2134). Not yet snapshot-persisted.
+    physical_override: Option<PhysicalInfo>,
     command_queue: VecDeque<QueuedCommand>,
     commands: CommandStack,
     pending_action_events: VecDeque<ActionTransitionEvent>,
@@ -2643,6 +2648,7 @@ impl Object {
             destroyed: matches!(state.status, ObjectStatus::Deleted),
             state,
             last_energy_loss_cause: OWNER_NONE,
+            physical_override: None,
             command_queue: VecDeque::new(),
             commands: CommandStack::new(),
             pending_action_events: VecDeque::new(),
@@ -4476,6 +4482,8 @@ pub struct Definition {
     no_burn_damage: bool,
     burn_turn_to: Option<String>,
     incomplete_activity: bool,
+    /// The [Physical] DefCore section (C4Def::Physical).
+    physical: PhysicalInfo,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4564,6 +4572,7 @@ impl Definition {
             no_burn_damage: false,
             burn_turn_to: None,
             incomplete_activity: false,
+            physical: PhysicalInfo::default(),
         })
     }
 
@@ -4671,6 +4680,7 @@ impl Definition {
         );
         definition.set_burn_turn_to(resource.core.burn_turn_to.clone());
         definition.set_incomplete_activity(resource.core.incomplete_activity);
+        definition.set_physical(resource.core.physical);
         definition.set_collectible(resource.core.collectible);
         definition.set_constructable(resource.core.constructable);
         definition.set_construction_offset(resource.core.con_size_off);
@@ -5041,6 +5051,14 @@ impl Definition {
 
     pub fn set_incomplete_activity(&mut self, enabled: bool) {
         self.incomplete_activity = enabled;
+    }
+
+    pub fn physical(&self) -> &PhysicalInfo {
+        &self.physical
+    }
+
+    pub fn set_physical(&mut self, physical: PhysicalInfo) {
+        self.physical = physical;
     }
 
     pub fn set_collection_limit(&mut self, limit: Option<u32>) {
@@ -12510,7 +12528,7 @@ impl Engine {
         }
 
         if matches!(procedure, ActionProcedure::Fight)
-            && !self.apply_fight_procedure(idx, movement_profile, &definition_id)
+            && !self.apply_fight_procedure(idx, &definition_id)
         {
             return;
         }
@@ -13419,12 +13437,7 @@ impl Engine {
         true
     }
 
-    fn apply_fight_procedure(
-        &mut self,
-        idx: usize,
-        movement_profile: MovementProfile,
-        definition_id: &DefinitionId,
-    ) -> bool {
+    fn apply_fight_procedure(&mut self, idx: usize, definition_id: &DefinitionId) -> bool {
         let Some(target_id) = self.objects[idx].state.action.target else {
             self.reset_action_to_default(idx, definition_id, true);
             return false;
@@ -13478,7 +13491,46 @@ impl Engine {
         let target_vertices = self.objects[target_idx].state.vertices.clone();
         let initial_direction = self.objects[idx].state.direction;
 
-        let threshold = fight_distance_threshold(&fighter_vertices, &target_vertices);
+        // Physical training (C4Object.cpp:5214-5216): Tick5 trains Fight.
+        if self.frame % 5 == 0 {
+            self.train_physical(idx, |physical| &mut physical.fight, 1, C4_MAX_PHYSICAL);
+        }
+
+        // Direction (C4Object.cpp:5218-5220): face the target; equal x keeps
+        // the previous facing.
+        let direction = if target_position.x > fighter_position.x {
+            Direction::Right
+        } else if target_position.x < fighter_position.x {
+            Direction::Left
+        } else {
+            initial_direction
+        };
+
+        // Position (C4Object.cpp:5221-5228): stand beside the target at half
+        // its shape width + 2, approach with the Walk physical:
+        // lLimit = ValByPhysical(95, Walk), Towards(xdir, ±lLimit, lLimit).
+        let target_half_width = fight_distance_threshold(&target_vertices, &target_vertices) / 2;
+        let mut approach_x = fighter_position.x;
+        if direction == Direction::Left {
+            approach_x = target_position.x + target_half_width + 2;
+        }
+        if direction == Direction::Right {
+            approach_x = target_position.x - target_half_width - 2;
+        }
+        let limit = math::val_by_physical(95, self.object_physical(idx).walk);
+        let physics = self.physics;
+        let fighter = &mut self.objects[idx];
+        fighter.state.direction = direction;
+        let mut xdir = fighter.fixed_velocity.x;
+        match fighter_position.x.cmp(&approach_x) {
+            std::cmp::Ordering::Equal => math::towards(&mut xdir, C4Fixed::ZERO, limit),
+            std::cmp::Ordering::Less => math::towards(&mut xdir, limit, limit),
+            std::cmp::Ordering::Greater => math::towards(&mut xdir, -limit, limit),
+        }
+        fighter.fixed_velocity.x = xdir;
+
+        // Distance check (C4Object.cpp:5229-5234): own shape width bounds.
+        let threshold = fight_distance_threshold(&fighter_vertices, &fighter_vertices);
         if (fighter_position.x - target_position.x).abs() > threshold
             || (fighter_position.y - target_position.y).abs() > threshold
         {
@@ -13486,36 +13538,9 @@ impl Engine {
             return false;
         }
 
-        let delta_x = target_position.x - fighter_position.x;
-        let closeness = (threshold / 2).max(1);
-        let walk_speed = movement_profile.walk_speed.max(0);
-        let walk_accel = movement_profile.walk_acceleration.max(0);
-        let physics = self.physics;
-
-        let desired_direction = if delta_x > 0 {
-            Direction::Right
-        } else if delta_x < 0 {
-            Direction::Left
-        } else {
-            initial_direction
-        };
-
-        let desired_velocity = if walk_speed == 0 || delta_x.abs() <= closeness {
-            0
-        } else if delta_x > 0 {
-            walk_speed
-        } else {
-            -walk_speed
-        };
-
+        // Other (C4Object.cpp:5235-5238): grounded fighting. The Tick35
+        // DoExperience(+2) needs the C4ObjectInfo model.
         let fighter = &mut self.objects[idx];
-        fighter.state.direction = desired_direction;
-        let new_velocity = step_fixed_toward(
-            fighter.fixed_velocity.x,
-            itofix(desired_velocity),
-            itofix(walk_accel),
-        );
-        fighter.fixed_velocity.x = clamp_fixed_to_limit(new_velocity, walk_speed);
         fighter.fixed_velocity.y = C4Fixed::ZERO;
         physics.clamp_fixed_velocity(&mut fighter.fixed_velocity);
         fighter.refresh_velocity_from_fixed();
@@ -14390,20 +14415,55 @@ impl Engine {
         }
     }
 
+    /// `C4Object::GetPhysical` (C4Object.cpp:2118-2134): the trained
+    /// per-object physicals when present, else the definition's `[Physical]`
+    /// section. (Temporary physicals and the fair-crew info path need the
+    /// C4ObjectInfo model.)
+    fn object_physical(&self, idx: usize) -> PhysicalInfo {
+        self.objects[idx].physical_override.unwrap_or_else(|| {
+            self.definitions
+                .get(&self.objects[idx].definition_id)
+                .map(|definition| *definition.physical())
+                .unwrap_or_default()
+        })
+    }
+
+    /// `C4Object::TrainPhysical` (C4Object.cpp:2136-2146) against the
+    /// per-object physicals, cloned from the definition on first training
+    /// (the permanent info physicals need the info model).
+    fn train_physical(
+        &mut self,
+        idx: usize,
+        field: fn(&mut PhysicalInfo) -> &mut i32,
+        train_by: i32,
+        max_train: i32,
+    ) {
+        let base = self.object_physical(idx);
+        let object = &mut self.objects[idx];
+        let physical = object.physical_override.get_or_insert(base);
+        PhysicalInfo::train_value(field(physical), train_by, max_train);
+    }
+
     /// Engine-side `C4Object::DoEnergy` slice (C4Object.cpp:1345-1365) in the
-    /// engine's percent-point energy units: clamp at zero, track the last
-    /// energy-loss cause (C4Object.cpp:1353), and assign death when an alive
-    /// object's energy first reaches zero (C4Object.cpp:1363). The physical
-    /// energy maximum (GetPhysical()->Energy) still needs the physicals
-    /// model.
+    /// engine's percent-point energy units: clamp between zero and the
+    /// physical Energy ceiling (scaled from the 0..C4MaxPhysical range to
+    /// percent points), track the last energy-loss cause (C4Object.cpp:1353),
+    /// and assign death when an alive object's energy first reaches zero
+    /// (C4Object.cpp:1363). Zero-physical definitions keep the unclamped
+    /// legacy ceiling so physical-less fixtures behave as before.
     fn change_object_energy(&mut self, idx: usize, change: i32, caused_by: i32) {
+        let max_energy = self.object_physical(idx).energy / (C4_MAX_PHYSICAL / 100);
         let was_zero = {
             let object = &mut self.objects[idx];
             if change < 0 {
                 object.last_energy_loss_cause = caused_by;
             }
             let was_zero = object.state.energy == 0;
-            object.state.energy = object.state.energy.saturating_add(change).max(0);
+            let mut energy = object.state.energy.saturating_add(change).max(0);
+            if max_energy > 0 {
+                energy = energy.min(max_energy);
+            }
+            object.state.energy = energy;
             was_zero
         };
         if self.objects[idx].state.alive && self.objects[idx].state.energy == 0 && !was_zero {
@@ -22835,11 +22895,12 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             ActionSpec::default().with_procedure("fight"),
         );
         fighter_definition.configure_actions(Some("Idle".to_string()), fighter_actions);
-        fighter_definition.set_movement_profile(
-            MovementProfile::default()
-                .with_walk_speed(6)
-                .with_walk_acceleration(3),
-        );
+        // DFA_FIGHT approaches with the Walk physical (C4Object.cpp:5225-5228),
+        // not the movement profile. 35000 is the stock Clonk DefCore value.
+        fighter_definition.set_physical(PhysicalInfo {
+            walk: 35_000,
+            ..PhysicalInfo::default()
+        });
 
         let mut opponent_definition =
             Definition::from_script("Opponent", "Opponent", script).unwrap();
@@ -22925,7 +22986,11 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let fighter_idx = engine
             .find_object_index(fighter_id)
             .expect("fighter exists");
-        assert_eq!(engine.objects[fighter_idx].fixed_velocity.x.val(), 294912);
+        // C4Object.cpp:5221-5228: facing Right, stand-beside target_x at
+        // 12 - 16/2 - 2 = 2; lLimit = ValByPhysical(95, 35000)
+        // = itofix(35000*19, 2000000) = raw 21790; Towards steps the initial
+        // raw 98304 down by one lLimit: 98304 - 21790 = 76514.
+        assert_eq!(engine.objects[fighter_idx].fixed_velocity.x.val(), 76514);
     }
 
     #[test]
@@ -23006,6 +23071,152 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("fighter present after tick");
         assert_eq!(fighter.action.name, "Idle");
         assert_eq!(fighter.velocity, Vector2::ZERO);
+    }
+
+    #[test]
+    fn fight_procedure_trains_fight_physical_on_tick5() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut fighter_definition = Definition::from_script("Fighter", "Fighter", script).unwrap();
+        let mut fighter_actions = HashMap::new();
+        fighter_actions.insert(
+            "Fight".to_string(),
+            ActionSpec::default().with_procedure("fight"),
+        );
+        fighter_definition.configure_actions(Some("Fight".to_string()), fighter_actions);
+        fighter_definition.set_physical(PhysicalInfo {
+            walk: 35_000,
+            fight: 20_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut opponent_definition =
+            Definition::from_script("Opponent", "Opponent", script).unwrap();
+        let mut opponent_actions = HashMap::new();
+        opponent_actions.insert(
+            "Fight".to_string(),
+            ActionSpec::default().with_procedure("fight"),
+        );
+        opponent_definition.configure_actions(Some("Fight".to_string()), opponent_actions);
+
+        let mut engine = Engine::with_seed(33);
+        engine
+            .register_definition(fighter_definition)
+            .expect("fighter definition registers");
+        engine
+            .register_definition(opponent_definition)
+            .expect("opponent definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+
+        let vertices = vec![
+            ObjectVertex::new(-8, -8),
+            ObjectVertex::new(8, -8),
+            ObjectVertex::new(8, 8),
+            ObjectVertex::new(-8, 8),
+        ];
+
+        let opponent_id = engine
+            .spawn_object(
+                SpawnConfig::new("Opponent")
+                    .with_position(Vector2::new(12, 0))
+                    .with_vertices(vertices.clone())
+                    .with_action(ActionState::new("Fight")),
+            )
+            .expect("opponent spawns");
+        let mut fight_state = ActionState::new("Fight");
+        fight_state.target = Some(opponent_id);
+        let fighter_id = engine
+            .spawn_object(
+                SpawnConfig::new("Fighter")
+                    .with_position(Vector2::new(0, 0))
+                    .with_vertices(vertices)
+                    .with_action(fight_state),
+            )
+            .expect("fighter spawns");
+        engine
+            .apply_object_update(
+                opponent_id,
+                ObjectUpdate::new()
+                    .with_action_update(ActionUpdate::default().with_target(Some(fighter_id))),
+            )
+            .expect("opponent target update succeeds");
+
+        // C4Object.cpp:5214-5216: `if (!Tick5) TrainPhysical(Fight, 1,
+        // C4MaxPhysical)` — the gate fires on frames divisible by 5 only.
+        for _ in 0..4 {
+            engine.tick().expect("tick succeeds");
+        }
+        let fighter_idx = engine
+            .find_object_index(fighter_id)
+            .expect("fighter exists");
+        assert_eq!(
+            engine.objects[fighter_idx].physical_override, None,
+            "no training before the first Tick5 frame"
+        );
+
+        engine.tick().expect("tick succeeds");
+        let trained = engine.objects[fighter_idx]
+            .physical_override
+            .expect("Tick5 training clones the definition physicals");
+        assert_eq!(trained.fight, 20_001);
+        assert_eq!(trained.walk, 35_000, "other physicals copied untouched");
+    }
+
+    #[test]
+    fn do_energy_clamps_to_physical_energy_ceiling() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Clonk", "Clonk", script).unwrap();
+        // DoEnergy bounds energy by GetPhysical()->Energy (C4Object.cpp:1361);
+        // 50000 on the 0..C4MaxPhysical scale is 50 percent points.
+        definition.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+        let legacy_definition = Definition::from_script("Crate", "Crate", script).unwrap();
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine
+            .register_definition(legacy_definition)
+            .expect("legacy definition registers");
+
+        let clonk_id = engine
+            .spawn_object(SpawnConfig::new("Clonk").with_energy(40))
+            .expect("clonk spawns");
+        let clonk_idx = engine.find_object_index(clonk_id).expect("clonk exists");
+        engine.change_object_energy(clonk_idx, 30, -1);
+        assert_eq!(
+            engine.objects[clonk_idx].state.energy, 50,
+            "gain clamps to the physical Energy ceiling"
+        );
+
+        // Documented deviation: zero-physical fixture definitions keep the
+        // legacy unclamped ceiling instead of C++'s clamp-to-zero.
+        let crate_id = engine
+            .spawn_object(SpawnConfig::new("Crate").with_energy(40))
+            .expect("crate spawns");
+        let crate_idx = engine.find_object_index(crate_id).expect("crate exists");
+        engine.change_object_energy(crate_idx, 30, -1);
+        assert_eq!(engine.objects[crate_idx].state.energy, 70);
     }
 
     #[test]

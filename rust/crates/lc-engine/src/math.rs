@@ -282,6 +282,36 @@ pub fn itofix_prec(x: i32, prec: i32) -> C4Fixed {
     C4Fixed(val)
 }
 
+/// `ValByPhysical` (C4InfoCore.h:224-227): the percentage of a physical's
+/// maximum as a fixed value — `itofix(physical * (percent/5),
+/// C4MaxPhysical * 20)`. The `percent / 5` is integer division.
+#[inline]
+pub fn val_by_physical(percent: i32, physical: i32) -> C4Fixed {
+    itofix_prec(physical.wrapping_mul(percent / 5), 100_000 * 20)
+}
+
+/// `Towards` (C4Object.cpp:4561-4566): step `val` toward `target` by `step`,
+/// snapping when within range.
+pub fn towards(val: &mut C4Fixed, target: C4Fixed, step: C4Fixed) {
+    if *val == target {
+        return;
+    }
+    let diff = if *val < target {
+        target - *val
+    } else {
+        *val - target
+    };
+    if diff <= step {
+        *val = target;
+        return;
+    }
+    if *val < target {
+        *val += step;
+    } else {
+        *val -= step;
+    }
+}
+
 /// Fixed-point → integer (round to nearest). Fixed.h:224.
 #[inline]
 pub fn fixtoi(x: C4Fixed) -> i32 {

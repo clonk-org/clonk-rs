@@ -63,6 +63,81 @@ impl Definition {
     }
 }
 
+/// `C4MaxPhysical` (C4InfoCore.h:31): the 100% value of every physical.
+pub const C4_MAX_PHYSICAL: i32 = 100_000;
+
+/// Mirror of `C4PhysicalInfo` (C4InfoCore.h:34-63), parsed from the
+/// `[Physical]` section of DefCore.txt with the `C4PhysInfoNameMap` field
+/// names (C4InfoCore.cpp:181-205). Defaults are all zero
+/// (`C4PhysicalInfo::Default`, C4InfoCore.cpp:239-242).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
+)]
+pub struct PhysicalInfo {
+    pub energy: i32,
+    pub breath: i32,
+    pub walk: i32,
+    pub jump: i32,
+    pub scale: i32,
+    pub hangle: i32,
+    pub dig: i32,
+    pub swim: i32,
+    pub throw: i32,
+    pub push: i32,
+    pub fight: i32,
+    pub magic: i32,
+    pub float: i32,
+    pub can_scale: i32,
+    pub can_hangle: i32,
+    pub can_dig: i32,
+    pub can_construct: i32,
+    pub can_chop: i32,
+    pub can_fly: i32,
+    pub corrosion_resist: i32,
+    pub breathe_water: i32,
+}
+
+impl PhysicalInfo {
+    /// Assign a value by its `C4PhysInfoNameMap` name (lowercased); returns
+    /// false for unknown names.
+    pub fn set_by_name(&mut self, name: &str, value: i32) -> bool {
+        let slot = match name {
+            "energy" => &mut self.energy,
+            "breath" => &mut self.breath,
+            "walk" => &mut self.walk,
+            "jump" => &mut self.jump,
+            "scale" => &mut self.scale,
+            "hangle" => &mut self.hangle,
+            "dig" => &mut self.dig,
+            "swim" => &mut self.swim,
+            "throw" => &mut self.throw,
+            "push" => &mut self.push,
+            "fight" => &mut self.fight,
+            "magic" => &mut self.magic,
+            "float" => &mut self.float,
+            "canscale" => &mut self.can_scale,
+            "canhangle" => &mut self.can_hangle,
+            "candig" => &mut self.can_dig,
+            "canconstruct" => &mut self.can_construct,
+            "canchop" => &mut self.can_chop,
+            "canfly" => &mut self.can_fly,
+            "corrosionresist" => &mut self.corrosion_resist,
+            "breathewater" => &mut self.breathe_water,
+            _ => return false,
+        };
+        *slot = value;
+        true
+    }
+
+    /// `C4PhysicalInfo::TrainValue` (C4InfoCore.cpp:279-285): only nonzero
+    /// values train; never above the cap, never decreased.
+    pub fn train_value(value: &mut i32, train_by: i32, max_train: i32) {
+        if *value != 0 {
+            *value = (*value + train_by).min(max_train).max(*value);
+        }
+    }
+}
+
 /// Parsed metadata from `DefCore.txt`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefComponent {
@@ -100,6 +175,9 @@ pub struct DefCore {
     /// IncompleteActivity=1: keeps contents on incineration and allows
     /// collection below FullCon (C4Effect.cpp:588, SetOCF C4Object.cpp:594).
     pub incomplete_activity: bool,
+    /// The [Physical] section (C4Def loads it via FollowName("Physical"),
+    /// C4Def.cpp:459-460).
+    pub physical: PhysicalInfo,
     pub collectible: bool,
     pub constructable: bool,
     pub con_size_off: i32,
@@ -335,6 +413,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut no_burn_damage = false;
     let mut burn_turn_to: Option<String> = None;
     let mut incomplete_activity = false;
+    let mut physical = PhysicalInfo::default();
     let mut collectible = false;
     let mut constructable = false;
     let mut con_size_off: i32 = 0;
@@ -368,6 +447,11 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         let value = raw_value.trim();
 
         let section = current_section.as_deref().unwrap_or("defcore");
+
+        if section == "physical" {
+            physical.set_by_name(&key.to_ascii_lowercase(), parse_i32(value).unwrap_or(0));
+            continue;
+        }
 
         if section != "defcore" {
             continue;
@@ -531,6 +615,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         no_burn_damage,
         burn_turn_to,
         incomplete_activity,
+        physical,
         collectible,
         constructable,
         con_size_off,
@@ -1653,6 +1738,44 @@ NextAction=Dup
             reference.next_action_index, 4,
             "last duplicate wins (C4Def.cpp:789-791 overwrite loop)"
         );
+    }
+
+    #[test]
+    fn parse_def_core_physical_section() {
+        // C4PhysicalInfo via the [Physical] DefCore section
+        // (C4Def.cpp:459-460, name map C4InfoCore.cpp:181-205); defaults are
+        // all zero (C4InfoCore.cpp:239-242).
+        let data = br#"
+            [DefCore]
+            id=CLNK
+            Name=Clonk
+
+            [Physical]
+            Energy=50000
+            Walk=35000
+            Fight=20000
+            CanScale=1
+            CorrosionResist=1
+        "#;
+        let parsed = parse_def_core(data).expect("def core parses");
+        assert_eq!(parsed.physical.energy, 50_000);
+        assert_eq!(parsed.physical.walk, 35_000);
+        assert_eq!(parsed.physical.fight, 20_000);
+        assert_eq!(parsed.physical.can_scale, 1);
+        assert_eq!(parsed.physical.corrosion_resist, 1);
+        assert_eq!(parsed.physical.jump, 0, "unset physicals default to zero");
+
+        // TrainValue (C4InfoCore.cpp:279-285): zero stays zero, caps hold,
+        // never decreases.
+        let mut zero = 0;
+        PhysicalInfo::train_value(&mut zero, 100, C4_MAX_PHYSICAL);
+        assert_eq!(zero, 0);
+        let mut value = 99_950;
+        PhysicalInfo::train_value(&mut value, 100, C4_MAX_PHYSICAL);
+        assert_eq!(value, C4_MAX_PHYSICAL);
+        let mut above = 120_000;
+        PhysicalInfo::train_value(&mut above, 100, C4_MAX_PHYSICAL);
+        assert_eq!(above, 120_000, "never decreased by training");
     }
 
     #[test]

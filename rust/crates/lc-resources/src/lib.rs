@@ -10,7 +10,7 @@ pub mod scenario;
 pub use definition::{
     ActionDefinition, ActionMap, ColorByOwnerMask, DefComponent, DefCore,
     Definition as ResourceDefinition, DefinitionError, DefinitionScript, DefinitionScriptFile,
-    PictureRect,
+    PhysicalInfo, PictureRect, C4_MAX_PHYSICAL,
 };
 pub use font::{load_endeavour_font, load_ttf, FontResource, FontResourceError};
 pub use graphics::{GraphicsError, GraphicsImage, GraphicsResource};
