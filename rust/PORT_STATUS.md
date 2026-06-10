@@ -144,6 +144,19 @@ array indices/dispatch; `forward_rest` variadic TODO (`vm.rs:464,484`);
 `invoke_host_function` (`:200-222`) no param/return validation; call dispatch
 (`:493-496`) by-name, no inheritance/overload chain. (`Expr::This`, div-by-zero,
 slots, stack limit — fixed; see Completed.)
+**Host-call par conversion (`CheckConvertFunctionParameters`,
+C4AulExec.cpp:1364-1396) unported:** pre-#strict-3 callers get falsy pars
+`Set0()`d to nil before the declared-type conversion, so real content legally
+passes `0` where `C4String*`/object params are expected (found live: CLNK
+`Control2Effect` crashed the app via `GetEffectCount(0, this())`,
+Clonk.c4d Script.c:863). Emulated ONLY for the effect-name params
+(`effect_name_filter`, compat.rs — AddEffect/RemoveEffect/GetEffect/
+GetEffectCount); every other host fn still rejects falsy ints where C++
+converts — content-crash landmines until the conversion layer exists.
+Related app gap: control-path script errors now log-and-continue like C++
+(`control_script_error_to_status`, lc-app main.rs), but a script error during
+the simulation tick (`app.update()` in the event loop) still EXITS the app
+where C++ shows it and keeps running.
 
 **script-values** — `C4ScriptCnvMap`/`ConvertTo`, the map-key hash, typed
 `C4V_C4Object` identity, VM-visible references for `&` params/returns and
