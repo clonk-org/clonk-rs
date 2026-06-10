@@ -24978,6 +24978,280 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn sort_func_orders_ascending_by_cached_values_like_cpp() {
+        // C4SortObjectFunc (C4FindObject.cpp:934-956): [C4SO_Func=160, name,
+        // pars...] calls `name` once per object in find order via
+        // PrepareCache (C4FindObject.cpp:819-832), converts with getInt(),
+        // and stable-sorts ascending ("least return values first",
+        // C4FindObject.h:61).
+        let finder_script = r#"
+        global func Ranked() {
+            return FindObjects([20, "PROB"], [160, "Rank"]);
+        }
+        "#;
+        let probe_script = r#"
+        local calls;
+        func Rank() {
+            calls = calls + 1;
+            return GetOwner();
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script)
+                    .expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        let p5 = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(5))
+            .expect("probe spawns");
+        let p1 = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(1))
+            .expect("probe spawns");
+        let p3 = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(3))
+            .expect("probe spawns");
+        engine.tick().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        let result = engine
+            .call_object_function(finder_idx, "Ranked", Vec::new())
+            .expect("Ranked runs");
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                Value::Object(p1.as_u64()),
+                Value::Object(p3.as_u64()),
+                Value::Object(p5.as_u64()),
+            ]),
+            "ascending by Rank() return"
+        );
+        // PrepareCache evaluates exactly once per object.
+        for id in [p1, p3, p5] {
+            let idx = engine.find_object_index(id).expect("probe exists");
+            assert_eq!(
+                engine.objects[idx].state.local_vars.get("calls"),
+                Some(&Value::Int(1)),
+                "cached: one call per object (C4FindObject.cpp:826-829)"
+            );
+        }
+    }
+
+    #[test]
+    fn find_object2_with_sort_uses_uncached_pairwise_compare_like_cpp() {
+        // The single-result Find path keeps a running best and calls the
+        // UNCACHED Compare(candidate, best) per passing candidate
+        // (C4FindObject.cpp:188-199) — CompareGetValue runs for obj1 then
+        // obj2 in hardcoded order ("might lead to desyncs otherwise
+        // [Icewing]", C4FindObject.cpp:834-842), with no PrepareCache. So
+        // the first match is never evaluated on its own, and the running
+        // best re-evaluates on every later comparison.
+        let finder_script = r#"
+        global func Best() {
+            return FindObject2([20, "PROB"], [160, "Rank"]);
+        }
+        "#;
+        let probe_script = r#"
+        local calls;
+        local rank;
+        func Construction() { return 1; }
+        func SetRank(value) { rank = value; return 1; }
+        func Rank() {
+            calls = calls + 1;
+            return rank;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script)
+                    .expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        let a = engine
+            .spawn_object(SpawnConfig::new("PROB"))
+            .expect("probe spawns");
+        let b = engine
+            .spawn_object(SpawnConfig::new("PROB"))
+            .expect("probe spawns");
+        let c = engine
+            .spawn_object(SpawnConfig::new("PROB"))
+            .expect("probe spawns");
+        engine.tick().expect("tick succeeds");
+        for (id, rank) in [(a, 1), (b, 2), (c, 3)] {
+            let idx = engine.find_object_index(id).expect("probe exists");
+            engine
+                .call_object_function(idx, "SetRank", vec![Value::Int(rank)])
+                .expect("SetRank runs");
+        }
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        let result = engine
+            .call_object_function(finder_idx, "Best", Vec::new())
+            .expect("Best runs");
+        assert_eq!(result, Value::Object(a.as_u64()), "least rank wins");
+        // A is best from the start: evaluated in Compare(B,A) and
+        // Compare(C,A); B and C once each; nobody is evaluated for the
+        // first match itself.
+        for (id, expected_calls) in [(a, 2), (b, 1), (c, 1)] {
+            let idx = engine.find_object_index(id).expect("probe exists");
+            assert_eq!(
+                engine.objects[idx].state.local_vars.get("calls"),
+                Some(&Value::Int(expected_calls)),
+                "uncached Compare evaluation counts (C4FindObject.cpp:188-199)"
+            );
+        }
+    }
+
+    #[test]
+    fn find_objects_replaces_objects_destroyed_during_sort_with_nil() {
+        // After sorting, objects a Sort_Func callback deleted are REPLACED
+        // with nullptr instead of erased (CheckObjectStatusAfterSort,
+        // replace_if — C4FindObject.cpp:223, 362, 372-375), so a FindObjects
+        // result can legitimately contain nil entries.
+        let finder_script = r#"
+        global func Cull() {
+            return FindObjects([20, "PROB"], [160, "Rate"]);
+        }
+        "#;
+        let probe_script = r#"
+        func Rate() {
+            if (GetOwner() == 5) {
+                RemoveObject();
+            }
+            return GetOwner();
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script)
+                    .expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        let p5 = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(5))
+            .expect("probe spawns");
+        let p1 = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(1))
+            .expect("probe spawns");
+        let p3 = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(3))
+            .expect("probe spawns");
+        engine.tick().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        let result = engine
+            .call_object_function(finder_idx, "Cull", Vec::new())
+            .expect("Cull runs");
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                Value::Object(p1.as_u64()),
+                Value::Object(p3.as_u64()),
+                Value::Nil,
+            ]),
+            "the destroyed owner-5 probe keeps its sorted slot as nil"
+        );
+        // Deletion is deferred like C++ (swept at end of frame); the commit
+        // shows as Deleted status immediately.
+        let p5_idx = engine.find_object_index(p5).expect("not yet swept");
+        assert_eq!(
+            engine.objects[p5_idx].state.status,
+            ObjectStatus::Deleted,
+            "the RemoveObject from the sort callback was committed"
+        );
+    }
+
+    #[test]
+    fn sort_func_converts_results_with_get_int() {
+        // CompareGetValue converts with getInt() (C4FindObject.cpp:955;
+        // C4Value.h:159): bools become 0/1, pointer types (strings, arrays)
+        // become 0 — unlike Find_Func's raw truthiness.
+        let finder_script = r#"
+        global func Ranked() {
+            return FindObjects([20, "PROB"], [160, "Rank"]);
+        }
+        "#;
+        // String-returning ranks all convert to 0 → stable sort keeps
+        // collection order; a true bool ranks as 1 (after the zeros).
+        let probe_script = r#"
+        func Rank() {
+            if (GetOwner() == 7) { return true; }
+            return "not an int";
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("FNDR", "Finder", finder_script)
+                    .expect("finder compiles"),
+            )
+            .expect("finder registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        let finder = engine
+            .spawn_object(SpawnConfig::new("FNDR"))
+            .expect("finder spawns");
+        let bool_probe = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(7))
+            .expect("probe spawns");
+        let s1 = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(1))
+            .expect("probe spawns");
+        let s2 = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(2))
+            .expect("probe spawns");
+        engine.tick().expect("tick succeeds");
+
+        let finder_idx = engine.find_object_index(finder).expect("finder exists");
+        let result = engine
+            .call_object_function(finder_idx, "Ranked", Vec::new())
+            .expect("Ranked runs");
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                Value::Object(s1.as_u64()),
+                Value::Object(s2.as_u64()),
+                Value::Object(bool_probe.as_u64()),
+            ]),
+            "strings rank 0 (stable, collection order); true ranks 1"
+        );
+    }
+
+    #[test]
     fn do_damage_asks_effects_for_non_living_and_fires_callback() {
         // C4Object::DoDamage (C4Object.cpp:1330-1343): NON-living things ask
         // their effects first (the inverse of DoEnergy's Alive gate), the

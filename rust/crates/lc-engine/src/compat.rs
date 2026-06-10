@@ -7828,11 +7828,18 @@ impl SortCriterion {
         Self::parse_typed(data.first().map(value_as_i32).unwrap_or(0), data)
     }
 
-    /// `CompareGetValue` (C4FindObject.cpp:908-932). `Random` draws the
+    /// `CompareGetValue` (C4FindObject.cpp:908-956). `Random` draws the
     /// synced `Random(1 << 16)` — exactly once per object, in collection
-    /// order, via the cache (C4SortObjectByValue::PrepareCache).
-    fn value_for(&self, world: &impl WorldAccessor, object: &HostWorldObject) -> i64 {
-        match self {
+    /// order, via the cache (C4SortObjectByValue::PrepareCache). `Func`
+    /// runs the nested call: no overload → 0 silently, the result converts
+    /// with `getInt()` (bools 0/1, pointer types 0), and callback errors
+    /// pass through (`fPassErrors=true`, C4FindObject.cpp:947-956).
+    fn value_for(
+        &self,
+        world: &impl WorldAccessor,
+        object: &HostWorldObject,
+    ) -> Result<i64, RuntimeError> {
+        Ok(match self {
             SortCriterion::Distance { x, y } => {
                 let position = object.position();
                 let dx = i64::from(position.x - x);
@@ -7863,28 +7870,38 @@ impl SortCriterion {
                     .map(|metadata| metadata.value)
                     .unwrap_or(0),
             ),
-            SortCriterion::Func { .. } => 0,
+            SortCriterion::Func { name, pars } => {
+                match call_world_object_function(object.id, name, pars) {
+                    None => 0,
+                    Some(result) => i64::from(result?.as_c4_int().unwrap_or(0)),
+                }
+            }
             SortCriterion::Reverse(_) | SortCriterion::Multiple(_) => 0,
-        }
+        })
     }
 
     /// `C4SortObject::SortObjects` (C4FindObject.cpp:784-812): per-criterion
     /// value caches computed in collection order, then a stable sort with
     /// `Compare > 0` ⇒ ascending by value (smallest first).
-    fn sort(&self, world: &impl WorldAccessor, ids: &mut [ObjectId]) {
-        let keys = self.cache_keys(world, ids);
+    fn sort(&self, world: &impl WorldAccessor, ids: &mut [ObjectId]) -> Result<(), RuntimeError> {
+        let keys = self.cache_keys(world, ids)?;
         let mut order: Vec<usize> = (0..ids.len()).collect();
         order.sort_by(|&a, &b| Self::compare_keys(&keys[a], &keys[b]));
         let sorted: Vec<ObjectId> = order.iter().map(|&index| ids[index]).collect();
         ids.copy_from_slice(&sorted);
+        Ok(())
     }
 
     /// Per-object key vectors: flattened (criterion, direction) values so
     /// Reverse/Multiple compose like the C++ Compare chain.
-    fn cache_keys(&self, world: &impl WorldAccessor, ids: &[ObjectId]) -> Vec<Vec<i64>> {
+    fn cache_keys(
+        &self,
+        world: &impl WorldAccessor,
+        ids: &[ObjectId],
+    ) -> Result<Vec<Vec<i64>>, RuntimeError> {
         let mut keys = vec![Vec::new(); ids.len()];
-        self.fill_keys(world, ids, &mut keys, false);
-        keys
+        self.fill_keys(world, ids, &mut keys, false)?;
+        Ok(keys)
     }
 
     fn fill_keys(
@@ -7893,25 +7910,26 @@ impl SortCriterion {
         ids: &[ObjectId],
         keys: &mut [Vec<i64>],
         reverse: bool,
-    ) {
+    ) -> Result<(), RuntimeError> {
         match self {
-            SortCriterion::Reverse(child) => child.fill_keys(world, ids, keys, !reverse),
+            SortCriterion::Reverse(child) => child.fill_keys(world, ids, keys, !reverse)?,
             SortCriterion::Multiple(children) => {
                 for child in children {
-                    child.fill_keys(world, ids, keys, reverse);
+                    child.fill_keys(world, ids, keys, reverse)?;
                 }
             }
             _ => {
                 let sign = if reverse { -1 } else { 1 };
                 for (index, id) in ids.iter().enumerate() {
-                    let value = world
-                        .get_object(*id)
-                        .map(|object| self.value_for(world, &object))
-                        .unwrap_or(0);
+                    let value = match world.get_object(*id) {
+                        Some(object) => self.value_for(world, &object)?,
+                        None => 0,
+                    };
                     keys[index].push(sign * value);
                 }
             }
         }
+        Ok(())
     }
 
     fn compare_keys(a: &[i64], b: &[i64]) -> std::cmp::Ordering {
@@ -7923,6 +7941,74 @@ impl SortCriterion {
         }
         std::cmp::Ordering::Equal
     }
+
+    /// The UNCACHED `Compare(obj1, obj2)` used by the single-result Find
+    /// path (C4FindObject.cpp:834-842): `CompareGetValue` runs for obj1
+    /// then obj2 in hardcoded order, returning `value2 - value1` (>0 ⇒
+    /// obj1 sorts first). Reverse swaps the arguments
+    /// (C4FindObject.cpp:856-859); Multiple returns the first nonzero
+    /// child comparison (C4FindObject.cpp:885-895).
+    fn compare_uncached(
+        &self,
+        world: &impl WorldAccessor,
+        obj1: &HostWorldObject,
+        obj2: &HostWorldObject,
+    ) -> Result<i64, RuntimeError> {
+        match self {
+            SortCriterion::Reverse(child) => child.compare_uncached(world, obj2, obj1),
+            SortCriterion::Multiple(children) => {
+                for child in children {
+                    let result = child.compare_uncached(world, obj1, obj2)?;
+                    if result != 0 {
+                        return Ok(result);
+                    }
+                }
+                Ok(0)
+            }
+            _ => {
+                let value1 = self.value_for(world, obj1)?;
+                let value2 = self.value_for(world, obj2)?;
+                Ok(value2 - value1)
+            }
+        }
+    }
+}
+
+/// The single-result Find with a sort attached (C4FindObject.cpp:186-199):
+/// a running best, replaced when the uncached `Compare(candidate, best)`
+/// is positive. No PrepareCache — value functions (and `C4SO_Random`
+/// draws) run per comparison.
+fn find_first_with_sort(
+    world: &impl WorldAccessor,
+    condition: &FindCondition,
+    sort: &SortCriterion,
+) -> Result<Option<ObjectId>, RuntimeError> {
+    if condition.is_impossible(world) {
+        return Ok(None);
+    }
+    let mut best: Option<(ObjectId, HostWorldObject)> = None;
+    for object_id in world.object_ids() {
+        let Some(object) = world.get_object(object_id) else {
+            continue;
+        };
+        if !object.status().is_active() {
+            continue;
+        }
+        if !condition.check(world, &object)? {
+            continue;
+        }
+        best = match best {
+            None => Some((object_id, object)),
+            Some((best_id, best_object)) => {
+                if sort.compare_uncached(world, &object, &best_object)? > 0 {
+                    Some((object_id, object))
+                } else {
+                    Some((best_id, best_object))
+                }
+            }
+        };
+    }
+    Ok(best.map(|(id, _)| id))
 }
 
 /// `CreateCriterionsFromPars` (C4Script.cpp:1985-2034): each argument array
@@ -8001,11 +8087,13 @@ fn find_object2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(view) = snapshot_func_find_view() else {
             return Ok(Value::Nil);
         };
+        if let Some(sort) = sort {
+            return Ok(find_first_with_sort(&view, &condition, &sort)?
+                .map(object_reference_value)
+                .unwrap_or(Value::Nil));
+        }
         let mut matches = find_condition_matches(&view, &condition)?;
         retain_live_nested(&mut matches);
-        if let Some(sort) = sort {
-            sort.sort(&view, &mut matches);
-        }
         return Ok(matches
             .first()
             .map(|id| object_reference_value(*id))
@@ -8016,10 +8104,12 @@ fn find_object2(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
-        let mut matches = find_condition_matches(context, &condition)?;
         if let Some(sort) = sort {
-            sort.sort(context, &mut matches);
+            return Ok(find_first_with_sort(context, &condition, &sort)?
+                .map(object_reference_value)
+                .unwrap_or(Value::Nil));
         }
+        let matches = find_condition_matches(context, &condition)?;
         Ok(matches
             .first()
             .map(|id| object_reference_value(*id))
@@ -8039,13 +8129,31 @@ fn find_objects2(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Array(Vec::new()));
         };
         let mut matches = find_condition_matches(&view, &condition)?;
+        // Pre-sort: erase objects deleted during Check
+        // (C4FindObject.cpp:217-218).
         retain_live_nested(&mut matches);
         if let Some(sort) = sort {
-            sort.sort(&view, &mut matches);
+            sort.sort(&view, &mut matches)?;
         }
-        return Ok(Value::Array(
-            matches.into_iter().map(object_reference_value).collect(),
-        ));
+        // Post-sort: objects deleted by sort callbacks keep their slot as
+        // nil (CheckObjectStatusAfterSort, C4FindObject.cpp:223,372-375).
+        return Ok(Value::Array(HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            matches
+                .into_iter()
+                .map(|id| {
+                    if borrow
+                        .as_ref()
+                        .map(|context| context.nested_object_destroyed(id))
+                        .unwrap_or(false)
+                    {
+                        Value::Nil
+                    } else {
+                        object_reference_value(id)
+                    }
+                })
+                .collect()
+        })));
     }
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -8054,7 +8162,7 @@ fn find_objects2(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         let mut matches = find_condition_matches(context, &condition)?;
         if let Some(sort) = sort {
-            sort.sort(context, &mut matches);
+            sort.sort(context, &mut matches)?;
         }
         Ok(Value::Array(
             matches.into_iter().map(object_reference_value).collect(),
