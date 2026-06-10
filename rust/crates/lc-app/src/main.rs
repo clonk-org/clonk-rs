@@ -189,6 +189,31 @@ struct Cli {
     menu_view: String,
 }
 
+/// Graphics.c4g files the startup-dialog parity renderers draw with
+/// (C4StartupGraphics::Init, C4Startup.cpp:38-90 + GUI resource assets,
+/// C4Gui.cpp:1087-1097).
+const STARTUP_DIALOG_IMAGES: &[&str] = &[
+    "StartupScenSelBG.png",
+    "StartupPlrSelBG.png",
+    "StartupNetworkBG.png",
+    "StartupDlgPaper.png",
+    "StartupTabClip.png",
+    "StartupOptionIcons.png",
+    "StartupScenSelIcons.png",
+    "StartupScenSelTitleOv.png",
+    "StartupBookScroll.png",
+    "StartupNetGetRef.png",
+    "LoaderWatercave1.png",
+    "GUIButton.png",
+    "GUIButtonDown.png",
+    "GUIButtonHighlight.png",
+    "GUICaption.png",
+    "GUICheckbox.png",
+    "GUIIcons.png",
+    "GUIIcons2.png",
+    "GUIScroll.png",
+];
+
 struct RuntimeConfig {
     player_owner: i32,
     player_name: String,
@@ -308,6 +333,9 @@ struct FrontendAssets {
     /// GUIButtonHighlight.png — additive focus/hover overlay for GUI buttons
     /// (C4GraphicsResource.cpp:1089-1093, C4GuiButton.cpp:94-98).
     button_highlight: Option<ImageData>,
+    /// Graphics.c4g images used by the startup dialog parity renderers,
+    /// keyed by file name (see `STARTUP_DIALOG_IMAGES`).
+    startup_dialog_images: HashMap<String, ImageData>,
     base_sprites: HashMap<String, DefinitionSprite>,
     cursor_atlas: Arc<CursorAtlas>,
     hud_graphics: Arc<HudGraphics>,
@@ -317,6 +345,7 @@ impl FrontendAssets {
     fn load(paths: Option<&AppPaths>) -> Self {
         let font = Self::load_font(paths);
         let clonk_fonts = Self::load_clonk_fonts(paths);
+        let mut startup_dialog_images = HashMap::new();
         let mut menu_background = None;
         let mut scenario_browser_background = None;
         let mut options_background = None;
@@ -368,6 +397,17 @@ impl FrontendAssets {
                             },
                         );
                     }
+                    for name in STARTUP_DIALOG_IMAGES {
+                        match graphics.load_image(name) {
+                            Ok(image) => {
+                                startup_dialog_images
+                                    .insert((*name).to_string(), Self::image_to_data(image));
+                            }
+                            Err(err) => {
+                                tracing::warn!(name, error = %err, "startup dialog image missing");
+                            }
+                        }
+                    }
                     cursor_atlas = Self::load_cursor_atlas(&graphics);
                     hud_graphics = Self::load_hud_graphics(&graphics);
                 }
@@ -391,6 +431,7 @@ impl FrontendAssets {
             logo,
             button_textures,
             button_highlight,
+            startup_dialog_images,
             base_sprites: sprites,
             cursor_atlas: Arc::new(cursor_atlas),
             hud_graphics: Arc::new(hud_graphics),
