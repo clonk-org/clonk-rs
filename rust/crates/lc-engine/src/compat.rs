@@ -137,6 +137,11 @@ pub(crate) enum PlayerCommand {
         player_id: i32,
         definition_id: DefinitionId,
     },
+    /// `FnSetWealth` (C4Script.cpp:2761-2766), already clamped.
+    SetWealth {
+        player_id: i32,
+        value: i32,
+    },
 }
 
 impl HostWorldObject {
@@ -1062,6 +1067,44 @@ fn get_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         };
         Ok(Value::Int(player.wealth))
+    })
+}
+
+/// `FnSetWealth` (C4Script.cpp:2761-2766): clamp-set to `0..=100000`,
+/// false for invalid players.
+fn set_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(RuntimeError::new(
+            "SetWealth expects 2 arguments: player, value",
+        ));
+    }
+    let player_id = value_to_i32(&args[0], "SetWealth", "player")?;
+    let value = match args.get(1) {
+        Some(Value::Int(value)) => *value,
+        Some(Value::Nil) | None => 0,
+        Some(other) => {
+            return Err(RuntimeError::new(format!(
+                "SetWealth: expected int for value, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(player) = context.player_state_mut(player_id) else {
+            return Ok(Value::Bool(false));
+        };
+        let clamped = value.clamp(0, 100_000);
+        player.wealth = clamped;
+        context.record_player_command(PlayerCommand::SetWealth {
+            player_id,
+            value: clamped,
+        });
+        Ok(Value::Bool(true))
     })
 }
 
@@ -2242,6 +2285,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlayerType", get_player_type);
     script.register_host_function("GetPlayerID", get_player_id);
     script.register_host_function("GetWealth", get_wealth);
+    script.register_host_function("SetWealth", set_wealth);
     script.register_host_function("GetScore", get_score);
     script.register_host_function("GetPlrValue", get_plr_value);
     script.register_host_function("GetPlrValueGain", get_plr_value_gain);
@@ -12649,6 +12693,7 @@ mod tests {
         "SetRDir",
         "SetTemperature",
         "SetTransferZone",
+        "SetWealth",
         "SetWind",
         "SetXDir",
         "SetYDir",
@@ -13623,6 +13668,44 @@ mod tests {
         let args = [Value::Int(12)];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_wealth(&args));
         assert_eq!(result.expect("GetWealth succeeds"), Value::Int(87));
+    }
+
+    #[test]
+    fn set_wealth_clamps_and_records_player_command() {
+        // FnSetWealth (C4Script.cpp:2761-2766): clamp-set to 0..=100000,
+        // false for invalid players. (DoWealth's 10000 cap applies only to
+        // the engine-internal adjust path, C4Player.cpp:905-915.)
+        let player = PlayerState {
+            id: 12,
+            wealth: 87,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            assert_eq!(
+                set_wealth(&[Value::Int(12), Value::Int(150_000)])?,
+                Value::Bool(true)
+            );
+            // The same callback observes the clamped value.
+            assert_eq!(get_wealth(&[Value::Int(12)])?, Value::Int(100_000));
+            // Invalid player (C4Script.cpp:2763).
+            assert_eq!(
+                set_wealth(&[Value::Int(5), Value::Int(10)])?,
+                Value::Bool(false)
+            );
+            Ok::<Value, RuntimeError>(Value::Nil)
+        });
+        result.expect("SetWealth succeeds");
+        assert!(matches!(
+            outcome.player_commands.as_slice(),
+            [PlayerCommand::SetWealth {
+                player_id: 12,
+                value: 100_000,
+            }]
+        ));
     }
 
     #[test]

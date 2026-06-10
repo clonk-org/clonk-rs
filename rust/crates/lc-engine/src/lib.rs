@@ -12816,6 +12816,11 @@ impl Engine {
                 } => {
                     self.revoke_player_knowledge(player_id, &definition_id)?;
                 }
+                PlayerCommand::SetWealth { player_id, value } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.set_wealth(value);
+                    }
+                }
             }
         }
         Ok(())
