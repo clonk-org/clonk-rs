@@ -2277,6 +2277,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("RemoveEffect", remove_effect);
     script.register_host_function("GetEffect", get_effect);
     script.register_host_function("GetEffectCount", get_effect_count);
+    script.register_host_function("WildcardMatch", wildcard_match);
     script.register_host_function("EffectVar", effect_var);
     script.register_host_function("GetPlayerCount", get_player_count);
     script.register_host_function("GetPlayerByIndex", get_player_by_index);
@@ -4082,6 +4083,55 @@ impl Drop for RandomContextGuard {
     }
 }
 
+/// `SWildcardMatchEx` (C4Strings.cpp:531-562): `*`/`?` wildcard match with
+/// backtracking, byte-wise like the C++ char loop.
+fn s_wildcard_match_ex(string: &str, wildcard: &str) -> bool {
+    let (s, w) = (string.as_bytes(), wildcard.as_bytes());
+    let (mut pos, mut wild) = (0usize, 0usize);
+    let mut backtrack: Option<(usize, usize)> = None;
+    while wild < w.len() || backtrack.is_some() {
+        if w.get(wild) == Some(&b'*') {
+            wild += 1;
+            backtrack = Some((wild, pos));
+        } else if pos >= s.len() {
+            break;
+        } else if w.get(wild) == Some(&b'?') || w.get(wild) == Some(&s[pos]) {
+            wild += 1;
+            pos += 1;
+        } else if let Some((last_wild, last_pos)) = backtrack {
+            backtrack = Some((last_wild, last_pos + 1));
+            wild = last_wild;
+            pos = last_pos + 1;
+        } else {
+            return false;
+        }
+    }
+    wild >= w.len() && pos >= s.len()
+}
+
+/// `FnWildcardMatch` (C4Script.cpp:5606-5609): both params go through
+/// `FnStringPar`, which maps nil (and Set0'd falsy pars,
+/// C4AulExec.cpp:1370-1374) to `""` (C4Script.cpp:78-81).
+fn wildcard_match(args: &[Value]) -> Result<Value, RuntimeError> {
+    let string_par = |value: Option<&Value>, par: &str| -> Result<String, RuntimeError> {
+        match value {
+            Some(Value::String(text)) => Ok(text.clone()),
+            Some(Value::Nil) | Some(Value::Int(0)) | Some(Value::Bool(false)) | None => {
+                Ok(String::new())
+            }
+            Some(other) => Err(RuntimeError::new(format!(
+                "WildcardMatch: expected string or nil for {par}, got {}",
+                other.type_name()
+            ))),
+        }
+    };
+    let string = string_par(args.first(), "string")?;
+    let wildcard = string_par(args.get(1), "wildcard")?;
+    Ok(Value::Int(i32::from(s_wildcard_match_ex(
+        &string, &wildcard,
+    ))))
+}
+
 /// Effect-name parameter shared by AddEffect/RemoveEffect/GetEffect/
 /// GetEffectCount: C++ declares it `C4String *`, and pre-#strict-3 callers
 /// legally pass falsy values that CheckConvertFunctionParameters Set0()s to
@@ -4141,14 +4191,16 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(0));
     }
 
+    // C++ FnAddEffect: unpassed iTimerIntervall is 0 - no timer callbacks
+    // (C4Effect.cpp:342).
     let interval = match args.get(3) {
-        Some(Value::Int(value)) if *value > 0 => *value,
+        Some(Value::Int(value)) if *value >= 0 => *value,
         Some(Value::Int(_)) => {
             return Err(RuntimeError::new(
-                "AddEffect: interval must be > 0 when provided",
+                "AddEffect: interval must be >= 0 when provided",
             ))
         }
-        Some(Value::Nil) | None => 1,
+        Some(Value::Nil) | None => 0,
         Some(other) => {
             return Err(RuntimeError::new(format!(
                 "AddEffect: expected int for interval, got {}",
@@ -11583,15 +11635,13 @@ impl EffectScopeContext {
         self.effects.clone()
     }
 
+    // iIntervall/iTime stored verbatim (C4Effect.cpp:66-67).
     fn add_effect(&mut self, mut effect: EffectState) -> i32 {
-        if effect.interval <= 0 {
-            effect.interval = 1;
+        if effect.interval < 0 {
+            effect.interval = 0;
         }
         if effect.timer < 0 {
             effect.timer = 0;
-        }
-        if effect.interval > 0 && effect.timer >= effect.interval {
-            effect.timer %= effect.interval;
         }
 
         if let Some(index) = self
@@ -12688,6 +12738,7 @@ mod tests {
         "SoundLevel",
         "Sqrt",
         "TrainPhysical",
+        "WildcardMatch",
     ];
 
     #[test]
@@ -16600,6 +16651,35 @@ mod tests {
         });
         let value = result.expect("GetEffectCount with priority succeeds");
         assert_eq!(value, Value::Int(2));
+    }
+
+    #[test]
+    fn wildcard_match_follows_cpp_swildcardmatchex() {
+        // SWildcardMatchEx (C4Strings.cpp:531-562) via FnWildcardMatch
+        // (C4Script.cpp:5606-5609): `*`/`?` with backtracking, int 0/1 result.
+        // Clonk.c4d Script.c:587 gates riding controls on
+        // `WildcardMatch(GetAction(), "Ride*")`.
+        let m = |s: &str, w: &str| {
+            wildcard_match(&[Value::String(s.into()), Value::String(w.into())])
+                .expect("WildcardMatch succeeds")
+        };
+        assert_eq!(m("Walk", "Ride*"), Value::Int(0));
+        assert_eq!(m("Ride", "Ride*"), Value::Int(1));
+        assert_eq!(m("RideStill", "Ride*"), Value::Int(1));
+        assert_eq!(m("IntJnRAimControl", "*Control*"), Value::Int(1));
+        assert_eq!(m("abc", "*b"), Value::Int(0));
+        assert_eq!(m("ab", "a?"), Value::Int(1));
+        assert_eq!(m("ab", "*"), Value::Int(1));
+        assert_eq!(m("", ""), Value::Int(1));
+        // FnStringPar maps nil (and Set0'd falsy pars) to "" (C4Script.cpp:78-81).
+        assert_eq!(
+            wildcard_match(&[Value::Nil, Value::Int(0)]).expect("falsy args succeed"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            wildcard_match(&[Value::String("x".into()), Value::Nil]).expect("nil wildcard"),
+            Value::Int(0)
+        );
     }
 
     #[test]
