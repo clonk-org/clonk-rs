@@ -336,19 +336,43 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
    (C4Object.cpp:4771-5286), Scale/Hangle Tick5 + Swim Tick10 at-limit
    training, no gravity for Swim/Float, facing by xdir sign; physical-less
    fixture definitions keep the legacy `MovementProfile` paths (documented
-   deviation). **Open:** attach detach at fire start (needs the DFA_ATTACH
-   action scan); fire modes/sounds; Tick5 base extinguish (base model);
-   SmokeRate smoke (visual); Push/Pull force `ValByPhysical(250, Push)` +
-   walk limit (C4Object.cpp:5048-5129), `ObjectComJump`
-   Con-scaled Walk/Jump physicals (C4ObjectCom.cpp:287-288), Throw `pthrow
-   = ValByPhysical(400, Throw)` (C4ObjectCom.cpp:127); swim InLiquid
-   exit/surface checks (need the liquid model); Breath/`ExecLife`
-   asphyxiation; the C4ObjectInfo model (permanent training, DoExperience —
-   the fight exec skips the Tick35 `DoExperience(+2)`); temporary physicals
-   + `SetPhysical`/`TrainPhysical`/`ResetPhysical` host fns;
-   `physical_override` and `last_energy_loss_cause` not yet
-   snapshot-persisted; effect ClearAll revival abort and player
-   pointer/view cleanup in AssignDeath.
+   deviation). **Two-layer physicals + script API DONE (2026-06-09):**
+   object physical state split into `info_physical` (C4ObjectInfo::Physical
+   surrogate for crew members, lazily cloned from the definition),
+   `temporary_physical` + `physical_changes` (PhysicalTemporary/
+   TemporaryPhysical with the C4TempPhysicalInfo change stack); GetPhysical
+   resolves temporary→info→definition (C4Object.cpp:2118-2134);
+   TrainPhysical trains the temp set incl. stacked previous values and the
+   crew info — an object with neither trains NOTHING (C4Object.cpp:
+   2136-2146; C4InfoCore.cpp:309-317); host fns `GetPhysical`/`SetPhysical`/
+   `TrainPhysical`/`ResetPhysical` with all PHYS_* modes
+   (C4Script.cpp:552-688, fair crew off), state carried through script
+   scopes and applied wholesale via `ObjectUpdate.physicals`; all three
+   fields + `last_energy_loss_cause` + `breath` snapshot-persisted
+   (C4Object.cpp:2738-2801). **ExecLife breathing DONE (2026-06-09):**
+   Tick5 supply check at the mouth, breath −2*C4MaxPhysical/100 → at zero
+   DoEnergy(−1) asphyxiation with cause attribution, synced `Random(5)`
+   BubbleOut x draw, Breath training, one-gulp restore + DeepBreath
+   callback (C4Object.cpp:878-919); NoBreath DefCore-parsed; breath fills
+   from physicals at birth (:193). **ALSO FIXED:** the tick loop ran the
+   fire effect TWICE per object per frame (both sites from the original
+   fire commit; direct-call fire tests missed it) — double DoCon decay,
+   double damage gates, double inflame draws; now once-per-frame with a
+   tick-level pin (C4Object.cpp:1073-1077). **Open:** attach detach at fire
+   start (needs the DFA_ATTACH action scan); fire modes/sounds; Tick5 base
+   extinguish (base model); SmokeRate smoke (visual); Push/Pull force
+   `ValByPhysical(250, Push)` + walk limit (C4Object.cpp:5048-5129),
+   `ObjectComJump` Con-scaled Walk/Jump physicals (C4ObjectCom.cpp:287-288),
+   Throw `pthrow = ValByPhysical(400, Throw)` (C4ObjectCom.cpp:127); swim
+   InLiquid exit/surface checks (need the liquid model); MVehic forcefield
+   breathe arm (needs the solid-mask material layer); FXB1 bubble object;
+   corrosion/InMat-incineration ExecLife arms (need InMat tracking); the
+   C4ObjectInfo model (permanent training storage, DoExperience — the fight
+   exec skips the Tick35 `DoExperience(+2)`, fair crew); foreign-object
+   physicals reads/writes in the host fns (this-object only, like
+   DoEnergy); PHYS_* script constants (no constant registration mechanism
+   yet); effect ClearAll revival abort and player pointer/view cleanup in
+   AssignDeath.
 7. **PARTIAL** — `script-values`. **Done:** `C4ScriptCnvMap` 81-cell table +
    `ConvertTo` dispatch (`C4Value.cpp:431-598`; differential-locked
    `script_value_convert` — 81-cell grid + per-(value,target,#strict) result);
