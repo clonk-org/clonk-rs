@@ -156,6 +156,11 @@ pub const OWNER_NONE: i32 = -1;
 pub const FULL_CON: i32 = 100_000;
 
 /// Energy-loss cause types (C4Effects.h:59-67), passed to Fx*Damage.
+/// Damage cause types (C4Effects.h:53-56).
+pub const C4FX_CALL_DMG_SCRIPT: i32 = 0;
+pub const C4FX_CALL_DMG_BLAST: i32 = 1;
+pub const C4FX_CALL_DMG_FIRE: i32 = 2;
+pub const C4FX_CALL_DMG_CHOP: i32 = 3;
 pub const C4FX_CALL_ENG_SCRIPT: i32 = 32;
 pub const C4FX_CALL_ENG_BLAST: i32 = 33;
 pub const C4FX_CALL_ENG_OBJ_HIT: i32 = 34;
@@ -15500,10 +15505,10 @@ impl Engine {
                 return;
             }
         }
-        // Damage: Tick10 DoDamage(+2) (C4Object.cpp:780)
+        // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:780)
         if frame % 10 == 0 && !no_burn_damage {
-            let object = &mut self.objects[idx];
-            object.state.damage = object.state.damage.saturating_add(2);
+            let cause = self.objects[idx].state.fire_caused_by;
+            self.change_object_damage(idx, 2, C4FX_CALL_DMG_FIRE, cause);
         }
         // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:782)
         if frame % 5 == 0 {
@@ -15761,6 +15766,33 @@ impl Engine {
             };
         }
         change
+    }
+
+    /// `C4Object::DoDamage` (C4Object.cpp:1330-1343): NON-living things ask
+    /// their effects first, the damage stat clamps at zero, and the Damage
+    /// script callback fires with (change, causedBy).
+    fn change_object_damage(&mut self, idx: usize, change: i32, cause: i32, caused_by: i32) {
+        let change = if !self.objects[idx].state.alive
+            && !self.objects[idx].state.effects.is_empty()
+        {
+            let modified = self.call_effects_do_damage(idx, change, cause, caused_by);
+            if modified == 0 {
+                return;
+            }
+            modified
+        } else {
+            change
+        };
+        {
+            let object = &mut self.objects[idx];
+            object.state.damage = object.state.damage.saturating_add(change).max(0);
+        }
+        // Engine script call (C4Object.cpp:1342).
+        let _ = self.call_object_function(
+            idx,
+            "Damage",
+            vec![Value::Int(change), Value::Int(caused_by)],
+        );
     }
 
     /// Engine-side `C4Object::DoEnergy` slice (C4Object.cpp:1345-1365) in the
@@ -24478,6 +24510,70 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("Tick5 training clones the definition physicals");
         assert_eq!(trained.fight, 20_001);
         assert_eq!(trained.walk, 35_000, "other physicals copied untouched");
+    }
+
+    #[test]
+    fn do_damage_asks_effects_for_non_living_and_fires_callback() {
+        // C4Object::DoDamage (C4Object.cpp:1330-1343): NON-living things ask
+        // their effects first (the inverse of DoEnergy's Alive gate), the
+        // damage clamps at zero, and the Damage script callback fires with
+        // (change, causedBy).
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Shell", priority = 100, interval = 0 } ] };
+        }
+
+        global func FxShellDamage(state, effect, damage, damage_type, cause_plr) {
+            return damage / 2;
+        }
+
+        func Damage(change, caused_by) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        // Non-living: the effect halves the damage.
+        let crate_id = engine
+            .spawn_object(SpawnConfig::new("Actor").with_alive(false))
+            .expect("spawn succeeds");
+        engine.tick().expect("tick succeeds");
+        let idx = engine.find_object_index(crate_id).expect("object exists");
+        engine.change_object_damage(idx, 10, C4FX_CALL_DMG_SCRIPT, 3);
+        assert_eq!(engine.objects[idx].state.damage, 5);
+        let calls = call_log.lock().unwrap().clone();
+        assert!(
+            calls.iter().any(|name| name == "Damage"),
+            "the Damage script callback fires (C4Object.cpp:1342)"
+        );
+
+        // Living: effects are NOT asked for damage (C4Object.cpp:1333).
+        let clonk_id = engine
+            .spawn_object(SpawnConfig::new("Actor").with_alive(true))
+            .expect("spawn succeeds");
+        engine.tick().expect("tick succeeds");
+        let idx = engine.find_object_index(clonk_id).expect("object exists");
+        engine.change_object_damage(idx, 10, C4FX_CALL_DMG_SCRIPT, 3);
+        assert_eq!(engine.objects[idx].state.damage, 10);
     }
 
     #[test]
