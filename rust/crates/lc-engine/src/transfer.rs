@@ -1,6 +1,6 @@
 use crate::ObjectId;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferZone {
@@ -53,42 +53,54 @@ impl TransferZoneCommand {
 
 #[derive(Debug, Clone, Default)]
 pub struct TransferZoneTable {
-    zones: HashMap<ObjectId, TransferZone>,
+    /// C++ traversal order: `Add` prepends so the newest zone comes first
+    /// (C4TransferZone.cpp:96-108) and `Find` returns the first hit in that
+    /// order; re-setting an existing owner updates in place, keeping its
+    /// position (C4TransferZone.cpp:83-88).
+    zones: Vec<TransferZone>,
 }
 
 impl TransferZoneTable {
     pub fn get(&self, owner: ObjectId) -> Option<&TransferZone> {
-        self.zones.get(&owner)
+        self.zones.iter().find(|zone| zone.owner == owner)
     }
 
     pub fn set(&mut self, owner: ObjectId, rect: TransferZoneRect) {
         if rect.width <= 0 || rect.height <= 0 {
-            self.zones.remove(&owner);
+            self.clear(owner);
             return;
         }
-        let zone = TransferZone {
-            owner,
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-            used: false,
-        };
-        self.zones.insert(owner, zone);
+        if let Some(zone) = self.zones.iter_mut().find(|zone| zone.owner == owner) {
+            zone.x = rect.x;
+            zone.y = rect.y;
+            zone.width = rect.width;
+            zone.height = rect.height;
+            return;
+        }
+        self.zones.insert(
+            0,
+            TransferZone {
+                owner,
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+                used: false,
+            },
+        );
     }
 
     pub fn clear(&mut self, owner: ObjectId) {
-        self.zones.remove(&owner);
+        self.zones.retain(|zone| zone.owner != owner);
     }
 
     pub fn retain_existing(&mut self, alive: &HashSet<ObjectId>) {
-        self.zones.retain(|owner, _| alive.contains(owner));
+        self.zones.retain(|zone| alive.contains(&zone.owner));
     }
 
     pub fn states(&self) -> Vec<TransferZoneState> {
-        let mut states: Vec<_> = self
-            .zones
-            .values()
+        self.zones
+            .iter()
             .map(|zone| TransferZoneState {
                 owner: zone.owner,
                 x: zone.x,
@@ -96,26 +108,57 @@ impl TransferZoneTable {
                 width: zone.width,
                 height: zone.height,
             })
-            .collect();
-        states.sort_by_key(|state| state.owner);
-        states
+            .collect()
     }
 
     pub fn from_states(states: &[TransferZoneState]) -> Self {
         let mut table = Self::default();
         for state in states {
-            table.zones.insert(
-                state.owner,
-                TransferZone {
-                    owner: state.owner,
-                    x: state.x,
-                    y: state.y,
-                    width: state.width,
-                    height: state.height,
-                    used: false,
-                },
-            );
+            table.zones.push(TransferZone {
+                owner: state.owner,
+                x: state.x,
+                y: state.y,
+                width: state.width,
+                height: state.height,
+                used: false,
+            });
         }
         table
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: i32, y: i32, width: i32, height: i32) -> TransferZoneRect {
+        TransferZoneRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn zones_keep_cpp_traversal_order() {
+        // C4TransferZones::Add prepends — newest zone first
+        // (C4TransferZone.cpp:104-105); Set updates an existing zone in
+        // place, keeping its list position (:83-88).
+        let mut table = TransferZoneTable::default();
+        table.set(ObjectId::new(1), rect(0, 0, 10, 10));
+        table.set(ObjectId::new(2), rect(5, 0, 10, 10));
+        let states = table.states();
+        assert_eq!(states[0].owner, ObjectId::new(2), "newest first");
+        assert_eq!(states[1].owner, ObjectId::new(1));
+
+        table.set(ObjectId::new(1), rect(0, 0, 20, 20));
+        let states = table.states();
+        assert_eq!(states[0].owner, ObjectId::new(2), "update keeps position");
+        assert_eq!(states[1].owner, ObjectId::new(1));
+        assert_eq!(states[1].width, 20);
+
+        let table = TransferZoneTable::from_states(&states);
+        assert_eq!(table.states(), states, "round trip preserves order");
     }
 }
