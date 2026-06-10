@@ -6550,8 +6550,8 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
-        self.dispatch_effect_callback_3(
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        self.dispatch_effect_callback(
             state,
             object_id,
             effect,
@@ -12593,20 +12593,29 @@ impl Engine {
         while let Some(event) = queue.pop_front() {
             let snapshot_for_call = state_snapshot.clone();
             let mut timer_kill = false;
+            let mut start_denied = false;
             let (outcome, audio_state, new_rng) = match event.kind {
-                EffectEventKind::Started => definition.call_effect_start(
-                    &snapshot_for_call,
-                    object_id,
-                    &event.effect,
-                    rng,
-                    &global_view,
-                    current_physics,
-                    current_environment,
-                    frame,
-                    world.clone(),
-                    game_over_triggered,
-                    current_audio,
-                )?,
+                EffectEventKind::Started => {
+                    let (outcome, audio_state, new_rng, start_result) = definition
+                        .call_effect_start(
+                            &snapshot_for_call,
+                            object_id,
+                            &event.effect,
+                            rng,
+                            &global_view,
+                            current_physics,
+                            current_environment,
+                            frame,
+                            world.clone(),
+                            game_over_triggered,
+                            current_audio,
+                        )?;
+                    // C4Fx_Start_Deny (-1, C4Effects.h:43): the effect is
+                    // marked dead before validating (C4Effect.cpp:128-131)
+                    // and deleted without a Stop callback.
+                    start_denied = matches!(start_result, Some(Value::Int(-1)));
+                    (outcome, audio_state, new_rng)
+                }
                 EffectEventKind::Timer => {
                     let (outcome, audio_state, new_rng, timer_result) = definition
                         .call_effect_timer(
@@ -12654,6 +12663,10 @@ impl Engine {
                 if let Some(removed) = object.remove_effect(&event.effect.name) {
                     queue.push_back(EffectEvent::stopped(removed, EffectStopReason::Removed));
                 }
+                state_snapshot.effects = object.state.effects.clone();
+            }
+            if start_denied {
+                object.remove_effect(&event.effect.name);
                 state_snapshot.effects = object.state.effects.clone();
             }
 
@@ -26662,6 +26675,73 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let calls = call_log.lock().unwrap().clone();
         let stop_calls = calls.iter().filter(|name| *name == "FxDoomedStop").count();
         assert_eq!(stop_calls, 1, "the kill runs the Stop callback");
+    }
+
+    #[test]
+    fn effect_start_deny_drops_effect_without_stop() {
+        // C4Fx_Start_Deny (-1, C4Effects.h:43): an FxStart returning it
+        // marks the effect dead before it ever validates
+        // (C4Effect.cpp:128-131) — it disappears without a Stop callback.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Denied", interval = 2 } ] };
+        }
+
+        global func FxDeniedStart(state, effect) {
+            return -1;
+        }
+
+        global func FxDeniedTimer(state, effect, timer) {
+            return nil;
+        }
+
+        global func FxDeniedStop(state, effect, reason) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, _args| {
+                call_log.lock().unwrap().push(name.to_string());
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_debugger_hooks(hooks);
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        let mut last = None;
+        for _ in 0..3 {
+            last = Some(engine.tick().expect("tick succeeds"));
+        }
+        let snapshot = last.expect("snapshot present");
+        let object = snapshot.object(id).expect("object present");
+        assert!(object.effects.is_empty(), "denied effect never validates");
+
+        let calls = call_log.lock().unwrap().clone();
+        assert!(
+            !calls.iter().any(|name| name == "FxDeniedTimer"),
+            "denied effects never tick"
+        );
+        assert!(
+            !calls.iter().any(|name| name == "FxDeniedStop"),
+            "dead effects are deleted without the Stop callback"
+        );
     }
 
     #[test]
