@@ -151,6 +151,9 @@ pub enum EffectEventKind {
     Started,
     Timer,
     Stopped(EffectStopReason),
+    /// `C4Effect::Check` (C4Effect.cpp:167-189): the carried effect is the
+    /// CHECKER asked about a pending new effect by name.
+    Check { pending: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +174,13 @@ impl EffectEvent {
         Self {
             effect,
             kind: EffectEventKind::Timer,
+        }
+    }
+
+    pub fn check(checker: EffectState, pending: String) -> Self {
+        Self {
+            effect: checker,
+            kind: EffectEventKind::Check { pending },
         }
     }
 

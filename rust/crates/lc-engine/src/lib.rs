@@ -6606,6 +6606,42 @@ impl Definition {
         self.script.has_effect_callback(effect_name, event)
     }
 
+    /// `Fx<Name>Effect` check call (C4Effect.cpp:178): the checker effect is
+    /// asked about a pending new effect by name.
+    #[allow(clippy::too_many_arguments)]
+    fn call_effect_effect(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        checker: &EffectState,
+        pending: &str,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        self.dispatch_effect_callback(
+            state,
+            object_id,
+            checker,
+            "Effect",
+            "FxEffect",
+            vec![Value::String(pending.to_string())],
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn dispatch_effect_callback_3(
         &self,
@@ -12609,8 +12645,39 @@ impl Engine {
         let mut pending_player_commands = Vec::new();
         let mut pending_landscape_ops = Vec::new();
         let mut game_over_requested = false;
+        let mut checked_started: HashSet<String> = HashSet::new();
+        let mut denied_started: HashSet<String> = HashSet::new();
 
         while let Some(event) = queue.pop_front() {
+            // C4Effect::Check (C4Effect.cpp:97-116): before a new effect
+            // validates, ask all effects with iPriority >= the new priority
+            // via their Fx<Name>Effect callback — except for priority-1
+            // effects, which are out of the priority call chain (:170).
+            if matches!(event.kind, EffectEventKind::Started) {
+                if denied_started.remove(&event.effect.name) {
+                    continue;
+                }
+                if event.effect.priority != 1 && !checked_started.contains(&event.effect.name) {
+                    checked_started.insert(event.effect.name.clone());
+                    let checkers: Vec<EffectState> = state_snapshot
+                        .effects
+                        .iter()
+                        .filter(|existing| {
+                            existing.name != event.effect.name
+                                && existing.priority >= event.effect.priority
+                        })
+                        .cloned()
+                        .collect();
+                    if !checkers.is_empty() {
+                        let pending = event.effect.name.clone();
+                        queue.push_front(event);
+                        for checker in checkers.into_iter().rev() {
+                            queue.push_front(EffectEvent::check(checker, pending.clone()));
+                        }
+                        continue;
+                    }
+                }
+            }
             let snapshot_for_call = state_snapshot.clone();
             // C4Effect::GetCallbackScript: the command target object's def
             // script, else the idCommandTarget def script, else the host
@@ -12687,6 +12754,33 @@ impl Engine {
                     game_over_triggered,
                     current_audio,
                 )?,
+                EffectEventKind::Check { ref pending } => {
+                    let (outcome, audio_state, new_rng, check_result) = dispatch_definition
+                        .call_effect_effect(
+                            &snapshot_for_call,
+                            object_id,
+                            &event.effect,
+                            pending,
+                            rng,
+                            &global_view,
+                            current_physics,
+                            current_environment,
+                            frame,
+                            world.clone(),
+                            game_over_triggered,
+                            current_audio,
+                        )?;
+                    // C4Fx_Effect_Deny (-1, C4Effects.h:36) blocks the new
+                    // effect entirely. Annul/AnnulCalls (-2/-3) — the
+                    // add-to-other-effect FxAdd path — are still open and
+                    // currently let the effect proceed.
+                    if matches!(check_result, Some(Value::Int(-1))) {
+                        denied_started.insert(pending.clone());
+                        object.remove_effect(pending);
+                        state_snapshot.effects = object.state.effects.clone();
+                    }
+                    (outcome, audio_state, new_rng)
+                }
             };
             rng = new_rng;
             current_audio = audio_state;
@@ -26799,6 +26893,75 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(
             engine.objects[idx].state.energy, 40,
             "FxBuffTimer ran in the spell def's script at iTime 2 and 4"
+        );
+    }
+
+    #[test]
+    fn effect_check_chain_denies_new_effects() {
+        // C4Effect::Check (C4Effect.cpp:97-116, 167-189): before a new
+        // effect validates, existing effects with iPriority >= the new
+        // priority get their Fx<Name>Effect callback with the new effect's
+        // name — C4Fx_Effect_Deny (-1, C4Effects.h:36) blocks the creation
+        // entirely (no Start, no Stop). Priority-1 effects skip the chain.
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Armor", priority = 200, interval = 0 } ] };
+        }
+
+        global func FxArmorEffect(state, effect, new_name) {
+            if (new_name == "Fire") {
+                return -1;
+            }
+            return nil;
+        }
+
+        global func FxFireStart(state, effect) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 2) {
+                return { effects = [
+                    { op = "add", name = "Fire", priority = 100, interval = 0 },
+                    { op = "add", name = "Buff", priority = 100, interval = 0 }
+                ] };
+            }
+            if (frame == 3) {
+                return { effects = [ { op = "add", name = "Fire", priority = 1, interval = 0 } ] };
+            }
+            return nil;
+        }
+        "#;
+
+        let definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        engine.tick().expect("tick succeeds");
+        let second = engine.tick().expect("tick succeeds");
+        let object = second.object(id).expect("object present");
+        let names: Vec<&str> = object
+            .effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Buff", "Armor"],
+            "Armor denies Fire; Buff passes the chain"
+        );
+
+        let third = engine.tick().expect("tick succeeds");
+        let object = third.object(id).expect("object present");
+        assert!(
+            object.effects.iter().any(|effect| effect.name == "Fire"),
+            "priority-1 effects skip the check chain (C4Effect.cpp:170)"
         );
     }
 
