@@ -800,7 +800,11 @@ fn run_menu_dump(
         "scenarios" => Some(MainMenuItem::LocalGame),
         "options" => Some(MainMenuItem::Options),
         "about" => Some(MainMenuItem::About),
-        other => anyhow::bail!("unknown --menu-view `{other}` (main|scenarios|options|about)"),
+        "plrsel" => Some(MainMenuItem::PlayerSelection),
+        "net" => Some(MainMenuItem::NetworkGame),
+        other => {
+            anyhow::bail!("unknown --menu-view `{other}` (main|scenarios|options|about|plrsel|net)")
+        }
     };
     if let Some(item) = item {
         app.handle_main_menu_activation(item)
@@ -2372,8 +2376,12 @@ enum StartupView {
     MainMenu,
     ScenarioBrowser,
     NetworkLobby,
+    /// C4StartupNetDlg — the network game browser ("Start Network Game").
+    NetworkGame,
     Options,
     About,
+    /// C4StartupPlrSelDlg — the player selection dialog.
+    PlayerSelection,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4832,6 +4840,11 @@ impl GameApp {
                                 self.handle_menu_input(|menu| menu.menu().handle_key_up(gui_key))?
                             }
                         },
+                        StartupView::NetworkGame | StartupView::PlayerSelection => {
+                            if state == ElementState::Pressed && gui_key == KeyCode::Escape {
+                                self.show_main_menu();
+                            }
+                        }
                         StartupView::MainMenu => {
                             let actions = match state {
                                 ElementState::Pressed => {
@@ -5770,6 +5783,7 @@ impl GameApp {
                                 self.handle_menu_input(|menu| menu.menu().handle_key_up(key))?
                             }
                         },
+                        StartupView::NetworkGame | StartupView::PlayerSelection => {}
                         StartupView::MainMenu => {
                             let actions = match state {
                                 ElementState::Pressed => self.main_menu_state.handle_key_down(key),
@@ -5835,6 +5849,11 @@ impl GameApp {
                     self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Escape))?
                 }
             },
+            StartupView::NetworkGame | StartupView::PlayerSelection => {
+                if state == ElementState::Pressed {
+                    self.show_main_menu();
+                }
+            }
             StartupView::MainMenu => {
                 let actions = match state {
                     ElementState::Pressed => self.main_menu_state.handle_key_down(KeyCode::Escape),
@@ -5893,6 +5912,7 @@ impl GameApp {
                         ElementState::Released => self
                             .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?,
                     },
+                    StartupView::NetworkGame | StartupView::PlayerSelection => {}
                     StartupView::MainMenu => {
                         let actions = match state {
                             ElementState::Pressed => {
@@ -5975,6 +5995,7 @@ impl GameApp {
                         state.set_pointer_position(Some(point));
                         state.menu().handle_pointer_move(point)
                     }),
+                    StartupView::NetworkGame | StartupView::PlayerSelection => Ok(()),
                     StartupView::MainMenu => {
                         self.main_menu_state.set_pointer_position(Some(point));
                         let actions = self.main_menu_state.handle_pointer_move(point);
@@ -6155,6 +6176,7 @@ impl GameApp {
                     return Ok(());
                 }
                 match self.startup_view {
+                    StartupView::NetworkGame | StartupView::PlayerSelection => Ok(()),
                     StartupView::ScenarioBrowser => {
                         if let Some(point) = self.menu_state.pointer_position() {
                             match button_state {
@@ -6278,6 +6300,7 @@ impl GameApp {
             return Ok(());
         }
         match self.startup_view {
+            StartupView::NetworkGame | StartupView::PlayerSelection => Ok(()),
             StartupView::ScenarioBrowser => match phase {
                 TouchPhase::Started => self.handle_menu_input(|state| {
                     state.set_pointer_position(Some(position));
@@ -6421,6 +6444,7 @@ impl GameApp {
     fn pointer_left(&mut self) {
         match self.mode {
             AppMode::Menu => match self.startup_view {
+                StartupView::NetworkGame | StartupView::PlayerSelection => {}
                 StartupView::ScenarioBrowser => {
                     self.menu_state.set_pointer_position(None);
                 }
@@ -6744,16 +6768,18 @@ impl GameApp {
                 self.open_scenario_browser();
             }
             MainMenuItem::NetworkGame => {
-                if self.network_mode.is_none() || self.network_lobby.is_none() {
-                    self.status_text =
-                        "Start the application with --host or --join to use the network lobby"
-                            .to_string();
-                } else {
+                if self.network_mode.is_some() && self.network_lobby.is_some() {
                     self.open_network_lobby();
+                } else {
+                    // C4StartupMainDlg routes to the network game browser
+                    // (C4StartupNetDlg) regardless of host/join state.
+                    self.startup_view = StartupView::NetworkGame;
+                    self.status_text.clear();
                 }
             }
             MainMenuItem::PlayerSelection => {
-                self.status_text = "Player selection UI not yet implemented".to_string();
+                self.startup_view = StartupView::PlayerSelection;
+                self.status_text.clear();
             }
             MainMenuItem::Options => {
                 self.open_options_menu();
@@ -8451,6 +8477,9 @@ fn render_startup_frame(
             surface.fill(Color::opaque(16, 28, 52));
         }
         match view {
+            // Renderers land per-dialog; until wired these views show the
+            // bare background.
+            StartupView::NetworkGame | StartupView::PlayerSelection => {}
             StartupView::MainMenu => {
                 main_menu.render(surface);
                 // Logo + version line per C4StartupMainDlg::DrawElement
