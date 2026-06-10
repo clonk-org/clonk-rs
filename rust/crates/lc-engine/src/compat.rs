@@ -4439,7 +4439,8 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut match_index = 0;
     for effect in &effects {
         if let Some(filter) = name_filter {
-            if effect.name != filter {
+            // C4Effect::Get wildcard-compares names (C4Effect.cpp:229).
+            if !s_wildcard_match_ex(&effect.name, filter) {
                 continue;
             }
         }
@@ -4515,7 +4516,8 @@ fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
         .iter()
         .filter(|effect| {
             if let Some(filter) = name_filter {
-                if effect.name != filter {
+                // C4Effect::GetCount wildcard-compares names (C4Effect.cpp:263).
+                if !s_wildcard_match_ex(&effect.name, filter) {
                     return false;
                 }
             }
@@ -11694,7 +11696,9 @@ impl EffectScopeContext {
         let position = if let Some(name) = name_filter {
             let mut remaining = index;
             self.effects.iter().position(|effect| {
-                if effect.name == name {
+                // FnRemoveEffect resolves named removals through the
+                // wildcard-aware C4Effect::Get (C4Script.cpp:5494).
+                if s_wildcard_match_ex(&effect.name, name) {
                     if remaining == 0 {
                         true
                     } else {
@@ -16679,6 +16683,33 @@ mod tests {
         assert_eq!(
             wildcard_match(&[Value::String("x".into()), Value::Nil]).expect("nil wildcard"),
             Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn effect_name_filters_wildcard_match_like_cpp() {
+        // C4Effect::Get/GetCount wildcard-compare effect names
+        // (C4Effect.cpp:229,263 via SWildcardMatchEx), and FnRemoveEffect
+        // resolves named removals through the same Get (C4Script.cpp:5494);
+        // CLNK Control2Effect relies on `GetEffect("*Control*", this(), i)`.
+        let state = empty_state();
+        let (result, _) = with_object_host_context(|| -> Result<Value, RuntimeError> {
+            add_effect(&[
+                Value::String("IntJnRAimControl".into()),
+                state.clone(),
+                Value::Int(100),
+            ])?;
+            add_effect(&[Value::String("Glow".into()), state.clone(), Value::Int(50)])?;
+            let count = get_effect_count(&[Value::String("*Control*".into()), state.clone()])?;
+            assert_eq!(count, Value::Int(1));
+            let number = get_effect(&[Value::String("*Control*".into()), state.clone()])?;
+            assert!(matches!(number, Value::Int(n) if n > 0));
+            remove_effect(&[Value::String("*Contr?l*".into()), state.clone()])?;
+            get_effect_count(&[Value::Nil, state.clone()])
+        });
+        assert_eq!(
+            result.expect("wildcard filter chain succeeds"),
+            Value::Int(1)
         );
     }
 
