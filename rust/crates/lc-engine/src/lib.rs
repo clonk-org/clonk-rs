@@ -1986,6 +1986,11 @@ impl ObjectState {
         if let Some(local_vars) = &delta.local_vars {
             self.local_vars = local_vars.clone();
         }
+        if let Some(physicals) = &delta.physicals {
+            self.info_physical = physicals.info;
+            self.temporary_physical = physicals.temporary;
+            self.physical_changes = physicals.changes.clone();
+        }
 
         self.action.reconcile_with_library(library);
         ApplyDeltaOutcome {
@@ -2034,6 +2039,7 @@ struct ObjectDelta {
     base_graphics: Option<Option<ObjectBaseGraphics>>,
     components: Option<HashMap<DefinitionId, u32>>,
     local_vars: Option<HashMap<String, Value>>,
+    physicals: Option<PhysicalsUpdate>,
 }
 
 impl ObjectDelta {
@@ -2107,6 +2113,9 @@ impl ObjectDelta {
         if let Some(components) = update.components {
             self.components = Some(components);
         }
+        if let Some(physicals) = update.physicals {
+            self.physicals = Some(physicals);
+        }
         if let Some(action) = update.action {
             match &mut self.action {
                 Some(existing) => existing.merge(action),
@@ -2144,6 +2153,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             base_graphics: update.base_graphics,
             components: update.components,
             local_vars: update.local_vars,
+            physicals: update.physicals,
         }
     }
 }
@@ -2200,6 +2210,19 @@ pub struct ObjectUpdate {
     pub components: Option<HashMap<DefinitionId, u32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_vars: Option<HashMap<String, Value>>,
+    /// Full physical-state overwrite from the physicals host functions
+    /// (SetPhysical/TrainPhysical/ResetPhysical, C4Script.cpp:552-636).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physicals: Option<PhysicalsUpdate>,
+}
+
+/// The complete per-object physical state as left by a script callback —
+/// applied wholesale (a cleared temporary set must overwrite engine state).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicalsUpdate {
+    pub info: Option<PhysicalInfo>,
+    pub temporary: Option<PhysicalInfo>,
+    pub changes: Vec<(String, i32)>,
 }
 
 impl ObjectUpdate {
@@ -2354,6 +2377,7 @@ impl ObjectUpdate {
             && self.draw_transform.is_none()
             && self.base_graphics.is_none()
             && self.components.is_none()
+            && self.physicals.is_none()
     }
 }
 
@@ -5208,6 +5232,12 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_physicals(
+                    state.info_physical,
+                    state.temporary_physical,
+                    state.physical_changes.clone(),
+                    *self.physical(),
+                )
                 .with_ocf(self.compute_ocf(state)),
             ),
             global_effects,
@@ -5368,6 +5398,12 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_physicals(
+                    state.info_physical,
+                    state.temporary_physical,
+                    state.physical_changes.clone(),
+                    *self.physical(),
+                )
                 .with_ocf(self.compute_ocf(state)),
             ),
             global_effects,
@@ -5520,6 +5556,12 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_physicals(
+                    state.info_physical,
+                    state.temporary_physical,
+                    state.physical_changes.clone(),
+                    *self.physical(),
+                )
                 .with_ocf(self.compute_ocf(state)),
             ),
             global_effects,
@@ -5686,6 +5728,12 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_physicals(
+                    state.info_physical,
+                    state.temporary_physical,
+                    state.physical_changes.clone(),
+                    *self.physical(),
+                )
                 .with_ocf(self.compute_ocf(state)),
             ),
             global_effects,
@@ -5794,6 +5842,12 @@ impl Definition {
             state.base_graphics.clone(),
         )
         .with_alive(state.alive)
+        .with_physicals(
+            state.info_physical,
+            state.temporary_physical,
+            state.physical_changes.clone(),
+            *self.physical(),
+        )
         .with_base_graphics(state.base_graphics.clone())
         .with_ocf(self.compute_ocf(state));
         let (result, outcome) = compat::with_effect_context_with_state(
@@ -5919,6 +5973,12 @@ impl Definition {
             state.base_graphics.clone(),
         )
         .with_alive(state.alive)
+        .with_physicals(
+            state.info_physical,
+            state.temporary_physical,
+            state.physical_changes.clone(),
+            *self.physical(),
+        )
         .with_base_graphics(state.base_graphics.clone())
         .with_ocf(self.compute_ocf(state));
         let (result, mut host_effects) = compat::with_effect_context_with_state(
@@ -6037,6 +6097,12 @@ impl Definition {
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
+        .with_physicals(
+            state.info_physical,
+            state.temporary_physical,
+            state.physical_changes.clone(),
+            *self.physical(),
+        )
         .with_ocf(self.compute_ocf(state));
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -6158,6 +6224,12 @@ impl Definition {
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
+        .with_physicals(
+            state.info_physical,
+            state.temporary_physical,
+            state.physical_changes.clone(),
+            *self.physical(),
+        )
         .with_ocf(self.compute_ocf(state));
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
@@ -6274,6 +6346,12 @@ impl Definition {
             state.base_graphics.clone(),
         )
         .with_alive(state.alive)
+        .with_physicals(
+            state.info_physical,
+            state.temporary_physical,
+            state.physical_changes.clone(),
+            *self.physical(),
+        )
         .with_base_graphics(state.base_graphics.clone())
         .with_ocf(self.compute_ocf(state));
         let (result, mut host_effects) = compat::with_effect_context_with_state(
@@ -6596,6 +6674,12 @@ impl Definition {
                     state.base_graphics.clone(),
                 )
                 .with_alive(state.alive)
+                .with_physicals(
+                    state.info_physical,
+                    state.temporary_physical,
+                    state.physical_changes.clone(),
+                    *self.physical(),
+                )
                 .with_base_graphics(state.base_graphics.clone())
                 .with_ocf(self.compute_ocf(state)),
             ),
@@ -8794,6 +8878,7 @@ impl Engine {
                         shape: definition.shape_rect(),
                         construction_offset: definition.construction_offset(),
                         basement: definition.basement(),
+                        physical: *definition.physical(),
                     },
                 )
             })
@@ -11258,6 +11343,7 @@ impl Engine {
             container,
             vertices,
             graphics_overlays,
+            physicals,
             ..
         } = update;
 
@@ -11279,6 +11365,11 @@ impl Engine {
 
             if let Some(position) = position {
                 object.set_position(position);
+            }
+            if let Some(physicals) = physicals {
+                object.state.info_physical = physicals.info;
+                object.state.temporary_physical = physicals.temporary;
+                object.state.physical_changes = physicals.changes;
             }
             if let Some(velocity) = velocity {
                 object.set_velocity(velocity);
@@ -17362,6 +17453,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     shape: None,
                     construction_offset: 0,
                     basement: 0,
+                    physical: lc_resources::PhysicalInfo::default(),
                 },
             )
         })
@@ -24143,6 +24235,46 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             vec![("Walk".to_string(), 35_000)]
         );
         assert_eq!(restored.objects[idx].last_energy_loss_cause, 3);
+    }
+
+    #[test]
+    fn set_physical_host_fn_applies_to_engine_state() {
+        // SetPhysical(PHYS_Temporary) from a script callback auto-enables
+        // temporary mode (C4Script.cpp:584-597); the scope's pending update
+        // writes it back into engine state, where GetPhysical resolves the
+        // temporary set first (C4Object.cpp:2118-2121).
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            if (frame == 1) {
+                SetPhysical("Walk", 42000, 2);
+            }
+            return nil;
+        }
+        "#;
+
+        let definition = Definition::from_script("Mutant", "Mutant", script).unwrap();
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Mutant"))
+            .expect("mutant spawns");
+
+        engine.tick().expect("tick succeeds");
+        let idx = engine.find_object_index(id).expect("mutant exists");
+        assert_eq!(
+            engine.objects[idx].state.temporary_physical,
+            Some(PhysicalInfo {
+                walk: 42_000,
+                ..PhysicalInfo::default()
+            })
+        );
+        assert_eq!(engine.object_physical(idx).walk, 42_000);
     }
 
     #[test]

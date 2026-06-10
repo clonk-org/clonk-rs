@@ -24,11 +24,12 @@ use crate::{
     CommandDirection, CrewSelectionState, DefinitionId, DefinitionRect, Direction, DrawTransform,
     EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectBaseGraphics,
     ObjectGraphicsOverlay, ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand,
-    ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicsSettings, PlayerState,
-    QueuedCommand, SpawnConfig, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
-    CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT,
-    CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
+    ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicalsUpdate, PhysicsSettings,
+    PlayerState, QueuedCommand, SpawnConfig, TransferZoneCommand, TransferZoneRect,
+    TransferZoneState, Vector2, CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT,
+    CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
 };
+use lc_resources::PhysicalInfo;
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use std::mem;
 use tracing::{debug, info};
@@ -106,7 +107,15 @@ pub(crate) struct DefinitionMetadata {
     pub construction_offset: i32,
     #[allow(dead_code)]
     pub basement: i32,
+    /// The `[Physical]` section (GetPhysical's def form, C4Script.cpp:652).
+    pub physical: PhysicalInfo,
 }
+
+/// `SetPhysical`/`GetPhysical` modes (C4Script.cpp:552-555).
+const PHYS_CURRENT: i32 = 0;
+const PHYS_PERMANENT: i32 = 1;
+const PHYS_TEMPORARY: i32 = 2;
+const PHYS_STACK_TEMPORARY: i32 = 3;
 
 #[derive(Debug, Clone)]
 pub(crate) enum PlayerCommand {
@@ -2338,6 +2347,10 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("RemoveObject", remove_object);
     script.register_host_function("GetEnergy", get_energy);
     script.register_host_function("DoEnergy", do_energy);
+    script.register_host_function("GetPhysical", get_physical);
+    script.register_host_function("SetPhysical", set_physical);
+    script.register_host_function("TrainPhysical", train_physical);
+    script.register_host_function("ResetPhysical", reset_physical);
     script.register_host_function("GetCon", get_con);
     script.register_host_function("DoCon", do_con);
     script.register_host_function("DoDamage", do_damage);
@@ -3398,6 +3411,10 @@ pub(crate) struct HostObjectContext<'a> {
     pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
     pub draw_transform: Option<DrawTransform>,
     pub base_graphics: Option<ObjectBaseGraphics>,
+    pub info_physical: Option<PhysicalInfo>,
+    pub temporary_physical: Option<PhysicalInfo>,
+    pub physical_changes: Vec<(String, i32)>,
+    pub definition_physical: PhysicalInfo,
 }
 
 impl<'a> HostObjectContext<'a> {
@@ -3514,11 +3531,35 @@ impl<'a> HostObjectContext<'a> {
             graphics_overlays: Vec::new(),
             draw_transform,
             base_graphics,
+            info_physical: None,
+            temporary_physical: None,
+            physical_changes: Vec::new(),
+            definition_physical: PhysicalInfo::default(),
         }
     }
 
     pub fn with_alive(mut self, alive: bool) -> Self {
         self.alive = alive;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_crew_member(mut self, crew_member: bool) -> Self {
+        self.crew_member = crew_member;
+        self
+    }
+
+    pub fn with_physicals(
+        mut self,
+        info: Option<PhysicalInfo>,
+        temporary: Option<PhysicalInfo>,
+        changes: Vec<(String, i32)>,
+        definition: PhysicalInfo,
+    ) -> Self {
+        self.info_physical = info;
+        self.temporary_physical = temporary;
+        self.physical_changes = changes;
+        self.definition_physical = definition;
         self
     }
 
@@ -5292,6 +5333,173 @@ fn get_con(args: &[Value]) -> Result<Value, RuntimeError> {
         Ok(Value::Int(construction_to_script_value(
             object.construction(),
         )))
+    })
+}
+
+/// A physical name argument (`FnStringPar`): None for Nil/absent/empty.
+fn physical_name_argument(
+    args: &[Value],
+    index: usize,
+    fn_name: &str,
+) -> Result<Option<String>, RuntimeError> {
+    match args.get(index) {
+        Some(Value::String(name)) if !name.is_empty() => Ok(Some(name.clone())),
+        Some(Value::String(_)) | Some(Value::Nil) | None => Ok(None),
+        Some(other) => Err(RuntimeError::new(format!(
+            "{fn_name}: expected string for physical name, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn int_argument(args: &[Value], index: usize, fn_name: &str) -> Result<i32, RuntimeError> {
+    match args.get(index) {
+        Some(Value::Int(value)) => Ok(*value),
+        Some(Value::Nil) | None => Ok(0),
+        Some(other) => Err(RuntimeError::new(format!(
+            "{fn_name}: expected int, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// `FnGetPhysical` (C4Script.cpp:638-688): `GetPhysical(name, mode, obj,
+/// id)`. The def form reads the definition's `[Physical]` section; object
+/// reads resolve against this object only (the host model does not mutate or
+/// read foreign objects' physicals yet).
+fn get_physical(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(name) = physical_name_argument(args, 0, "GetPhysical")? else {
+        return Ok(Value::Nil);
+    };
+    let mode = int_argument(args, 1, "GetPhysical")?;
+    let target_id = args
+        .get(2)
+        .map(|arg| parse_object_reference_argument(arg, "GetPhysical", "target"))
+        .transpose()?
+        .flatten();
+    let definition_id = match args.get(3) {
+        Some(Value::String(id)) if !id.is_empty() => Some(id.clone()),
+        _ => None,
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        // No object given: a def id reads the definition physicals
+        // (C4Script.cpp:644-653).
+        if target_id.is_none() {
+            if let Some(definition_id) = definition_id {
+                return Ok(context
+                    .world
+                    .definition_metadata(&definition_id)
+                    .and_then(|metadata| metadata.physical.value_by_name(&name))
+                    .map(Value::Int)
+                    .unwrap_or(Value::Nil));
+            }
+        }
+        let Some(object) = context.object_context() else {
+            return Ok(Value::Nil);
+        };
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Nil);
+            }
+        }
+        Ok(object
+            .get_physical(&name, mode)
+            .map(Value::Int)
+            .unwrap_or(Value::Nil))
+    })
+}
+
+/// `FnSetPhysical` (C4Script.cpp:557-601): `SetPhysical(name, value, mode,
+/// obj)`.
+fn set_physical(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(name) = physical_name_argument(args, 0, "SetPhysical")? else {
+        return Ok(Value::Bool(false));
+    };
+    let value = int_argument(args, 1, "SetPhysical")?;
+    let mode = int_argument(args, 2, "SetPhysical")?;
+    let target_id = args
+        .get(3)
+        .map(|arg| parse_object_reference_argument(arg, "SetPhysical", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetPhysical requires an active engine context"))?;
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+        Ok(Value::Bool(object.set_physical(&name, value, mode)))
+    })
+}
+
+/// `FnTrainPhysical` (C4Script.cpp:603-611): `TrainPhysical(name, by, max,
+/// obj)`.
+fn train_physical(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(name) = physical_name_argument(args, 0, "TrainPhysical")? else {
+        return Ok(Value::Bool(false));
+    };
+    let train_by = int_argument(args, 1, "TrainPhysical")?;
+    let max_train = int_argument(args, 2, "TrainPhysical")?;
+    let target_id = args
+        .get(3)
+        .map(|arg| parse_object_reference_argument(arg, "TrainPhysical", "target"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("TrainPhysical requires an active engine context"))?;
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+        Ok(Value::Bool(object.train_physical(&name, train_by, max_train)))
+    })
+}
+
+/// `FnResetPhysical` (C4Script.cpp:613-636): `ResetPhysical(obj, name)` —
+/// the object comes FIRST in this one.
+fn reset_physical(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target_id = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "ResetPhysical", "target"))
+        .transpose()?
+        .flatten();
+    let name = physical_name_argument(args, 1, "ResetPhysical")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("ResetPhysical requires an active engine context"))?;
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+        Ok(Value::Bool(object.reset_physical(name.as_deref())))
     })
 }
 
@@ -8736,6 +8944,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 shape: None,
                 construction_offset: 0,
                 basement: 0,
+                physical: PhysicalInfo::default(),
             });
         let definition_category = metadata.category;
 
@@ -8907,6 +9116,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 shape: None,
                 construction_offset: 0,
                 basement: 0,
+                physical: PhysicalInfo::default(),
             });
         let definition_category = metadata.category;
 
@@ -11032,6 +11242,10 @@ impl EffectHostContext {
                 ocf_base,
                 crew_member,
                 draw_transform,
+                info_physical,
+                temporary_physical,
+                physical_changes,
+                definition_physical,
             } = ctx;
             ObjectScopeContext::new(
                 id,
@@ -11063,6 +11277,10 @@ impl EffectHostContext {
                 graphics_overlays,
                 base_graphics,
                 draw_transform,
+                info_physical,
+                temporary_physical,
+                physical_changes,
+                definition_physical,
             )
         });
         let global = Some(EffectScopeContext::new(global_effects));
@@ -11443,6 +11661,10 @@ struct ObjectScopeContext {
     graphics_overlays: Vec<ObjectGraphicsOverlay>,
     base_graphics: Option<ObjectBaseGraphics>,
     current_draw_transform: Option<DrawTransform>,
+    info_physical: Option<PhysicalInfo>,
+    temporary_physical: Option<PhysicalInfo>,
+    physical_changes: Vec<(String, i32)>,
+    definition_physical: PhysicalInfo,
 }
 
 impl ObjectScopeContext {
@@ -11476,6 +11698,10 @@ impl ObjectScopeContext {
         graphics_overlays: Vec<ObjectGraphicsOverlay>,
         base_graphics: Option<ObjectBaseGraphics>,
         draw_transform: Option<DrawTransform>,
+        info_physical: Option<PhysicalInfo>,
+        temporary_physical: Option<PhysicalInfo>,
+        physical_changes: Vec<(String, i32)>,
+        definition_physical: PhysicalInfo,
     ) -> Self {
         let blocks_other_actions = action_library.blocks_other_actions(&action_name);
         let max_energy = energy.max(DEFAULT_MAX_ENERGY);
@@ -11517,11 +11743,192 @@ impl ObjectScopeContext {
             graphics_overlays,
             base_graphics,
             current_draw_transform: draw_transform,
+            info_physical,
+            temporary_physical,
+            physical_changes,
+            definition_physical,
         }
     }
 
     fn id(&self) -> ObjectId {
         self.id
+    }
+
+    /// Record the full physical state into the pending update (applied
+    /// wholesale by the engine — a cleared temp mode must overwrite).
+    fn record_physicals(&mut self) {
+        self.pending_update.physicals = Some(PhysicalsUpdate {
+            info: self.info_physical,
+            temporary: self.temporary_physical,
+            changes: self.physical_changes.clone(),
+        });
+    }
+
+    /// `C4Object::GetPhysical` (C4Object.cpp:2118-2134): temporary set when
+    /// active (unless `permanent`), else info physicals, else definition.
+    fn resolved_physical(&self, permanent: bool) -> PhysicalInfo {
+        let temporary = (!permanent).then_some(self.temporary_physical).flatten();
+        temporary
+            .or(self.info_physical)
+            .unwrap_or(self.definition_physical)
+    }
+
+    /// `FnGetPhysical` mode dispatch (C4Script.cpp:638-688, fair crew off).
+    fn get_physical(&self, name: &str, mode: i32) -> Option<i32> {
+        match mode {
+            PHYS_CURRENT => self.resolved_physical(false).value_by_name(name),
+            PHYS_PERMANENT => {
+                // Info objects only (C4Script.cpp:668).
+                if !self.crew_member {
+                    return None;
+                }
+                self.info_physical
+                    .unwrap_or(self.definition_physical)
+                    .value_by_name(name)
+            }
+            PHYS_TEMPORARY => {
+                // Info objects only, and only in temporary mode
+                // (C4Script.cpp:680-682).
+                if !self.crew_member {
+                    return None;
+                }
+                self.temporary_physical
+                    .and_then(|physical| physical.value_by_name(name))
+            }
+            _ => None,
+        }
+    }
+
+    /// `FnSetPhysical` mode dispatch (C4Script.cpp:557-601, fair crew off).
+    fn set_physical(&mut self, name: &str, value: i32, mode: i32) -> bool {
+        // Unknown names fail (C4Script.cpp:562).
+        if PhysicalInfo::default().value_mut_by_name(name).is_none() {
+            return false;
+        }
+        match mode {
+            PHYS_CURRENT => {
+                // Temporary mode or info objects only (C4Script.cpp:569).
+                if let Some(temporary) = self.temporary_physical.as_mut() {
+                    temporary.set_by_name(name, value);
+                } else if self.crew_member {
+                    let definition_physical = self.definition_physical;
+                    self.info_physical
+                        .get_or_insert(definition_physical)
+                        .set_by_name(name, value);
+                } else {
+                    return false;
+                }
+                self.record_physicals();
+                true
+            }
+            PHYS_PERMANENT => {
+                // Info objects only (C4Script.cpp:576).
+                if !self.crew_member {
+                    return false;
+                }
+                let definition_physical = self.definition_physical;
+                self.info_physical
+                    .get_or_insert(definition_physical)
+                    .set_by_name(name, value);
+                self.record_physicals();
+                true
+            }
+            PHYS_TEMPORARY | PHYS_STACK_TEMPORARY => {
+                // Auto-switch to temporary mode (C4Script.cpp:587-591).
+                let base = self.resolved_physical(false);
+                let temporary = self.temporary_physical.get_or_insert(base);
+                // PHYS_StackTemporary remembers the old value
+                // (C4Script.cpp:593-594; C4InfoCore.cpp:333-337).
+                if mode == PHYS_STACK_TEMPORARY {
+                    if let Some(previous) = temporary.value_by_name(name) {
+                        self.physical_changes.push((name.to_string(), previous));
+                    }
+                }
+                self.temporary_physical
+                    .as_mut()
+                    .map(|physical| physical.set_by_name(name, value));
+                self.record_physicals();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `C4Object::TrainPhysical` (C4Object.cpp:2136-2146) over the scope
+    /// copies; trains stacked previous values too (C4InfoCore.cpp:309-317).
+    fn train_physical(&mut self, name: &str, train_by: i32, max_train: i32) -> bool {
+        if PhysicalInfo::default().value_mut_by_name(name).is_none() {
+            return false;
+        }
+        let mut trained = false;
+        if let Some(temporary) = self.temporary_physical.as_mut() {
+            if let Some(value) = temporary.value_mut_by_name(name) {
+                PhysicalInfo::train_value(value, train_by, max_train);
+            }
+            for (_, previous) in self
+                .physical_changes
+                .iter_mut()
+                .filter(|(changed, _)| changed.eq_ignore_ascii_case(name))
+            {
+                PhysicalInfo::train_value(previous, train_by, max_train);
+            }
+            trained = true;
+        }
+        if self.crew_member {
+            let definition_physical = self.definition_physical;
+            let info = self.info_physical.get_or_insert(definition_physical);
+            if let Some(value) = info.value_mut_by_name(name) {
+                PhysicalInfo::train_value(value, train_by, max_train);
+            }
+            trained = true;
+        }
+        if trained {
+            self.record_physicals();
+        }
+        trained
+    }
+
+    /// `FnResetPhysical` (C4Script.cpp:613-636).
+    fn reset_physical(&mut self, name: Option<&str>) -> bool {
+        // Only in temporary mode (C4Script.cpp:619).
+        if self.temporary_physical.is_none() {
+            return false;
+        }
+        if let Some(name) = name.filter(|name| !name.is_empty()) {
+            if PhysicalInfo::default().value_mut_by_name(name).is_none() {
+                return false;
+            }
+            // Undo the last registered change for this physical
+            // (C4InfoCore.cpp:339-351).
+            let Some(position) = self
+                .physical_changes
+                .iter()
+                .rposition(|(changed, _)| changed.eq_ignore_ascii_case(name))
+            else {
+                return false;
+            };
+            let (_, previous) = self.physical_changes.remove(position);
+            self.temporary_physical
+                .as_mut()
+                .map(|physical| physical.set_by_name(name, previous));
+            // Keep temporary mode while other changes remain or the set
+            // still deviates from the reference (C4Script.cpp:628;
+            // C4InfoCore.cpp:319-331).
+            let reference = self.resolved_physical(true);
+            let deviates = self
+                .temporary_physical
+                .map(|physical| physical != reference)
+                .unwrap_or(false);
+            if !self.physical_changes.is_empty() || deviates {
+                self.record_physicals();
+                return true;
+            }
+        }
+        // Full reset (C4Script.cpp:631-635).
+        self.temporary_physical = None;
+        self.physical_changes.clear();
+        self.record_physicals();
+        true
     }
 
     fn status(&self) -> ObjectStatus {
@@ -12054,6 +12461,7 @@ mod tests {
     use crate::ocf;
     use crate::ActionSpec;
     use crate::AudioCommand;
+    use lc_resources::C4_MAX_PHYSICAL;
     use proptest::prelude::*;
     use std::collections::HashMap;
     use std::fmt;
@@ -12134,6 +12542,7 @@ mod tests {
         "GetOwner",
         "GetPath",
         "GetPhase",
+        "GetPhysical",
         "GetPlayerByIndex",
         "GetPlayerCount",
         "GetPlayerID",
@@ -12176,6 +12585,7 @@ mod tests {
         "Random",
         "RemoveEffect",
         "RemoveObject",
+        "ResetPhysical",
         "SetAction",
         "SetActionData",
         "SetActionTargets",
@@ -12193,6 +12603,7 @@ mod tests {
         "SetObjectStatus",
         "SetOwner",
         "SetPhase",
+        "SetPhysical",
         "SetPlrKnowledge",
         "SetPosition",
         "SetR",
@@ -12207,6 +12618,7 @@ mod tests {
         "Sound",
         "SoundLevel",
         "Sqrt",
+        "TrainPhysical",
     ];
 
     #[test]
@@ -13239,6 +13651,7 @@ mod tests {
                 shape: None,
                 construction_offset: 0,
                 basement: 0,
+                physical: PhysicalInfo::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -13275,6 +13688,7 @@ mod tests {
                     shape: None,
                     construction_offset: 0,
                     basement: 0,
+                    physical: PhysicalInfo::default(),
                 },
             ),
             (
@@ -13289,6 +13703,7 @@ mod tests {
                     shape: None,
                     construction_offset: 0,
                     basement: 0,
+                    physical: PhysicalInfo::default(),
                 },
             ),
         ]);
@@ -13327,6 +13742,7 @@ mod tests {
                 shape: None,
                 construction_offset: 0,
                 basement: 0,
+                physical: PhysicalInfo::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -13378,6 +13794,7 @@ mod tests {
                 shape: None,
                 construction_offset: 0,
                 basement: 0,
+                physical: PhysicalInfo::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -13702,6 +14119,7 @@ mod tests {
                 shape: None,
                 construction_offset: 0,
                 basement: 0,
+                physical: PhysicalInfo::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -13737,6 +14155,7 @@ mod tests {
                 shape: None,
                 construction_offset: 0,
                 basement: 0,
+                physical: PhysicalInfo::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -13788,6 +14207,7 @@ mod tests {
                 shape: None,
                 construction_offset: 0,
                 basement: 0,
+                physical: PhysicalInfo::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -16497,6 +16917,90 @@ mod tests {
     }
 
     #[test]
+    fn physicals_host_fns_follow_cpp_mode_semantics() {
+        // SetPhysical/GetPhysical/TrainPhysical/ResetPhysical
+        // (C4Script.cpp:552-688) on a non-crew object with all-zero
+        // definition physicals.
+        let (result, outcome) = with_object_host_context(|| {
+            let walk = || Value::String("Walk".to_string());
+            // TrainPhysical with neither temp mode nor info trains nothing
+            // (C4Object.cpp:2136-2146).
+            assert_eq!(
+                train_physical(&[walk(), Value::Int(5), Value::Int(C4_MAX_PHYSICAL)])?,
+                Value::Bool(false)
+            );
+            // Unknown physical name fails (C4Script.cpp:562).
+            assert_eq!(
+                set_physical(&[
+                    Value::String("Bogus".to_string()),
+                    Value::Int(1),
+                    Value::Int(2)
+                ])?,
+                Value::Bool(false)
+            );
+            // PHYS_Current needs temp mode or an info (C4Script.cpp:569).
+            assert_eq!(
+                set_physical(&[walk(), Value::Int(1), Value::Int(0)])?,
+                Value::Bool(false)
+            );
+            // PHYS_Permanent needs an info (C4Script.cpp:576).
+            assert_eq!(
+                set_physical(&[walk(), Value::Int(1), Value::Int(1)])?,
+                Value::Bool(false)
+            );
+            // PHYS_Temporary reads need an info too (C4Script.cpp:680).
+            assert_eq!(get_physical(&[walk(), Value::Int(2)])?, Value::Nil);
+            // PHYS_Temporary write auto-enables temp mode
+            // (C4Script.cpp:587-596).
+            assert_eq!(
+                set_physical(&[walk(), Value::Int(50_000), Value::Int(2)])?,
+                Value::Bool(true)
+            );
+            assert_eq!(get_physical(&[walk(), Value::Int(0)])?, Value::Int(50_000));
+            // PHYS_Current works while temp mode is on (C4Script.cpp:567-572).
+            assert_eq!(
+                set_physical(&[walk(), Value::Int(60_000), Value::Int(0)])?,
+                Value::Bool(true)
+            );
+            // PHYS_StackTemporary registers the previous value
+            // (C4Script.cpp:593-596).
+            assert_eq!(
+                set_physical(&[walk(), Value::Int(70_000), Value::Int(3)])?,
+                Value::Bool(true)
+            );
+            // Training in temp mode trains the active value AND the stacked
+            // previous one (C4InfoCore.cpp:309-317).
+            assert_eq!(
+                train_physical(&[walk(), Value::Int(5), Value::Int(C4_MAX_PHYSICAL)])?,
+                Value::Bool(true)
+            );
+            assert_eq!(get_physical(&[walk(), Value::Int(0)])?, Value::Int(70_005));
+            // Named reset restores the last stacked value
+            // (C4Script.cpp:622-629; C4InfoCore.cpp:339-351) and keeps temp
+            // mode because the set still deviates from the reference.
+            assert_eq!(
+                reset_physical(&[Value::Nil, walk()])?,
+                Value::Bool(true)
+            );
+            assert_eq!(get_physical(&[walk(), Value::Int(0)])?, Value::Int(60_005));
+            // Full reset drops temp mode (C4Script.cpp:631-635)...
+            assert_eq!(reset_physical(&[])?, Value::Bool(true));
+            assert_eq!(get_physical(&[walk(), Value::Int(0)])?, Value::Int(0));
+            // ...and resetting without temp mode fails (C4Script.cpp:619).
+            assert_eq!(reset_physical(&[])?, Value::Bool(false));
+            Ok(Value::Nil)
+        });
+        result.expect("physicals host fns run");
+        // The scope records the final physical state for the engine — the
+        // cleared temp mode must overwrite any prior engine-side state.
+        let update = outcome.object_update.expect("physicals update recorded");
+        let physicals = update.physicals.expect("physicals state recorded");
+        assert_eq!(physicals.info, None);
+        assert_eq!(physicals.temporary, None);
+        assert_eq!(physicals.changes, Vec::<(String, i32)>::new());
+    }
+
+    #[test]
     fn do_energy_applies_delta_and_clamps() {
         let (result, outcome) = with_object_host_context(|| do_energy(&[Value::Int(-25)]));
         let value = result.expect("DoEnergy returns bool");
@@ -16746,6 +17250,7 @@ mod tests {
                 shape: Some(DefinitionRect::new(-10, -40, 20, 40)),
                 construction_offset: 0,
                 basement: 0,
+                physical: PhysicalInfo::default(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -16794,6 +17299,7 @@ mod tests {
             shape: Some(DefinitionRect::new(-10, -40, 20, 40)),
             construction_offset: 0,
             basement: 0,
+            physical: PhysicalInfo::default(),
         };
         let definitions = HashMap::from([
             ("Workshop".to_string(), workshop_metadata.clone()),
