@@ -3319,6 +3319,163 @@ pub fn draw_image(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
     }
 }
 
+/// 1:1 alpha-over blit of an `image` subregion to `(dest_x, dest_y)`.
+///
+/// Mirrors a C++ facet blit at native size (no stretch), as used by
+/// `C4GUI::Element::DrawBar`'s begin/middle/end slices (C4Gui.cpp:281-311).
+pub fn draw_image_strip(
+    surface: &mut Surface,
+    dest_x: i32,
+    dest_y: i32,
+    image: &ImageData,
+    src_x: u32,
+    src_y: u32,
+    src_w: u32,
+    src_h: u32,
+) {
+    let pixels = image.pixels();
+    let (iw, ih) = (image.width(), image.height());
+    let src_w = src_w.min(iw.saturating_sub(src_x));
+    let src_h = src_h.min(ih.saturating_sub(src_y));
+    for sy in 0..src_h {
+        let ty = dest_y + sy as i32;
+        if ty < 0 || ty >= surface.height() as i32 {
+            continue;
+        }
+        for sx in 0..src_w {
+            let tx = dest_x + sx as i32;
+            if tx < 0 || tx >= surface.width() as i32 {
+                continue;
+            }
+            let idx = (((src_y + sy) * iw + (src_x + sx)) * 4) as usize;
+            let Some(rgba) = pixels.get(idx..idx + 4) else {
+                continue;
+            };
+            let color = Color::new(rgba[0], rgba[1], rgba[2], rgba[3]);
+            if color.a == 0 {
+                continue;
+            }
+            let blended = if color.a == 255 {
+                color
+            } else {
+                let background = surface.get_pixel(tx as u32, ty as u32).unwrap_or_default();
+                blend_colors(color, background)
+            };
+            let _ = surface.set_pixel(tx as u32, ty as u32, blended);
+        }
+    }
+}
+
+/// Bilinearly samples `image` at GL_LINEAR coordinates for a stretch into
+/// `rect`, returning the interpolated RGBA at destination pixel `(dx, dy)`.
+///
+/// GL samples at `(d + 0.5) * src/dst - 0.5` with edge clamping; the C++
+/// engine stretches facets this way whenever scale != 1 and point filtering
+/// is off (StdGL.cpp:528-532, Config default PointFiltering=false).
+fn bilinear_sample(image: &ImageData, rect: &GuiRect, dx: u32, dy: u32) -> [f32; 4] {
+    let pixels = image.pixels();
+    let (sw, sh) = (image.width() as f32, image.height() as f32);
+    let texel = |x: i32, y: i32| -> [f32; 4] {
+        let x = x.clamp(0, image.width() as i32 - 1) as u32;
+        let y = y.clamp(0, image.height() as i32 - 1) as u32;
+        let idx = ((y * image.width() + x) * 4) as usize;
+        pixels
+            .get(idx..idx + 4)
+            .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32])
+            .unwrap_or([0.0; 4])
+    };
+    let u = (dx as f32 + 0.5) * sw / rect.size.width.max(1.0) - 0.5;
+    let v = (dy as f32 + 0.5) * sh / rect.size.height.max(1.0) - 0.5;
+    let (x0, y0) = (u.floor() as i32, v.floor() as i32);
+    let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+    let (p00, p10) = (texel(x0, y0), texel(x0 + 1, y0));
+    let (p01, p11) = (texel(x0, y0 + 1), texel(x0 + 1, y0 + 1));
+    std::array::from_fn(|c| {
+        let top = p00[c] * (1.0 - fx) + p10[c] * fx;
+        let bottom = p01[c] * (1.0 - fx) + p11[c] * fx;
+        top * (1.0 - fy) + bottom * fy
+    })
+}
+
+/// Stretches `image` into `rect` with GL_LINEAR-equivalent bilinear sampling
+/// and normal alpha-over blending.
+pub fn draw_image_bilinear(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || image.width() == 0 || image.height() == 0
+    {
+        return;
+    }
+    let dest_x = rect.origin.x.round() as i32;
+    let dest_y = rect.origin.y.round() as i32;
+    let dest_w = rect.size.width.round() as u32;
+    let dest_h = rect.size.height.round() as u32;
+    for dy in 0..dest_h {
+        let ty = dest_y + dy as i32;
+        if ty < 0 || ty >= surface.height() as i32 {
+            continue;
+        }
+        for dx in 0..dest_w {
+            let tx = dest_x + dx as i32;
+            if tx < 0 || tx >= surface.width() as i32 {
+                continue;
+            }
+            let s = bilinear_sample(image, rect, dx, dy);
+            let a = s[3].round().clamp(0.0, 255.0);
+            if a <= 0.0 {
+                continue;
+            }
+            let dst = surface.get_pixel(tx as u32, ty as u32).unwrap_or_default();
+            let af = a / 255.0;
+            let blend = |src: f32, dst: u8| -> u8 {
+                (src * af + dst as f32 * (1.0 - af)).round().clamp(0.0, 255.0) as u8
+            };
+            let out = Color::new(
+                blend(s[0], dst.r),
+                blend(s[1], dst.g),
+                blend(s[2], dst.b),
+                255,
+            );
+            let _ = surface.set_pixel(tx as u32, ty as u32, out);
+        }
+    }
+}
+
+/// Stretches `image` into `rect` with bilinear sampling and additive blending
+/// (`dst + src*alpha`, StdGL.cpp:908 `glBlendFunc(GL_SRC_ALPHA, GL_ONE)`), as
+/// used for the GUI button focus highlight (C4GuiButton.cpp:94-98).
+pub fn draw_image_bilinear_additive(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || image.width() == 0 || image.height() == 0
+    {
+        return;
+    }
+    let dest_x = rect.origin.x.round() as i32;
+    let dest_y = rect.origin.y.round() as i32;
+    let dest_w = rect.size.width.round() as u32;
+    let dest_h = rect.size.height.round() as u32;
+    for dy in 0..dest_h {
+        let ty = dest_y + dy as i32;
+        if ty < 0 || ty >= surface.height() as i32 {
+            continue;
+        }
+        for dx in 0..dest_w {
+            let tx = dest_x + dx as i32;
+            if tx < 0 || tx >= surface.width() as i32 {
+                continue;
+            }
+            let s = bilinear_sample(image, rect, dx, dy);
+            let af = s[3] / 255.0;
+            if af <= 0.0 {
+                continue;
+            }
+            let dst = surface.get_pixel(tx as u32, ty as u32).unwrap_or_default();
+            let add = |src: f32, dst: u8| -> u8 {
+                (dst as f32 + src * af).round().clamp(0.0, 255.0) as u8
+            };
+            let out = Color::new(add(s[0], dst.r), add(s[1], dst.g), add(s[2], dst.b), dst.a);
+            let _ = surface.set_pixel(tx as u32, ty as u32, out);
+        }
+    }
+}
+
 fn blend_colors(foreground: Color, background: Color) -> Color {
     if foreground.a == 0 {
         return background;
@@ -3376,6 +3533,51 @@ mod tests {
 
     fn test_font() -> Arc<dyn TextFont> {
         Arc::new(BitmapFont::new())
+    }
+
+    fn gray(v: u8) -> Color {
+        Color::new(v, v, v, 255)
+    }
+
+    #[test]
+    fn draw_image_strip_copies_subregion_one_to_one() {
+        // 4x1 source: columns 0..4 are 10,20,30,40 gray.
+        let pixels: Vec<u8> = [10u8, 20, 30, 40]
+            .iter()
+            .flat_map(|v| [*v, *v, *v, 255])
+            .collect();
+        let image = ImageData::new(4, 1, pixels);
+        let mut surface = Surface::new(2, 1, PixelFormat::Rgba8888);
+        draw_image_strip(&mut surface, 0, 0, &image, 2, 0, 2, 1);
+        assert_eq!(surface.get_pixel(0, 0), Some(gray(30)));
+        assert_eq!(surface.get_pixel(1, 0), Some(gray(40)));
+    }
+
+    #[test]
+    fn draw_image_bilinear_matches_gl_linear_sampling() {
+        // 2x1 black|white stretched to 4x1: GL_LINEAR samples at texel centres
+        // (i+0.5)*sw/dw - 0.5 with edge clamping -> 0, 64, 191, 255.
+        let pixels: Vec<u8> = [0u8, 255].iter().flat_map(|v| [*v, *v, *v, 255]).collect();
+        let image = ImageData::new(2, 1, pixels);
+        let mut surface = Surface::new(4, 1, PixelFormat::Rgba8888);
+        draw_image_bilinear(&mut surface, &GuiRect::new(0.0, 0.0, 4.0, 1.0), &image);
+        assert_eq!(surface.get_pixel(0, 0), Some(gray(0)));
+        assert_eq!(surface.get_pixel(1, 0), Some(gray(64)));
+        assert_eq!(surface.get_pixel(2, 0), Some(gray(191)));
+        assert_eq!(surface.get_pixel(3, 0), Some(gray(255)));
+    }
+
+    #[test]
+    fn draw_image_bilinear_additive_adds_weighted_source() {
+        // Additive blit per StdGL.cpp:908 glBlendFunc(GL_SRC_ALPHA, GL_ONE):
+        // dst = min(dst + src*a/255, 255).
+        let pixels: Vec<u8> = vec![100, 100, 100, 128];
+        let image = ImageData::new(1, 1, pixels);
+        let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
+        surface.set_pixel(0, 0, gray(200)).unwrap();
+        draw_image_bilinear_additive(&mut surface, &GuiRect::new(0.0, 0.0, 1.0, 1.0), &image);
+        // 200 + round(100*128/255) = 200 + 50 = 250
+        assert_eq!(surface.get_pixel(0, 0), Some(Color::new(250, 250, 250, 255)));
     }
 
     fn empty_sprites() -> Arc<HashMap<String, DefinitionSprite>> {

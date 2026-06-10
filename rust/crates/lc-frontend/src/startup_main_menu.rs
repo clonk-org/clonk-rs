@@ -1,7 +1,123 @@
-use crate::{draw_image, draw_text, fill_rect, GuiPoint, KeyCode};
+use crate::{draw_text, fill_rect, GuiPoint, ImageData, KeyCode};
 use lc_graphics::{Color, Surface, TextFont};
 use lc_gui::{ButtonTextures, Rect as GuiRect, Size as GuiSize};
 use std::sync::Arc;
+
+/// Integer rectangle in screen pixels (mirrors C++ `C4Rect`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IntRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// Pixel-exact C4StartupMainDlg geometry, all in C++ integer math.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MainMenuLayout {
+    /// Fullscreen-dialog client rect; child elements are offset by its origin
+    /// (C4GuiContainers.cpp:273-308).
+    pub client: IntRect,
+    /// The six big buttons, in screen coordinates.
+    pub buttons: [IntRect; 6],
+    /// Right-aligned anchor of the participants label (C4StartupMainDlg.cpp:69).
+    pub participants_anchor: (i32, i32),
+    /// Right-aligned x anchor of the trademark line (C4StartupMainDlg.cpp:72-74);
+    /// its y depends on the mini font's line height.
+    pub trademark_anchor_x: i32,
+}
+
+/// Computes the C4StartupMainDlg layout for a `w`x`h` screen.
+///
+/// Mirrors C4StartupMainDlg.cpp:42-46 (ComponentAligner stacking),
+/// C4GuiDialogs.cpp:813-822,858-862 (fullscreen dialog margins) and
+/// C4Gui.cpp:975-990,1041-1047 (aligner margin handling).
+pub fn main_menu_layout(w: i32, h: i32) -> MainMenuLayout {
+    // Fullscreen dialog margins: X = w/50 (2 below 500px), Y = h*2/75 (2 below
+    // 320px); the top margin adds the 50px reserved title strip
+    // (C4GUI_FullscreenDlg_TitleHeight = C4UpperBoardHeight, C4Gui.h:163).
+    let margin_x = if w < 500 { 2 } else { w / 50 };
+    let margin_y = if h < 320 { 2 } else { h * 2 / 75 };
+    let margin_top = 50 + margin_y;
+    let client = IntRect {
+        x: margin_x,
+        y: margin_top,
+        w: w - 2 * margin_x,
+        h: h - margin_top - margin_y,
+    };
+
+    // Button column: right 2/5 of the dialog bounds, inset Wdt/26 horizontally
+    // and 40 + Hgt/8 vertically; each button takes 40px (C4GUI_BigButtonHgt)
+    // plus a 2px aligner margin above and below (44px pitch).
+    let panel_w = w * 2 / 5;
+    let inset_x = w / 26;
+    let inset_y = 40 + h / 8;
+    let col_x = (w - panel_w) + inset_x;
+    let col_w = panel_w - 2 * inset_x;
+
+    let button_h = 40;
+    let padding = 2;
+    let mut buttons = [IntRect::default(); 6];
+    for (i, rect) in buttons.iter_mut().enumerate() {
+        *rect = IntRect {
+            x: client.x + col_x,
+            y: client.y + inset_y + padding + (i as i32) * (button_h + 2 * padding),
+            w: col_w,
+            h: button_h,
+        };
+    }
+
+    MainMenuLayout {
+        client,
+        buttons,
+        participants_anchor: (
+            client.x + client.w * 39 / 40,
+            client.y + client.h * 9 / 10,
+        ),
+        trademark_anchor_x: client.x + client.w,
+    }
+}
+
+/// Draws a horizontal three-slice bar from `image` into `rect` at native
+/// (1:1) pixel scale, mirroring C4GUI::Element::DrawBar's "exact bar" branch
+/// (C4Gui.cpp:283-311) with DynBarFacet slices: begin = left `border` columns,
+/// middle = the remainder tiled, end = right `border` columns drawn last,
+/// where `border` = texture height (C4Gui.cpp:101-107).
+pub fn draw_bar(surface: &mut Surface, rect: &GuiRect, image: &ImageData) {
+    let border = image.height();
+    let mid_w = image.width().saturating_sub(2 * border);
+    let (x0, y0) = (rect.origin.x as i32, rect.origin.y as i32);
+    let bar_w = rect.size.width as i32;
+    let end_show = (border / 3) as i32; // iRightShowLength (C4Gui.cpp:289)
+
+    // begin slice (clipped if the bar is narrower than the slice)
+    let begin_w = (border as i32).min(bar_w).max(0) as u32;
+    crate::draw_image_strip(surface, x0, y0, image, 0, 0, begin_w, border);
+
+    // middle tiles: advance by the full middle width even when clipped
+    if mid_w > 0 {
+        let mut ix = border as i32;
+        while ix < bar_w - end_show {
+            let tile_w = (mid_w as i32).min(bar_w - end_show - ix).max(0) as u32;
+            crate::draw_image_strip(surface, x0 + ix, y0, image, border, 0, tile_w, border);
+            ix += mid_w as i32;
+        }
+    }
+
+    // end slice, right-aligned, drawn last (overdraws middle tiles)
+    let end_w = (border as i32).min(bar_w).max(0) as u32;
+    let end_src_x = image.width() - border + (border - end_w);
+    crate::draw_image_strip(
+        surface,
+        x0 + bar_w - end_w as i32,
+        y0,
+        image,
+        end_src_x,
+        0,
+        end_w,
+        border,
+    );
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MainMenuItem {
@@ -23,10 +139,17 @@ pub enum MainMenuAction {
 pub struct StartupMainMenu {
     font: Arc<dyn TextFont>,
     textures: Option<ButtonTextures>,
+    /// GUIButtonHighlight, blitted additively over focused/hovered buttons
+    /// (C4GuiButton.cpp:94-98).
+    highlight: Option<ImageData>,
     buttons: Vec<MenuButton>,
     pointer_position: Option<GuiPoint>,
     pressed_index: Option<usize>,
+    /// Keyboard focus; the C++ dialog focuses the start button on first show
+    /// (C4StartupMainDlg.cpp:305-310).
     selected_index: Option<usize>,
+    /// Button under the mouse; highlights like focus but doesn't move it.
+    hover_index: Option<usize>,
     layout: Vec<GuiRect>,
     size: GuiSize,
 }
@@ -53,13 +176,20 @@ impl StartupMainMenu {
         Self {
             font,
             textures,
+            highlight: None,
             buttons,
             pointer_position: None,
             pressed_index: None,
-            selected_index: None,
+            selected_index: Some(0),
+            hover_index: None,
             layout: Vec::new(),
             size: GuiSize::new(0.0, 0.0),
         }
+    }
+
+    /// Sets the GUIButtonHighlight texture for the focus/hover overlay.
+    pub fn set_highlight_texture(&mut self, highlight: Option<ImageData>) {
+        self.highlight = highlight;
     }
 
     pub fn resize(&mut self, width: f32, height: f32) {
@@ -73,16 +203,13 @@ impl StartupMainMenu {
 
     pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
         self.pointer_position = position;
-        if let Some(point) = position {
-            if let Some(index) = self.hit_test(point) {
-                self.selected_index = Some(index);
-            }
-        }
+        self.hover_index = position.and_then(|point| self.hit_test(point));
     }
 
     pub fn pointer_left(&mut self) {
         self.pointer_position = None;
         self.pressed_index = None;
+        self.hover_index = None;
     }
 
     pub fn set_item_enabled(&mut self, item: MainMenuItem, enabled: bool) {
@@ -105,15 +232,15 @@ impl StartupMainMenu {
 
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<MainMenuAction> {
         self.pointer_position = Some(position);
+        // The mouse only hovers; it does not move the keyboard focus
+        // (C++ Button::MouseEnter sets fMouseOver, C4GuiButton.cpp:160-181).
         let mut actions = Vec::new();
-        if let Some(index) = self.hit_test(position) {
-            if self.selected_index != Some(index) {
-                self.selected_index = Some(index);
-                let item = self.buttons[index].item;
-                actions.push(MainMenuAction::SelectionChanged(item));
+        let hover = self.hit_test(position);
+        if hover != self.hover_index {
+            self.hover_index = hover;
+            if let Some(index) = hover {
+                actions.push(MainMenuAction::SelectionChanged(self.buttons[index].item));
             }
-        } else if self.selected_index.is_some() {
-            self.selected_index = None;
         }
         actions
     }
@@ -178,18 +305,25 @@ impl StartupMainMenu {
                 self.pressed_index,
                 self.buttons[index].enabled,
             );
-            self.draw_button(surface, rect, &self.buttons[index], state);
+            let highlighted = self.buttons[index].enabled
+                && (self.selected_index == Some(index) || self.hover_index == Some(index));
+            self.draw_button(surface, rect, &self.buttons[index], state, highlighted);
         }
 
-        // Participants label: plain white, right-aligned near the bottom-right
-        // (C++ Label at Wdt*39/40, Hgt*9/10, ARight; C4StartupMainDlg.cpp:69).
-        let width = self.size.width.max(1.0);
-        let height = self.size.height.max(1.0);
-        let font_size = (height * 0.03).clamp(14.0, 30.0);
+        let layout = main_menu_layout(
+            self.size.width.max(1.0) as i32,
+            self.size.height.max(1.0) as i32,
+        );
+        let white = Color::new(255, 255, 255, 255);
+
+        // Participants label: white TitleFont (22px), right-aligned at
+        // client*(39/40, 9/10) (C4StartupMainDlg.cpp:69-70).
+        let (anchor_x, anchor_y) = layout.participants_anchor;
+        let font_size = 22.0;
         let metrics = self.font.measure_text(participants_label, font_size);
         let label_rect = GuiRect::new(
-            (width * 39.0 / 40.0 - metrics.width).max(0.0),
-            height * 9.0 / 10.0,
+            (anchor_x as f32 - metrics.width).max(0.0),
+            anchor_y as f32,
             metrics.width,
             font_size,
         );
@@ -197,8 +331,33 @@ impl StartupMainMenu {
             surface,
             &label_rect,
             participants_label,
-            Color::new(255, 255, 255, 255),
+            white,
             font_size,
+            0.0,
+            self.font.as_ref(),
+        );
+
+        // Trademark line: white MiniFont (12px), right-aligned at the client
+        // rect's right edge, half a line above its bottom
+        // (C4StartupMainDlg.cpp:72-74; FANPROJECTTEXT/TRADEMARKTEXT,
+        // C4Version.h:21-22).
+        let trademark = "LegacyClonk is a fan project based on Clonk Rage.   \
+                         'Clonk' is a registered trademark of Matthes Bender.";
+        let mini_size = 12.0;
+        let mini_line_height = 18; // Endeavour 12px: (1303+308)*12/1024 (StdFont.cpp:351)
+        let metrics = self.font.measure_text(trademark, mini_size);
+        let label_rect = GuiRect::new(
+            (layout.trademark_anchor_x as f32 - metrics.width).max(0.0),
+            (layout.client.y + layout.client.h - mini_line_height / 2) as f32,
+            metrics.width,
+            mini_size,
+        );
+        draw_text(
+            surface,
+            &label_rect,
+            trademark,
+            white,
+            mini_size,
             0.0,
             self.font.as_ref(),
         );
@@ -233,17 +392,19 @@ impl StartupMainMenu {
         rect: &GuiRect,
         button: &MenuButton,
         state: ButtonVisualState,
+        highlighted: bool,
     ) {
+        // Plank: 3-slice bar of StartupBigButton(Down) at native scale
+        // (Button::DrawElement, C4GuiButton.cpp:81-89). The down state swaps
+        // the texture; disabled/selected do NOT change the plank in C++.
+        let pressed = state == ButtonVisualState::Pressed;
         if let Some(textures) = self.textures.as_ref() {
-            let image = match state {
-                ButtonVisualState::Disabled => {
-                    textures.disabled.as_ref().unwrap_or(&textures.normal)
-                }
-                ButtonVisualState::Pressed => &textures.pressed,
-                ButtonVisualState::Selected => &textures.selected,
-                ButtonVisualState::Normal => &textures.normal,
+            let image = if pressed {
+                &textures.pressed
+            } else {
+                &textures.normal
             };
-            draw_image(surface, rect, image);
+            draw_bar(surface, rect, image);
         } else {
             let color = match state {
                 ButtonVisualState::Disabled => Color::new(50, 60, 72, 220),
@@ -254,6 +415,20 @@ impl StartupMainMenu {
             fill_rect(surface, rect, color);
         }
 
+        // Focus/hover highlight: additive blit of GUIButtonHighlight stretched
+        // into (x0+5, y0+3, w-10, h-6) (C4GuiButton.cpp:94-98).
+        if highlighted {
+            if let Some(highlight) = self.highlight.as_ref() {
+                let overlay = GuiRect::new(
+                    rect.origin.x + 5.0,
+                    rect.origin.y + 3.0,
+                    rect.size.width - 10.0,
+                    rect.size.height - 6.0,
+                );
+                crate::draw_image_bilinear_additive(surface, &overlay, highlight);
+            }
+        }
+
         // C++ C4GUI button captions use C4GUI_ButtonFontClr = 0xffffff00 (yellow)
         // when active and C4GUI_InactCaptionFontClr = 0xffafafaf when disabled
         // (src/C4Gui.h:53-56, drawn at C4GuiButton.cpp:109).
@@ -262,13 +437,14 @@ impl StartupMainMenu {
         } else {
             Color::new(0xaf, 0xaf, 0xaf, 0xff)
         };
-        // C++ renders the button caption centred within the plank; centre both
-        // axes using the measured text extent.
+        // Caption centred at ((x0+x1)/2, (y0+y1-textHgt)/2), shifted +1,+1 when
+        // pressed (C4GuiButton.cpp:90-109).
+        let txt_off = if pressed { 1.0 } else { 0.0 };
         let font_size = (rect.size.height * 0.48).clamp(16.0, 32.0);
         let metrics = self.font.measure_text(button.label, font_size);
         let text_rect = GuiRect::new(
-            rect.origin.x + ((rect.size.width - metrics.width) * 0.5).max(0.0),
-            rect.origin.y + ((rect.size.height - font_size) * 0.5).max(0.0),
+            rect.origin.x + ((rect.size.width - metrics.width) * 0.5).max(0.0) + txt_off,
+            rect.origin.y + ((rect.size.height - font_size) * 0.5).max(0.0) + txt_off,
             metrics.width,
             font_size,
         );
@@ -297,30 +473,12 @@ impl StartupMainMenu {
             return Vec::new();
         }
 
-        let width = self.size.width.max(1.0);
-        let height = self.size.height.max(1.0);
-        // Mirror C++ C4StartupMainDlg (C4StartupMainDlg.cpp:44-65): the buttons
-        // occupy the right 2/5 of the width (`caMain.GetFromRight(Wdt*2/5)`),
-        // inset by `Wdt/26` horizontally and `40 + Hgt/8` vertically, stacked from
-        // the top at `C4GUI_BigButtonHgt` (40) each with `iButtonPadding` (2)
-        // between. The fixed C++ logical sizes are scaled to the render height so
-        // the layout matches across resolutions; the full-width planks float over
-        // the loader background (no panel backdrop).
-        let panel_x = width * 3.0 / 5.0;
-        let panel_w = width * 2.0 / 5.0;
-        let hmargin = width / 26.0;
-        let button_x = panel_x + hmargin;
-        let button_w = (panel_w - hmargin * 2.0).max(1.0);
-        let button_height = (height * 0.062).clamp(34.0, 60.0);
-        let padding = (button_height * 0.05).max(2.0);
-        let top_margin = height / 8.0 + button_height;
-
-        let mut rects = Vec::with_capacity(self.buttons.len());
-        for (idx, _) in self.buttons.iter().enumerate() {
-            let y = top_margin + idx as f32 * (button_height + padding);
-            rects.push(GuiRect::new(button_x, y, button_w, button_height));
-        }
-        rects
+        let layout = main_menu_layout(self.size.width.max(1.0) as i32, self.size.height.max(1.0) as i32);
+        layout
+            .buttons
+            .iter()
+            .map(|r| GuiRect::new(r.x as f32, r.y as f32, r.w as f32, r.h as f32))
+            .collect()
     }
 }
 
@@ -359,5 +517,81 @@ impl ButtonVisualState {
             return Self::Selected;
         }
         Self::Normal
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lc_graphics::PixelFormat;
+
+    /// Builds a `w`x`h` image whose pixel at column x is gray value `10*(x+1)`.
+    fn column_coded_image(w: u32, h: u32) -> crate::ImageData {
+        let pixels = (0..h)
+            .flat_map(|_| (0..w).flat_map(|x| [(10 * (x + 1)) as u8; 3].into_iter().chain([255u8])))
+            .collect();
+        crate::ImageData::new(w, h, pixels)
+    }
+
+    fn column_values(surface: &lc_graphics::Surface, y: u32, w: u32) -> Vec<u8> {
+        (0..w)
+            .map(|x| surface.get_pixel(x, y).map(|c| c.r).unwrap_or(0))
+            .collect()
+    }
+
+    // C4GUI::Element::DrawBar "exact bar" (C4Gui.cpp:283-311): begin slice 1:1,
+    // middle tiled until `w - end_w/3`, end slice right-aligned drawn last.
+    #[test]
+    fn draw_bar_three_slices_tiles_and_right_aligns_end() {
+        // 6x2 texture, border = height = 2: begin = cols 0-1 (10,20),
+        // middle = cols 2-3 (30,40), end = cols 4-5 (50,60).
+        let image = column_coded_image(6, 2);
+        let mut surface = lc_graphics::Surface::new(7, 2, PixelFormat::Rgba8888);
+        draw_bar(
+            &mut surface,
+            &GuiRect::new(0.0, 0.0, 7.0, 2.0),
+            &image,
+        );
+        // iRightShowLength = 2/3 = 0; tiles at x=2 (30,40), x=4 (30,40), x=6 (30);
+        // end drawn last right-aligned at x=5 -> overwrites cols 5,6 with 50,60.
+        assert_eq!(column_values(&surface, 0, 7), vec![10, 20, 30, 40, 30, 50, 60]);
+    }
+
+    // Pixel-exact C4StartupMainDlg geometry at 1280x720, derived from
+    // C4StartupMainDlg.cpp:42-46 (ComponentAligner math),
+    // C4GuiDialogs.cpp:813-822,858-862 (fullscreen dialog margins) and
+    // C4GuiContainers.cpp:301-308 (client rect = children offset), verified
+    // against an F9 screenshot of the C++ engine at 1280x720.
+    #[test]
+    fn layout_matches_cpp_main_dlg_at_1280x720() {
+        let layout = main_menu_layout(1280, 720);
+
+        // Fullscreen dialog client rect: margins x=1280/50=25, top=50+720*2/75=69.
+        assert_eq!(
+            (
+                layout.client.x,
+                layout.client.y,
+                layout.client.w,
+                layout.client.h
+            ),
+            (25, 69, 1230, 632)
+        );
+
+        // Buttons: right 2/5 panel inset by Wdt/26 and 40+Hgt/8, stacked at
+        // 40px height on a 44px pitch starting +2, offset by the client origin.
+        for (i, rect) in layout.buttons.iter().enumerate() {
+            assert_eq!(
+                (rect.x, rect.y, rect.w, rect.h),
+                (842, 201 + 44 * (i as i32), 414, 40),
+                "button {i}"
+            );
+        }
+
+        // Participants label anchor (right-aligned): client*(39/40, 9/10) + origin.
+        assert_eq!(layout.participants_anchor, (1224, 637));
+
+        // Trademark label anchor: right edge of the client rect.
+        assert_eq!(layout.trademark_anchor_x, 1255);
+        assert_eq!(layout.client.y + layout.client.h, 701);
     }
 }

@@ -171,6 +171,13 @@ struct Cli {
         help = "Headless: boot the sandbox, advance --test-frames frames, render one in-game frame to a PNG at PATH, and exit (no window). For visual rendering-parity checks."
     )]
     dump_frame: Option<std::path::PathBuf>,
+
+    #[arg(
+        long = "dump-menu-frame",
+        value_name = "PATH",
+        help = "Headless: boot to the startup main menu, render one frame to a PNG at PATH, and exit (no window). For menu rendering-parity checks."
+    )]
+    dump_menu_frame: Option<std::path::PathBuf>,
 }
 
 struct RuntimeConfig {
@@ -287,6 +294,9 @@ struct FrontendAssets {
     about_background: Option<ImageData>,
     logo: Option<ImageData>,
     button_textures: Option<ButtonTextures>,
+    /// GUIButtonHighlight.png — additive focus/hover overlay for GUI buttons
+    /// (C4GraphicsResource.cpp:1089-1093, C4GuiButton.cpp:94-98).
+    button_highlight: Option<ImageData>,
     base_sprites: HashMap<String, DefinitionSprite>,
     cursor_atlas: Arc<CursorAtlas>,
     hud_graphics: Arc<HudGraphics>,
@@ -301,6 +311,7 @@ impl FrontendAssets {
         let mut about_background = None;
         let mut logo = None;
         let mut button_textures = None;
+        let mut button_highlight = None;
         let mut sprites = HashMap::new();
         let mut cursor_atlas = CursorAtlas::empty();
         let mut hud_graphics = HudGraphics::default();
@@ -330,6 +341,10 @@ impl FrontendAssets {
                         .ok()
                         .map(Self::image_to_data);
                     button_textures = Self::load_button_textures(&graphics);
+                    button_highlight = graphics
+                        .load_image("GUIButtonHighlight.png")
+                        .ok()
+                        .map(Self::image_to_data);
                     if let Ok(sprite) = graphics.load_image("Crew.png") {
                         let image = Self::image_to_data(sprite);
                         sprites.insert(
@@ -362,6 +377,7 @@ impl FrontendAssets {
             about_background,
             logo,
             button_textures,
+            button_highlight,
             base_sprites: sprites,
             cursor_atlas: Arc::new(cursor_atlas),
             hud_graphics: Arc::new(hud_graphics),
@@ -713,6 +729,57 @@ fn run_sandbox_dump(
     Ok(())
 }
 
+/// Headless: boot to the startup main menu (`AppMode::Menu`), render one frame to
+/// the renderer's CPU surface, and write it as a PNG. Counterpart of
+/// `run_sandbox_dump` for startup-menu rendering-parity checks against the C++
+/// engine's F9 screenshots.
+fn run_menu_dump(
+    dump_path: &std::path::Path,
+    app_paths: Option<&Arc<AppPaths>>,
+    runtime: RuntimeConfig,
+) -> Result<()> {
+    use std::thread;
+    use std::time::Duration;
+
+    let mut app = GameApp::new(
+        1280,
+        720,
+        AudioOptions::default(),
+        app_paths.map(|v| &**v),
+        runtime,
+    )
+    .context("failed to initialise app for menu dump")?;
+
+    // Pump update() until async boot finishes and the startup menu is shown.
+    let mut booted = false;
+    for _ in 0..600 {
+        if matches!(app.mode, AppMode::Menu) {
+            booted = true;
+            break;
+        }
+        app.update().context("update while booting to menu")?;
+        thread::sleep(Duration::from_millis(2));
+    }
+    if !booted {
+        anyhow::bail!("app did not reach the startup menu for menu dump");
+    }
+
+    // Render one frame to the CPU surface, then encode it.
+    let (w, h) = {
+        let s = app.graphics.surface();
+        (s.width(), s.height())
+    };
+    let mut frame = vec![0u8; (w as usize) * (h as usize) * 4];
+    app.render(&mut frame)
+        .context("failed to render menu frame")?;
+    let png = encode_surface_to_png(app.graphics.surface())
+        .context("failed to encode menu frame to PNG")?;
+    std::fs::write(dump_path, &png)
+        .with_context(|| format!("failed to write {}", dump_path.display()))?;
+    println!("wrote {} ({}x{}, startup menu)", dump_path.display(), w, h);
+    Ok(())
+}
+
 fn run_integration_test(
     scenario_path: &std::path::Path,
     test_frames: u32,
@@ -838,6 +905,11 @@ fn main() -> Result<()> {
     // Handle headless frame dump: render one in-game sandbox frame to PNG and exit.
     if let Some(dump_path) = &cli.dump_frame {
         return run_sandbox_dump(dump_path, cli.test_frames, app_paths.as_ref(), runtime);
+    }
+
+    // Handle headless menu dump: render one startup-menu frame to PNG and exit.
+    if let Some(dump_path) = &cli.dump_menu_frame {
+        return run_menu_dump(dump_path, app_paths.as_ref(), runtime);
     }
 
     let event_loop = EventLoop::new();
@@ -4267,9 +4339,12 @@ fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
 }
 
 fn load_participants_label(paths: Option<&AppPaths>) -> String {
-    let mut label = String::from("Participants: ");
+    // C++ C4StartupMainDlg::UpdateParticipants (C4StartupMainDlg.cpp:174-200):
+    // IDS_DESC_PLRS ("Players: ") + comma-separated player file basenames
+    // without extension, or IDS_DLG_NOPLAYERSSELECTED ("none selected").
+    let mut label = String::from("Players: ");
     let Some(paths) = paths else {
-        label.push_str("None");
+        label.push_str("none selected");
         return label;
     };
 
@@ -4282,12 +4357,12 @@ fn load_participants_label(paths: Option<&AppPaths>) -> String {
                 .unwrap_or_default();
             let mut names = Vec::new();
             for entry in entries {
-                let trimmed = entry.trim();
+                let trimmed = entry.trim().trim_matches('"');
                 if trimmed.is_empty() {
                     continue;
                 }
                 let name = Path::new(trimmed)
-                    .file_name()
+                    .file_stem()
                     .and_then(|value| value.to_str())
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| trimmed.to_string());
@@ -4296,7 +4371,7 @@ fn load_participants_label(paths: Option<&AppPaths>) -> String {
                 }
             }
             if names.is_empty() {
-                label.push_str("None");
+                label.push_str("none selected");
             } else {
                 label.push_str(&names.join(", "));
             }
@@ -4309,7 +4384,7 @@ fn load_participants_label(paths: Option<&AppPaths>) -> String {
                     "failed to read participants from config"
                 );
             }
-            label.push_str("None");
+            label.push_str("none selected");
         }
     }
 
@@ -4367,6 +4442,7 @@ impl GameApp {
             .map_err(|err| anyhow!("failed to create startup menu: {err}"))?;
         menu.resize(width as f32, height as f32);
         let mut main_menu = StartupMainMenu::new(assets.font_arc(), button_textures.clone());
+        main_menu.set_highlight_texture(assets.button_highlight.clone());
         main_menu.resize(width as f32, height as f32);
         let participants_label = load_participants_label(paths);
         let main_menu_state = MainMenuState::new(main_menu, participants_label);
@@ -8313,40 +8389,52 @@ fn render_startup_frame(
             _ => assets.menu_background(),
         };
         if let Some(background) = background {
+            // C++ stretches the loader fullscreen with GL_LINEAR filtering
+            // (C4Facet::DrawFullScreen, C4Facet.cpp:130-140; StdGL.cpp:528-532).
             let rect = lc_gui::Rect::from_origin_size(
                 GuiPoint::new(0.0, 0.0),
                 lc_gui::Size::new(surface.width() as f32, surface.height() as f32),
             );
-            draw_image(surface, &rect, &background);
+            lc_frontend::draw_image_bilinear(surface, &rect, &background);
         } else {
             surface.fill(Color::opaque(16, 28, 52));
         }
         match view {
             StartupView::MainMenu => {
                 main_menu.render(surface);
-                // Draw logo and version info (matching C++ implementation)
+                // Logo + version line per C4StartupMainDlg::DrawElement
+                // (C4StartupMainDlg.cpp:111-122), in C++ integer math.
                 if let Some(logo) = assets.logo() {
-                    let width = surface.width() as f32;
-                    let height = surface.height() as f32;
-                    let logo_zoom = 0.4;
-                    let logo_width = logo.width() as f32 * logo_zoom;
-                    let logo_height = logo.height() as f32 * logo_zoom;
-                    let logo_x = width * 30.0 / 31.0 - logo_width;
-                    let logo_y = height / 21.0 - 5.0;
-                    let logo_rect = lc_gui::Rect::new(logo_x, logo_y, logo_width, logo_height);
-                    draw_image(surface, &logo_rect, &logo);
+                    let width = surface.width() as i32;
+                    let height = surface.height() as i32;
+                    let logo_w = (0.4 * logo.width() as f32) as i32;
+                    let logo_h = (0.4 * logo.height() as f32) as i32;
+                    let logo_x = width * 30 / 31 - logo_w;
+                    let logo_y = height / 21 - 5;
+                    let logo_rect = lc_gui::Rect::new(
+                        logo_x as f32,
+                        logo_y as f32,
+                        logo_w as f32,
+                        logo_h as f32,
+                    );
+                    lc_frontend::draw_image_bilinear(surface, &logo_rect, &logo);
 
-                    // Draw version text
-                    let version_text = "Version 4.9.11.0";
-                    let version_x = width * 39.0 / 40.0 - 150.0;
-                    let version_y = height / 18.0 + logo_height;
+                    // "Version %s" with C4VERSION = "4.9.11.0 [362] " (trailing
+                    // space from empty C4VERSIONEXTRA/C4BUILDOPT, C4Version.h:55),
+                    // right-aligned at (Wdt*39/40, Hgt/18 + 0.4*logoHgt) in the
+                    // GUI TextFont, white, markup on.
+                    let version_text = "Version 4.9.11.0 [362] ";
+                    let version_x = (width * 39 / 40) as f32;
+                    let version_y = (height / 18 + logo_h) as f32;
                     let version_color = Color::new(255, 255, 255, 255);
-                    assets.font_arc().draw_text(
+                    let font = assets.font_arc();
+                    let metrics = font.measure_text(version_text, 14.0);
+                    font.draw_text(
                         surface,
-                        version_x,
+                        version_x - metrics.width,
                         version_y,
                         version_text,
-                        18.0,
+                        14.0,
                         version_color,
                     );
                 }
@@ -8373,6 +8461,16 @@ fn render_startup_frame(
             let font = assets.font_arc();
             dialog.render(surface, font.as_ref());
         }
+
+        // The C++ blit shader applies the gamma ramp to every fragment
+        // (StdGL.cpp:1082-1086, UseShaderGamma default on); with the default
+        // ramp this only lifts pure black by one step, so applying it once to
+        // the finished frame is equivalent up to blending rounding.
+        static STARTUP_GAMMA: std::sync::OnceLock<lc_graphics::GammaRamp> =
+            std::sync::OnceLock::new();
+        STARTUP_GAMMA
+            .get_or_init(lc_graphics::GammaRamp::standard)
+            .apply_to_surface(surface);
     }
     let surface = graphics.surface();
     let pixels = surface.pixels();
@@ -10078,6 +10176,32 @@ mod tests {
         let decoded = decode_audio(audio).expect("sandbox music decodes");
         assert_eq!(decoded.sample_rate, 44_100);
         assert!(decoded.frames.len() > 2_000);
+    }
+
+    #[test]
+    fn menu_dump_writes_main_menu_png_at_1280x720() {
+        lc_core::logging::init();
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("menu.png");
+        run_menu_dump(
+            &path,
+            None,
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("dump startup menu frame");
+
+        // PNG IHDR: width/height are big-endian u32 at byte offsets 16/20.
+        let png = fs::read(&path).expect("read dumped png");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "not a PNG file");
+        let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
+        let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+        assert_eq!((width, height), (1280, 720));
     }
 
     #[test]
