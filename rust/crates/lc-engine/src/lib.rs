@@ -1270,6 +1270,12 @@ pub struct EnvironmentSettings {
     pub wind_variation: i32,
     #[serde(default)]
     pub wind_period: u32,
+    /// Scenario wind bounds (C4SWeather::Default: Wind.Set(0, 70, -100, 100),
+    /// C4Scenario.cpp:377).
+    #[serde(default = "default_wind_min")]
+    pub wind_min: i32,
+    #[serde(default = "default_wind_max")]
+    pub wind_max: i32,
     #[serde(default)]
     pub temperature: i32,
     #[serde(default)]
@@ -1331,6 +1337,8 @@ impl EnvironmentSettings {
             wind_update_interval: 0,
             wind_variation: 0,
             wind_period: 0,
+            wind_min: -100,
+            wind_max: 100,
             temperature: 0,
             climate: 0,
             temperature_variation: 0,
@@ -1619,11 +1627,27 @@ impl EnvironmentSettings {
         ambient.saturating_add(offset).clamp(-100, 100)
     }
 
-    pub fn advance_frame(&mut self, rng: &mut LcgRng) {
+    /// `C4Weather::Execute` (C4Weather.cpp:72-101): season and temperature
+    /// step on Tick35 frames; `TargetWind = C4S.Weather.Wind.Evaluate()` on
+    /// Tick1000 frames — ONE synced draw,
+    /// `BoundBy(Std + Random(2*Rnd + 1) - Rnd, Min, Max)`
+    /// (C4SVal::Evaluate, C4Scenario.cpp:43-46); the wind itself steps ±1
+    /// toward the target on Tick10 frames.
+    pub fn advance_frame(&mut self, rng: &mut LcgRng, frame: u64) {
         self.refresh_runtime_fields();
-        self.update_season();
-        self.update_temperature_from_season();
-        self.update_wind(rng);
+        if frame % 35 == 0 {
+            self.update_season();
+            self.update_temperature_from_season();
+        }
+        if frame % 1000 == 0 {
+            let rnd = self.wind_variation.max(0);
+            self.wind_target = (self.base_wind + rng.random(2 * rnd + 1) - rnd)
+                .clamp(self.wind_min, self.wind_max);
+        }
+        if frame % 10 == 0 {
+            self.wind = (self.wind + (self.wind_target - self.wind).signum())
+                .clamp(self.wind_min, self.wind_max);
+        }
         self.advance_time_of_day();
         self.update_precipitation_runtime();
     }
@@ -1640,16 +1664,12 @@ impl EnvironmentSettings {
         self.precipitation
     }
 
-    pub fn wind_force(&self, frame: u64) -> i32 {
-        if self.wind_variation == 0 || self.wind_period == 0 {
-            return self.wind;
-        }
-
-        let period = self.wind_period as f32;
-        let phase = (frame % self.wind_period as u64) as f32 / period;
-        let angle = phase * core::f32::consts::TAU;
-        let delta = (self.wind_variation as f32 * angle.sin()).round() as i32;
-        self.wind.saturating_add(delta)
+    /// The current wind (C4Weather::Wind). State advances in `advance_frame`
+    /// with the C++ tick gates; the frame parameter is kept for caller
+    /// compatibility but the value is the mutable wind state, matching
+    /// `C4Weather::GetWind` minus the position-dependent tunnel check.
+    pub fn wind_force(&self, _frame: u64) -> i32 {
+        self.wind
     }
 
     fn apply_to_velocity(&self, velocity: &mut FixedVec2, frame: u64) {
@@ -1716,33 +1736,6 @@ impl EnvironmentSettings {
         }
     }
 
-    fn update_wind(&mut self, rng: &mut LcgRng) {
-        if self.wind_update_interval == 0 || self.wind_variation == 0 {
-            self.wind_target = self.wind;
-            self.wind_update_timer = 0;
-        } else {
-            if self.wind_update_timer == 0 {
-                self.wind_update_timer = self.wind_update_interval;
-                let range = self.wind_variation.abs();
-                let offset = rng.gen_range(-range..=range);
-                let lower = self.base_wind.saturating_sub(range);
-                let upper = self.base_wind.saturating_add(range);
-                let target = self.base_wind.saturating_add(offset).clamp(lower, upper);
-                self.wind_target = target;
-            }
-
-            if self.wind_update_timer > 0 {
-                self.wind_update_timer -= 1;
-            }
-        }
-
-        if self.wind < self.wind_target {
-            self.wind = self.wind.saturating_add(1);
-        } else if self.wind > self.wind_target {
-            self.wind = self.wind.saturating_sub(1);
-        }
-    }
-
     pub fn refresh_runtime_fields(&mut self) {
         if self.wind_update_interval == 0 && self.wind_variation > 0 {
             self.wind_update_interval = Self::default_wind_update_interval(self.wind_period);
@@ -1785,6 +1778,14 @@ pub struct EnvironmentFrame {
     pub precipitation: i32,
     #[serde(default)]
     pub sky_color: Option<RgbColor>,
+}
+
+fn default_wind_min() -> i32 {
+    -100
+}
+
+fn default_wind_max() -> i32 {
+    100
 }
 
 fn default_owner() -> i32 {
@@ -9900,7 +9901,7 @@ impl Engine {
             }
         }
         self.weather_events.clear();
-        self.environment.advance_frame(&mut self.rng);
+        self.environment.advance_frame(&mut self.rng, frame);
         self.tick_weather_events(frame)?;
         if let Some(sky) = &mut self.sky {
             sky.advance(&self.environment);
@@ -18086,7 +18087,6 @@ mod tests {
     use crate::scenario::{ClearObjectObjective, CreateObjectObjective, ScenarioObjectives};
     use lc_resources::MaterialLibrary;
     use lc_script::Value;
-    use rand::Rng;
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
@@ -19688,46 +19688,33 @@ global func MenuCommand(state, kind, selection)
 
     #[test]
     fn wind_variation_adjusts_over_time() {
+        // C4Weather::Execute (C4Weather.cpp:94-100): TargetWind re-evaluates
+        // only on Tick1000 frames with ONE synced draw
+        // (BoundBy(Std + Random(2*Rnd+1) - Rnd, Min, Max), C4SVal::Evaluate,
+        // C4Scenario.cpp:43-46); the wind steps ±1 toward the target on
+        // Tick10 frames.
         let mut settings = EnvironmentSettings::new(5).with_wind_variation(4, 40);
-        let base = settings.base_wind;
         let mut rng = LcgRng::seed_from_u64(1234);
         let mut probe = rng.clone();
-        let range = settings.wind_variation.abs();
-        let lower = base.saturating_sub(range);
-        let upper = base.saturating_add(range);
-        let offset = probe.gen_range(-range..=range);
-        let expected_target = (base.saturating_add(offset)).clamp(lower, upper);
+        let rnd = settings.wind_variation.max(0);
+        let expected_target = (settings.base_wind + probe.random(2 * rnd + 1) - rnd)
+            .clamp(settings.wind_min, settings.wind_max);
 
-        settings.advance_frame(&mut rng);
+        // Off-gate frames consume no draws and leave the wind unchanged.
+        let before = settings;
+        settings.advance_frame(&mut rng, 7);
+        assert_eq!(settings.wind, before.wind);
+        assert_eq!(settings.wind_target, before.wind_target);
 
+        settings.advance_frame(&mut rng, 1000);
         assert_eq!(
             settings.wind_target, expected_target,
-            "wind target should move within configured variation"
+            "Tick1000 target evaluation"
         );
-        assert_eq!(
-            settings.wind_update_timer,
-            settings.wind_update_interval.saturating_sub(1),
-            "timer should be primed for next update cycle"
-        );
-
-        if expected_target > base {
-            assert_eq!(
-                settings.wind,
-                base.saturating_add(1),
-                "wind should move toward higher target by one unit"
-            );
-        } else if expected_target < base {
-            assert_eq!(
-                settings.wind,
-                base.saturating_sub(1),
-                "wind should move toward lower target by one unit"
-            );
-        } else {
-            assert_eq!(
-                settings.wind, base,
-                "wind should remain unchanged when target equals base"
-            );
-        }
+        assert_eq!(rng, probe, "exactly one synced draw");
+        let stepped = (before.wind + (expected_target - before.wind).signum())
+            .clamp(settings.wind_min, settings.wind_max);
+        assert_eq!(settings.wind, stepped, "Tick10 step toward the target");
     }
 
     const SET_BRIDGE_ACTION_DATA_SCRIPT: &str = r#"
@@ -22913,12 +22900,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
     #[test]
     fn wind_force_respects_variation_and_period() {
+        // The old sinusoidal per-frame wind model was an invention; the C++
+        // wind is mutable state (C4Weather::Wind) advanced by the tick gates
+        // in advance_frame - wind_force reports it regardless of the frame.
         let settings = EnvironmentSettings::new(2).with_wind_variation(4, 4);
-        assert_eq!(settings.wind_force(0), 2);
-        assert_eq!(settings.wind_force(1), 6);
-        assert_eq!(settings.wind_force(2), 2);
-        assert_eq!(settings.wind_force(3), -2);
-        assert_eq!(settings.wind_force(4), 2);
+        for frame in 0..5 {
+            assert_eq!(settings.wind_force(frame), 2);
+        }
 
         let default_period = EnvironmentSettings::new(1).with_wind_variation(3, 0);
         assert_eq!(default_period.wind_variation, 3);
@@ -22982,7 +22970,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .with_season(0)
             .with_temperature(-40);
         let mut rng = LcgRng::seed_from_u64(0);
-        settings.advance_frame(&mut rng);
+        settings.advance_frame(&mut rng, 35);
         assert_eq!(settings.temperature, -39);
     }
 
@@ -22994,7 +22982,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .with_season(50)
             .with_temperature(40);
         let mut rng = LcgRng::seed_from_u64(1);
-        settings.advance_frame(&mut rng);
+        settings.advance_frame(&mut rng, 35);
         assert_eq!(settings.temperature, 39);
     }
 

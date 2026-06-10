@@ -53,6 +53,9 @@
           "commands": []
         },
         "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
         "fixed_position": {
           "x": -458752,
           "y": -262013
@@ -68,7 +71,9 @@
         "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
-        "temperature": -1,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 0,
         "climate": 0,
         "temperature_variation": 0,
         "temperature_period": 0,
@@ -89,7 +94,7 @@
         "no_gamma": true
       },
       "wind_force": 0,
-      "ambient_temperature": -1,
+      "ambient_temperature": 0,
       "precipitation": 0,
       "sky_color": {
         "r": 12,
@@ -682,6 +687,9 @@
           "commands": []
         },
         "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
         "fixed_position": {
           "x": -262144,
           "y": -524026
@@ -697,7 +705,9 @@
         "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
-        "temperature": -2,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 0,
         "climate": 0,
         "temperature_variation": 0,
         "temperature_period": 0,
@@ -718,7 +728,7 @@
         "no_gamma": true
       },
       "wind_force": 0,
-      "ambient_temperature": -2,
+      "ambient_temperature": 0,
       "precipitation": 0,
       "sky_color": {
         "r": 12,
@@ -1311,6 +1321,9 @@
           "commands": []
         },
         "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
         "fixed_position": {
           "x": -65536,
           "y": -786039
@@ -1359,7 +1372,10 @@
         "command_stack": {
           "commands": []
         },
-        "local_vars": {}
+        "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1
       }
     ],
     "environment": {
@@ -1371,7 +1387,9 @@
         "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
-        "temperature": -3,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 0,
         "climate": 0,
         "temperature_variation": 0,
         "temperature_period": 0,
@@ -1392,7 +1410,7 @@
         "no_gamma": true
       },
       "wind_force": 0,
-      "ambient_temperature": -3,
+      "ambient_temperature": 0,
       "precipitation": 0,
       "sky_color": {
         "r": 12,
@@ -1985,6 +2003,9 @@
           "commands": []
         },
         "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
         "fixed_position": {
           "x": 131072,
           "y": -1048052
@@ -2034,6 +2055,9 @@
           "commands": []
         },
         "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
         "fixed_position": {
           "x": -393216,
           "y": 131
@@ -2049,7 +2073,9 @@
         "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
-        "temperature": -4,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 0,
         "climate": 0,
         "temperature_variation": 0,
         "temperature_period": 0,
@@ -2070,7 +2096,7 @@
         "no_gamma": true
       },
       "wind_force": 0,
-      "ambient_temperature": -4,
+      "ambient_temperature": 0,
       "precipitation": 0,
       "sky_color": {
         "r": 12,
@@ -2663,6 +2689,9 @@
           "commands": []
         },
         "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
         "fixed_position": {
           "x": 327680,
           "y": -1310065
@@ -2712,6 +2741,9 @@
           "commands": []
         },
         "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
         "fixed_position": {
           "x": -393216,
           "y": 262
@@ -2727,7 +2759,9 @@
         "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
-        "temperature": -5,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 0,
         "climate": 0,
         "temperature_variation": 0,
         "temperature_period": 0,
@@ -2748,7 +2782,7 @@
         "no_gamma": true
       },
       "wind_force": 0,
-      "ambient_temperature": -5,
+      "ambient_temperature": 0,
       "precipitation": 0,
       "sky_color": {
         "r": 12,
@@ -3306,7 +3340,9 @@
         "wind_update_interval": 0,
         "wind_variation": 0,
         "wind_period": 0,
-        "temperature": -6,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 0,
         "climate": 0,
         "temperature_variation": 0,
         "temperature_period": 0,
@@ -3327,7 +3363,7 @@
         "no_gamma": true
       },
       "wind_force": 0,
-      "ambient_temperature": -6,
+      "ambient_temperature": 0,
       "precipitation": 0,
       "sky_color": {
         "r": 12,

@@ -53,26 +53,31 @@
           "commands": []
         },
         "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
         "fixed_position": {
-          "x": 1315962,
+          "x": 1314652,
           "y": 262275
         },
         "fixed_velocity": {
-          "x": 5242,
+          "x": 3932,
           "y": 131
         }
       }
     ],
     "environment": {
       "settings": {
-        "wind": 5,
+        "wind": 6,
         "base_wind": 6,
-        "wind_target": 2,
-        "wind_update_timer": 3,
+        "wind_target": 6,
+        "wind_update_timer": 0,
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 17,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 18,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
@@ -96,8 +101,2272 @@
         "precipitation_strength": 0,
         "no_gamma": true
       },
-      "wind_force": 8,
-      "ambient_temperature": 26,
+      "wind_force": 6,
+      "ambient_temperature": 27,
+      "precipitation": 42,
+      "sky_color": {
+        "r": 24,
+        "g": 48,
+        "b": 96
+      }
+    },
+    "sky": null,
+    "weather_events": [],
+    "global_effects": [],
+    "particles": [],
+    "players": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": [],
+    "landscape": {
+      "width": 96,
+      "surface": [
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18
+      ],
+      "liquids": [
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        }
+      ],
+      "solid_materials": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "default_solid_material": null,
+      "default_liquid_material": null
+    },
+    "rng": {
+      "hold": 1383819543,
+      "count": 502,
+      "rnd3_buf": [
+        0,
+        1,
+        0,
+        -1,
+        0,
+        -1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0,
+        -1,
+        -1,
+        1,
+        1,
+        0,
+        1,
+        -1,
+        1,
+        1,
+        1,
+        0,
+        -1,
+        0,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        0,
+        -1,
+        1,
+        1,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -1,
+        -1,
+        0,
+        0,
+        0,
+        1,
+        -1,
+        -1,
+        0,
+        0,
+        0,
+        -1,
+        -1,
+        1,
+        0,
+        1,
+        -1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        -1,
+        1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        -1,
+        0,
+        1,
+        -1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        -1,
+        -1,
+        -1,
+        1,
+        0,
+        -1,
+        1,
+        0,
+        0,
+        -1,
+        1,
+        0,
+        1,
+        0,
+        1,
+        0,
+        -1,
+        0,
+        -1,
+        1,
+        0,
+        0,
+        1,
+        1,
+        -1,
+        -1,
+        0,
+        0,
+        -1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0,
+        -1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        1,
+        1,
+        -1,
+        -1,
+        -1,
+        1,
+        0,
+        1,
+        -1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        -1,
+        1,
+        0,
+        1,
+        -1,
+        0,
+        -1,
+        1,
+        0,
+        -1,
+        1,
+        -1,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        0,
+        0,
+        -1,
+        0,
+        0,
+        1,
+        1,
+        0,
+        -1,
+        1,
+        1,
+        1,
+        -1,
+        1,
+        1,
+        1,
+        -1,
+        -1,
+        -1,
+        -1,
+        1,
+        0,
+        0,
+        -1,
+        1,
+        1,
+        1,
+        1,
+        -1,
+        0,
+        0,
+        0,
+        1,
+        -1,
+        1,
+        1,
+        -1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        -1,
+        -1,
+        -1,
+        1,
+        -1,
+        0,
+        1,
+        0,
+        1,
+        0,
+        0,
+        -1,
+        -1,
+        0,
+        1,
+        0,
+        1,
+        0,
+        0,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        1,
+        -1,
+        -1,
+        -1,
+        1,
+        -1,
+        1,
+        0,
+        0,
+        -1,
+        0,
+        1,
+        -1,
+        1,
+        0,
+        -1,
+        1,
+        -1,
+        0,
+        0,
+        -1,
+        1,
+        1,
+        -1,
+        1,
+        0,
+        1,
+        1,
+        1,
+        1,
+        -1,
+        -1,
+        0,
+        1,
+        -1,
+        -1,
+        0,
+        0,
+        -1,
+        0,
+        -1,
+        0,
+        -1,
+        0,
+        0,
+        -1,
+        1,
+        0,
+        1,
+        1,
+        -1,
+        0,
+        1,
+        1,
+        -1,
+        1,
+        1,
+        -1,
+        1,
+        0,
+        0,
+        1,
+        -1,
+        -1,
+        -1,
+        0,
+        0,
+        1,
+        0,
+        -1,
+        0,
+        1,
+        -1,
+        -1,
+        0,
+        0,
+        -1,
+        -1,
+        0,
+        1,
+        1,
+        -1,
+        0,
+        1,
+        -1,
+        1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        1,
+        -1,
+        -1,
+        1,
+        0,
+        -1,
+        -1,
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        1,
+        0,
+        1,
+        1,
+        -1,
+        1,
+        -1,
+        0,
+        -1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        1,
+        0,
+        -1,
+        -1,
+        0,
+        -1,
+        -1,
+        -1,
+        0,
+        0,
+        -1,
+        0,
+        1,
+        1,
+        0,
+        0,
+        -1,
+        0,
+        1,
+        0,
+        1,
+        1,
+        -1,
+        0,
+        -1,
+        -1,
+        -1,
+        0,
+        0,
+        -1,
+        -1,
+        1,
+        -1,
+        0,
+        1,
+        0,
+        1,
+        1,
+        -1,
+        0,
+        -1,
+        -1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -1,
+        0,
+        1,
+        -1,
+        0,
+        1,
+        0,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        -1,
+        1,
+        1,
+        0,
+        -1,
+        1,
+        -1,
+        -1,
+        0,
+        1,
+        0,
+        0,
+        -1,
+        1,
+        0,
+        -1,
+        1,
+        -1,
+        1,
+        1,
+        0,
+        0,
+        -1,
+        1,
+        1,
+        0,
+        1,
+        0,
+        1,
+        0,
+        1,
+        -1,
+        -1,
+        1,
+        -1,
+        1,
+        0,
+        1,
+        0,
+        -1,
+        -1,
+        -1,
+        -1,
+        0,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        0,
+        0,
+        1,
+        -1,
+        1,
+        0,
+        -1,
+        -1,
+        -1,
+        1,
+        0,
+        1,
+        -1,
+        -1,
+        0
+      ],
+      "rnd3_ptr": 0
+    },
+    "surfaces": [],
+    "hud": {
+      "players": [],
+      "messages": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Drifter": 1
+    },
+    "transfer_zones": [],
+    "menu_requests": [],
+    "audio": []
+  },
+  {
+    "frame": 2,
+    "game_over": false,
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
+    "objects": [
+      {
+        "id": 1,
+        "definition_id": "Drifter",
+        "position": {
+          "x": 20,
+          "y": 4
+        },
+        "velocity": {
+          "x": 0,
+          "y": 0
+        },
+        "rotation": 0,
+        "energy": 72,
+        "damage": 0,
+        "magic_energy": 0,
+        "magic_capacity": 0,
+        "construction": 100000,
+        "action": {
+          "name": "Idle",
+          "phase": 2,
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
+        },
+        "direction": 0,
+        "command_direction": 0,
+        "action_procedure": null,
+        "effects": [],
+        "vertices": [],
+        "container": null,
+        "contents": [],
+        "components": {},
+        "status": "normal",
+        "owner": 1,
+        "category": 1,
+        "crew_member": false,
+        "alive": true,
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        },
+        "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
+        "fixed_position": {
+          "x": 1322516,
+          "y": 262537
+        },
+        "fixed_velocity": {
+          "x": 7864,
+          "y": 262
+        }
+      }
+    ],
+    "environment": {
+      "settings": {
+        "wind": 6,
+        "base_wind": 6,
+        "wind_target": 6,
+        "wind_update_timer": 0,
+        "wind_update_interval": 4,
+        "wind_variation": 4,
+        "wind_period": 9,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 18,
+        "climate": 0,
+        "temperature_variation": 12,
+        "temperature_period": 18,
+        "temperature_phase": 6,
+        "time_of_day": 1270,
+        "time_speed": 35,
+        "precipitation": 42,
+        "sky_color": {
+          "r": 24,
+          "g": 48,
+          "b": 96
+        },
+        "season": 0,
+        "year_speed": 0,
+        "season_delay": 0,
+        "temperature_range": 30,
+        "lightning": 0,
+        "meteorite": 0,
+        "volcano": 0,
+        "earthquake": 0,
+        "precipitation_strength": 0,
+        "no_gamma": true
+      },
+      "wind_force": 6,
+      "ambient_temperature": 29,
+      "precipitation": 42,
+      "sky_color": {
+        "r": 24,
+        "g": 48,
+        "b": 96
+      }
+    },
+    "sky": null,
+    "weather_events": [],
+    "global_effects": [],
+    "particles": [],
+    "players": [],
+    "crew_selection": {},
+    "crew_roles": {},
+    "known_crew_owners": [],
+    "eliminated_crew_owners": [],
+    "landscape": {
+      "width": 96,
+      "surface": [
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18,
+        18
+      ],
+      "liquids": [
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        },
+        {
+          "segments": []
+        }
+      ],
+      "solid_materials": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "default_solid_material": null,
+      "default_liquid_material": null
+    },
+    "rng": {
+      "hold": 199458686,
+      "count": 503,
+      "rnd3_buf": [
+        0,
+        1,
+        0,
+        -1,
+        0,
+        -1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0,
+        -1,
+        -1,
+        1,
+        1,
+        0,
+        1,
+        -1,
+        1,
+        1,
+        1,
+        0,
+        -1,
+        0,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        0,
+        -1,
+        1,
+        1,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -1,
+        -1,
+        0,
+        0,
+        0,
+        1,
+        -1,
+        -1,
+        0,
+        0,
+        0,
+        -1,
+        -1,
+        1,
+        0,
+        1,
+        -1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        -1,
+        1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        -1,
+        0,
+        1,
+        -1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        -1,
+        -1,
+        -1,
+        1,
+        0,
+        -1,
+        1,
+        0,
+        0,
+        -1,
+        1,
+        0,
+        1,
+        0,
+        1,
+        0,
+        -1,
+        0,
+        -1,
+        1,
+        0,
+        0,
+        1,
+        1,
+        -1,
+        -1,
+        0,
+        0,
+        -1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0,
+        -1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        1,
+        1,
+        -1,
+        -1,
+        -1,
+        1,
+        0,
+        1,
+        -1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        -1,
+        1,
+        0,
+        1,
+        -1,
+        0,
+        -1,
+        1,
+        0,
+        -1,
+        1,
+        -1,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        0,
+        0,
+        -1,
+        0,
+        0,
+        1,
+        1,
+        0,
+        -1,
+        1,
+        1,
+        1,
+        -1,
+        1,
+        1,
+        1,
+        -1,
+        -1,
+        -1,
+        -1,
+        1,
+        0,
+        0,
+        -1,
+        1,
+        1,
+        1,
+        1,
+        -1,
+        0,
+        0,
+        0,
+        1,
+        -1,
+        1,
+        1,
+        -1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        -1,
+        -1,
+        -1,
+        1,
+        -1,
+        0,
+        1,
+        0,
+        1,
+        0,
+        0,
+        -1,
+        -1,
+        0,
+        1,
+        0,
+        1,
+        0,
+        0,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        1,
+        -1,
+        -1,
+        -1,
+        1,
+        -1,
+        1,
+        0,
+        0,
+        -1,
+        0,
+        1,
+        -1,
+        1,
+        0,
+        -1,
+        1,
+        -1,
+        0,
+        0,
+        -1,
+        1,
+        1,
+        -1,
+        1,
+        0,
+        1,
+        1,
+        1,
+        1,
+        -1,
+        -1,
+        0,
+        1,
+        -1,
+        -1,
+        0,
+        0,
+        -1,
+        0,
+        -1,
+        0,
+        -1,
+        0,
+        0,
+        -1,
+        1,
+        0,
+        1,
+        1,
+        -1,
+        0,
+        1,
+        1,
+        -1,
+        1,
+        1,
+        -1,
+        1,
+        0,
+        0,
+        1,
+        -1,
+        -1,
+        -1,
+        0,
+        0,
+        1,
+        0,
+        -1,
+        0,
+        1,
+        -1,
+        -1,
+        0,
+        0,
+        -1,
+        -1,
+        0,
+        1,
+        1,
+        -1,
+        0,
+        1,
+        -1,
+        1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        1,
+        -1,
+        -1,
+        1,
+        0,
+        -1,
+        -1,
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        1,
+        0,
+        1,
+        1,
+        -1,
+        1,
+        -1,
+        0,
+        -1,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        1,
+        0,
+        -1,
+        -1,
+        0,
+        -1,
+        -1,
+        -1,
+        0,
+        0,
+        -1,
+        0,
+        1,
+        1,
+        0,
+        0,
+        -1,
+        0,
+        1,
+        0,
+        1,
+        1,
+        -1,
+        0,
+        -1,
+        -1,
+        -1,
+        0,
+        0,
+        -1,
+        -1,
+        1,
+        -1,
+        0,
+        1,
+        0,
+        1,
+        1,
+        -1,
+        0,
+        -1,
+        -1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -1,
+        0,
+        1,
+        -1,
+        0,
+        1,
+        0,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        -1,
+        1,
+        1,
+        0,
+        -1,
+        1,
+        -1,
+        -1,
+        0,
+        1,
+        0,
+        0,
+        -1,
+        1,
+        0,
+        -1,
+        1,
+        -1,
+        1,
+        1,
+        0,
+        0,
+        -1,
+        1,
+        1,
+        0,
+        1,
+        0,
+        1,
+        0,
+        1,
+        -1,
+        -1,
+        1,
+        -1,
+        1,
+        0,
+        1,
+        0,
+        -1,
+        -1,
+        -1,
+        -1,
+        0,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        0,
+        0,
+        1,
+        -1,
+        1,
+        0,
+        -1,
+        -1,
+        -1,
+        1,
+        0,
+        1,
+        -1,
+        -1,
+        0
+      ],
+      "rnd3_ptr": 0
+    },
+    "surfaces": [],
+    "hud": {
+      "players": [],
+      "messages": []
+    },
+    "controls": [],
+    "network_packets": [],
+    "definition_categories": {
+      "Drifter": 1
+    },
+    "transfer_zones": [],
+    "menu_requests": [],
+    "audio": []
+  },
+  {
+    "frame": 3,
+    "game_over": false,
+    "physics": {
+      "gravity": 1,
+      "max_fall_speed": 12,
+      "max_rise_speed": -20,
+      "max_horizontal_speed": 12
+    },
+    "objects": [
+      {
+        "id": 1,
+        "definition_id": "Drifter",
+        "position": {
+          "x": 20,
+          "y": 4
+        },
+        "velocity": {
+          "x": 0,
+          "y": 0
+        },
+        "rotation": 0,
+        "energy": 72,
+        "damage": 0,
+        "magic_energy": 0,
+        "magic_capacity": 0,
+        "construction": 100000,
+        "action": {
+          "name": "Idle",
+          "phase": 3,
+          "ticks": 0,
+          "data": 0,
+          "target": null,
+          "target2": null
+        },
+        "direction": 0,
+        "command_direction": 0,
+        "action_procedure": null,
+        "effects": [],
+        "vertices": [],
+        "container": null,
+        "contents": [],
+        "components": {},
+        "status": "normal",
+        "owner": 1,
+        "category": 1,
+        "crew_member": false,
+        "alive": true,
+        "graphics_overlays": [],
+        "command_queue": [],
+        "command_stack": {
+          "commands": []
+        },
+        "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
+        "fixed_position": {
+          "x": 1334312,
+          "y": 262930
+        },
+        "fixed_velocity": {
+          "x": 11796,
+          "y": 393
+        }
+      }
+    ],
+    "environment": {
+      "settings": {
+        "wind": 6,
+        "base_wind": 6,
+        "wind_target": 6,
+        "wind_update_timer": 0,
+        "wind_update_interval": 4,
+        "wind_variation": 4,
+        "wind_period": 9,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 18,
+        "climate": 0,
+        "temperature_variation": 12,
+        "temperature_period": 18,
+        "temperature_phase": 6,
+        "time_of_day": 1305,
+        "time_speed": 35,
+        "precipitation": 42,
+        "sky_color": {
+          "r": 24,
+          "g": 48,
+          "b": 96
+        },
+        "season": 0,
+        "year_speed": 0,
+        "season_delay": 0,
+        "temperature_range": 30,
+        "lightning": 0,
+        "meteorite": 0,
+        "volcano": 0,
+        "earthquake": 0,
+        "precipitation_strength": 0,
+        "no_gamma": true
+      },
+      "wind_force": 6,
+      "ambient_temperature": 30,
       "precipitation": 42,
       "sky_color": {
         "r": 24,
@@ -1127,7 +3396,7 @@
     "audio": []
   },
   {
-    "frame": 2,
+    "frame": 4,
     "game_over": false,
     "physics": {
       "gravity": 1,
@@ -1140,7 +3409,7 @@
         "id": 1,
         "definition_id": "Drifter",
         "position": {
-          "x": 20,
+          "x": 21,
           "y": 4
         },
         "velocity": {
@@ -1155,7 +3424,7 @@
         "construction": 100000,
         "action": {
           "name": "Idle",
-          "phase": 2,
+          "phase": 4,
           "ticks": 0,
           "data": 0,
           "target": null,
@@ -1180,31 +3449,36 @@
           "commands": []
         },
         "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
         "fixed_position": {
-          "x": 1326446,
-          "y": 262537
+          "x": 1350040,
+          "y": 263454
         },
         "fixed_velocity": {
-          "x": 10484,
-          "y": 262
+          "x": 15728,
+          "y": 524
         }
       }
     ],
     "environment": {
       "settings": {
-        "wind": 4,
+        "wind": 6,
         "base_wind": 6,
-        "wind_target": 2,
-        "wind_update_timer": 2,
+        "wind_target": 6,
+        "wind_update_timer": 0,
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 16,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 18,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
         "temperature_phase": 6,
-        "time_of_day": 1270,
+        "time_of_day": 1340,
         "time_speed": 35,
         "precipitation": 42,
         "sky_color": {
@@ -1223,8 +3497,8 @@
         "precipitation_strength": 0,
         "no_gamma": true
       },
-      "wind_force": 8,
-      "ambient_temperature": 27,
+      "wind_force": 6,
+      "ambient_temperature": 29,
       "precipitation": 42,
       "sky_color": {
         "r": 24,
@@ -2254,7 +4528,7 @@
     "audio": []
   },
   {
-    "frame": 3,
+    "frame": 5,
     "game_over": false,
     "physics": {
       "gravity": 1,
@@ -2267,7 +4541,7 @@
         "id": 1,
         "definition_id": "Drifter",
         "position": {
-          "x": 20,
+          "x": 21,
           "y": 4
         },
         "velocity": {
@@ -2282,7 +4556,7 @@
         "construction": 100000,
         "action": {
           "name": "Idle",
-          "phase": 3,
+          "phase": 5,
           "ticks": 0,
           "data": 0,
           "target": null,
@@ -2307,31 +4581,36 @@
           "commands": []
         },
         "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
         "fixed_position": {
-          "x": 1340862,
-          "y": 262930
+          "x": 1369700,
+          "y": 264109
         },
         "fixed_velocity": {
-          "x": 14416,
-          "y": 393
+          "x": 19660,
+          "y": 655
         }
       }
     ],
     "environment": {
       "settings": {
-        "wind": 3,
+        "wind": 6,
         "base_wind": 6,
-        "wind_target": 2,
-        "wind_update_timer": 1,
+        "wind_target": 6,
+        "wind_update_timer": 0,
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 15,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 18,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
         "temperature_phase": 6,
-        "time_of_day": 1305,
+        "time_of_day": 1375,
         "time_speed": 35,
         "precipitation": 42,
         "sky_color": {
@@ -3381,7 +5660,7 @@
     "audio": []
   },
   {
-    "frame": 4,
+    "frame": 6,
     "game_over": false,
     "physics": {
       "gravity": 1,
@@ -3409,7 +5688,7 @@
         "construction": 100000,
         "action": {
           "name": "Idle",
-          "phase": 4,
+          "phase": 6,
           "ticks": 0,
           "data": 0,
           "target": null,
@@ -3434,31 +5713,36 @@
           "commands": []
         },
         "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
         "fixed_position": {
-          "x": 1357244,
-          "y": 263454
+          "x": 1393292,
+          "y": 264895
         },
         "fixed_velocity": {
-          "x": 16382,
-          "y": 524
+          "x": 23592,
+          "y": 786
         }
       }
     ],
     "environment": {
       "settings": {
-        "wind": 2,
+        "wind": 6,
         "base_wind": 6,
-        "wind_target": 2,
+        "wind_target": 6,
         "wind_update_timer": 0,
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 14,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 18,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
         "temperature_phase": 6,
-        "time_of_day": 1340,
+        "time_of_day": 1410,
         "time_speed": 35,
         "precipitation": 42,
         "sky_color": {
@@ -3477,8 +5761,8 @@
         "precipitation_strength": 0,
         "no_gamma": true
       },
-      "wind_force": 3,
-      "ambient_temperature": 25,
+      "wind_force": 6,
+      "ambient_temperature": 24,
       "precipitation": 42,
       "sky_color": {
         "r": 24,
@@ -4508,2260 +6792,6 @@
     "audio": []
   },
   {
-    "frame": 5,
-    "game_over": false,
-    "physics": {
-      "gravity": 1,
-      "max_fall_speed": 12,
-      "max_rise_speed": -20,
-      "max_horizontal_speed": 12
-    },
-    "objects": [
-      {
-        "id": 1,
-        "definition_id": "Drifter",
-        "position": {
-          "x": 21,
-          "y": 4
-        },
-        "velocity": {
-          "x": 0,
-          "y": 0
-        },
-        "rotation": 0,
-        "energy": 72,
-        "damage": 0,
-        "magic_energy": 0,
-        "magic_capacity": 0,
-        "construction": 100000,
-        "action": {
-          "name": "Idle",
-          "phase": 5,
-          "ticks": 0,
-          "data": 0,
-          "target": null,
-          "target2": null
-        },
-        "direction": 0,
-        "command_direction": 0,
-        "action_procedure": null,
-        "effects": [],
-        "vertices": [],
-        "container": null,
-        "contents": [],
-        "components": {},
-        "status": "normal",
-        "owner": 1,
-        "category": 1,
-        "crew_member": false,
-        "alive": true,
-        "graphics_overlays": [],
-        "command_queue": [],
-        "command_stack": {
-          "commands": []
-        },
-        "local_vars": {},
-        "fixed_position": {
-          "x": 1374936,
-          "y": 264109
-        },
-        "fixed_velocity": {
-          "x": 17692,
-          "y": 655
-        }
-      }
-    ],
-    "environment": {
-      "settings": {
-        "wind": 3,
-        "base_wind": 6,
-        "wind_target": 7,
-        "wind_update_timer": 3,
-        "wind_update_interval": 4,
-        "wind_variation": 4,
-        "wind_period": 9,
-        "temperature": 13,
-        "climate": 0,
-        "temperature_variation": 12,
-        "temperature_period": 18,
-        "temperature_phase": 6,
-        "time_of_day": 1375,
-        "time_speed": 35,
-        "precipitation": 42,
-        "sky_color": {
-          "r": 24,
-          "g": 48,
-          "b": 96
-        },
-        "season": 0,
-        "year_speed": 0,
-        "season_delay": 0,
-        "temperature_range": 30,
-        "lightning": 0,
-        "meteorite": 0,
-        "volcano": 0,
-        "earthquake": 0,
-        "precipitation_strength": 0,
-        "no_gamma": true
-      },
-      "wind_force": 2,
-      "ambient_temperature": 22,
-      "precipitation": 42,
-      "sky_color": {
-        "r": 24,
-        "g": 48,
-        "b": 96
-      }
-    },
-    "sky": null,
-    "weather_events": [],
-    "global_effects": [],
-    "particles": [],
-    "players": [],
-    "crew_selection": {},
-    "crew_roles": {},
-    "known_crew_owners": [],
-    "eliminated_crew_owners": [],
-    "landscape": {
-      "width": 96,
-      "surface": [
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18
-      ],
-      "liquids": [
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        }
-      ],
-      "solid_materials": [
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null
-      ],
-      "default_solid_material": null,
-      "default_liquid_material": null
-    },
-    "rng": {
-      "hold": 775092998,
-      "count": 511,
-      "rnd3_buf": [
-        0,
-        1,
-        0,
-        -1,
-        0,
-        -1,
-        0,
-        0,
-        1,
-        0,
-        0,
-        1,
-        1,
-        1,
-        0,
-        -1,
-        -1,
-        1,
-        1,
-        0,
-        1,
-        -1,
-        1,
-        1,
-        1,
-        0,
-        -1,
-        0,
-        -1,
-        -1,
-        -1,
-        -1,
-        -1,
-        0,
-        -1,
-        1,
-        1,
-        0,
-        1,
-        1,
-        1,
-        1,
-        1,
-        1,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        -1,
-        -1,
-        0,
-        0,
-        0,
-        1,
-        -1,
-        -1,
-        0,
-        0,
-        0,
-        -1,
-        -1,
-        1,
-        0,
-        1,
-        -1,
-        1,
-        1,
-        0,
-        0,
-        0,
-        -1,
-        1,
-        0,
-        1,
-        1,
-        0,
-        1,
-        0,
-        0,
-        0,
-        1,
-        -1,
-        0,
-        1,
-        -1,
-        0,
-        0,
-        1,
-        0,
-        0,
-        -1,
-        -1,
-        -1,
-        1,
-        0,
-        -1,
-        1,
-        0,
-        0,
-        -1,
-        1,
-        0,
-        1,
-        0,
-        1,
-        0,
-        -1,
-        0,
-        -1,
-        1,
-        0,
-        0,
-        1,
-        1,
-        -1,
-        -1,
-        0,
-        0,
-        -1,
-        0,
-        1,
-        1,
-        0,
-        1,
-        0,
-        -1,
-        0,
-        1,
-        1,
-        0,
-        1,
-        1,
-        1,
-        -1,
-        -1,
-        -1,
-        1,
-        0,
-        1,
-        -1,
-        1,
-        1,
-        0,
-        0,
-        0,
-        -1,
-        1,
-        0,
-        1,
-        -1,
-        0,
-        -1,
-        1,
-        0,
-        -1,
-        1,
-        -1,
-        0,
-        0,
-        1,
-        1,
-        1,
-        0,
-        0,
-        0,
-        0,
-        1,
-        1,
-        0,
-        0,
-        -1,
-        0,
-        0,
-        1,
-        1,
-        0,
-        -1,
-        1,
-        1,
-        1,
-        -1,
-        1,
-        1,
-        1,
-        -1,
-        -1,
-        -1,
-        -1,
-        1,
-        0,
-        0,
-        -1,
-        1,
-        1,
-        1,
-        1,
-        -1,
-        0,
-        0,
-        0,
-        1,
-        -1,
-        1,
-        1,
-        -1,
-        1,
-        1,
-        1,
-        1,
-        1,
-        -1,
-        -1,
-        -1,
-        1,
-        -1,
-        0,
-        1,
-        0,
-        1,
-        0,
-        0,
-        -1,
-        -1,
-        0,
-        1,
-        0,
-        1,
-        0,
-        0,
-        -1,
-        -1,
-        -1,
-        -1,
-        -1,
-        1,
-        -1,
-        -1,
-        -1,
-        1,
-        -1,
-        1,
-        0,
-        0,
-        -1,
-        0,
-        1,
-        -1,
-        1,
-        0,
-        -1,
-        1,
-        -1,
-        0,
-        0,
-        -1,
-        1,
-        1,
-        -1,
-        1,
-        0,
-        1,
-        1,
-        1,
-        1,
-        -1,
-        -1,
-        0,
-        1,
-        -1,
-        -1,
-        0,
-        0,
-        -1,
-        0,
-        -1,
-        0,
-        -1,
-        0,
-        0,
-        -1,
-        1,
-        0,
-        1,
-        1,
-        -1,
-        0,
-        1,
-        1,
-        -1,
-        1,
-        1,
-        -1,
-        1,
-        0,
-        0,
-        1,
-        -1,
-        -1,
-        -1,
-        0,
-        0,
-        1,
-        0,
-        -1,
-        0,
-        1,
-        -1,
-        -1,
-        0,
-        0,
-        -1,
-        -1,
-        0,
-        1,
-        1,
-        -1,
-        0,
-        1,
-        -1,
-        1,
-        0,
-        1,
-        1,
-        0,
-        1,
-        1,
-        0,
-        1,
-        1,
-        1,
-        0,
-        0,
-        1,
-        1,
-        -1,
-        -1,
-        1,
-        0,
-        -1,
-        -1,
-        1,
-        0,
-        1,
-        0,
-        0,
-        0,
-        1,
-        0,
-        1,
-        0,
-        1,
-        1,
-        -1,
-        1,
-        -1,
-        0,
-        -1,
-        0,
-        1,
-        1,
-        0,
-        1,
-        0,
-        -1,
-        -1,
-        -1,
-        -1,
-        -1,
-        1,
-        0,
-        -1,
-        -1,
-        0,
-        -1,
-        -1,
-        -1,
-        0,
-        0,
-        -1,
-        0,
-        1,
-        1,
-        0,
-        0,
-        -1,
-        0,
-        1,
-        0,
-        1,
-        1,
-        -1,
-        0,
-        -1,
-        -1,
-        -1,
-        0,
-        0,
-        -1,
-        -1,
-        1,
-        -1,
-        0,
-        1,
-        0,
-        1,
-        1,
-        -1,
-        0,
-        -1,
-        -1,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        -1,
-        0,
-        1,
-        -1,
-        0,
-        1,
-        0,
-        0,
-        1,
-        1,
-        0,
-        1,
-        0,
-        0,
-        0,
-        -1,
-        1,
-        1,
-        0,
-        -1,
-        1,
-        -1,
-        -1,
-        0,
-        1,
-        0,
-        0,
-        -1,
-        1,
-        0,
-        -1,
-        1,
-        -1,
-        1,
-        1,
-        0,
-        0,
-        -1,
-        1,
-        1,
-        0,
-        1,
-        0,
-        1,
-        0,
-        1,
-        -1,
-        -1,
-        1,
-        -1,
-        1,
-        0,
-        1,
-        0,
-        -1,
-        -1,
-        -1,
-        -1,
-        0,
-        -1,
-        -1,
-        -1,
-        -1,
-        -1,
-        -1,
-        0,
-        0,
-        1,
-        -1,
-        1,
-        0,
-        -1,
-        -1,
-        -1,
-        1,
-        0,
-        1,
-        -1,
-        -1,
-        0
-      ],
-      "rnd3_ptr": 0
-    },
-    "surfaces": [],
-    "hud": {
-      "players": [],
-      "messages": []
-    },
-    "controls": [],
-    "network_packets": [],
-    "definition_categories": {
-      "Drifter": 1
-    },
-    "transfer_zones": [],
-    "menu_requests": [],
-    "audio": []
-  },
-  {
-    "frame": 6,
-    "game_over": false,
-    "physics": {
-      "gravity": 1,
-      "max_fall_speed": 12,
-      "max_rise_speed": -20,
-      "max_horizontal_speed": 12
-    },
-    "objects": [
-      {
-        "id": 1,
-        "definition_id": "Drifter",
-        "position": {
-          "x": 21,
-          "y": 4
-        },
-        "velocity": {
-          "x": 0,
-          "y": 0
-        },
-        "rotation": 0,
-        "energy": 72,
-        "damage": 0,
-        "magic_energy": 0,
-        "magic_capacity": 0,
-        "construction": 100000,
-        "action": {
-          "name": "Idle",
-          "phase": 6,
-          "ticks": 0,
-          "data": 0,
-          "target": null,
-          "target2": null
-        },
-        "direction": 0,
-        "command_direction": 0,
-        "action_procedure": null,
-        "effects": [],
-        "vertices": [],
-        "container": null,
-        "contents": [],
-        "components": {},
-        "status": "normal",
-        "owner": 1,
-        "category": 1,
-        "crew_member": false,
-        "alive": true,
-        "graphics_overlays": [],
-        "command_queue": [],
-        "command_stack": {
-          "commands": []
-        },
-        "local_vars": {},
-        "fixed_position": {
-          "x": 1393283,
-          "y": 264895
-        },
-        "fixed_velocity": {
-          "x": 18347,
-          "y": 786
-        }
-      }
-    ],
-    "environment": {
-      "settings": {
-        "wind": 4,
-        "base_wind": 6,
-        "wind_target": 7,
-        "wind_update_timer": 2,
-        "wind_update_interval": 4,
-        "wind_variation": 4,
-        "wind_period": 9,
-        "temperature": 12,
-        "climate": 0,
-        "temperature_variation": 12,
-        "temperature_period": 18,
-        "temperature_phase": 6,
-        "time_of_day": 1410,
-        "time_speed": 35,
-        "precipitation": 42,
-        "sky_color": {
-          "r": 24,
-          "g": 48,
-          "b": 96
-        },
-        "season": 0,
-        "year_speed": 0,
-        "season_delay": 0,
-        "temperature_range": 30,
-        "lightning": 0,
-        "meteorite": 0,
-        "volcano": 0,
-        "earthquake": 0,
-        "precipitation_strength": 0,
-        "no_gamma": true
-      },
-      "wind_force": 1,
-      "ambient_temperature": 18,
-      "precipitation": 42,
-      "sky_color": {
-        "r": 24,
-        "g": 48,
-        "b": 96
-      }
-    },
-    "sky": null,
-    "weather_events": [],
-    "global_effects": [],
-    "particles": [],
-    "players": [],
-    "crew_selection": {},
-    "crew_roles": {},
-    "known_crew_owners": [],
-    "eliminated_crew_owners": [],
-    "landscape": {
-      "width": 96,
-      "surface": [
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18,
-        18
-      ],
-      "liquids": [
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        },
-        {
-          "segments": []
-        }
-      ],
-      "solid_materials": [
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null
-      ],
-      "default_solid_material": null,
-      "default_liquid_material": null
-    },
-    "rng": {
-      "hold": 4048373169,
-      "count": 512,
-      "rnd3_buf": [
-        0,
-        1,
-        0,
-        -1,
-        0,
-        -1,
-        0,
-        0,
-        1,
-        0,
-        0,
-        1,
-        1,
-        1,
-        0,
-        -1,
-        -1,
-        1,
-        1,
-        0,
-        1,
-        -1,
-        1,
-        1,
-        1,
-        0,
-        -1,
-        0,
-        -1,
-        -1,
-        -1,
-        -1,
-        -1,
-        0,
-        -1,
-        1,
-        1,
-        0,
-        1,
-        1,
-        1,
-        1,
-        1,
-        1,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        -1,
-        -1,
-        0,
-        0,
-        0,
-        1,
-        -1,
-        -1,
-        0,
-        0,
-        0,
-        -1,
-        -1,
-        1,
-        0,
-        1,
-        -1,
-        1,
-        1,
-        0,
-        0,
-        0,
-        -1,
-        1,
-        0,
-        1,
-        1,
-        0,
-        1,
-        0,
-        0,
-        0,
-        1,
-        -1,
-        0,
-        1,
-        -1,
-        0,
-        0,
-        1,
-        0,
-        0,
-        -1,
-        -1,
-        -1,
-        1,
-        0,
-        -1,
-        1,
-        0,
-        0,
-        -1,
-        1,
-        0,
-        1,
-        0,
-        1,
-        0,
-        -1,
-        0,
-        -1,
-        1,
-        0,
-        0,
-        1,
-        1,
-        -1,
-        -1,
-        0,
-        0,
-        -1,
-        0,
-        1,
-        1,
-        0,
-        1,
-        0,
-        -1,
-        0,
-        1,
-        1,
-        0,
-        1,
-        1,
-        1,
-        -1,
-        -1,
-        -1,
-        1,
-        0,
-        1,
-        -1,
-        1,
-        1,
-        0,
-        0,
-        0,
-        -1,
-        1,
-        0,
-        1,
-        -1,
-        0,
-        -1,
-        1,
-        0,
-        -1,
-        1,
-        -1,
-        0,
-        0,
-        1,
-        1,
-        1,
-        0,
-        0,
-        0,
-        0,
-        1,
-        1,
-        0,
-        0,
-        -1,
-        0,
-        0,
-        1,
-        1,
-        0,
-        -1,
-        1,
-        1,
-        1,
-        -1,
-        1,
-        1,
-        1,
-        -1,
-        -1,
-        -1,
-        -1,
-        1,
-        0,
-        0,
-        -1,
-        1,
-        1,
-        1,
-        1,
-        -1,
-        0,
-        0,
-        0,
-        1,
-        -1,
-        1,
-        1,
-        -1,
-        1,
-        1,
-        1,
-        1,
-        1,
-        -1,
-        -1,
-        -1,
-        1,
-        -1,
-        0,
-        1,
-        0,
-        1,
-        0,
-        0,
-        -1,
-        -1,
-        0,
-        1,
-        0,
-        1,
-        0,
-        0,
-        -1,
-        -1,
-        -1,
-        -1,
-        -1,
-        1,
-        -1,
-        -1,
-        -1,
-        1,
-        -1,
-        1,
-        0,
-        0,
-        -1,
-        0,
-        1,
-        -1,
-        1,
-        0,
-        -1,
-        1,
-        -1,
-        0,
-        0,
-        -1,
-        1,
-        1,
-        -1,
-        1,
-        0,
-        1,
-        1,
-        1,
-        1,
-        -1,
-        -1,
-        0,
-        1,
-        -1,
-        -1,
-        0,
-        0,
-        -1,
-        0,
-        -1,
-        0,
-        -1,
-        0,
-        0,
-        -1,
-        1,
-        0,
-        1,
-        1,
-        -1,
-        0,
-        1,
-        1,
-        -1,
-        1,
-        1,
-        -1,
-        1,
-        0,
-        0,
-        1,
-        -1,
-        -1,
-        -1,
-        0,
-        0,
-        1,
-        0,
-        -1,
-        0,
-        1,
-        -1,
-        -1,
-        0,
-        0,
-        -1,
-        -1,
-        0,
-        1,
-        1,
-        -1,
-        0,
-        1,
-        -1,
-        1,
-        0,
-        1,
-        1,
-        0,
-        1,
-        1,
-        0,
-        1,
-        1,
-        1,
-        0,
-        0,
-        1,
-        1,
-        -1,
-        -1,
-        1,
-        0,
-        -1,
-        -1,
-        1,
-        0,
-        1,
-        0,
-        0,
-        0,
-        1,
-        0,
-        1,
-        0,
-        1,
-        1,
-        -1,
-        1,
-        -1,
-        0,
-        -1,
-        0,
-        1,
-        1,
-        0,
-        1,
-        0,
-        -1,
-        -1,
-        -1,
-        -1,
-        -1,
-        1,
-        0,
-        -1,
-        -1,
-        0,
-        -1,
-        -1,
-        -1,
-        0,
-        0,
-        -1,
-        0,
-        1,
-        1,
-        0,
-        0,
-        -1,
-        0,
-        1,
-        0,
-        1,
-        1,
-        -1,
-        0,
-        -1,
-        -1,
-        -1,
-        0,
-        0,
-        -1,
-        -1,
-        1,
-        -1,
-        0,
-        1,
-        0,
-        1,
-        1,
-        -1,
-        0,
-        -1,
-        -1,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        -1,
-        0,
-        1,
-        -1,
-        0,
-        1,
-        0,
-        0,
-        1,
-        1,
-        0,
-        1,
-        0,
-        0,
-        0,
-        -1,
-        1,
-        1,
-        0,
-        -1,
-        1,
-        -1,
-        -1,
-        0,
-        1,
-        0,
-        0,
-        -1,
-        1,
-        0,
-        -1,
-        1,
-        -1,
-        1,
-        1,
-        0,
-        0,
-        -1,
-        1,
-        1,
-        0,
-        1,
-        0,
-        1,
-        0,
-        1,
-        -1,
-        -1,
-        1,
-        -1,
-        1,
-        0,
-        1,
-        0,
-        -1,
-        -1,
-        -1,
-        -1,
-        0,
-        -1,
-        -1,
-        -1,
-        -1,
-        -1,
-        -1,
-        0,
-        0,
-        1,
-        -1,
-        1,
-        0,
-        -1,
-        -1,
-        -1,
-        1,
-        0,
-        1,
-        -1,
-        -1,
-        0
-      ],
-      "rnd3_ptr": 0
-    },
-    "surfaces": [],
-    "hud": {
-      "players": [],
-      "messages": []
-    },
-    "controls": [],
-    "network_packets": [],
-    "definition_categories": {
-      "Drifter": 1
-    },
-    "transfer_zones": [],
-    "menu_requests": [],
-    "audio": []
-  },
-  {
     "frame": 7,
     "game_over": false,
     "physics": {
@@ -6815,26 +6845,31 @@
           "commands": []
         },
         "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
         "fixed_position": {
-          "x": 1412285,
+          "x": 1420816,
           "y": 265812
         },
         "fixed_velocity": {
-          "x": 19002,
+          "x": 27524,
           "y": 917
         }
       }
     ],
     "environment": {
       "settings": {
-        "wind": 5,
+        "wind": 6,
         "base_wind": 6,
-        "wind_target": 7,
-        "wind_update_timer": 1,
+        "wind_target": 6,
+        "wind_update_timer": 0,
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 11,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 18,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
@@ -6858,8 +6893,8 @@
         "precipitation_strength": 0,
         "no_gamma": true
       },
-      "wind_force": 1,
-      "ambient_temperature": 13,
+      "wind_force": 6,
+      "ambient_temperature": 20,
       "precipitation": 42,
       "sky_color": {
         "r": 24,
@@ -7368,8 +7403,8 @@
       "default_liquid_material": null
     },
     "rng": {
-      "hold": 2211762608,
-      "count": 513,
+      "hold": 1774591965,
+      "count": 508,
       "rnd3_buf": [
         0,
         1,
@@ -7942,12 +7977,15 @@
           "commands": []
         },
         "local_vars": {},
+        "on_fire": false,
+        "fire_phase": 0,
+        "fire_caused_by": -1,
         "fixed_position": {
-          "x": 1433253,
+          "x": 1452272,
           "y": 266860
         },
         "fixed_velocity": {
-          "x": 20968,
+          "x": 31456,
           "y": 1048
         }
       }
@@ -7956,12 +7994,14 @@
       "settings": {
         "wind": 6,
         "base_wind": 6,
-        "wind_target": 7,
+        "wind_target": 6,
         "wind_update_timer": 0,
         "wind_update_interval": 4,
         "wind_variation": 4,
         "wind_period": 9,
-        "temperature": 10,
+        "wind_min": -100,
+        "wind_max": 100,
+        "temperature": 18,
         "climate": 0,
         "temperature_variation": 12,
         "temperature_period": 18,
@@ -7985,8 +8025,8 @@
         "precipitation_strength": 0,
         "no_gamma": true
       },
-      "wind_force": 3,
-      "ambient_temperature": 8,
+      "wind_force": 6,
+      "ambient_temperature": 16,
       "precipitation": 42,
       "sky_color": {
         "r": 24,
@@ -8495,8 +8535,8 @@
       "default_liquid_material": null
     },
     "rng": {
-      "hold": 1902832051,
-      "count": 514,
+      "hold": 3269587756,
+      "count": 509,
       "rnd3_buf": [
         0,
         1,
