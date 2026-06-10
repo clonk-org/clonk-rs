@@ -4825,7 +4825,11 @@ impl GameApp {
                 return Ok(());
             }
         }
-        let _ = self.input.handle_event(&mut self.engine, owner, event)?;
+        if let Err(err) = self.input.handle_event(&mut self.engine, owner, event) {
+            let status = control_script_error_to_status(err)?;
+            tracing::error!(status, "control script error (non-fatal like C++)");
+            self.status_text = status;
+        }
         Ok(())
     }
 
@@ -8559,6 +8563,16 @@ fn is_focusable(object: &ObjectSnapshot) -> bool {
     object.alive && object.status.is_active()
 }
 
+/// Script errors raised while executing a control are shown and survived in
+/// C++ (ErrorOrWarning → C4AulExecError::show, C4AulExec.cpp:1345-1361); only
+/// engine-model errors stay fatal. Returns the status-line message to show.
+fn control_script_error_to_status(err: EngineError) -> Result<String, EngineError> {
+    match err {
+        EngineError::Script { ref source, .. } => Ok(format!("Script error: {err}: {source}")),
+        other => Err(other),
+    }
+}
+
 fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
     match code {
         VirtualKeyCode::Return => Some(KeyCode::Enter),
@@ -9366,7 +9380,7 @@ mod tests {
     use lc_engine::{
         ActionState, CommandDirection, CommandStackSnapshot, Direction, EnvironmentFrame,
         HudPlayerSnapshot, HudSnapshot, ObjectId, ObjectSnapshot, ObjectStatus, PlayerState,
-        PlayerStatus, SimulationSnapshot, Vector2, DEFAULT_CATEGORY,
+        PlayerStatus, ScriptError, SimulationSnapshot, Vector2, DEFAULT_CATEGORY,
     };
     use parking_lot::ReentrantMutex;
     use std::collections::HashMap;
@@ -9420,6 +9434,30 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         }
         panic!("scenario did not enter running mode in time");
+    }
+
+    #[test]
+    fn control_script_errors_are_non_fatal_like_cpp() {
+        // C++ surfaces control-time script errors and keeps the session
+        // alive (ErrorOrWarning → C4AulExecError::show, C4AulExec.cpp:
+        // 1345-1361); only the offending call fails, the game keeps running.
+        let script_error = EngineError::Script {
+            definition: "CLNK".into(),
+            function: "Control",
+            source: ScriptError::parse("boom", 1, 1),
+        };
+        let status = control_script_error_to_status(script_error)
+            .expect("script errors downgrade to a status message");
+        assert!(
+            status.contains("CLNK"),
+            "status names the definition: {status}"
+        );
+
+        let fatal = EngineError::CrewSelection {
+            owner: 0,
+            detail: "broken".into(),
+        };
+        control_script_error_to_status(fatal).expect_err("engine-model errors stay fatal");
     }
 
     fn write_preview_png(path: &Path, pixel: [u8; 4]) {
