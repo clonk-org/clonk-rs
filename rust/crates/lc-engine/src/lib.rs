@@ -17333,13 +17333,33 @@ impl Engine {
         event: MaterialInteractionEvent,
         pos_changed: &mut bool,
     ) -> bool {
+        // mrfUserCheck (C4Material.cpp:612-625): user-defined reactions do
+        // the splash/slide check up front, gated on CheckSlide; the ExecMask
+        // gate was applied when the reaction table was built.
+        if reaction.user_defined
+            && reaction.insertion_check
+            && event == MaterialInteractionEvent::PxsMove
+            && !self.mrf_insert_check(
+                x,
+                y,
+                &mut pixel.xdir,
+                &mut pixel.ydir,
+                pixel.mat,
+                ls_mat,
+                pos_changed,
+            )
+        {
+            return false;
+        }
+        let user_defined = reaction.user_defined;
         match reaction.kind {
             MaterialReactionKind::None => false,
             // mrfConvert (C4Material.cpp:626-661)
             MaterialReactionKind::Convert { target, depth } => {
-                if event != MaterialInteractionEvent::PxsPos {
-                    // hardcoded InMatConvert has no collision proc
-                    // (C4Material.cpp:631-633)
+                if event != MaterialInteractionEvent::PxsPos && !user_defined {
+                    // hardcoded InMatConvert has no collision proc; USER
+                    // conversions also convert upon hitting materials
+                    // (C4Material.cpp:629-634)
                     return false;
                 }
                 // Check depth (C4Material.cpp:638-650)
@@ -17361,7 +17381,10 @@ impl Engine {
             }
             // mrfPoof (C4Material.cpp:663-689)
             MaterialReactionKind::Poof => {
-                if event == MaterialInteractionEvent::PxsMove
+                // the body's insert check is `!fUserDefined`-gated
+                // (C4Material.cpp:685-688); user entries did mrfUserCheck
+                if !user_defined
+                    && event == MaterialInteractionEvent::PxsMove
                     && !self.mrf_insert_check(
                         x,
                         y,
@@ -17396,15 +17419,18 @@ impl Engine {
                     // No corrosion before movement (C4Material.cpp:696-698)
                     return false;
                 }
-                if !self.mrf_insert_check(
-                    x,
-                    y,
-                    &mut pixel.xdir,
-                    &mut pixel.ydir,
-                    pixel.mat,
-                    ls_mat,
-                    pos_changed,
-                ) {
+                // `!fUserDefined`-gated body check (C4Material.cpp:719-722)
+                if !user_defined
+                    && !self.mrf_insert_check(
+                        x,
+                        y,
+                        &mut pixel.xdir,
+                        &mut pixel.ydir,
+                        pixel.mat,
+                        ls_mat,
+                        pos_changed,
+                    )
+                {
                     return false;
                 }
                 let corroded = evaluate_corrosion(
@@ -17467,15 +17493,18 @@ impl Engine {
                 if event != MaterialInteractionEvent::PxsMove {
                     return false;
                 }
-                if !self.mrf_insert_check(
-                    x,
-                    y,
-                    &mut pixel.xdir,
-                    &mut pixel.ydir,
-                    pixel.mat,
-                    ls_mat,
-                    pos_changed,
-                ) {
+                // `!fUserDefined`-gated body check (C4Material.cpp:783-787)
+                if !user_defined
+                    && !self.mrf_insert_check(
+                        x,
+                        y,
+                        &mut pixel.xdir,
+                        &mut pixel.ydir,
+                        pixel.mat,
+                        ls_mat,
+                        pos_changed,
+                    )
+                {
                     // continue existing
                     return false;
                 }
@@ -21014,6 +21043,123 @@ mod tests {
         assert_eq!((x, y), (0, 10), "absorbed at the slide target");
         assert_eq!(xdir, math::C4Fixed::ZERO);
         assert_eq!(engine.rng, mirror, "no synced draws on same-mat slide");
+    }
+
+    #[test]
+    fn user_insert_reaction_with_check_slide_off_skips_insert_check_like_cpp() {
+        // mrfUserCheck (C4Material.cpp:612-625): user-defined reactions run
+        // the splash/slide check only when CheckSlide is set (fInsertionCheck,
+        // default true); the mrfInsert body's own check is `!fUserDefined`-
+        // gated (C4Material.cpp:783-787). With CheckSlide=0 the insert
+        // proceeds even where a slide path would otherwise keep the PXS
+        // alive — and no slide RNG is drawn.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Sand]
+            Name=Sand
+            Density=25
+            Friction=10
+            MaxSlide=2
+            SplashRate=0
+
+            [Reaction]
+            Type=Insert
+            TargetSpec=Earth
+            CheckSlide=0
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let sand = materials.id_of("Sand").expect("sand exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        // Same slide-available terrain as the builtin-insert test: without
+        // CheckSlide the slide would keep the PXS alive; with CheckSlide=0
+        // the user reaction inserts immediately.
+        let mut engine = Engine::with_seed(21);
+        engine.set_materials(materials);
+        engine.set_landscape(
+            Landscape::with_default_material(5, vec![11, 10, 10, 10, 11], Some(earth))
+                .expect("landscape builds"),
+        );
+        let mirror = engine.rng.clone();
+        assert!(engine.pxs_system.create(
+            sand,
+            math::itofix(2),
+            math::itofix(9),
+            math::C4Fixed::ZERO,
+            math::itofix(1),
+        ));
+        engine.tick_pxs();
+        assert_eq!(
+            engine.pxs_system.iter().count(),
+            0,
+            "CheckSlide=0 inserts without the slide check"
+        );
+        assert_eq!(engine.rng, mirror, "no splash/slide draws");
+    }
+
+    #[test]
+    fn user_convert_reaction_fires_on_pxs_move_like_cpp() {
+        // mrfConvert: hardcoded InMatConvert has no collision proc, but
+        // USER-defined conversions also convert upon hitting materials —
+        // meePXSMove falls through to the conversion logic
+        // (C4Material.cpp:629-634). On success the dirs zero and the pixel
+        // lives on as the converted material (pfPosChanged snaps it,
+        // C4PXS.cpp:106-112).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Slime]
+            Name=Slime
+            Density=25
+            Friction=10
+
+            [Reaction]
+            Type=Convert
+            TargetSpec=Earth
+            ConvertMat=Water
+            CheckSlide=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let slime = materials.id_of("Slime").expect("slime exists");
+        let water = materials.id_of("Water").expect("water exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut engine = Engine::with_seed(21);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(5, 10, Some(earth)));
+        let mirror = engine.rng.clone();
+        assert!(engine.pxs_system.create(
+            slime,
+            math::itofix(2),
+            math::itofix(9),
+            math::C4Fixed::ZERO,
+            math::itofix(1),
+        ));
+        engine.tick_pxs();
+        let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
+        assert_eq!(survivors.len(), 1, "converted pixel lives on");
+        assert_eq!(survivors[0].mat, water, "converted to Water on hit");
+        assert_eq!(survivors[0].xdir, math::C4Fixed::ZERO);
+        assert_eq!(survivors[0].ydir, math::C4Fixed::ZERO);
+        assert_eq!(engine.rng, mirror, "no draws on the conversion path");
     }
 
     #[test]

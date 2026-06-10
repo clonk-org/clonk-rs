@@ -1043,7 +1043,10 @@ fn parse_custom_reaction_kind(
     definition: &MaterialReactionDefinition,
     by_name: &HashMap<String, MaterialId>,
 ) -> Option<MaterialReactionKind> {
-    let reaction_type = normalize_key(definition.value("type")?);
+    let reaction_type = definition
+        .value("type")
+        .map(normalize_key)
+        .unwrap_or_default();
     match reaction_type.as_str() {
         "convert" => {
             let depth = definition.int("depth").filter(|value| *value > 0);
@@ -1063,7 +1066,6 @@ fn parse_custom_reaction_kind(
             Some(MaterialReactionKind::Convert { target, depth })
         }
         "poof" => Some(MaterialReactionKind::Poof),
-        "incinerate" => Some(MaterialReactionKind::Incinerate),
         "insert" => Some(MaterialReactionKind::Insert),
         "corrode" => {
             let rate = definition.int("corrosionrate").unwrap_or(100).clamp(0, 100);
@@ -1073,7 +1075,11 @@ fn parse_custom_reaction_kind(
                 corrosion_probability: Some(rate),
             })
         }
-        _ => None,
+        // Any unknown (or absent) Type — "Incinerate" included — binds the
+        // ReactionFuncMap nullptr sentinel's NoReaction: a user-defined
+        // no-op that still occupies the slot and overrides the hardcoded
+        // default (C4Material.cpp:38-46,53-57).
+        _ => Some(MaterialReactionKind::None),
     }
 }
 
@@ -1359,6 +1365,85 @@ mod tests {
             set.evaluate_temperature_conversion(steam, TemperatureDirection::Upwards, 40)
                 .is_none(),
             "temperature above threshold should not trigger below conversion"
+        );
+    }
+
+    #[test]
+    fn unknown_reaction_types_install_overriding_no_reaction_like_cpp() {
+        // ReactionFuncMap (C4Material.cpp:38-46) names only Script/Convert/
+        // Poof/Corrode/Insert; any other Type — including "Incinerate" and
+        // an absent one — binds the nullptr sentinel's NoReaction
+        // (C4Material.cpp:45): a user-defined no-op that still OCCUPIES the
+        // reaction slot, suppressing the hardcoded default reaction.
+        let set = build_material_set(
+            r#"
+            [Material Fire]
+            Name=Fire
+            Density=20
+            Incindiary=100
+
+            [Reaction]
+            Type=Incinerate
+            TargetSpec=Snow
+
+            [Material Snow]
+            Name=Snow
+            Density=50
+            Inflammable=100
+
+            [Material Acid]
+            Name=Acid
+            Density=25
+            Corrosive=80
+
+            [Reaction]
+            Type=Frobnicate
+            TargetSpec=Rock
+
+            [Material Rock]
+            Name=Rock
+            Density=70
+            Corrode=60
+
+            [Material Mist]
+            Name=Mist
+            Density=20
+            Extinguisher=1
+
+            [Reaction]
+            TargetSpec=Ember
+
+            [Material Ember]
+            Name=Ember
+            Density=60
+            Incindiary=1
+            "#,
+        );
+        let fire = set.id_of("Fire").expect("fire material");
+        let snow = set.id_of("Snow").expect("snow material");
+        let reaction = set.reaction(Some(fire), Some(snow));
+        assert_eq!(
+            reaction.kind,
+            MaterialReactionKind::None,
+            "Type=Incinerate is not user-nameable; the slot holds NoReaction \
+             instead of the default incineration",
+        );
+        assert!(reaction.user_defined, "the no-op entry is user-defined");
+
+        let acid = set.id_of("Acid").expect("acid material");
+        let rock = set.id_of("Rock").expect("rock material");
+        assert_eq!(
+            set.reaction(Some(acid), Some(rock)).kind,
+            MaterialReactionKind::None,
+            "an unknown Type still overrides the hardcoded default",
+        );
+
+        let mist = set.id_of("Mist").expect("mist material");
+        let ember = set.id_of("Ember").expect("ember material");
+        assert_eq!(
+            set.reaction(Some(mist), Some(ember)).kind,
+            MaterialReactionKind::None,
+            "a [Reaction] without Type= also binds NoReaction",
         );
     }
 
