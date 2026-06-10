@@ -179,6 +179,14 @@ struct Cli {
         help = "Headless: boot to the startup main menu, render one frame to a PNG at PATH, and exit (no window). For menu rendering-parity checks."
     )]
     dump_menu_frame: Option<std::path::PathBuf>,
+
+    #[arg(
+        long = "menu-view",
+        value_name = "VIEW",
+        default_value = "main",
+        help = "Startup view for --dump-menu-frame: main, scenarios, options, or about."
+    )]
+    menu_view: String,
 }
 
 struct RuntimeConfig {
@@ -755,6 +763,7 @@ fn run_sandbox_dump(
 /// engine's F9 screenshots.
 fn run_menu_dump(
     dump_path: &std::path::Path,
+    menu_view: &str,
     app_paths: Option<&Arc<AppPaths>>,
     runtime: RuntimeConfig,
 ) -> Result<()> {
@@ -782,6 +791,20 @@ fn run_menu_dump(
     }
     if !booted {
         anyhow::bail!("app did not reach the startup menu for menu dump");
+    }
+
+    // Switch to the requested startup view through the same activation path
+    // the UI uses, so per-view state objects exist.
+    let item = match menu_view {
+        "main" => None,
+        "scenarios" => Some(MainMenuItem::LocalGame),
+        "options" => Some(MainMenuItem::Options),
+        "about" => Some(MainMenuItem::About),
+        other => anyhow::bail!("unknown --menu-view `{other}` (main|scenarios|options|about)"),
+    };
+    if let Some(item) = item {
+        app.handle_main_menu_activation(item)
+            .map_err(|err| anyhow::anyhow!("activating menu view `{menu_view}`: {err}"))?;
     }
 
     // Render one frame to the CPU surface, then encode it.
@@ -929,7 +952,7 @@ fn main() -> Result<()> {
 
     // Handle headless menu dump: render one startup-menu frame to PNG and exit.
     if let Some(dump_path) = &cli.dump_menu_frame {
-        return run_menu_dump(dump_path, app_paths.as_ref(), runtime);
+        return run_menu_dump(dump_path, &cli.menu_view, app_paths.as_ref(), runtime);
     }
 
     let event_loop = EventLoop::new();
@@ -10229,6 +10252,7 @@ mod tests {
         let path = dir.path().join("menu.png");
         run_menu_dump(
             &path,
+            "main",
             None,
             RuntimeConfig {
                 player_owner: 1,
