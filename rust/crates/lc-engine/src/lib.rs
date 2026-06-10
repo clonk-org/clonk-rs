@@ -1865,6 +1865,20 @@ pub struct ObjectState {
     /// C4Object::GetFireCausePlr for contact-incineration attribution).
     #[serde(default = "default_owner")]
     pub fire_caused_by: i32,
+    /// `C4ObjectInfo::Physical` surrogate for crew members until the info
+    /// model lands — cloned lazily from the definition physicals on first
+    /// training/permanent write. None = read the definition physicals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info_physical: Option<PhysicalInfo>,
+    /// `PhysicalTemporary`/`TemporaryPhysical` (C4Object.h): the script-set
+    /// temporary physicals, taking precedence in GetPhysical
+    /// (C4Object.cpp:2118-2134). None = temporary mode off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporary_physical: Option<PhysicalInfo>,
+    /// `C4TempPhysicalInfo::Changes` (C4InfoCore.h:113): PHYS_StackTemporary
+    /// registrations as (physical name, previous value), newest last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub physical_changes: Vec<(String, i32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -2549,17 +2563,6 @@ struct Object {
     /// Last energy-loss causing player (C4Object::LastEnergyLossCausePlayer,
     /// read by AssignDeath for kill attribution).
     last_energy_loss_cause: i32,
-    /// `C4ObjectInfo::Physical` surrogate for crew members until the info
-    /// model lands — cloned lazily from the definition physicals on first
-    /// training/permanent write. None = read the definition physicals.
-    info_physical: Option<PhysicalInfo>,
-    /// `PhysicalTemporary`/`TemporaryPhysical` (C4Object.h): the script-set
-    /// temporary physicals, taking precedence in GetPhysical
-    /// (C4Object.cpp:2118-2134). None = temporary mode off.
-    temporary_physical: Option<PhysicalInfo>,
-    /// `C4TempPhysicalInfo::Changes` (C4InfoCore.h:113): PHYS_StackTemporary
-    /// registrations as (physical name, previous value), newest last.
-    physical_changes: Vec<(String, i32)>,
     command_queue: VecDeque<QueuedCommand>,
     commands: CommandStack,
     pending_action_events: VecDeque<ActionTransitionEvent>,
@@ -2654,9 +2657,6 @@ impl Object {
             destroyed: matches!(state.status, ObjectStatus::Deleted),
             state,
             last_energy_loss_cause: OWNER_NONE,
-            info_physical: None,
-            temporary_physical: None,
-            physical_changes: Vec::new(),
             command_queue: VecDeque::new(),
             commands: CommandStack::new(),
             pending_action_events: VecDeque::new(),
@@ -3443,9 +3443,9 @@ impl Object {
             on_fire: self.state.on_fire,
             fire_phase: self.state.fire_phase,
             fire_caused_by: self.state.fire_caused_by,
-            info_physical: self.info_physical,
-            temporary_physical: self.temporary_physical,
-            physical_changes: self.physical_changes.clone(),
+            info_physical: self.state.info_physical,
+            temporary_physical: self.state.temporary_physical,
+            physical_changes: self.state.physical_changes.clone(),
             last_energy_loss_cause: self.last_energy_loss_cause,
             fixed_position: subpixel_or_none(self.fixed_position, position),
             fixed_velocity: subpixel_or_none(self.fixed_velocity, velocity),
@@ -8637,8 +8637,7 @@ impl Engine {
 
     fn object_shape_rect(&self, object: &Object) -> DefinitionRect {
         let position = object.state.position;
-        object
-            .current_shape_rect()
+        object            .current_shape_rect()
             .map(|rect| {
                 DefinitionRect::new(
                     position.x.saturating_add(rect.x),
@@ -11192,8 +11191,7 @@ impl Engine {
             spawn_requests.extend(spawns.into_iter());
         }
 
-        // C4GameObjects::CrossCheck runs once per frame after object
-        // execution (C4Game.cpp ExecObjects → Objects.CrossCheck()).
+        // C4GameObjects::CrossCheck runs once per frame after object        // execution (C4Game.cpp ExecObjects → Objects.CrossCheck()).
         self.cross_check(frame)?;
 
         self.detach_destroyed_objects()?;
@@ -11324,8 +11322,7 @@ impl Engine {
             if let Some(action) = action {
                 let previous_action = object.state.action.clone();
                 let requested_name_change = action.name.is_some();
-                let result = object
-                    .state
+                let result = object                    .state
                     .action
                     .apply_update_with_library(&action, &action_library);
                 if matches!(result, ActionUpdateResult::Applied)
@@ -12259,6 +12256,9 @@ impl Engine {
                     on_fire: snapshot.on_fire,
                     fire_phase: snapshot.fire_phase,
                     fire_caused_by: snapshot.fire_caused_by,
+                    info_physical: snapshot.info_physical,
+                    temporary_physical: snapshot.temporary_physical,
+                    physical_changes: snapshot.physical_changes.clone(),
                 },
                 shape_template,
                 snapshot.own_vertices.clone(),
@@ -12280,13 +12280,9 @@ impl Engine {
                 object.fixed_rotation = fixed_rotation;
                 object.state.rotation = fixtoi(fixed_rotation);
             }
-            object.info_physical = snapshot.info_physical;
-            object.temporary_physical = snapshot.temporary_physical;
-            object.physical_changes = snapshot.physical_changes.clone();
             object.last_energy_loss_cause = snapshot.last_energy_loss_cause;
             object.command_queue = VecDeque::from(persisted.command_queue.clone());
-            object
-                .commands
+            object                .commands
                 .restore_from_snapshot(&persisted.command_stack);
             self.objects.push(object);
             if let Some(container) = snapshot.container {
@@ -13609,8 +13605,7 @@ impl Engine {
         };
 
         let object = &mut self.objects[idx];
-        let result = object
-            .state
+        let result = object            .state
             .action
             .apply_update_with_library(&update, &library);
         if clear_targets {
@@ -13657,8 +13652,7 @@ impl Engine {
         };
 
         let object = &mut self.objects[idx];
-        let result = object
-            .state
+        let result = object            .state
             .action
             .apply_update_with_library(&update, library);
         object.state.action.target = None;
@@ -14254,8 +14248,7 @@ impl Engine {
     }
 
     /// `C4GameObjects::CrossCheck` reverse area check
-    /// (C4GameObjects.cpp:140-197), run once per frame after object
-    /// execution: every frame an OCF_Alive victim takes OCF_HitSpeed2 hits
+    /// (C4GameObjects.cpp:140-197), run once per frame after object    /// execution: every frame an OCF_Alive victim takes OCF_HitSpeed2 hits
     /// from C4D_Object projectiles inside its shape; on Tick3 frames
     /// collection runs (OCF_Collection vs OCF_Carryable, Collection rect).
     /// Candidates are deduplicated per victim like the C++ Marker. Pass 1
@@ -14353,8 +14346,7 @@ impl Engine {
     }
 
     /// CrossCheck pass 1: AtObject check (C4GameObjects.cpp:97-138). On Tick5
-    /// frames FightReady objects standing at a hostile FightReady object
-    /// start fighting both ways after the RejectFight callbacks. The Tick35
+    /// frames FightReady objects standing at a hostile FightReady object    /// start fighting both ways after the RejectFight callbacks. The Tick35
     /// contact-incineration arm (OCF_OnFire vs OCF_Inflammable with the
     /// `!Random(ContactIncinerate)` draw) still needs the fire model — no
     /// Rust object ever carries OCF_OnFire yet, so the C++ stream consumes no
@@ -14482,8 +14474,7 @@ impl Engine {
             target2: Some(None),
         };
         let object = &mut self.objects[idx];
-        let result = object
-            .state
+        let result = object            .state
             .action
             .apply_update_with_library(&update, &library);
         if matches!(result, ActionUpdateResult::Applied)
@@ -14884,8 +14875,9 @@ impl Engine {
     fn object_physical(&self, idx: usize) -> PhysicalInfo {
         let object = &self.objects[idx];
         object
+            .state
             .temporary_physical
-            .or(object.info_physical)
+            .or(object.state.info_physical)
             .unwrap_or_else(|| self.definition_physical(idx))
     }
 
@@ -14898,11 +14890,12 @@ impl Engine {
         let definition_physical = self.definition_physical(idx);
         let object = &mut self.objects[idx];
         let mut trained = false;
-        if let Some(temporary) = object.temporary_physical.as_mut() {
+        if let Some(temporary) = object.state.temporary_physical.as_mut() {
             if let Some(value) = temporary.value_mut_by_name(name) {
                 PhysicalInfo::train_value(value, train_by, max_train);
             }
             for (_, previous) in object
+                .state
                 .physical_changes
                 .iter_mut()
                 .filter(|(changed, _)| changed.eq_ignore_ascii_case(name))
@@ -14912,7 +14905,7 @@ impl Engine {
             trained = true;
         }
         if object.state.crew_member {
-            let info = object.info_physical.get_or_insert(definition_physical);
+            let info = object.state.info_physical.get_or_insert(definition_physical);
             if let Some(value) = info.value_mut_by_name(name) {
                 PhysicalInfo::train_value(value, train_by, max_train);
             }
@@ -15043,8 +15036,7 @@ impl Engine {
             target2: Some(None),
         };
         let object = &mut self.objects[idx];
-        let result = object
-            .state
+        let result = object            .state
             .action
             .apply_update_with_library(&update, &library);
         if matches!(result, ActionUpdateResult::Applied)
@@ -15079,8 +15071,7 @@ impl Engine {
                     target2: Some(None),
                 };
                 let object = &mut self.objects[idx];
-                let result = object
-                    .state
+                let result = object                    .state
                     .action
                     .apply_update_with_library(&update, &library);
                 if matches!(result, ActionUpdateResult::Applied) {
@@ -16805,6 +16796,9 @@ impl Engine {
                 on_fire: false,
                 fire_phase: 0,
                 fire_caused_by: OWNER_NONE,
+                info_physical: None,
+                temporary_physical: None,
+                physical_changes: Vec::new(),
             },
             shape_template,
             own_shape_vertices,
@@ -21528,8 +21522,7 @@ global func MenuCommand(state, kind, selection)
         assert_eq!(object.velocity.y, 0);
         assert_eq!(object.velocity.x, 0);
         assert_eq!(
-            object
-                .fixed_velocity
+            object                .fixed_velocity
                 .expect("gravity should remain sub-pixel")
                 .y
                 .val(),
@@ -21569,8 +21562,7 @@ global func MenuCommand(state, kind, selection)
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity, Vector2::new(3, 3));
         assert_eq!(
-            object
-                .fixed_velocity
+            object                .fixed_velocity
                 .expect("gravity should remain sub-pixel")
                 .y
                 .val(),
@@ -21610,8 +21602,7 @@ global func MenuCommand(state, kind, selection)
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity.y, 0);
         assert_eq!(
-            object
-                .fixed_velocity
+            object                .fixed_velocity
                 .expect("float gravity should remain sub-pixel")
                 .y
                 .val(),
@@ -21653,8 +21644,7 @@ global func MenuCommand(state, kind, selection)
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity, Vector2::new(2, -2));
         assert_eq!(
-            object
-                .fixed_velocity
+            object                .fixed_velocity
                 .expect("float gravity should remain sub-pixel")
                 .y
                 .val(),
@@ -21695,8 +21685,7 @@ global func MenuCommand(state, kind, selection)
         assert_eq!(object.velocity.y, 0);
         assert_eq!(object.velocity.x, 0);
         assert_eq!(
-            object
-                .fixed_velocity
+            object                .fixed_velocity
                 .expect("swim gravity should remain sub-pixel")
                 .y
                 .val(),
@@ -22961,16 +22950,14 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(object.velocity, Vector2::ZERO);
         assert_eq!(object.position, Vector2::ZERO);
         assert_eq!(
-            object
-                .fixed_velocity
+            object                .fixed_velocity
                 .expect("wind should remain sub-pixel")
                 .x
                 .val(),
             1310
         );
         assert_eq!(
-            object
-                .fixed_position
+            object                .fixed_position
                 .expect("wind movement should remain sub-pixel")
                 .x
                 .val(),
@@ -22982,16 +22969,14 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(object.velocity, Vector2::ZERO);
         assert_eq!(object.position, Vector2::ZERO);
         assert_eq!(
-            object
-                .fixed_velocity
+            object                .fixed_velocity
                 .expect("wind should accumulate in fixed velocity")
                 .x
                 .val(),
             2620
         );
         assert_eq!(
-            object
-                .fixed_position
+            object                .fixed_position
                 .expect("wind movement should accumulate in fixed position")
                 .x
                 .val(),
@@ -23637,12 +23622,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .find_object_index(fighter_id)
             .expect("fighter exists");
         assert_eq!(
-            engine.objects[fighter_idx].info_physical, None,
+            engine.objects[fighter_idx].state.info_physical, None,
             "no training before the first Tick5 frame"
         );
 
         engine.tick().expect("tick succeeds");
         let trained = engine.objects[fighter_idx]
+            .state
             .info_physical
             .expect("Tick5 training clones the definition physicals");
         assert_eq!(trained.fight, 20_001);
@@ -23798,7 +23784,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(engine.objects[idx].fixed_velocity.y.val(), -32768);
         engine.tick().expect("tick succeeds");
         assert_eq!(engine.objects[idx].fixed_velocity.y.val(), -39321);
-        assert_eq!(engine.objects[idx].info_physical, None);
+        assert_eq!(engine.objects[idx].state.info_physical, None);
 
         // Tick5 at-limit training (C4Object.cpp:4810-4812): frame 5 sees
         // |ydir| == lLimit and trains Scale by 1.
@@ -23806,6 +23792,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.tick().expect("tick succeeds");
         engine.tick().expect("tick succeeds");
         let trained = engine.objects[idx]
+            .state
             .info_physical
             .expect("at-limit Tick5 training clones the physicals");
         assert_eq!(trained.scale, 30_001);
@@ -23860,13 +23847,14 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 41943);
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
         assert_eq!(engine.objects[idx].state.direction, Direction::Right);
-        assert_eq!(engine.objects[idx].info_physical, None);
+        assert_eq!(engine.objects[idx].state.info_physical, None);
 
         // Tick5 at-limit training (C4Object.cpp:4844-4846).
         engine.tick().expect("tick succeeds");
         engine.tick().expect("tick succeeds");
         engine.tick().expect("tick succeeds");
         let trained = engine.objects[idx]
+            .state
             .info_physical
             .expect("at-limit Tick5 training clones the physicals");
         assert_eq!(trained.hangle, 40_001);
@@ -23927,13 +23915,14 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(engine.objects[idx].fixed_velocity.x.val(), 52428);
         assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
         assert_eq!(engine.objects[idx].state.direction, Direction::Right);
-        assert_eq!(engine.objects[idx].info_physical, None);
+        assert_eq!(engine.objects[idx].state.info_physical, None);
 
         // Tick10 at-limit training (C4Object.cpp:4924-4926).
         for _ in 0..5 {
             engine.tick().expect("tick succeeds");
         }
         let trained = engine.objects[idx]
+            .state
             .info_physical
             .expect("at-limit Tick10 training clones the physicals");
         assert_eq!(trained.swim, 50_001);
@@ -24044,8 +24033,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     #[test]
     fn train_physical_requires_info_or_temporary_physicals() {
         // C4Object::TrainPhysical (C4Object.cpp:2136-2146) trains the
-        // temporary set when active and the info physicals when the object
-        // carries a C4ObjectInfo — an object with neither trains NOTHING.
+        // temporary set when active and the info physicals when the object        // carries a C4ObjectInfo — an object with neither trains NOTHING.
         let script = r#"
         global func Initialize(state, random) {
             return nil;
@@ -24070,8 +24058,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             !engine.train_physical(sheep_idx, "Fight", 1, C4_MAX_PHYSICAL),
             "non-crew object without temporary physicals trains nothing"
         );
-        assert_eq!(engine.objects[sheep_idx].info_physical, None);
-        assert_eq!(engine.objects[sheep_idx].temporary_physical, None);
+        assert_eq!(engine.objects[sheep_idx].state.info_physical, None);
+        assert_eq!(engine.objects[sheep_idx].state.temporary_physical, None);
 
         // Crew members carry an info (surrogate: crew_member flag) whose
         // physicals clone the definition's on first training.
@@ -24083,10 +24071,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         // The zero fight value stays untrained (TrainValue only-nonzero) but
         // the info set now exists, cloned from the definition.
         assert_eq!(
-            engine.objects[crew_idx].info_physical,
+            engine.objects[crew_idx].state.info_physical,
             Some(PhysicalInfo::default())
         );
-        assert_eq!(engine.objects[crew_idx].temporary_physical, None);
+        assert_eq!(engine.objects[crew_idx].state.temporary_physical, None);
     }
 
     #[test]
@@ -24114,16 +24102,16 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .spawn_object(SpawnConfig::new("Clonk").with_energy(40))
             .expect("clonk spawns");
         let idx = engine.find_object_index(id).expect("clonk exists");
-        engine.objects[idx].info_physical = Some(PhysicalInfo {
+        engine.objects[idx].state.info_physical = Some(PhysicalInfo {
             fight: 12_345,
             walk: 35_000,
             ..PhysicalInfo::default()
         });
-        engine.objects[idx].temporary_physical = Some(PhysicalInfo {
+        engine.objects[idx].state.temporary_physical = Some(PhysicalInfo {
             walk: 99_000,
             ..PhysicalInfo::default()
         });
-        engine.objects[idx].physical_changes = vec![("Walk".to_string(), 35_000)];
+        engine.objects[idx].state.physical_changes = vec![("Walk".to_string(), 35_000)];
         engine.objects[idx].last_energy_loss_cause = 3;
 
         let state = engine.capture_state();
@@ -24136,7 +24124,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let idx = restored.find_object_index(id).expect("clonk restored");
         assert_eq!(
-            restored.objects[idx].info_physical,
+            restored.objects[idx].state.info_physical,
             Some(PhysicalInfo {
                 fight: 12_345,
                 walk: 35_000,
@@ -24144,14 +24132,14 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             })
         );
         assert_eq!(
-            restored.objects[idx].temporary_physical,
+            restored.objects[idx].state.temporary_physical,
             Some(PhysicalInfo {
                 walk: 99_000,
                 ..PhysicalInfo::default()
             })
         );
         assert_eq!(
-            restored.objects[idx].physical_changes,
+            restored.objects[idx].state.physical_changes,
             vec![("Walk".to_string(), 35_000)]
         );
         assert_eq!(restored.objects[idx].last_energy_loss_cause, 3);
@@ -25919,16 +25907,14 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(object.velocity.y, 0);
         assert_eq!(object.position.y, 0);
         assert_eq!(
-            object
-                .fixed_velocity
+            object                .fixed_velocity
                 .expect("custom gravity should remain sub-pixel")
                 .y
                 .val(),
             262
         );
         assert_eq!(
-            object
-                .fixed_position
+            object                .fixed_position
                 .expect("custom gravity movement should remain sub-pixel")
                 .y
                 .val(),
@@ -26840,8 +26826,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         // Hand-derived golden: the definition base vertex is y=4, but the owned
         // base vertex is y=8. After restore, changing Con from FullCon to
         // FullCon/2 must jolt the owned base to y=4, not the definition base to
-        // y=2. The full shape y=8,h=4 has old bottom 12, so the straight-object
-        // bottom preserve also moves y to 12 - 2 - 0 = 10.
+        // y=2. The full shape y=8,h=4 has old bottom 12, so the straight-object        // bottom preserve also moves y to 12 - 2 - 0 = 10.
         let mut definition = simple_definition("OwnedShape");
         definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 2, 4)));
         definition.set_shape_vertices(vec![ObjectVertex::new(0, 4).with_cnat(CNAT_BOTTOM)]);
@@ -26875,8 +26860,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         // Mirrors src/C4Def.cpp:387 and src/C4Object.cpp:329-333: DefCore
         // `StretchGrowth` sets `Def->GrowthType`, so UpdateShape calls
         // C4Shape::Stretch instead of Jolt. Stretch scales x/y/w/h and VtxX/VtxY
-        // at src/C4Shape.cpp:105-116, then DoCon preserves the straight-object
-        // bottom at src/C4Object.cpp:1462-1468.
+        // at src/C4Shape.cpp:105-116, then DoCon preserves the straight-object        // bottom at src/C4Object.cpp:1462-1468.
         //
         // Hand-derived golden: shape x=2,w=6,h=4 and vertex (8,4) at 50%
         // construction stretch to shape x=1,w=3,h=2 and vertex (4,2). The old
