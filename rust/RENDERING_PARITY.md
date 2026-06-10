@@ -66,12 +66,40 @@ All done + unit-tested against the C++ formulas, 2026-05-30 (`lc-graphics`, 33 t
 - [x] Button caption colour matches C++ exactly: `C4GUI_ButtonFontClr = 0xffffff00`
       (yellow) when active, `C4GUI_InactCaptionFontClr = 0xffafafaf` when disabled
       (`src/C4Gui.h:53-56`). Verified live 2026-05-30.
-- [ ] Remaining menu polish: exact plank texture/bolt detail (asset-level), hotkey
-      underline from the `&` marker, version string under the logo.
+- [x] **Startup main menu pixel-exact vs C++ (2026-06-10).** Measured against an
+      F9 GL-backbuffer capture of the C++ engine at windowed 1280x720:
+      **99.80% of pixels bit-identical**; the residual is ±1-LSB GPU filter
+      rounding under the focus highlight (invisible) plus the mouse-cursor
+      sprite baked into the C++ capture. What it took (all cited in code):
+      * Exact `C4StartupMainDlg` integer geometry incl. fullscreen-dialog client
+        margins (`main_menu_layout`, unit-tested: buttons at (842,201+44i,414,40)
+        @720p); 3-slice `DrawBar` planks; additive `GUIButtonHighlight`
+        focus/hover overlay; trademark line; `"Players: none selected"`;
+        version string from `C4VERSION`.
+      * **CStdFont-faithful fonts**: FreeType `FT_LOAD_RENDER|FT_LOAD_NO_HINTING`
+        at `FT_Set_Pixel_Sizes(h,h)` (same rasterizer family as the vendored
+        2.14.x), atlas-cell composition with the baked blur shadow + BltAlpha
+        `>>8` quirk (`lc-graphics/src/clonk_font.rs`), sizes 12/13/14/16/22,
+        `<c>` markup + `&` hotkey highlight (renders pale, NOT underlined),
+        glyph-exact captions/labels.
+      * **Gamma**: the blit shader's per-fragment ramp lookup (`CGammaControl`
+        formula, NEAREST 1D-texture index = `floor(c*256/255)`, black floor
+        0→1) — `lc-graphics/src/gamma.rs`.
+      * **Blits**: `CStdDDraw::Blit`-faithful per-texture-tile quads
+        (pow2-of-min-dim tiles, `GL_CLAMP_TO_EDGE` per C4Surface.cpp:1102),
+        GL_LINEAR bilinear in f32, float blend, single store rounding.
+- [x] Verification: `lc-app --dump-menu-frame <png>` renders the startup menu
+      headlessly at 1280x720. Compare against `build/Screenshots/*.png` shifted
+      **one row up** — C++ `C4Surface::SavePNG` has an off-by-one in its
+      `glReadPixels` readback loop (`realHgt - y`, C4Surface.cpp:434), so every
+      F9 screenshot is one row off and its top row is undefined. (Upstream C++
+      bug worth fixing; the live window is NOT shifted.)
+- [ ] Remaining menu polish: none known at the main menu beyond the ±1-LSB GPU
+      filter residual.
 - [ ] Other startup dialogs: scenario-selection "book", options, player select,
-      about — layouts to match their `C4Startup*Dlg`.
+      about — layouts to match their `C4Startup*Dlg` (the shared font/gamma/
+      blit machinery above now makes these mostly layout work).
 - [ ] Scenario-selection "book" (`C4StartupScenSelDlg`) — the parallax 3D book.
-- [ ] Font rendering + markup (`StdFont`, `StdMarkup`) — hotkeys, colored text.
 
 ### R3 — in-game scene (largest; depends on simulation correctness)
 - [x] **Verification capability**: `lc-app --dump-frame <png> [--sandbox] --test-frames N`
