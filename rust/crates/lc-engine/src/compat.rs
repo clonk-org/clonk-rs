@@ -23,12 +23,13 @@ use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionUpdate, AudioCommand,
     CommandDirection, CrewSelectionState, DefinitionId, DefinitionRect, Direction, DrawTransform,
     EnvironmentSettings, FloatVector2, GraphicsOverlayMode, Landscape, ObjectBaseGraphics,
-    ObjectGraphicsOverlay, ObjectId, ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand,
-    ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicalsUpdate, PhysicsSettings,
-    PlayerState, QueuedCommand, SpawnConfig, TransferZoneCommand, TransferZoneRect,
-    TransferZoneState, Vector2, CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT,
-    CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
+    ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
+    ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder, PhysicalsUpdate,
+    PhysicsSettings, PlayerState, QueuedCommand, SpawnConfig, TransferZoneCommand,
+    TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER,
+    CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
 };
+use std::sync::Arc;
 use lc_resources::PhysicalInfo;
 use lc_script::{Engine as ScriptEngine, RuntimeError, Value};
 use std::mem;
@@ -91,6 +92,10 @@ pub(crate) struct HostWorldObject {
     contents: Vec<ObjectId>,
     #[allow(dead_code)]
     pub draw_transform: Option<DrawTransform>,
+    /// Full object-state snapshot for nested script calls (Find_Func,
+    /// GameCall): lets host functions build a complete object scope for
+    /// another object mid-VM-call. `None` in legacy fixture contexts.
+    state: Option<Rc<ObjectState>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -98,6 +103,8 @@ pub(crate) struct DefinitionMetadata {
     pub category: i32,
     pub ocf_base: u32,
     pub crew_member: bool,
+    /// ActMap for building nested object scopes (Find_Func targets).
+    pub action_library: ActionLibrary,
     #[allow(dead_code)]
     pub value: i32,
     #[allow(dead_code)]
@@ -237,6 +244,7 @@ impl HostWorldObject {
             container,
             contents: Vec::new(),
             draw_transform,
+            state: None,
         }
     }
 
@@ -248,6 +256,17 @@ impl HostWorldObject {
     pub(crate) fn with_ocf(mut self, ocf: u32) -> Self {
         self.ocf = ocf;
         self
+    }
+
+    pub(crate) fn with_full_state(mut self, state: Rc<ObjectState>) -> Self {
+        self.state = Some(state);
+        self
+    }
+
+    /// The full state snapshot, when the context was built by the engine
+    /// (`Engine::host_world_context`). See the `state` field docs.
+    pub(crate) fn full_state(&self) -> Option<&Rc<ObjectState>> {
+        self.state.as_ref()
     }
 
     pub fn alive(&self) -> bool {
@@ -350,7 +369,8 @@ impl HostWorldObject {
     }
 }
 
-#[derive(Debug, Clone)]
+// Not `derive(Debug)`: `ScriptEngine` (in `definition_scripts`) has no Debug.
+#[derive(Clone)]
 pub(crate) struct HostWorldContext {
     objects: Rc<HashMap<ObjectId, HostWorldObject>>,
     order: Rc<Vec<ObjectId>>,
@@ -370,6 +390,10 @@ pub(crate) struct HostWorldContext {
     /// return false exactly like the C++ GetDef-failure paths
     /// (C4Script.cpp:4874,4893,4917,4932).
     particle_defs: Option<Rc<std::collections::HashSet<String>>>,
+    /// Compiled definition scripts, shared from `Engine.definitions`, so host
+    /// functions can run script functions on other objects mid-VM-call
+    /// (Find_Func/Sort_Func, GameCall). Empty in legacy fixture contexts.
+    definition_scripts: Rc<HashMap<DefinitionId, Arc<ScriptEngine>>>,
 }
 
 impl Default for HostWorldContext {
@@ -387,6 +411,7 @@ impl Default for HostWorldContext {
             next_object_id: 1,
             team_home_base_rule: false,
             particle_defs: None,
+            definition_scripts: Rc::new(HashMap::new()),
         }
     }
 }
@@ -472,7 +497,22 @@ impl HostWorldContext {
             next_object_id,
             team_home_base_rule,
             particle_defs: None,
+            definition_scripts: Rc::new(HashMap::new()),
         }
+    }
+
+    /// Attach the engine's compiled definition scripts for nested script
+    /// calls. See the `definition_scripts` field docs.
+    pub(crate) fn with_definition_scripts(
+        mut self,
+        scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
+    ) -> Self {
+        self.definition_scripts = Rc::new(scripts);
+        self
+    }
+
+    pub(crate) fn definition_script(&self, id: &str) -> Option<&Arc<ScriptEngine>> {
+        self.definition_scripts.get(id)
     }
 
     /// Attach the engine's particle def registry (names from
@@ -9060,6 +9100,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                     .unwrap_or(DEFAULT_CATEGORY),
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
+                action_library: ActionLibrary::default(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -9232,6 +9273,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                     .unwrap_or(DEFAULT_CATEGORY),
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
+                action_library: ActionLibrary::default(),
                 value: 0,
                 mass: 0,
                 constructable: true,
@@ -13807,6 +13849,7 @@ mod tests {
                 category: 0x1,
                 ocf_base: 0,
                 crew_member: false,
+                action_library: ActionLibrary::default(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -13844,6 +13887,7 @@ mod tests {
                     category: 0x1,
                     ocf_base: 0,
                     crew_member: false,
+                    action_library: ActionLibrary::default(),
                     value: 0,
                     mass: 0,
                     constructable: false,
@@ -13859,6 +13903,7 @@ mod tests {
                     category: 0x2,
                     ocf_base: 0,
                     crew_member: false,
+                    action_library: ActionLibrary::default(),
                     value: 0,
                     mass: 0,
                     constructable: false,
@@ -13898,6 +13943,7 @@ mod tests {
                 category: 0x1,
                 ocf_base: 0,
                 crew_member: false,
+                action_library: ActionLibrary::default(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -13950,6 +13996,7 @@ mod tests {
                 category: 0x1,
                 ocf_base: 0,
                 crew_member: false,
+                action_library: ActionLibrary::default(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -14275,6 +14322,7 @@ mod tests {
                 category: 1,
                 ocf_base: 0,
                 crew_member: false,
+                action_library: ActionLibrary::default(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -14311,6 +14359,7 @@ mod tests {
                 category: 1,
                 ocf_base: 0,
                 crew_member: false,
+                action_library: ActionLibrary::default(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -14363,6 +14412,7 @@ mod tests {
                 category: 1,
                 ocf_base: 0,
                 crew_member: false,
+                action_library: ActionLibrary::default(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -17539,6 +17589,7 @@ mod tests {
                 category: crate::CATEGORY_STRUCTURE,
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
+                action_library: ActionLibrary::default(),
                 value: 0,
                 mass: 100,
                 constructable: true,
@@ -17588,6 +17639,7 @@ mod tests {
             category: crate::CATEGORY_STRUCTURE,
             ocf_base: ocf::NORMAL,
             crew_member: false,
+            action_library: ActionLibrary::default(),
             value: 0,
             mass: 100,
             constructable: true,

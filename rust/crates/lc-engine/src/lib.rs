@@ -127,6 +127,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::ops::AddAssign;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::math::{
@@ -4508,7 +4509,10 @@ pub struct DefinitionComponent {
 pub struct Definition {
     id: DefinitionId,
     name: String,
-    script: ScriptEngine,
+    /// Shared compiled script: `host_world_context()` hands clones of this
+    /// `Arc` to host functions so nested script calls (Find_Func, GameCall)
+    /// can execute another definition's functions mid-VM-call.
+    script: Arc<ScriptEngine>,
     includes: Vec<String>,
     has_construction: bool,
     has_initialize: bool,
@@ -4603,7 +4607,7 @@ impl Definition {
         Ok(Self {
             id,
             name,
-            script,
+            script: Arc::new(script),
             includes,
             has_construction,
             has_initialize,
@@ -4665,7 +4669,7 @@ impl Definition {
     }
 
     pub fn merge_from(&mut self, parent: &Definition) {
-        self.script.merge_from(&parent.script);
+        Arc::make_mut(&mut self.script).merge_from(&parent.script);
         // Re-check function existence flags after merging parent functions
         if !self.has_construction {
             self.has_construction = self.script.has_function("Construction");
@@ -4843,7 +4847,14 @@ impl Definition {
     }
 
     pub fn set_debugger_hooks(&mut self, hooks: DebuggerHooks) {
-        self.script.set_debugger_hooks(hooks);
+        Arc::make_mut(&mut self.script).set_debugger_hooks(hooks);
+    }
+
+    /// Shared handle to the compiled script for nested script calls
+    /// (Find_Func/GameCall targets resolve functions on the target object's
+    /// own definition script, C4Aul.cpp:130-148).
+    pub(crate) fn script_arc(&self) -> Arc<ScriptEngine> {
+        Arc::clone(&self.script)
     }
 
     pub fn configure_actions(
@@ -9034,6 +9045,7 @@ impl Engine {
                         category: definition.category(),
                         ocf_base: definition.ocf_base(),
                         crew_member: definition.is_crew(),
+                        action_library: definition.action_library().clone(),
                         value: definition.value(),
                         mass: definition.mass(),
                         constructable: definition.is_constructable(),
@@ -9104,6 +9116,7 @@ impl Engine {
                 .with_contents(object.state.contents.clone())
                 .with_alive(object.state.alive)
                 .with_ocf(ocf)
+                .with_full_state(Rc::new(object.state.clone()))
             }),
             landscape,
             definition_metadata,
@@ -9114,6 +9127,12 @@ impl Engine {
             self.team_home_base_rule,
         )
         .with_particle_defs(self.particle_system.def_names())
+        .with_definition_scripts(
+            self.definitions
+                .iter()
+                .map(|(id, definition)| (id.clone(), definition.script_arc()))
+                .collect(),
+        )
     }
 
     pub fn clear_scenario_script(&mut self) {
@@ -18261,6 +18280,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     category: *category,
                     ocf_base: OCF_NORMAL,
                     crew_member: false,
+                    action_library: ActionLibrary::default(),
                     value: 0,
                     mass: 0,
                     constructable: false,
