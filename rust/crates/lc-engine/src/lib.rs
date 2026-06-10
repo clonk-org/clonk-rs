@@ -116,7 +116,7 @@ use compat::{
     PlayerCommand,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
-use material::{evaluate_corrosion, MaterialInteractionEvent, MaterialReactionKind};
+use material::{evaluate_corrosion, MaterialInteractionEvent, MaterialReaction, MaterialReactionKind};
 use message::{MessageCommand, MessageManager, MessageSpec, PersistedMessage};
 use ocf::NORMAL as OCF_NORMAL;
 use sector::{SectorMap, SectorObject};
@@ -17211,7 +17211,7 @@ impl Engine {
         let reaction =
             self.materials
                 .reaction_for_event(Some(pixel.mat), inmat, MaterialInteractionEvent::PxsPos);
-        if !matches!(reaction, MaterialReactionKind::None) {
+        if !matches!(reaction.kind, MaterialReactionKind::None) {
             // C++ passes nullptr for pfPosChanged at the PXSPos event; the
             // landscape position equals the PXS position here (C4PXS.cpp:55).
             let (ls_x, ls_y) = (ix, iy);
@@ -17281,7 +17281,7 @@ impl Engine {
                 inmat,
                 MaterialInteractionEvent::PxsMove,
             );
-            if !matches!(reaction, MaterialReactionKind::None) {
+            if !matches!(reaction.kind, MaterialReactionKind::None) {
                 let mut pos_changed = false;
                 if self.execute_pxs_reaction(
                     reaction,
@@ -17323,7 +17323,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     fn execute_pxs_reaction(
         &mut self,
-        reaction: MaterialReactionKind,
+        reaction: MaterialReaction,
         x: &mut i32,
         y: &mut i32,
         ls_x: i32,
@@ -17333,7 +17333,7 @@ impl Engine {
         event: MaterialInteractionEvent,
         pos_changed: &mut bool,
     ) -> bool {
-        match reaction {
+        match reaction.kind {
             MaterialReactionKind::None => false,
             // mrfConvert (C4Material.cpp:626-661)
             MaterialReactionKind::Convert { target, depth } => {

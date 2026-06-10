@@ -124,6 +124,30 @@ pub enum MaterialReactionKind {
     Insert,
 }
 
+/// One resolved reaction-table entry — the `C4MaterialReaction` essentials
+/// the mrf* functions consult: the dispatch kind plus the
+/// `fUserDefined`/`CheckSlide` flags (C4Material.cpp:48-69, 612-625).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterialReaction {
+    pub kind: MaterialReactionKind,
+    /// User reactions route through `mrfUserCheck`; hardcoded defaults do
+    /// their arm-specific unconditional checks.
+    pub user_defined: bool,
+    /// `CheckSlide=` (`fInsertionCheck`, default true): gates the
+    /// splash/slide check for user reactions on PXS movement.
+    pub insertion_check: bool,
+}
+
+impl MaterialReaction {
+    fn builtin(kind: MaterialReactionKind) -> Self {
+        Self {
+            kind,
+            user_defined: false,
+            insertion_check: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum MaterialInteractionEvent {
@@ -644,7 +668,7 @@ impl Material {
 pub struct MaterialSet {
     materials: Vec<Material>,
     by_name: HashMap<String, MaterialId>,
-    custom_reactions_by_event: [Vec<Option<MaterialReactionKind>>; MATERIAL_EVENT_COUNT],
+    custom_reactions_by_event: [Vec<Option<MaterialReaction>>; MATERIAL_EVENT_COUNT],
 }
 
 impl MaterialSet {
@@ -743,7 +767,7 @@ impl MaterialSet {
         pxs_material: Option<MaterialId>,
         landscape_material: Option<MaterialId>,
         event: MaterialInteractionEvent,
-    ) -> Option<MaterialReactionKind> {
+    ) -> Option<MaterialReaction> {
         let custom_reactions = &self.custom_reactions_by_event[event.index()];
         if custom_reactions.is_empty() {
             return None;
@@ -761,7 +785,7 @@ impl MaterialSet {
         &self,
         pxs_material: Option<MaterialId>,
         landscape_material: Option<MaterialId>,
-    ) -> MaterialReactionKind {
+    ) -> MaterialReaction {
         self.reaction_for_event(
             pxs_material,
             landscape_material,
@@ -774,10 +798,18 @@ impl MaterialSet {
         pxs_material: Option<MaterialId>,
         landscape_material: Option<MaterialId>,
         event: MaterialInteractionEvent,
-    ) -> MaterialReactionKind {
+    ) -> MaterialReaction {
         if let Some(custom) = self.custom_reaction(pxs_material, landscape_material, event) {
             return custom;
         }
+        MaterialReaction::builtin(self.builtin_reaction_kind(pxs_material, landscape_material))
+    }
+
+    fn builtin_reaction_kind(
+        &self,
+        pxs_material: Option<MaterialId>,
+        landscape_material: Option<MaterialId>,
+    ) -> MaterialReactionKind {
         let Some(pxs_id) = pxs_material else {
             return MaterialReactionKind::None;
         };
@@ -834,7 +866,7 @@ impl MaterialSet {
             MaterialInteractionEvent::MassMove,
         );
         execute_mass_move_reaction_kind(
-            reaction,
+            reaction.kind,
             landscape,
             self,
             pxs_x,
@@ -943,7 +975,7 @@ fn option_to_index(material: Option<MaterialId>) -> usize {
 fn build_custom_reactions(
     materials: &[Material],
     by_name: &HashMap<String, MaterialId>,
-) -> [Vec<Option<MaterialReactionKind>>; MATERIAL_EVENT_COUNT] {
+) -> [Vec<Option<MaterialReaction>>; MATERIAL_EVENT_COUNT] {
     let width = materials.len() + 1;
     let mut entries = std::array::from_fn(|_| vec![None; width * width]);
     if materials.is_empty() {
@@ -960,6 +992,14 @@ fn build_custom_reactions(
 
             let Some(kind) = parse_custom_reaction_kind(reaction_def, by_name) else {
                 continue;
+            };
+            // `CheckSlide=` (fInsertionCheck), default true
+            // (C4Material.cpp:66).
+            let insertion_check = reaction_def.bool_flag("checkslide").unwrap_or(true);
+            let reaction = MaterialReaction {
+                kind,
+                user_defined: true,
+                insertion_check,
             };
 
             let Some(target_raw) = reaction_def
@@ -988,7 +1028,7 @@ fn build_custom_reactions(
                         width,
                         Some(pxs_id),
                         target,
-                        kind,
+                        reaction,
                         reverse,
                     );
                 }
@@ -1141,11 +1181,11 @@ fn collect_targets_by_predicate(
 }
 
 fn set_custom_reaction(
-    entries: &mut [Option<MaterialReactionKind>],
+    entries: &mut [Option<MaterialReaction>],
     width: usize,
     pxs_material: Option<MaterialId>,
     landscape_material: Option<MaterialId>,
-    reaction: MaterialReactionKind,
+    reaction: MaterialReaction,
     reverse: bool,
 ) {
     let mut pxs_index = option_to_index(pxs_material);
@@ -1188,7 +1228,7 @@ mod tests {
         );
         let snow = set.id_of("Snow").expect("snow exists");
         let water = set.id_of("Water").expect("water exists");
-        let reaction = set.reaction(Some(snow), Some(water));
+        let reaction = set.reaction(Some(snow), Some(water)).kind;
         assert_eq!(
             reaction,
             MaterialReactionKind::Convert {
@@ -1218,7 +1258,7 @@ mod tests {
         let fire = set.id_of("Fire").expect("fire exists");
         let water = set.id_of("Water").expect("water exists");
         assert_eq!(
-            set.reaction(Some(fire), Some(water)),
+            set.reaction(Some(fire), Some(water)).kind,
             MaterialReactionKind::Poof
         );
     }
@@ -1243,7 +1283,7 @@ mod tests {
         let acid = set.id_of("Acid").expect("acid exists");
         let rock = set.id_of("Rock").expect("rock exists");
         assert_eq!(
-            set.reaction(Some(acid), Some(rock)),
+            set.reaction(Some(acid), Some(rock)).kind,
             MaterialReactionKind::Corrode {
                 corrosive_strength: 75,
                 corrode_resistance: 50,
@@ -1344,7 +1384,7 @@ mod tests {
         let fire = set.id_of("Fire").expect("fire material");
         let snow = set.id_of("Snow").expect("snow material");
         assert_eq!(
-            set.reaction(Some(fire), Some(snow)),
+            set.reaction(Some(fire), Some(snow)).kind,
             MaterialReactionKind::Poof,
             "reverse category reaction should apply to incoming incendiary material",
         );
@@ -1377,7 +1417,7 @@ mod tests {
         let rock = set.id_of("Rock").expect("rock material");
         let water = set.id_of("Water").expect("water material");
         assert_eq!(
-            set.reaction(Some(acid), Some(rock)),
+            set.reaction(Some(acid), Some(rock)).kind,
             MaterialReactionKind::Convert {
                 target: Some(water),
                 depth: Some(2),
@@ -1401,7 +1441,7 @@ mod tests {
         );
         let steam = set.id_of("Steam").expect("steam material");
         assert_eq!(
-            set.reaction(Some(steam), None),
+            set.reaction(Some(steam), None).kind,
             MaterialReactionKind::Poof,
             "reaction targeting sky should trigger when no landscape material is present",
         );
@@ -1423,7 +1463,7 @@ mod tests {
         );
         let mist = set.id_of("Mist").expect("mist material");
         assert_eq!(
-            set.reaction(Some(mist), None),
+            set.reaction(Some(mist), None).kind,
             MaterialReactionKind::None,
             "reaction without PXSMove bit should not apply to particle movement",
         );
@@ -1445,12 +1485,12 @@ mod tests {
         );
         let mist = set.id_of("Mist").expect("mist material");
         assert_eq!(
-            set.reaction(Some(mist), None),
+            set.reaction(Some(mist), None).kind,
             MaterialReactionKind::None,
             "mass-move-only reaction should not affect PXSMove lookups",
         );
         assert_eq!(
-            set.reaction_for_event(Some(mist), None, MaterialInteractionEvent::MassMove),
+            set.reaction_for_event(Some(mist), None, MaterialInteractionEvent::MassMove).kind,
             MaterialReactionKind::Poof,
             "mass-move exec mask should be available to mass movers",
         );
