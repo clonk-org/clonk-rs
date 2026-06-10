@@ -154,6 +154,14 @@ pub type DefinitionId = String;
 
 pub const OWNER_NONE: i32 = -1;
 pub const FULL_CON: i32 = 100_000;
+
+/// Energy-loss cause types (C4Effects.h:59-67), passed to Fx*Damage.
+pub const C4FX_CALL_ENG_SCRIPT: i32 = 32;
+pub const C4FX_CALL_ENG_BLAST: i32 = 33;
+pub const C4FX_CALL_ENG_OBJ_HIT: i32 = 34;
+pub const C4FX_CALL_ENG_FIRE: i32 = 35;
+pub const C4FX_CALL_ENG_ASPHYXIATION: i32 = 37;
+pub const C4FX_CALL_ENG_GET_PUNCHED: i32 = 40;
 const GAME_OVER_CHECK_INTERVAL: u8 = 35;
 const FIRE_DEFINITION_ID: &str = "FLAM";
 
@@ -6604,6 +6612,48 @@ impl Definition {
     /// Whether the definition script declares the `Fx<Name><Event>` callback.
     fn has_effect_callback(&self, effect_name: &str, event: &str) -> bool {
         self.script.has_effect_callback(effect_name, event)
+    }
+
+    /// `Fx<Name>Damage` (C4Effect.cpp:312-322): the effect is asked to
+    /// modify a damage/energy change before it applies.
+    #[allow(clippy::too_many_arguments)]
+    fn call_effect_damage(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        effect: &EffectState,
+        change: i32,
+        cause: i32,
+        caused_by: i32,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        self.dispatch_effect_callback(
+            state,
+            object_id,
+            effect,
+            "Damage",
+            "FxDamage",
+            vec![
+                Value::Int(change),
+                Value::Int(cause),
+                Value::Int(caused_by),
+            ],
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+        )
     }
 
     /// `Fx<Name>Effect` check call (C4Effect.cpp:178): the checker effect is
@@ -15251,7 +15301,7 @@ impl Engine {
                             fixtoi((dx_dir * dx_dir + dy_dir * dy_dir) * candidate_mass / 5);
                         // reduced to 1/3rd, but never dropped to zero by it
                         let hit_energy = (hit_energy / 3).max(i32::from(hit_energy != 0));
-                        self.change_object_energy(idx, -(hit_energy / 5), self.objects[candidate_idx].state.owner);
+                        self.change_object_energy(idx, -(hit_energy / 5), C4FX_CALL_ENG_OBJ_HIT, self.objects[candidate_idx].state.owner);
                         let tmass = obj1_mass.max(50);
                         let candidate_velocity = self.objects[candidate_idx].fixed_velocity;
                         // fling unless airborne off-Tick3 (C4GameObjects.cpp:176)
@@ -15457,7 +15507,7 @@ impl Engine {
         }
         // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:782)
         if frame % 5 == 0 {
-            self.change_object_energy(idx, -1, self.objects[idx].state.fire_caused_by);
+            self.change_object_energy(idx, -1, C4FX_CALL_ENG_FIRE, self.objects[idx].state.fire_caused_by);
         }
         // Background effects: Tick5 over valid landscape material
         // (C4Object.cpp:791-806) — extinguish in extinguisher material, then
@@ -15542,7 +15592,7 @@ impl Engine {
                 *breath = (*breath - 2 * C4_MAX_PHYSICAL / 100).max(0);
             } else {
                 let cause = self.objects[idx].last_energy_loss_cause;
-                self.change_object_energy(idx, -1, cause);
+                self.change_object_energy(idx, -1, C4FX_CALL_ENG_ASPHYXIATION, cause);
             }
             // The BubbleOut x argument draws Random(5) before the call
             // (C4Object.cpp:905); the bubble object itself is open.
@@ -15629,20 +15679,119 @@ impl Engine {
         trained
     }
 
+    /// `C4Effect::DoDamage` (C4Effect.cpp:312-322): walk the object's
+    /// effects in list order; each `Fx<Name>Damage` callback (resolved via
+    /// its command-target script) receives the running damage and its
+    /// return REPLACES it (`getInt` — a nil return zeroes it); the walk
+    /// stops once the damage reaches zero.
+    fn call_effects_do_damage(
+        &mut self,
+        idx: usize,
+        mut change: i32,
+        cause: i32,
+        caused_by: i32,
+    ) -> i32 {
+        let effects: Vec<EffectState> = self.objects[idx].state.effects.clone();
+        if effects.is_empty() {
+            return change;
+        }
+        let object_id = self.objects[idx].id;
+        let host_definition_id = self.objects[idx].definition_id.clone();
+        for effect in effects {
+            if change == 0 {
+                break;
+            }
+            let dispatch_id = effect
+                .command_target
+                .and_then(|target| self.find_object_index(ObjectId::new(target as u64)))
+                .map(|target_idx| self.objects[target_idx].definition_id.clone())
+                .or_else(|| effect.command_id.clone())
+                .unwrap_or_else(|| host_definition_id.clone());
+            let has_callback = self
+                .definitions
+                .get(&dispatch_id)
+                .map(|definition| definition.has_effect_callback(&effect.name, "Damage"))
+                .unwrap_or(false);
+            if !has_callback {
+                continue;
+            }
+            let action_library = self
+                .definitions
+                .get(&host_definition_id)
+                .map(|definition| definition.action_library().clone())
+                .unwrap_or_default();
+            let state_snapshot = self.objects[idx].state.clone();
+            let rng_state = self.rng.clone();
+            let global_view = self.global_effects.clone();
+            let world = self.host_world_context();
+            let Some(definition) = self.definitions.get(&dispatch_id) else {
+                continue;
+            };
+            let Ok((outcome, audio_state, new_rng, result)) = definition.call_effect_damage(
+                &state_snapshot,
+                object_id,
+                &effect,
+                change,
+                cause,
+                caused_by,
+                rng_state,
+                &global_view,
+                self.physics,
+                self.environment,
+                self.frame,
+                world,
+                self.game_over_triggered,
+                self.audio_registry.clone(),
+            ) else {
+                continue;
+            };
+            self.rng = new_rng;
+            self.audio_registry = audio_state;
+            let _ = self.apply_action_callback_outcome(
+                idx,
+                outcome,
+                &action_library,
+                object_id,
+                &host_definition_id,
+            );
+            change = match result {
+                Some(Value::Int(new_change)) => new_change,
+                Some(_) => 0,
+                None => change,
+            };
+        }
+        change
+    }
+
     /// Engine-side `C4Object::DoEnergy` slice (C4Object.cpp:1345-1365) in the
-    /// engine's percent-point energy units: clamp between zero and the
-    /// physical Energy ceiling (scaled from the 0..C4MaxPhysical range to
-    /// percent points), track the last energy-loss cause (C4Object.cpp:1353),
-    /// and assign death when an alive object's energy first reaches zero
-    /// (C4Object.cpp:1363). Zero-physical definitions keep the unclamped
-    /// legacy ceiling so physical-less fixtures behave as before.
-    fn change_object_energy(&mut self, idx: usize, change: i32, caused_by: i32) {
+    /// engine's percent-point energy units: living things' effects get the
+    /// Fx*Damage modification first (C4Object.cpp:1355-1359, zero aborts),
+    /// then clamp between zero and the physical Energy ceiling (scaled from
+    /// the 0..C4MaxPhysical range to percent points), track the last
+    /// energy-loss cause (C4Object.cpp:1353), and assign death when an alive
+    /// object's energy first reaches zero (C4Object.cpp:1363). Zero-physical
+    /// definitions keep the unclamped legacy ceiling so physical-less
+    /// fixtures behave as before.
+    fn change_object_energy(&mut self, idx: usize, change: i32, cause: i32, caused_by: i32) {
+        // Mark the damage-causing player first (C4Object.cpp:1351-1353).
+        if change < 0 || cause == C4FX_CALL_ENG_OBJ_HIT {
+            self.objects[idx].last_energy_loss_cause = caused_by;
+        }
+        // Living things: ask effects for change first (C4Object.cpp:1355-1359).
+        let change = if self.objects[idx].state.alive
+            && !self.objects[idx].state.effects.is_empty()
+        {
+            let modified = self.call_effects_do_damage(idx, change, cause, caused_by);
+            if modified == 0 {
+                return;
+            }
+            modified
+        } else {
+            change
+        };
         let max_energy = self.object_physical(idx).energy / (C4_MAX_PHYSICAL / 100);
         let was_zero = {
             let object = &mut self.objects[idx];
-            if change < 0 {
-                object.last_energy_loss_cause = caused_by;
-            }
             let was_zero = object.state.energy == 0;
             let mut energy = object.state.energy.saturating_add(change).max(0);
             if max_energy > 0 {
@@ -19727,9 +19876,9 @@ mod tests {
         )?;
 
         let idx = engine.find_object_index(clonk).expect("clonk exists");
-        engine.change_object_energy(idx, -3, 7);
+        engine.change_object_energy(idx, -3, C4FX_CALL_ENG_SCRIPT, 7);
         assert!(engine.objects[idx].state.alive, "energy 2 left");
-        engine.change_object_energy(idx, -2, 7);
+        engine.change_object_energy(idx, -2, C4FX_CALL_ENG_SCRIPT, 7);
         let idx = engine.find_object_index(clonk).expect("clonk exists");
         assert!(!engine.objects[idx].state.alive, "dead at zero energy");
         assert_eq!(engine.objects[idx].state.action.name, "Dead");
@@ -19746,7 +19895,7 @@ mod tests {
         );
 
         // Death is not re-assigned (already dead, C4Object.cpp:1141)
-        engine.change_object_energy(idx, -1, 9);
+        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 9);
         assert_eq!(engine.objects[idx].last_energy_loss_cause, 9);
         Ok(())
     }
@@ -24332,6 +24481,61 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn do_energy_asks_fx_damage_effects_first() {
+        // C4Object::DoEnergy asks living things' effects before applying
+        // (C4Object.cpp:1355-1359); C4Effect::DoDamage walks the effects in
+        // list order — each Fx<Name>Damage return REPLACES the damage
+        // (getInt), and a zeroed damage aborts both the walk and DoEnergy
+        // (C4Effect.cpp:312-322).
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [
+                { op = "add", name = "Armor", priority = 200, interval = 0 },
+                { op = "add", name = "Ward", priority = 100, interval = 0 }
+            ] };
+        }
+
+        global func FxWardDamage(state, effect, damage, damage_type, cause_plr) {
+            if (damage_type == 35) {
+                return 0;
+            }
+            return damage;
+        }
+
+        global func FxArmorDamage(state, effect, damage, damage_type, cause_plr) {
+            return damage / 2;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor").with_energy(50))
+            .expect("spawn succeeds");
+        engine.tick().expect("tick succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+
+        // List order is ascending priority: Ward (100) runs before Armor
+        // (200). A script-cause hit of -10 passes Ward untouched and is
+        // halved by Armor: 50 - 5 = 45.
+        engine.change_object_energy(idx, -10, C4FX_CALL_ENG_SCRIPT, 3);
+        assert_eq!(engine.objects[idx].state.energy, 45);
+
+        // A fire-cause hit is zeroed by Ward; the zero aborts the walk AND
+        // DoEnergy (C4Object.cpp:1358) — Armor never halves, energy keeps.
+        engine.change_object_energy(idx, -10, C4FX_CALL_ENG_FIRE, 3);
+        assert_eq!(engine.objects[idx].state.energy, 45);
+    }
+
+    #[test]
     fn do_energy_clamps_to_physical_energy_ceiling() {
         let script = r#"
         global func Initialize(state, random) {
@@ -24364,7 +24568,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .spawn_object(SpawnConfig::new("Clonk").with_energy(40))
             .expect("clonk spawns");
         let clonk_idx = engine.find_object_index(clonk_id).expect("clonk exists");
-        engine.change_object_energy(clonk_idx, 30, -1);
+        engine.change_object_energy(clonk_idx, 30, C4FX_CALL_ENG_SCRIPT, -1);
         assert_eq!(
             engine.objects[clonk_idx].state.energy, 50,
             "gain clamps to the physical Energy ceiling"
@@ -24376,7 +24580,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .spawn_object(SpawnConfig::new("Crate").with_energy(40))
             .expect("crate spawns");
         let crate_idx = engine.find_object_index(crate_id).expect("crate exists");
-        engine.change_object_energy(crate_idx, 30, -1);
+        engine.change_object_energy(crate_idx, 30, C4FX_CALL_ENG_SCRIPT, -1);
         assert_eq!(engine.objects[crate_idx].state.energy, 70);
     }
 
