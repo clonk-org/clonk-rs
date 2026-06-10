@@ -1,6 +1,6 @@
 # LegacyClonk Rust Port — Status & GAP LIST
 
-> Living document. Last updated 2026-06-09. The C++ engine in `../src/` is the
+> Living document. Last updated 2026-06-10. The C++ engine in `../src/` is the
 > **golden oracle**; parity = bit-for-bit match on simulation state. This file
 > tracks every divergence from that goal.
 
@@ -10,11 +10,23 @@ The port reproduces the engine's *shape* (structs, enums, command dispatch, FFI,
 ~1300 tests) and the two original headline determinism breaks — fixed-point math
 and the RNG — are now correct for the **currently ported paths**. All Top-15
 action items are done or partial-with-documented-remainder; the physicals model
-and GBackWind/IFT epics are complete. Lockstep parity is still blocked by the
-remaining epics: host→VM reentrancy (Find_Func/mrfScript/effect callbacks),
-C++ string interning + full save/load + binary packet encoding, the command-AI
-per-frame rework (incl. Throw ejection + the C4ObjectInfo model) — and proven
-only by the live C++↔Rust full-scenario shadow-diff (see Parity harnesses).
+and GBackWind/IFT epics are complete. **Host→VM reentrancy CORE LANDED
+(2026-06-10):** host functions can run script functions on other objects
+mid-VM-call (`compat::call_world_object_function` — scope-stack swap inside the
+effect context, outcomes folded into `EffectContextOutcome::other_objects` in
+first-call order and applied by `Engine::apply_nested_object_outcomes`);
+Find_Func/Sort_Func are the first consumers. Known seam divergences (documented,
+all locals-related or snapshot-related): VM sessions own their locals, so nested
+calls onto an IN-FLIGHT scope (self/dormant) read the pre-call locals snapshot
+and their local writes are discarded; Func-criterion finds read a snapshot view
+(mid-search mutations to non-target state and callback-spawned objects are not
+re-read; C++ reads live state); when the OUTER call errors, the partial outcome
+is dropped (pre-existing — C++ keeps mutations made before the error).
+Lockstep parity is still blocked by: mrfScript + GameCall/ObjectCall consumers
+of the seam, C++ string interning + full save/load + binary packet encoding,
+the command-AI per-frame rework (incl. Throw ejection + the C4ObjectInfo model)
+— and proven only by the live C++↔Rust full-scenario shadow-diff (see Parity
+harnesses).
 
 ### The two foundational breaks — current status
 
@@ -61,21 +73,11 @@ only by the live C++↔Rust full-scenario shadow-diff (see Parity harnesses).
 
 ## Gates
 
-- **`cargo test --workspace`: GREEN** (~1217 pass, cargo exit 0). Known flaky:
-  `lc-network session::tests::control_sync_and_reconnect_smoke` — passes in
-  isolation/clean runs; can fail under heavy parallel load when a departing
-  client's closing socket surfaces a transient `HostEvent::TransportError` that
-  `wait_for_host_ready` (`session.rs:1264`) treats as fatal. Network-I/O churn,
-  not a determinism issue. Fix: have `wait_for_*` tolerate transport errors from
-  departing clients (as they already skip `ClientLeft`).
-- **`cargo clippy`: NOT clean** (~275 lines). 7 `not_unsafe_ptr_arg_deref` errors
-  (FFI entry points deref raw pointers without `unsafe` — fix first, mark them
-  `unsafe fn`, no ABI change); ~30 `too_many_arguments`; ~6 `type_complexity`;
-  ~230 auto-fixable style lints. Deferred because several clippy
-  "simplifications" aren't proven behavior-preserving in determinism-critical
-  `lc-engine`/`lc-script`. Order: (1) FFI `unsafe`; (2) `#[allow]` on engine/FFI
-  signatures; (3) bulk `--fix` on non-critical crates + full test; (4)
-  engine/script by hand, each verified.
+- **`cargo test --workspace`: GREEN** (~1240 pass, cargo exit 0). The old
+  lc-network flake is FIXED (2026-06-10): `wait_for_host_ready` tolerates
+  departing-client `TransportError` like `ClientLeft`.
+- **`cargo clippy --workspace --all-targets -- -D warnings`: CLEAN**
+  (verified 2026-06-10; the previous ~275-line backlog was resolved).
 - **Graphical parity: NOT achieved** (presentation layer). Asset loading/2D blit
   matches, but menu chrome, the GL 3D scenario book, and in-game rendering all
   diverge — `lc-graphics` is ~25% (per-pixel blit only; no transforms/GL/shaders/
@@ -102,11 +104,11 @@ audited subsystems are determinism-critical.
 |---|---|---|---|
 | **script-values** | partial | **Done:** `C4ScriptCnvMap` 81-cell conversion table + `ConvertTo` dispatch (differential-locked `script_value_convert`); boost `hashCombine` + libc++ `std::hash<C4Value>` map-key hash (`script_value_hash`); typed `C4V_C4Object` identity as `Value::Object(u64)` through VM equality/truthiness/type/hash, FFI, host `this`, object-returning helpers, and effect vars; recursive FFI marshalling for `C4Id`/`Array`/`Proplist` through `LcScriptValueKind` + `LcScriptMapEntry`; VM-visible reference semantics for `&` params, `func &` returns, Local/Var slots, and array/map element refs. **Open:** `GuessType()` data-nonzero path (unreachable in the eager Rust value model — types are always known), C++ string-table interning/refcounts. Save/load + net sync still incomplete. | `lc-script/src/value.rs`, `lc-script/src/vm.rs`, `lc-engine/src/compat.rs` |
 | **particles** | mostly done (sim side) | **Corrected risk model:** C4Particles is *non-sync-relevant by design* (C4Particles.h:18-27) — every draw is `SafeRandom` (wall-clock-seeded libc `rand()`, C4Random.h:35,71-75), never the synced LCG, and counts scale with local `SmokeLevel`. The real parity risk was script-visible behavior: `CastParticles`/`CastBackParticles`/`PushParticles` were unregistered (script abort vs C++ `true`). **Done:** `particles.rs` ports `C4ParticleDefCore`+`Load` adjustments, def registry/overload, `Create` (room check, Attach offset), `Cast` draw structure, `Push`, `fxStdInit/Exec` (move/collision/RByV/gravity/WindDrift/AlphaFade/delay-phase/fadeout/offscreen), `fxSmokeInit/Exec`, Bounce/BounceY/Stop/Die; host fns with C++ return semantics incl. GetDef-failure → false; engine exec order object Back→Front then Global; snapshot/restore. **Open:** Particle.txt group loading (lc-resources) + gfx length/aspect from Graphics.png, draw procs (presentation), position-dependent `GBackWind`, clearing object-layer particles on object death. | `lc-engine/src/particles.rs`; `lib.rs`, `compat.rs` |
-| **findobject-ocf** | mostly done (2026-06-09) | **Done:** the full `CreateByValue()` condition-tree factory + `C4SortObject` with C++ cache semantics (see item 15) — `C4SO_Random` draws the synced `Random(1<<16)` once per object in collection order. **Open:** `Find_Func`/`Sort_Func` (host→VM reentrancy), `Controller` compares owner, `Layer` never matches, sector-bounds FindMany traversal order. | `compat.rs`; `ocf.rs` |
+| **findobject-ocf** | mostly done (2026-06-10) | **Done:** the full `CreateByValue()` condition-tree factory + `C4SortObject` with C++ cache semantics (see item 15); **Find_Func/Sort_Func via the host→VM reentrancy seam (2026-06-10)** — per-candidate nested calls with raw-truthiness Check / getInt sort values, FindSameNameFunc-style own-def-then-host resolution, fPassErrors=true error passthrough, IsImpossible only when the name is unknown everywhere, Not swaps impossible/ensured, criteria parsing stops at the first nil par (C4Script.cpp:1996), single-result Find-with-sort now uses the UNCACHED pairwise `Compare(candidate, best)` (per-comparison value calls/Random draws, C4FindObject.cpp:186-199), post-sort destroyed objects keep their slot as Nil. **Open:** `Controller` compares owner, `Layer` never matches, sector-bounds FindMany traversal order; cached sort keys compare as i64 while C++ wraps i32 (`values[j]-values[i]` — divergent only for |values| ≥ 2^31 spreads); C++ stable_sort internals not mirrored for non-total comparators. | `compat.rs`; `ocf.rs` |
 | **movement-physics** | partial | Central motion accumulates sub-pixel fixed velocity, steps x/y per pixel, consumes DefCore/current owned vertices and `StretchGrowth`/Jolt construction shape updates, runs shape/vertex `ContactCheck`, dispatches ContactLeft/Right/Top/Bottom and Hit/Hit2/Hit3 in C++ order, applies redirect/friction, clamps landscape and layer `TargetBounds`, overlays active DefCore solid masks as `MCVehic` contact density with sprite-alpha bitmap transparency, supports `Shape.Attach`, forces Jump/default on attach loss, rolls back per-degree rotation, and uses C++ density levels for background/material/vehicle contact checks (`C4M_Background=0`, material `Density`, closed side bounds and solid masks `C4M_Vehicle=100`). **Missing:** rotated solid-mask put-buffer semantics, `SetSolidMask`/solid-mask update lifetime, attached-object pushback. | `lib.rs`, `landscape.rs` |
 | **objects-core** | mostly done (2026-06-09) | **Done:** full `CrossCheck()` — all three passes (Tick5 hostile fight + Tick35 contact incineration, every-frame hit-damage/fling + Tick3 collection, Tick10 contained fight; see Completed); fire model + `AssignDeath`; **C4PhysicalInfo physicals** (`[Physical]` parsing, `GetPhysical` override→def fallback, `TrainPhysical`, `ValByPhysical`, DoEnergy Energy-ceiling clamp) + the C++ DFA_FIGHT exec (see item 6). **Open:** OCF computes a subset of the ~30 C++ checks (`ocf.rs` vs `lib.rs:527-666`); object list is `Vec` vs category/ID-sorted; C4ObjectInfo (permanent training/experience) unmodeled. | `lib.rs`, `ocf.rs`, `compat.rs` |
 | **game-control-record** | mostly done (2026-06-09) | **Done:** the real C4ControlSyncCheck digest (Random3/RandomCount/AllCrewPosX/SectShapeSum/MassMoverIndex via `CreatePtr` slots), `ControlRate`/`ControlTick`/`SyncRate` state machine, `BinaryControlRecord` 2-byte chunk-head stream with `RCT_Frame` fillers and the `frame+37` `RCT_End` (see item 14). **Open:** control-packet payload serialization (`DecompileToBuf<StdCompilerBinWrite>`), lc-network DoInput/queue wiring for host sync-check broadcast, `Prepare()` pre-validation. | `lib.rs`, `control.rs`, `record.rs`, `ffi.rs` |
-| **material** | partial (40%) | Reaction *execution* partly missing: `mrfInsertCheck` splash/slide physics (`C4Material.cpp:570-604`) and script reactions unported. `MaterialReactionKind` classifies; mass-mover path now executes corrode/poof (see item 9). No full `ExtractMaterial/InsertMaterial` semantics. | `lc-engine/material.rs`, `lc-resources/material.rs` |
+| **material** | partial (55%) | **User-defined reaction parity DONE (2026-06-10):** reaction-table entries carry `fUserDefined`/`CheckSlide`; unknown/absent `Type=` (incl. "Incinerate", not user-nameable) installs a NoReaction that OVERRIDES the hardcoded default (ReactionFuncMap nullptr sentinel, C4Material.cpp:38-46); `mrfUserCheck` prologue (CheckSlide-gated splash/slide on PXSMove) with `!fUserDefined`-gated body checks; user Convert fires on PXSMove (C4Material.cpp:629-634). **Open:** `mrfScript` script reactions (needs raw-value scenario call + by-ref write-back, see Task list), mass-mover reaction path has no VM access (loop restructure needed, RNG-order constrained), mass-move `Convert` → `PXS.Create` handoff (C4Material.cpp:654-657), full `ExtractMaterial/InsertMaterial` semantics. | `lc-engine/material.rs`, `lc-resources/material.rs` |
 | **pxs-massmover** | mostly done (2026-06-09) | **Done:** full `C4PXS::Execute` port — `pxs.rs` chunk/slot storage with `New()` lowest-free-slot reuse and chunk-major execution order (`C4PXS.cpp:175-234`), out-of-bounds rules, meePXSPos/meePXSMove reaction dispatch (`execute_pxs_reaction` mirrors mrfConvert/Poof/Corrode/Incinerate/Insert incl. depth-checked conversion and `Landscape.Incinerate`-at-position semantics), free-fall wind drift with the synced `Random(1200)` pair and `WindDrift_Factor`, coarse `_PathFree` (17×15 `PixCnt` cells, on-demand occupancy), step-loop with `fStopMovement` snap; `PXS.Cast` draw order (`r2` before `r1`, C4PXS.cpp:303-316) wired into blast (`level=60`, C4Landscape.cpp:1075-1078); dig spill as zero-velocity `PXS.Create`; raw-fixed save/load (`ParticleSnapshot.pxs_fixed`). Mass-mover side: down/L/R corrosion, two-pass reverse exec, `Random(10)` before `Rnd3()`. **Open:** mass-move `Convert` → `PXS.Create` handoff (C4Material.cpp:654-657; `MaterialReactionExecution::Converted` is produced but unconsumed), exact `BlastFree` material accounting around the cast. PXS wind drift is now position-dependent via the IFT tunnel overlay (2026-06-09). The invented PXS→object friction coupling was REMOVED (C++ PXS never touch objects). | `pxs.rs`, `mass_mover.rs`, `lib.rs`, `landscape.rs` |
 | **landscape** | partial (25%) | Batch `apply_temperature_conversions` vs C++ incremental `ExecuteScan/DoScan` with `ScanX` cursor (scan order desyncs). No `PRETTY_TEMP_CONV`, no map creation (`ChunkyRandom`/`MapToLandscape`), no `DigFree/BlastFree`, no pixel ops, no Save/Load. Liquid model is segment- vs pixel-based. | `landscape.rs`, `material.rs` |
 | **effects** | partial (timer semantics DONE 2026-06-10) | DONE: C++ modulo timer (monotonic iTime, zero interval never fires, verbatim iIntervall/iTime incl. AddEffect default 0), kill on C4Fx_Execute_Kill and on elapsed timerless intervals (Stop callback runs), FxStart C4Fx_Start_Deny (dead without Stop), list order ascending by |priority| (C4Effect.cpp:80-94). DONE 2026-06-10 second pass: command-target def resolution (C4Effect::GetCallbackScript - cross-def Fx* callbacks run in the right script), the Fx*Effect Check chain with C4Fx_Effect_Deny (priority-1 exemption). Open: Annul/AnnulCalls + FxAdd add-to-other-effect (C4Effect.cpp:191-210), TempRemove/TempReadd, Fx*Damage (DoEnergy modification, C4Object.cpp:1355-1359), builtin fire/helper effects (Splash/Smoke/Explosion/BubbleOut), the C++ global script engine (host-def fallback used). | `effect.rs`, `lib.rs` |
@@ -484,16 +486,56 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
     ascending sort. Host fns `FindObject2`/`ObjectCount2` registered;
     `FindObjects` dispatches array-first-arg → C++ criteria form, else the
     legacy fixture form. CreateCriterionsFromPars AND-merging + no-criterion
-    script error (C4Script.cpp:1985-2060). **Open:** `Find_Func`/`Sort_Func`
-    need host→VM reentrancy (Func conditions are impossible, Func sorts
-    compare equal); `Controller` compares owner (no controller model);
-    `Layer` never matches (host objects carry no layer); the sector-bounds
-    traversal (and its sector-order FindMany result ordering) — the main
-    list is always walked, matching the C++ unbounded path.
+    script error (C4Script.cpp:1985-2060). **Find_Func/Sort_Func DONE
+    (2026-06-10)** via the host→VM reentrancy seam (see findobject-ocf GAP
+    row for details and residual caveats). **Open:** `Controller` compares
+    owner (no controller model); `Layer` never matches (host objects carry
+    no layer); the sector-bounds traversal (and its sector-order FindMany
+    result ordering) — the main list is always walked, matching the C++
+    unbounded path.
 
 ---
 
 ## Completed (changelog)
+
+**Host→VM reentrancy seam + Find_Func/Sort_Func + material user-reactions
+(2026-06-10).** First slice of the reentrancy epic:
+- Structural: `Definition.script` is `Arc<ScriptEngine>`; `HostWorldContext`
+  carries `definition_scripts` (Arc clones) + per-object `Rc<ObjectState>`
+  full snapshots; `DefinitionMetadata.action_library`.
+- The seam: `compat::call_world_object_function(target, fn, args)` —
+  three-phase borrow discipline (prepare under borrow → run the target def's
+  VM borrow-free → restore under borrow); scope STACK on the context
+  (`object` = active, `dormant_scopes` = suspended levels) with
+  move-by-identity so one object never has two scopes (no double-apply);
+  completed nested scopes + VM-final locals kept per target for resumption;
+  folded into `EffectContextOutcome::other_objects` (ordered) and applied by
+  `Engine::apply_nested_object_outcomes` (update/destroy/commands/effects +
+  effect events per object); threaded through `CommandBatch`/`ScenarioBatch`
+  for the DSL/scenario paths. Resolution = target def's script function,
+  host functions as engine fallback, miss → silent None
+  (FindSameNameFunc, C4Aul.cpp:130-148).
+- Find_Func (C4FindObject.cpp:124-136,653-662): name+pars captured (slot 2 →
+  par 0, 10-par cap), raw-truthiness Check, errors rethrown
+  (fPassErrors=true), IsImpossible = name unknown everywhere, Not swaps
+  impossible/ensured, Func-mode finds run on a borrow-free snapshot view;
+  Status re-checks: pre-sort erase + post-sort Nil slots
+  (C4FindObject.cpp:217-223,372-375). Criteria parsing stops at the first
+  nil par (C4Script.cpp:1996; was: skipped).
+- Sort_Func (C4FindObject.cpp:934-956): cached once-per-object values in
+  find order (PrepareCache), getInt() conversion, stable ascending;
+  single-result Find-with-sort switched to the UNCACHED pairwise
+  `Compare(candidate, best)` with obj1-then-obj2 evaluation order — fixes
+  Random-draw-count parity for ALL sorts on FindObject2
+  (C4FindObject.cpp:186-199,834-842).
+- Material user-reactions: `MaterialReaction { kind, user_defined,
+  insertion_check }` table entries; unknown/absent Type installs a
+  default-overriding NoReaction ("Incinerate" is not user-nameable;
+  mrfIncinerate asserts !fUserDefined); mrfUserCheck prologue with
+  CheckSlide gate; user Convert fires on PXSMove (C4Material.cpp:38-46,
+  612-634,683-787).
+- Gates: lc-network flake fixed; clippy backlog found already clean
+  (-D warnings passes workspace-wide).
 
 **DFA_PUSH/DFA_PULL + jump physicals + GBackWind/IFT (2026-06-09).**
 `C4Object::Push` force model (C4Object.cpp:1758-1808: OCF_Grab/Grab=2 gates —
