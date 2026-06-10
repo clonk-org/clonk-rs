@@ -3433,6 +3433,7 @@ mod tests {
                 info_physical: None,
                 temporary_physical: None,
                 physical_changes: Vec::new(),
+                breath: 0,
                 last_energy_loss_cause: -1,
                 fixed_position: None,
                 fixed_velocity: None,

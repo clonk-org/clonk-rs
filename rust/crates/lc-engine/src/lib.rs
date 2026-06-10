@@ -1879,6 +1879,10 @@ pub struct ObjectState {
     /// registrations as (physical name, previous value), newest last.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub physical_changes: Vec<(String, i32)>,
+    /// `C4Object::Breath` on the raw 0..=Physical.Breath scale, filled from
+    /// the physicals at birth (C4Object.cpp:193).
+    #[serde(default)]
+    pub breath: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -3470,6 +3474,7 @@ impl Object {
             info_physical: self.state.info_physical,
             temporary_physical: self.state.temporary_physical,
             physical_changes: self.state.physical_changes.clone(),
+            breath: self.state.breath,
             last_energy_loss_cause: self.last_energy_loss_cause,
             fixed_position: subpixel_or_none(self.fixed_position, position),
             fixed_velocity: subpixel_or_none(self.fixed_velocity, velocity),
@@ -4011,6 +4016,9 @@ pub struct ObjectSnapshot {
     /// (physical name, previous value) pairs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub physical_changes: Vec<(String, i32)>,
+    /// `C4Object::Breath` (C4Object.cpp:2738 compile list).
+    #[serde(default)]
+    pub breath: i32,
     /// `LastEngLossPlr` (C4Object.cpp:2740) — kill attribution.
     #[serde(default = "default_owner")]
     pub last_energy_loss_cause: i32,
@@ -4531,6 +4539,8 @@ pub struct Definition {
     contact_incinerate: i32,
     no_burn_decay: bool,
     no_burn_damage: bool,
+    /// NoBreath=1: exempt from the ExecLife breathing check (C4Object.cpp:880).
+    no_breath: bool,
     burn_turn_to: Option<String>,
     incomplete_activity: bool,
     /// The [Physical] DefCore section (C4Def::Physical).
@@ -4620,6 +4630,7 @@ impl Definition {
             line_connect: 0,
             contact_incinerate: 0,
             no_burn_decay: false,
+            no_breath: false,
             no_burn_damage: false,
             burn_turn_to: None,
             incomplete_activity: false,
@@ -4731,6 +4742,7 @@ impl Definition {
         );
         definition.set_burn_turn_to(resource.core.burn_turn_to.clone());
         definition.set_incomplete_activity(resource.core.incomplete_activity);
+        definition.set_no_breath(resource.core.no_breath);
         definition.set_physical(resource.core.physical);
         definition.set_collectible(resource.core.collectible);
         definition.set_constructable(resource.core.constructable);
@@ -5075,6 +5087,14 @@ impl Definition {
 
     pub fn no_burn_damage(&self) -> bool {
         self.no_burn_damage
+    }
+
+    pub fn no_breath(&self) -> bool {
+        self.no_breath
+    }
+
+    pub fn set_no_breath(&mut self, no_breath: bool) {
+        self.no_breath = no_breath;
     }
 
     pub fn set_fire_properties(
@@ -11019,6 +11039,8 @@ impl Engine {
             self.update_sector_for_index(idx);
             // effects (fire) run after movement (C4Object.cpp:1073-1077)
             self.exec_object_fire(idx, frame);
+            // ExecLife runs after the fire effect (C4Object.cpp:1074-1080)
+            self.exec_object_life(idx, frame);
 
             let object_id = self.objects[idx].id;
             let state_snapshot = self.objects[idx].state.clone();
@@ -11220,8 +11242,6 @@ impl Engine {
 
             self.apply_landscape_at_index(idx);
             self.update_sector_for_index(idx);
-            // effects (fire) run after movement (C4Object.cpp:1073-1077)
-            self.exec_object_fire(idx, frame);
             let (procedure, line_connect, ocf_base, collectible) = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
@@ -12350,6 +12370,7 @@ impl Engine {
                     info_physical: snapshot.info_physical,
                     temporary_physical: snapshot.temporary_physical,
                     physical_changes: snapshot.physical_changes.clone(),
+                    breath: snapshot.breath,
                 },
                 shape_template,
                 snapshot.own_vertices.clone(),
@@ -14950,6 +14971,78 @@ impl Engine {
         }
     }
 
+    /// `C4Object::ExecLife` breathing block (C4Object.cpp:878-919), run
+    /// after the fire effect like C++ (C4Object.cpp:1074-1080). Still open:
+    /// the MVehic forcefield arm (needs the solid-mask material layer), the
+    /// FXB1 bubble object (the synced `Random(5)` x-argument draw IS
+    /// consumed), the DeepBreath callback's sound, and the corrosion/
+    /// InMat-incineration/base/birthday arms (need InMat and base models).
+    fn exec_object_life(&mut self, idx: usize, frame: u64) {
+        // Tick5, alive, breathing definitions only (C4Object.cpp:879-880).
+        if frame % 5 != 0 || !self.objects[idx].state.alive {
+            return;
+        }
+        let no_breath = self
+            .definitions
+            .get(&self.objects[idx].definition_id)
+            .map(|definition| definition.no_breath())
+            .unwrap_or(false);
+        if no_breath {
+            return;
+        }
+        let physical = self.object_physical(idx);
+        let position = self.objects[idx].state.position;
+        let shape_top = self.objects[idx]
+            .current_shape_rect()
+            .map(|rect| rect.y)
+            .unwrap_or(0);
+        let mouth_y = position.y + shape_top / 2;
+        // Supply check (C4Object.cpp:882-897).
+        let breathe = if self.objects[idx].state.container.is_some() {
+            true
+        } else if physical.breathe_water != 0 {
+            let water = self.materials.id_of("Water");
+            water.is_some()
+                && self
+                    .landscape
+                    .as_ref()
+                    .and_then(|landscape| landscape.material_at(position.x, position.y))
+                    == water
+        } else {
+            !self
+                .landscape
+                .as_ref()
+                .map(|landscape| {
+                    landscape.is_solid_at(position.x, mouth_y)
+                        || landscape.is_liquid_at(position.x, mouth_y)
+                })
+                .unwrap_or(false)
+        };
+        if !breathe {
+            // Reduce breath, then energy by the asphyxiation cause
+            // (C4Object.cpp:899-904).
+            if self.objects[idx].state.breath > 0 {
+                let breath = &mut self.objects[idx].state.breath;
+                *breath = (*breath - 2 * C4_MAX_PHYSICAL / 100).max(0);
+            } else {
+                let cause = self.objects[idx].last_energy_loss_cause;
+                self.change_object_energy(idx, -1, cause);
+            }
+            // The BubbleOut x argument draws Random(5) before the call
+            // (C4Object.cpp:905); the bubble object itself is open.
+            let _ = self.rng.random(5);
+            // Physical training (C4Object.cpp:908).
+            self.train_physical(idx, "Breath", 2, C4_MAX_PHYSICAL);
+        } else {
+            // Take breath (C4Object.cpp:913-917).
+            let take = physical.breath - self.objects[idx].state.breath;
+            if take > physical.breath / 2 {
+                let _ = self.call_object_function(idx, "DeepBreath", Vec::new());
+            }
+            self.objects[idx].state.breath += take;
+        }
+    }
+
     /// The definition's `[Physical]` section for the object (the
     /// `Def->Physical` fallback and the info-clone source).
     fn definition_physical(&self, idx: usize) -> PhysicalInfo {
@@ -16890,10 +16983,17 @@ impl Engine {
                 info_physical: None,
                 temporary_physical: None,
                 physical_changes: Vec::new(),
+                breath: 0,
             },
             shape_template,
             own_shape_vertices,
         );
+        // Breath fills from the physicals at birth (C4Object.cpp:193).
+        object.state.breath = self
+            .definitions
+            .get(&definition_id)
+            .map(|definition| definition.physical().breath)
+            .unwrap_or_default();
         object.ensure_material_capacity(self.materials.len());
         let mut container_changes = Vec::new();
         if let Some(container_id) = container {
@@ -24235,6 +24335,161 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             vec![("Walk".to_string(), 35_000)]
         );
         assert_eq!(restored.objects[idx].last_energy_loss_cause, 3);
+    }
+
+    #[test]
+    fn fire_effect_executes_once_per_tick() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+        let mut definition = Definition::from_script("Torch", "Torch", script).unwrap();
+        definition.set_fire_properties(1, true, true);
+        let mut engine = Engine::with_seed(1);
+        engine.register_definition(definition).expect("registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Torch"))
+            .expect("spawns");
+        let idx = engine.find_object_index(id).expect("exists");
+        engine.objects[idx].state.on_fire = true;
+        engine.objects[idx].state.fire_phase = 0;
+        engine.tick().expect("tick succeeds");
+        assert_eq!(engine.objects[idx].state.fire_phase, 1, "ExecFire once per frame");
+    }
+
+
+    #[test]
+    fn exec_life_breath_depletes_then_asphyxiates_in_semisolid() {
+        // ExecLife breathing (C4Object.cpp:878-919): Tick5, alive, no
+        // breathable supply at the mouth (y + Shape.y/2 semi-solid) →
+        // breath -= 2*C4MaxPhysical/100, the BubbleOut x argument draws
+        // Random(5), and only at zero breath DoEnergy(-1, EngAsphyxiation).
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Water]
+            Name=Water
+            Density=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+
+        let mut definition = Definition::from_script("Diver", "Diver", script).unwrap();
+        definition.set_physical(PhysicalInfo {
+            breath: 50_000,
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(77);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_materials(materials);
+        let mut landscape = Landscape::flat(8, 200);
+        // Submerge the breathe-check column: the mouth sits at
+        // y + shape.y/2 = 26 + (-8)/2 = 22.
+        landscape.set_liquid_column(2, vec![LiquidSegment::new(10, 40)]);
+        engine.set_landscape(landscape);
+
+        let vertices = vec![
+            ObjectVertex::new(-4, -8),
+            ObjectVertex::new(4, -8),
+            ObjectVertex::new(4, 8),
+            ObjectVertex::new(-4, 8),
+        ];
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Diver")
+                    .with_position(Vector2::new(2, 26))
+                    .with_vertices(vertices)
+                    .with_energy(50),
+            )
+            .expect("diver spawns");
+        let idx = engine.find_object_index(id).expect("diver exists");
+        assert_eq!(
+            engine.objects[idx].state.breath, 50_000,
+            "breath fills from the physicals at birth (C4Object.cpp:193)"
+        );
+
+        let mut mirror = engine.rng.clone();
+        for _ in 0..4 {
+            engine.tick().expect("tick succeeds");
+            let _ = mirror.random(i32::MAX); // the per-object Step draw
+        }
+        assert_eq!(engine.objects[idx].state.breath, 50_000, "Tick5 gate");
+        engine.tick().expect("tick succeeds");
+        assert_eq!(
+            engine.objects[idx].state.breath,
+            50_000 - 2 * C4_MAX_PHYSICAL / 100
+        );
+        assert_eq!(engine.objects[idx].state.energy, 50, "breath before energy");
+        let _ = mirror.random(5); // the BubbleOut x argument (C4Object.cpp:905)
+        let _ = mirror.random(i32::MAX); // the per-object Step draw
+        assert_eq!(engine.rng, mirror, "exactly one extra synced draw");
+
+        // Out of breath: the same gate now costs energy with the
+        // asphyxiation cause (C4Object.cpp:904).
+        engine.objects[idx].state.breath = 0;
+        engine.objects[idx].last_energy_loss_cause = 7;
+        for _ in 0..5 {
+            engine.tick().expect("tick succeeds");
+        }
+        assert_eq!(engine.objects[idx].state.energy, 49);
+        assert_eq!(engine.objects[idx].last_energy_loss_cause, 7);
+    }
+
+    #[test]
+    fn exec_life_breath_restores_with_supply() {
+        // Supply branch (C4Object.cpp:911-918): takebreath restores to the
+        // physical maximum in one gulp.
+        let script = r#"
+        global func Initialize(state, random) {
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+
+        let mut definition = Definition::from_script("Diver", "Diver", script).unwrap();
+        definition.set_physical(PhysicalInfo {
+            breath: 50_000,
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+
+        let mut engine = Engine::with_seed(77);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Diver").with_energy(50))
+            .expect("diver spawns");
+        let idx = engine.find_object_index(id).expect("diver exists");
+        engine.objects[idx].state.breath = 10_000;
+
+        for _ in 0..5 {
+            engine.tick().expect("tick succeeds");
+        }
+        assert_eq!(engine.objects[idx].state.breath, 50_000);
     }
 
     #[test]

@@ -181,6 +181,8 @@ pub struct DefCore {
     pub contact_incinerate: i32,
     /// NoBurnDecay=1: burning does not reduce Con (C4Object.cpp:777-778).
     pub no_burn_decay: bool,
+    /// `NoBreath` (C4Def.cpp:409): exempt from the ExecLife breathing check.
+    pub no_breath: bool,
     /// NoBurnDamage=1: burning deals no damage (C4Object.cpp:780).
     pub no_burn_damage: bool,
     /// BurnTurnTo=ID: definition change on incineration (C4Effect.cpp:580-585).
@@ -423,6 +425,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut collection_limit: Option<u32> = None;
     let mut contact_incinerate: i32 = 0;
     let mut no_burn_decay = false;
+    let mut no_breath = false;
     let mut no_burn_damage = false;
     let mut burn_turn_to: Option<String> = None;
     let mut incomplete_activity = false;
@@ -541,6 +544,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "noburndecay" => {
                 no_burn_decay = parse_bool(value);
             }
+            "nobreath" => {
+                no_breath = parse_bool(value);
+            }
             "noburndamage" => {
                 no_burn_damage = parse_bool(value);
             }
@@ -625,6 +631,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         collection_limit,
         contact_incinerate,
         no_burn_decay,
+        no_breath,
         no_burn_damage,
         burn_turn_to,
         incomplete_activity,
@@ -1802,11 +1809,13 @@ NextAction=Dup
             Name=Firy
             ContactIncinerate=10
             NoBurnDecay=1
+            NoBreath=1
             NoBurnDamage=1
         "#;
         let parsed = parse_def_core(data).expect("def core parses");
         assert_eq!(parsed.contact_incinerate, 10);
         assert!(parsed.no_burn_decay);
+        assert!(parsed.no_breath);
         assert!(parsed.no_burn_damage);
 
         let data = br#"
@@ -1817,6 +1826,7 @@ NextAction=Dup
         let parsed = parse_def_core(data).expect("def core parses");
         assert_eq!(parsed.contact_incinerate, 0, "default: not inflammable");
         assert!(!parsed.no_burn_decay);
+        assert!(!parsed.no_breath, "default: breathing");
         assert!(!parsed.no_burn_damage);
     }
 
