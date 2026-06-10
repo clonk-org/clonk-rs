@@ -328,16 +328,27 @@ Determinism-critical first; items 1–3 gate almost everything. Status inline.
    `TrainPhysical(Fight,1,C4MaxPhysical)`, facing by target x, stand-beside
    at `target.x ± (Shape.Wdt/2+2)` with `lLimit = ValByPhysical(95, Walk)`
    `Towards` stepping, own-shape distance check after the approach, grounded
-   `ydir=0`. **Open:** attach detach at fire start (needs the DFA_ATTACH
+   `ydir=0`. **Procedure speed limits DONE (2026-06-09):** Walk/Scale/
+   Hangle/Swim/Dig/Float ComDir movement follows the C++ physical model
+   whenever the relevant `[Physical]` value is nonzero — `WalkAccel`/
+   `SwimAccel`/`FloatAccel` constants (C4Movement.cpp:31-34), per-branch
+   clamps to `ValByPhysical(280/200/160/160/125, …)` resp. `FIXED100(Float)`
+   (C4Object.cpp:4771-5286), Scale/Hangle Tick5 + Swim Tick10 at-limit
+   training, no gravity for Swim/Float, facing by xdir sign; physical-less
+   fixture definitions keep the legacy `MovementProfile` paths (documented
+   deviation). **Open:** attach detach at fire start (needs the DFA_ATTACH
    action scan); fire modes/sounds; Tick5 base extinguish (base model);
-   SmokeRate smoke (visual); `ValByPhysical` speed limits across the OTHER
-   action procedures (walk/swim/scale/hangle/dig still use the invented
-   `MovementProfile`); Breath/`ExecLife` asphyxiation; the C4ObjectInfo model
-   (permanent training, DoExperience — the fight exec skips the Tick35
-   `DoExperience(+2)`); temporary physicals + `SetPhysical`/`TrainPhysical`/
-   `ResetPhysical` host fns; `physical_override` and
-   `last_energy_loss_cause` not yet snapshot-persisted; effect ClearAll
-   revival abort and player pointer/view cleanup in AssignDeath.
+   SmokeRate smoke (visual); Push/Pull force `ValByPhysical(250, Push)` +
+   walk limit (C4Object.cpp:5048-5129), `ObjectComJump`
+   Con-scaled Walk/Jump physicals (C4ObjectCom.cpp:287-288), Throw `pthrow
+   = ValByPhysical(400, Throw)` (C4ObjectCom.cpp:127); swim InLiquid
+   exit/surface checks (need the liquid model); Breath/`ExecLife`
+   asphyxiation; the C4ObjectInfo model (permanent training, DoExperience —
+   the fight exec skips the Tick35 `DoExperience(+2)`); temporary physicals
+   + `SetPhysical`/`TrainPhysical`/`ResetPhysical` host fns;
+   `physical_override` and `last_energy_loss_cause` not yet
+   snapshot-persisted; effect ClearAll revival abort and player
+   pointer/view cleanup in AssignDeath.
 7. **PARTIAL** — `script-values`. **Done:** `C4ScriptCnvMap` 81-cell table +
    `ConvertTo` dispatch (`C4Value.cpp:431-598`; differential-locked
    `script_value_convert` — 81-cell grid + per-(value,target,#strict) result);
@@ -467,7 +478,15 @@ facing by target x, stand-beside `target.x ± (Shape.Wdt/2+2)` approach with
 `lLimit = ValByPhysical(95, Walk)` `Towards` stepping (replacing the invented
 MovementProfile-based approach), own-shape distance check after the approach,
 grounded `ydir=0`; the Tick35 `DoExperience(+2)` waits on the C4ObjectInfo
-model. Opens tracked in item 6.
+model. **Second slice:** Walk/Scale/Hangle/Swim/Dig/Float ComDir movement
+follows the C++ physical model when the relevant physical is nonzero —
+`WalkAccel = FIXED100(50)`, `SwimAccel = FIXED100(20)`, `FloatAccel =
+FIXED100(10)` (C4Movement.cpp:31-34), per-branch limit clamps
+`ValByPhysical(280, Walk)`/`(200, Scale)`/`(160, Hangle)`/`(160, Swim)`/
+`(125, Dig)`/`FIXED100(Float)` (C4Object.cpp:4771-5286), Scale/Hangle Tick5
+and Swim Tick10 at-limit training, no gravity for Swim/Float (no DoGravity
+call in either case), Swim faces by xdir sign. Physical-less fixture
+definitions keep the legacy `MovementProfile` paths. Opens tracked in item 6.
 
 **Particle system — item 12 (sim side) (2026-06-09).** Ported C4Particles into
 `lc-engine/src/particles.rs` and corrected the audit's risk model: the C++
