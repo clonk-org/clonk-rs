@@ -9525,6 +9525,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
@@ -9562,6 +9563,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
@@ -9608,6 +9610,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
@@ -9658,6 +9661,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
@@ -9707,6 +9711,7 @@ impl Engine {
             .definitions
             .get(definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.to_string()))?;
+            let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
@@ -9796,6 +9801,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
@@ -10620,6 +10626,7 @@ impl Engine {
                     .definitions
                     .get(&definition_id)
                     .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
                 definition.action_library().clone()
             };
             let mut landscape_slot = self.landscape.take();
@@ -10709,9 +10716,11 @@ impl Engine {
                         .definitions
                         .get(&definition_id)
                         .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
                     let object = &mut self.objects[idx];
                     Self::run_effect_events_for_object(
                         definition,
+                        definitions_ref,
                         self.game_over_triggered,
                         rng_state,
                         object_id,
@@ -10791,9 +10800,11 @@ impl Engine {
                         .definitions
                         .get(&definition_id)
                         .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
                     let object = &mut self.objects[idx];
                     Self::run_effect_events_for_object(
                         definition,
+                        definitions_ref,
                         self.game_over_triggered,
                         rng_state,
                         object_id,
@@ -11110,6 +11121,7 @@ impl Engine {
                     .definitions
                     .get(&definition_id)
                     .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
                 definition.call_step(
                     &state_snapshot,
                     object_id,
@@ -11240,11 +11252,13 @@ impl Engine {
                         .definitions
                         .get(&definition_id)
                         .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
                     let global_view = self.global_effects.clone();
                     let rng_state = self.rng.clone();
                     let object = &mut self.objects[idx];
                     Self::run_effect_events_for_object(
                         definition,
+                        definitions_ref,
                         self.game_over_triggered,
                         rng_state,
                         object_id,
@@ -11434,6 +11448,7 @@ impl Engine {
                 .definitions
                 .get(&definition_id)
                 .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
             definition.action_library().clone()
         };
 
@@ -11644,6 +11659,7 @@ impl Engine {
                 .definitions
                 .get(&definition_id)
                 .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
             definition.action_library().clone()
         };
 
@@ -11670,6 +11686,7 @@ impl Engine {
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
@@ -11858,6 +11875,7 @@ impl Engine {
                 .definitions
                 .get(definition_id)
                 .ok_or_else(|| EngineError::UnknownDefinition(definition_id.to_string()))?;
+            let definitions_ref = &self.definitions;
             let global_view = self.global_effects.clone();
             let rng_state = self.rng.clone();
             let world = self.host_world_context();
@@ -11875,6 +11893,7 @@ impl Engine {
                 new_rng,
             ) = Self::run_effect_events_for_object(
                 definition,
+                definitions_ref,
                 self.game_over_triggered,
                 rng_state,
                 object_id,
@@ -12535,6 +12554,7 @@ impl Engine {
 
     fn run_effect_events_for_object(
         definition: &Definition,
+        definitions: &HashMap<DefinitionId, Definition>,
         game_over_triggered: bool,
         mut rng: LcgRng,
         object_id: ObjectId,
@@ -12592,11 +12612,22 @@ impl Engine {
 
         while let Some(event) = queue.pop_front() {
             let snapshot_for_call = state_snapshot.clone();
+            // C4Effect::GetCallbackScript: the command target object's def
+            // script, else the idCommandTarget def script, else the host
+            // object's script (the C++ global script engine is unmodeled).
+            let dispatch_definition = event
+                .effect
+                .command_target
+                .and_then(|target| world.get(ObjectId::new(target as u64)))
+                .map(|target| target.definition_id().to_string())
+                .or_else(|| event.effect.command_id.clone())
+                .and_then(|def_id| definitions.get(&def_id))
+                .unwrap_or(definition);
             let mut timer_kill = false;
             let mut start_denied = false;
             let (outcome, audio_state, new_rng) = match event.kind {
                 EffectEventKind::Started => {
-                    let (outcome, audio_state, new_rng, start_result) = definition
+                    let (outcome, audio_state, new_rng, start_result) = dispatch_definition
                         .call_effect_start(
                             &snapshot_for_call,
                             object_id,
@@ -12617,7 +12648,7 @@ impl Engine {
                     (outcome, audio_state, new_rng)
                 }
                 EffectEventKind::Timer => {
-                    let (outcome, audio_state, new_rng, timer_result) = definition
+                    let (outcome, audio_state, new_rng, timer_result) = dispatch_definition
                         .call_effect_timer(
                             &snapshot_for_call,
                             object_id,
@@ -12635,14 +12666,14 @@ impl Engine {
                     // returning C4Fx_Execute_Kill (-1, C4Effects.h:40) kills
                     // the effect; so does an elapsed interval with NO timer
                     // function.
-                    timer_kill = if definition.has_effect_callback(&event.effect.name, "Timer") {
+                    timer_kill = if dispatch_definition.has_effect_callback(&event.effect.name, "Timer") {
                         matches!(timer_result, Some(Value::Int(-1)))
                     } else {
                         true
                     };
                     (outcome, audio_state, new_rng)
                 }
-                EffectEventKind::Stopped(reason) => definition.call_effect_stop(
+                EffectEventKind::Stopped(reason) => dispatch_definition.call_effect_stop(
                     &snapshot_for_call,
                     object_id,
                     &event.effect,
@@ -17453,6 +17484,7 @@ impl Engine {
                     .definitions
                     .get(&definition_id)
                     .expect("definition must exist");
+            let definitions_ref = &self.definitions;
                 definition.call_construction(
                     &object.state,
                     id,
@@ -17638,6 +17670,7 @@ impl Engine {
                 .definitions
                 .get(&definition_id)
                 .expect("definition must exist");
+            let definitions_ref = &self.definitions;
             let global_view = self.global_effects.clone();
             let previous_container = object.state.container;
             let rng_state = self.rng.clone();
@@ -17655,6 +17688,7 @@ impl Engine {
                 new_rng,
             ) = Self::run_effect_events_for_object(
                 definition,
+                definitions_ref,
                 self.game_over_triggered,
                 rng_state,
                 id,
@@ -26718,6 +26752,54 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .map(|effect| effect.name.as_str())
             .collect();
         assert_eq!(names, vec!["Low", "Mid2", "Mid", "High"]);
+    }
+
+    #[test]
+    fn effect_callbacks_resolve_via_command_target_definition() {
+        // C4Effect::GetCallbackScript: Fx* functions live in the command
+        // target's def script (here via idCommandTarget — the sixth
+        // AddEffect argument), NOT in the affected object's script. The
+        // spell def's FxBuffTimer drains the host object's energy.
+        let host_script = r#"
+        global func Initialize(state, random) {
+            AddEffect("Buff", state, 100, 2, 0, "SPEL");
+            return nil;
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+        let spell_script = r#"
+        global func FxBuffTimer(state, effect, timer) {
+            DoEnergy(-5);
+            return nil;
+        }
+        "#;
+
+        let host = Definition::from_script("HOST", "Host", host_script).unwrap();
+        let spell = Definition::from_script("SPEL", "Spell", spell_script).unwrap();
+        let mut engine = Engine::with_seed(7);
+        engine.register_definition(host).expect("host registers");
+        engine.register_definition(spell).expect("spell registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("HOST").with_energy(50))
+            .expect("spawn succeeds");
+
+        for _ in 0..4 {
+            engine.tick().expect("tick succeeds");
+        }
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine.objects[idx].state.effects.len(),
+            1,
+            "the spell-script timer keeps the effect alive (a miss would \
+             kill it as timerless)"
+        );
+        assert_eq!(
+            engine.objects[idx].state.energy, 40,
+            "FxBuffTimer ran in the spell def's script at iTime 2 and 4"
+        );
     }
 
     #[test]
