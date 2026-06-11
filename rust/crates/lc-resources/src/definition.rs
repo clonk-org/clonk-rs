@@ -205,6 +205,9 @@ pub struct DefCore {
     pub upright_attach: u32,
     pub components: Vec<DefComponent>,
     pub line_connect: u32,
+    /// `CanBeBase` (C4Def.cpp DefCore): marks structures usable as the
+    /// FirstBase in PlaceReadyBase (C4Player.cpp:596-599).
+    pub can_be_base: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,6 +413,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut category: i32 = 0;
     let mut category_set = false;
     let mut crew_member = false;
+    let mut can_be_base = false;
     let mut object_value: i32 = 0;
     let mut object_mass: i32 = 0;
     let mut picture: Option<PictureRect> = None;
@@ -499,6 +503,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "crewmember" => {
                 crew_member = parse_bool(value);
+            }
+            "canbebase" => {
+                can_be_base = parse_bool(value);
             }
             "picture" => {
                 if let Some(rect) = parse_rect(value) {
@@ -653,6 +660,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         upright_attach,
         components,
         line_connect,
+        can_be_base,
     })
 }
 

@@ -98,6 +98,7 @@ struct ScenarioDefinition {
     script: String,
     actions: Option<DefinitionActions>,
     crew_member: bool,
+    can_be_base: bool,
     movement: MovementProfile,
     category: i32,
     value: i32,
@@ -164,6 +165,12 @@ pub struct Scenario {
     /// The four C4SPlrStart slots, consumed by joining players
     /// (C4Player::ScenarioInit, C4Player.cpp:670-777).
     player_starts: Vec<PlayerStart>,
+    /// The scenario's own Names.txt, overriding the standard clonk names
+    /// in Game.Names (C4Game.cpp:3288-3289).
+    standard_names: Option<String>,
+    /// `[Landscape] MapZoom` kept as a C4SVal: ScenarioInit evaluates it
+    /// per configured start coordinate (C4Player.cpp:713-714).
+    map_zoom: LegacyC4SVal,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -394,6 +401,11 @@ impl Scenario {
             landscape_insert_thrust: manifest.core.game.realism.landscape_insert_thrust != 0,
             system_scripts: load_scenario_system_scripts(group)?,
             player_starts: PlayerStart::slots_from_legacy(&manifest.core.players),
+            standard_names: group
+                .read_file("Names.txt")
+                .ok()
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+            map_zoom: manifest.core.landscape.map_zoom,
         })
     }
 
@@ -456,6 +468,13 @@ impl Scenario {
         // C4SPlrStart outlives scenario load: ScenarioInit reads it when a
         // player joins (C4Player.cpp:670-777).
         engine.set_player_starts(self.player_starts.clone());
+        engine.set_map_zoom(self.map_zoom);
+        // A scenario Names.txt overrides the standard clonk names
+        // (C4Game.cpp:3288-3289); without one the installer's choice (the
+        // planet System.c4g Names.txt) stays in place.
+        if self.standard_names.is_some() {
+            engine.set_standard_names(self.standard_names.clone());
+        }
         if let Some(landscape) = &self.landscape {
             engine.set_landscape(landscape.clone());
         } else {
@@ -504,6 +523,17 @@ impl Scenario {
                 compiled.configure_action_graphics(actions.graphics.clone());
             }
             compiled.set_crew_member(definition.crew_member);
+            compiled.set_can_be_base(definition.can_be_base);
+            // ClonkNames{lang}.txt|ClonkNames.txt (C4CFN_ClonkNames,
+            // C4Def.cpp:645-652): the language-suffixed list first, then
+            // the plain one. Only US is consulted until the language
+            // config is ported.
+            compiled.set_clonk_names(definition.resource_group.as_ref().and_then(|group| {
+                ["ClonkNamesUS.txt", "ClonkNames.txt"]
+                    .iter()
+                    .find_map(|name| group.read_file(name).ok())
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            }));
             compiled.set_movement_profile(definition.movement);
             compiled.set_category(definition.category);
             compiled.set_value(definition.value);
@@ -742,6 +772,7 @@ impl Scenario {
                     script: script_source,
                     actions: None,
                     crew_member,
+                    can_be_base: false,
                     movement: MovementProfile::default(),
                     category: category_override.unwrap_or(crate::DEFAULT_CATEGORY),
                     value: 0,
@@ -940,6 +971,8 @@ impl Scenario {
             landscape_insert_thrust: false,
             system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
+            standard_names: None,
+            map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
         })
     }
 }
@@ -3432,6 +3465,7 @@ fn scenario_definition_from_resource(
         script: script.combined().to_string(),
         actions,
         crew_member: core.crew_member,
+        can_be_base: core.can_be_base,
         movement: MovementProfile::default(),
         category: core.category,
         value: core.value,
@@ -5329,6 +5363,7 @@ global func Step(state, frame, random)
                 script: TEST_SCRIPT.to_string(),
                 actions: None,
                 crew_member: false,
+                can_be_base: false,
                 movement: MovementProfile::default(),
                 category: crate::DEFAULT_CATEGORY,
                 value: 0,
@@ -5363,6 +5398,8 @@ global func Step(state, frame, random)
             landscape_insert_thrust: false,
             system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
+            standard_names: None,
+            map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
         };
 
         let mut engine = Engine::with_seed(11);
@@ -5412,6 +5449,7 @@ global func Step(state, frame, random)
                 script: TEST_SCRIPT.to_string(),
                 actions: None,
                 crew_member: false,
+                can_be_base: false,
                 movement: MovementProfile::default(),
                 category: crate::DEFAULT_CATEGORY,
                 value: 0,
@@ -5446,6 +5484,8 @@ global func Step(state, frame, random)
             landscape_insert_thrust: false,
             system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
+            standard_names: None,
+            map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
         };
 
         let mut engine = Engine::with_seed(7);
@@ -5696,6 +5736,115 @@ global func Step(state, frame, random)
             })
             .collect();
         assert_eq!(names, vec!["Clonk".to_string(), "Clonk2".to_string()]);
+    }
+
+    #[test]
+    fn join_name_sources_and_map_zoom_follow_cpp() {
+        // New crew infos draw their name from the def's ClonkNames list
+        // when it has one (C4ObjectInfoList.cpp:160-164, C4Def.cpp:645-652),
+        // else from Game.Names — which a scenario Names.txt overrides
+        // (C4Game.cpp:3288-3289). A configured [PlayerN] Position
+        // multiplies a MapZoom.Evaluate per coordinate
+        // (C4Player.cpp:713-714) — one synced draw each.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/ClonkNames.txt"),
+            "Jim\nBob\nJoe\n",
+        )
+        .expect("write clonk names");
+        let plain = dir.path().join("Defs.c4d/Plain.c4d");
+        std::fs::create_dir_all(&plain).expect("plain def dir");
+        std::fs::write(
+            plain.join("DefCore.txt"),
+            "[DefCore]\nid=PLAI\nName=Plain\nCategory=0\nCrewMember=1\n",
+        )
+        .expect("write plain defcore");
+        std::fs::write(plain.join("Script.c"), "// plain\n").expect("write plain script");
+        std::fs::write(scenario_dir.join("Names.txt"), "Alpha\nBeta\n")
+            .expect("write scenario names");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Names\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=64\nMapHeight=40\nMapZoom=10\n\n\
+             [Player1]\nCrew=GOOD=1;PLAI=1\nPosition=20,30\n",
+        )
+        .expect("write scenario core");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(99);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let mut replay = engine.rng.clone();
+        let landscape = engine.landscape().expect("landscape set").clone();
+
+        // Wealth (default C4SVal(0,0,0,250)) — one draw.
+        LegacyC4SVal::new(0, 0, 0, 250).evaluate(&mut replay);
+        // Position 20,30 with MapZoom (10,0,5,15) — one draw per axis.
+        let mut ptx = (20 * LegacyC4SVal::new(10, 0, 5, 15).evaluate(&mut replay)).clamp(0, 639);
+        let mut pty = (30 * LegacyC4SVal::new(10, 0, 5, 15).evaluate(&mut replay)).clamp(0, 399);
+        if let Some((nx, ny)) = landscape.find_solid_ground(ptx, pty, 30) {
+            ptx = nx;
+            pty = ny;
+        }
+        if let Some((nx, ny)) =
+            landscape.find_con_site_spot(ptx, pty, 30, 50, 400, |_, _, _, _| false)
+        {
+            ptx = nx;
+            pty = ny;
+        }
+        let _ = (ptx, pty);
+        // Crew member 1 (GOOD): name from ClonkNames — Random over the
+        // newline count (3) — then the placement draw.
+        let good_names = ["Jim", "Bob", "Joe"];
+        let expected_good_name = good_names[replay.random(3) as usize];
+        replay.random(60);
+        // Crew member 2 (PLAI): no ClonkNames — name from the scenario
+        // Names.txt ("Alpha\nBeta\n" has 2 newlines) — then placement.
+        let scenario_names = ["Alpha", "Beta"];
+        let expected_plain_name = scenario_names[replay.random(2) as usize];
+        replay.random(60);
+
+        engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Tester".to_string(),
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+            })
+            .expect("join succeeds");
+        assert_eq!(engine.rng, replay, "draw ledger matches");
+
+        let snapshot = engine.snapshot();
+        let names: Vec<(String, String)> = snapshot
+            .objects
+            .iter()
+            .filter(|object| object.crew_member)
+            .map(|object| {
+                (
+                    object.definition_id.clone(),
+                    engine
+                        .crew_object_info(object.id)
+                        .expect("crew info recorded")
+                        .name
+                        .clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("GOOD".to_string(), expected_good_name.to_string()),
+                ("PLAI".to_string(), expected_plain_name.to_string()),
+            ]
+        );
     }
 
     #[test]
