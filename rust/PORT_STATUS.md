@@ -232,6 +232,43 @@ full-scenario shadow-diff (see Parity harnesses).
   snapshot lacks the new fire/physicals/breath/pxs_fixed fields (defaults
   on conversion); per-pixel collision, landscape and materials remain
   uncovered by the snapshot set.
+- **Shadow-diff count parity 805-vs-810 (task #24, 2026-06-11)** — the
+  count mismatch now NAMES its per-definition diff (runtime missing/
+  extra histograms; the bridge sends C4IdText(Def->id) so both sides
+  speak C4ID). Landed, each pinned by a test citing C++: effect
+  callbacks execute on the effect's command target (pFn->Exec(
+  pCommandTarget,...), C4Effect.cpp:129) with `this()`, live locals,
+  persisted local writes, and SPAWNS threaded out of the effect event
+  loop (GoldRush bandit equip — FxAIBanditNoMoveStart had aborted on
+  'Object call: target is zero!'); broadcast_scenario_function calls
+  goal/rule/environment OBJECTS before the scenario script
+  (GRBroadcast, C4ScriptHost.cpp:234-249 — TeamAccount's ACNT);
+  Objects.txt placements are LOADED, never constructed (SpawnConfig.
+  loaded; C4GameObjects::Load fires no Construction/Initialize —
+  killed the +2 CPFR/+4 WOOD initialize-at-load extras and the 3
+  spurious AMBO warnings); the FindObject family re-pinned to the C++
+  layout (id,x,y,wdt,hgt,OCF,action,actiontarget,container,findnext;
+  NO_CONTAINER/ANY_CONTAINER int sentinels never error; caller
+  excluded; caller-relative coords; explicit OCF 0 = OCF_All;
+  ObjectCount owner 10th with 0→ANY_OWNER); RemoveObject removes
+  FOREIGN objects via the re-dispatch seam (FnRemoveObject,
+  C4Script.cpp:455-460); scenario-call worlds attach FULL object
+  states so nested calls on PLACED objects resolve (GoldRush's
+  pObj->~Initialize() on the cannon was a tolerated no-op; the _ETG
+  cull and GC4V crosshair now happen). get_world_object reflects
+  mid-call containment from active/finished nested scopes.
+  `cargo xtask scenario-errors <name> --defs A,B` logs per-definition
+  counts per stage (headless histogram). GoldRush warnings 282→14.
+  REMAINING count gap: 5x FXU1 — the placed river bubbles die to
+  PhaseCall=LiquidCheck because the legacy landscape is a
+  surface-height profile with NO liquid/material data (water pixels
+  read as SOLID; is_liquid_at always false) — task #25 (per-pixel
+  TexMap materials + liquid columns + the C4Object::InLiquid flag).
+  Known divergences noted in code: nested SELF-call VM-local writes
+  are dropped (compat.rs prepare_nested_call origin:None branch);
+  foreign command-target effect callbacks get `this()` but not the
+  foreign locals; a scenario Initialize error discards the whole
+  batch (C++ keeps pre-error mutations).
 
 ## Gates
 
