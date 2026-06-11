@@ -3740,6 +3740,30 @@ impl Object {
     }
 }
 
+/// Converts a script error from an engine-initiated callback into a logged
+/// no-op. C++ runs lifecycle/game calls with `fPassErrors=false`: the error
+/// shows in the log, the call yields nil, and the game continues
+/// (C4AulExec.cpp:1318-1342). Non-script engine errors stay fatal.
+fn tolerate_script_error<T>(result: Result<T, EngineError>) -> Result<Option<T>, EngineError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(EngineError::Script {
+            definition,
+            function,
+            source,
+        }) => {
+            tracing::warn!(
+                %definition,
+                function,
+                error = %source,
+                "script error in engine callback; continuing like the C++ fail-safe exec"
+            );
+            Ok(None)
+        }
+        Err(other) => Err(other),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("definition `{0}` is already registered")]
@@ -9279,7 +9303,7 @@ impl Engine {
         let snapshot = self.snapshot();
         let random = self.next_random_i32();
         let rng_state = self.rng.clone();
-        let (batch, audio_state, new_rng) = script.initialize(
+        let initialize = script.initialize(
             &snapshot,
             rng_state,
             random,
@@ -9288,10 +9312,18 @@ impl Engine {
             self.environment,
             self.audio_registry.clone(),
             self.particle_system.def_names(),
-        )?;
-        self.rng = new_rng;
-        self.audio_registry = audio_state;
-        let created = self.apply_scenario_batch(batch)?;
+        );
+        // Initialize is a game call: a script error logs and the scenario
+        // still runs WITH its script installed (C++ fail-safe exec,
+        // C4AulExec.cpp:1318-1342).
+        let created = match tolerate_script_error(initialize)? {
+            Some((batch, audio_state, new_rng)) => {
+                self.rng = new_rng;
+                self.audio_registry = audio_state;
+                self.apply_scenario_batch(batch)?
+            }
+            None => Vec::new(),
+        };
         self.game_over_triggered = false;
         self.scenario_script = Some(script);
         Ok(created)
@@ -18286,8 +18318,7 @@ impl Engine {
                     .definitions
                     .get(&definition_id)
                     .expect("definition must exist");
-            let definitions_ref = &self.definitions;
-                definition.call_construction(
+                let callback = definition.call_construction(
                     &object.state,
                     id,
                     rng_state,
@@ -18298,7 +18329,18 @@ impl Engine {
                     self.host_world_context(),
                     self.game_over_triggered,
                     self.audio_registry.clone(),
-                )?
+                );
+                // Fail-safe game call: a script error logs and the object
+                // spawns without the callback's effects.
+                match tolerate_script_error(callback)? {
+                    Some(result) => result,
+                    None => (
+                        CommandBatch::default(),
+                        self.audio_registry.clone(),
+                        self.rng.clone(),
+                        self.next_object_id,
+                    ),
+                }
             };
             self.rng = new_rng;
             self.next_object_id = next_object_id;
@@ -18396,7 +18438,7 @@ impl Engine {
                     .definitions
                     .get(&definition_id)
                     .expect("definition must exist");
-                definition.call_initialize(
+                let callback = definition.call_initialize(
                     &object.state,
                     id,
                     random,
@@ -18408,7 +18450,18 @@ impl Engine {
                     self.host_world_context(),
                     self.game_over_triggered,
                     self.audio_registry.clone(),
-                )?
+                );
+                // Fail-safe game call: a script error logs and the object
+                // spawns without the callback's effects.
+                match tolerate_script_error(callback)? {
+                    Some(result) => result,
+                    None => (
+                        CommandBatch::default(),
+                        self.audio_registry.clone(),
+                        self.rng.clone(),
+                        self.next_object_id,
+                    ),
+                }
             };
             self.rng = new_rng;
             self.next_object_id = next_object_id;

@@ -429,7 +429,21 @@ impl Scenario {
 
         for definition in &self.definitions {
             let name = definition.name.as_deref().unwrap_or(&definition.id);
-            let mut compiled = Definition::from_script(&definition.id, name, &definition.script)?;
+            // C4Def::Load ignores Script.Load failures (C4Def.cpp:632): a
+            // definition with a broken script still loads, script-less; the
+            // error only shows in the log.
+            let mut compiled = match Definition::from_script(&definition.id, name, &definition.script)
+            {
+                Ok(compiled) => compiled,
+                Err(error) => {
+                    tracing::warn!(
+                        definition = %definition.id,
+                        %error,
+                        "definition script failed to load; registering script-less like C++"
+                    );
+                    Definition::from_script(&definition.id, name, "")?
+                }
+            };
             if let Some(actions) = &definition.actions {
                 compiled.configure_actions(actions.default_action.clone(), actions.specs.clone());
                 compiled.configure_action_graphics(actions.graphics.clone());
@@ -535,8 +549,26 @@ impl Scenario {
         }
 
         if let Some(script) = &self.script {
-            let mut additional = engine.install_scenario_script(&script.name, &script.source)?;
-            created.append(&mut additional);
+            // A scenario script that fails to COMPILE logs and the round
+            // runs script-less (C4ScriptHost load behavior); Initialize
+            // runtime errors are already tolerated inside
+            // `install_scenario_script`.
+            match engine.install_scenario_script(&script.name, &script.source) {
+                Ok(mut additional) => created.append(&mut additional),
+                Err(EngineError::Script {
+                    definition,
+                    function,
+                    source,
+                }) => {
+                    tracing::warn!(
+                        script = %definition,
+                        function,
+                        error = %source,
+                        "scenario script failed to load; continuing without it like C++"
+                    );
+                }
+                Err(other) => return Err(other.into()),
+            }
         }
         Ok(created)
     }
@@ -5213,6 +5245,136 @@ global func Step(state, frame, random)
                 Ok(groups)
             }
         }
+    }
+
+    /// Builds a minimal legacy scenario dir with one good definition and an
+    /// optional extra definition + scenario script, for resilience tests.
+    fn write_resilience_fixture(
+        dir: &std::path::Path,
+        extra_def: Option<(&str, &str)>,
+        scenario_script: &str,
+    ) -> std::path::PathBuf {
+        let defs_root = dir.join("Defs.c4d");
+        let good = defs_root.join("Good.c4d");
+        std::fs::create_dir_all(&good).expect("definition dir");
+        std::fs::write(
+            good.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write defcore");
+        std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+
+        if let Some((id, script)) = extra_def {
+            let extra = defs_root.join(format!("{id}.c4d"));
+            std::fs::create_dir_all(&extra).expect("extra definition dir");
+            std::fs::write(
+                extra.join("DefCore.txt"),
+                format!("[DefCore]\nid={id}\nName={id}\nCategory=0\nCrewMember=0\n"),
+            )
+            .expect("write extra defcore");
+            std::fs::write(extra.join("Script.c"), script).expect("write extra script");
+        }
+
+        let scenario_dir = dir.join("Resilience.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Resilience\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Good=1\nPosition=120,160\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(scenario_dir.join("Script.c"), scenario_script).expect("write script");
+        scenario_dir
+    }
+
+    fn apply_resilience_fixture(
+        dir: &tempfile::TempDir,
+        scenario_dir: &std::path::Path,
+    ) -> (Engine, Vec<ObjectId>) {
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        let created = scenario
+            .apply(&mut engine)
+            .expect("apply tolerates script errors like C++");
+        (engine, created)
+    }
+
+    #[test]
+    fn definition_script_parse_errors_are_logged_not_fatal_like_cpp() {
+        // C4Def::Load ignores the Script.Load result (C4Def.cpp:632): a
+        // definition whose Script.c fails to parse still loads — script-less
+        // — and the rest of the scenario is unaffected.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            Some(("BRKN", "func {{{ not a script\n")),
+            "global func Initialize(state, random) { return nil; }\n",
+        );
+        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(created.len(), 1, "the good crew member still spawns");
+        assert!(
+            engine.definitions.contains_key("BRKN"),
+            "the broken-script definition is registered script-less (C4Def.cpp:632)"
+        );
+        assert!(engine.definitions.contains_key("GOOD"));
+    }
+
+    #[test]
+    fn construction_callback_errors_are_logged_not_fatal_like_cpp() {
+        // Engine-initiated lifecycle calls are fail-safe in C++
+        // (fPassErrors=false → the error logs and the call yields nil,
+        // C4AulExec.cpp:1318-1342); the object still spawns.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
+        // Replace the good def's script with one whose Construction errors.
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "func Construction() { return NoSuchFunctionAnywhere(); }\n",
+        )
+        .expect("write erroring script");
+        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(
+            created.len(),
+            1,
+            "the object spawns despite the Construction error"
+        );
+        assert!(engine.object_snapshot(created[0]).is_some());
+    }
+
+    #[test]
+    fn scenario_initialize_errors_are_logged_not_fatal_like_cpp() {
+        // The scenario script's Initialize is a game call (fail-safe): a
+        // runtime error logs and the round starts anyway.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "global func Initialize(state, random) { return BadCall(); }\n",
+        );
+        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(created.len(), 1, "crew spawned before Initialize ran");
+        assert!(
+            engine.scenario_script.is_some(),
+            "the scenario script stays installed after the Initialize error"
+        );
+    }
+
+    #[test]
+    fn scenario_script_parse_errors_are_logged_not_fatal_like_cpp() {
+        // A scenario Script.c that fails to compile logs the parse error and
+        // the scenario runs without a script (C4ScriptHost load behavior).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir =
+            write_resilience_fixture(dir.path(), None, "global func {{{ broken\n");
+        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(created.len(), 1);
+        assert!(
+            engine.scenario_script.is_none(),
+            "no scenario script installed when it cannot compile"
+        );
     }
 
     #[test]
