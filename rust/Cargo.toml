@@ -19,3 +19,12 @@ members = [
 ]
 resolver = "2"
 default-members = ["crates/lc-app"]
+
+# The frontend renders in software (per-pixel blits); at opt-level 0 the menu
+# and boot are ~12x slower than release and unplayable. Keep dev builds
+# optimized enough to run while retaining debug assertions.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
