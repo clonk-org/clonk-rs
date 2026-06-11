@@ -11955,7 +11955,7 @@ impl Engine {
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context();
-        let (outcome, audio_state, new_rng) = definition.call_action_callback(
+        let callback = definition.call_action_callback(
             function,
             kind,
             &state_snapshot,
@@ -11969,7 +11969,13 @@ impl Engine {
             world,
             self.game_over_triggered,
             self.audio_registry.clone(),
-        )?;
+        );
+        // StartCall/EndCall/PhaseCall/AbortCall are engine-initiated game
+        // calls: a script error logs and the action proceeds (C++ fail-safe
+        // exec, C4AulExec.cpp:1318-1342).
+        let Some((outcome, audio_state, new_rng)) = tolerate_script_error(callback)? else {
+            return Ok(());
+        };
         self.rng = new_rng;
         self.audio_registry = audio_state;
 

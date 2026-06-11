@@ -2943,7 +2943,14 @@ impl LegacyObjectRecord {
         })?;
 
         if !definition_ids.contains(id.as_str()) {
-            return Err(ScenarioError::UnknownDefinition(id));
+            // C++ resolves each Objects.txt entry with C4Id2Def: an unknown
+            // id produces no object (logged) and the load continues.
+            tracing::warn!(
+                definition = %id,
+                line,
+                "Objects.txt references an unknown definition; skipping the object"
+            );
+            return Ok(None);
         }
 
         let number = number.ok_or_else(|| {
@@ -5453,6 +5460,30 @@ global func Step(state, frame, random)
             let object = engine.object_snapshot(*id).expect("crew exists");
             assert_eq!(object.definition_id, "GOOD");
         }
+    }
+
+    #[test]
+    fn objects_txt_unknown_definitions_are_skipped_like_cpp() {
+        // C++ creates Objects.txt objects via C4Id2Def per entry; an unknown
+        // id simply produces no object (logged), the rest of the scenario
+        // loads. 19 real scenarios reference defs outside their resolver
+        // scope and must not hard-fail.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=MISS\nNumber=9\nStatus=1\nCategory=0\nX=1\nY=2\n\n[Object]\nid=GOOD\nNumber=10\nStatus=1\nCategory=0\nX=10\nY=20\n",
+        )
+        .expect("write objects");
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert!(
+            engine.object_snapshot(ObjectId::new(10)).is_some(),
+            "the known object spawned"
+        );
+        assert!(
+            engine.object_snapshot(ObjectId::new(9)).is_none(),
+            "the unknown-definition object was skipped"
+        );
     }
 
     #[test]
