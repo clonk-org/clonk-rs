@@ -60,16 +60,31 @@ fn inherited_forwards_arguments() {
 #[test]
 fn include_parent_function_is_reachable_via_inherited() {
     // The #include seam: the child keeps its own function and the parent's
-    // becomes its overload target (C4AulLink include handling).
+    // becomes its overload target (C4AulLink include handling). GLOBAL
+    // functions are never copied by includes (C4AulLink.cpp:127 — they
+    // live at the engine, where install chaining forms their overloads),
+    // so the seam is pinned with public functions.
     let mut parent = Engine::new();
-    parent.add_script(Script::compile("global func F() { return 5; }").expect("compiles"));
+    parent.add_script(Script::compile("public func F() { return 5; }").expect("compiles"));
     let mut child = Engine::new();
     child.add_script(
-        Script::compile("global func F() { return _inherited() + 1; }").expect("compiles"),
+        Script::compile("public func F() { return _inherited() + 1; }").expect("compiles"),
     );
     child.merge_from(&parent);
     assert_eq!(
         child.call("F", &[]).expect("call succeeds"),
         Value::Int(6)
+    );
+
+    // A global func in the parent is NOT copied into the child.
+    let mut global_parent = Engine::new();
+    global_parent
+        .add_script(Script::compile("global func G() { return 5; }").expect("compiles"));
+    let mut plain_child = Engine::new();
+    plain_child.add_script(Script::compile("// empty\n").expect("compiles"));
+    plain_child.merge_from(&global_parent);
+    assert!(
+        !plain_child.has_function("G"),
+        "includes never copy global funcs (C4AulLink.cpp:127)"
     );
 }

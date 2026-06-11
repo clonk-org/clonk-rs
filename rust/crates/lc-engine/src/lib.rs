@@ -11592,6 +11592,46 @@ impl Engine {
         self.definition_metadata_cache.borrow_mut().take();
     }
 
+    /// Registers `global func` declarations from DEFINITION scripts into
+    /// the engine-global table (C4Aul AA_GLOBAL functions are owned by
+    /// Game.ScriptEngine — Time.c4d's IsNight, MainTipi's GetClan):
+    /// applied on top of the installed System.c4g table in definition
+    /// load order, later declarations overloading earlier ones, then
+    /// re-shared to every script host.
+    pub fn collect_definition_global_functions(&mut self) {
+        let mut functions: HashMap<String, lc_script::Function> = self
+            .global_script_functions
+            .as_deref()
+            .cloned()
+            .unwrap_or_default();
+        let mut changed = false;
+        for id in &self.definition_load_order {
+            let Some(definition) = self.definitions.get(id) else {
+                continue;
+            };
+            for (name, function) in definition.script.global_access_functions() {
+                let mut function = function.clone();
+                if let Some(previous) = functions.remove(name) {
+                    function.push_overload(previous);
+                }
+                functions.insert(name.clone(), function);
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+        let table = Some(Arc::new(functions));
+        self.global_script_functions = table.clone();
+        for definition in self.definitions.values_mut() {
+            definition.set_global_functions(table.clone());
+        }
+        if let Some(script) = self.scenario_script.as_mut() {
+            script.set_global_functions(table.clone());
+        }
+        self.definition_metadata_cache.borrow_mut().take();
+    }
+
     pub fn resolve_includes(&mut self) -> Result<(), EngineError> {
         self.definition_metadata_cache.borrow_mut().take();
         // Iteratively merge includes until no more changes occur

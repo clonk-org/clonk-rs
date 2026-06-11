@@ -193,6 +193,12 @@ impl Engine {
 
     pub fn merge_from(&mut self, other: &Engine) {
         for (name, function) in other.functions.iter() {
+            // Includes are AppendTo with bHighPrio=false in C++ — global
+            // funcs are never copied (C4AulLink.cpp:127); they stay
+            // reachable through the engine table.
+            if function.access == crate::ast::AccessLevel::Global {
+                continue;
+            }
             match self.functions.get_mut(name) {
                 // Child overrides parent, but the parent's function stays
                 // reachable as the child's `inherited` target (C++ include
@@ -212,6 +218,14 @@ impl Engine {
                 self.var_decls.push(var_decl.clone());
             }
         }
+    }
+
+    /// The script's `global func` declarations (AA_GLOBAL): C4Aul
+    /// registers these at the script ENGINE, not the local host.
+    pub fn global_access_functions(&self) -> impl Iterator<Item = (&String, &Function)> {
+        self.functions
+            .iter()
+            .filter(|(_, function)| function.access == crate::ast::AccessLevel::Global)
     }
 
     pub fn function_count(&self) -> usize {

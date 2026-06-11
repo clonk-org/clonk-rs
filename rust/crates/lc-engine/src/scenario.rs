@@ -565,9 +565,12 @@ impl Scenario {
         }
 
         // Script linking (C4Game::LinkScriptEngine -> C4AulScriptEngine::Link):
-        // appends resolve FIRST, then includes (C4AulLink.cpp:27-28).
+        // appends resolve FIRST, then includes (C4AulLink.cpp:27-28), and
+        // `global func` declarations in definition scripts join the
+        // engine-global table (AA_GLOBAL ownership).
         engine.resolve_appends();
         engine.resolve_includes()?;
+        engine.collect_definition_global_functions();
 
         let mut pending = self.initial_spawns.clone();
         let mut handles: HashMap<String, ObjectId> = HashMap::new();
@@ -5888,6 +5891,57 @@ global func Step(state, frame, random)
                 .map(|cell| cell.borrow().clone()),
             Some(lc_script::Value::Int(5)),
             "the definition script's write went back to the shared table"
+        );
+    }
+
+    #[test]
+    fn definition_global_funcs_register_engine_wide_like_cpp() {
+        // `global func` declarations in DEFINITION scripts belong to
+        // Game.ScriptEngine (AA_GLOBAL, C4AulParse preparse): Time.c4d
+        // declares `global func IsNight()` and every other script calls it
+        // plainly (GetFuncRecursive walks up to the engine,
+        // C4Aul.cpp:285-291). Includes/appends never copy global funcs
+        // (C4AulLink.cpp:127) — they are reachable through the engine.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "global func Initialize(state, random) {\n\
+                 var obj = CreateObject(GOOD, 50, 50, -1);\n\
+                 obj->Remember();\n\
+                 return nil;\n\
+             }\n",
+        );
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "#strict\nlocal seen;\n\
+             public func Remember() { seen = NightCheck(); return seen; }\n",
+        )
+        .expect("write target script");
+        let time = dir.path().join("Defs.c4d/Time.c4d");
+        std::fs::create_dir_all(&time).expect("time dir");
+        std::fs::write(
+            time.join("DefCore.txt"),
+            "[DefCore]\nid=TIME\nName=Time\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write time defcore");
+        std::fs::write(
+            time.join("Script.c"),
+            "#strict\nglobal func NightCheck() { return 8; }\n",
+        )
+        .expect("write time script");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let snapshot = engine.snapshot();
+        let object = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GOOD")
+            .expect("object created");
+        assert_eq!(
+            object.local_vars.get("seen"),
+            Some(&lc_script::Value::Int(8)),
+            "another def's script called the definition-declared global func"
         );
     }
 
