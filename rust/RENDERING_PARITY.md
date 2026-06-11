@@ -110,9 +110,25 @@ All done + unit-tested against the C++ formulas, 2026-05-30 (`lc-graphics`, 33 t
       bar. Masks: cursor sprite baked into refs at ~(637,356); scensel list +
       right page (live entries differ from the ref's empty exe-dir scan); net
       list client (nondeterministic masterserver content).
-- [ ] Options (`C4StartupOptionsDlg`, Program tab) and Player Selection
-      (`C4StartupPlrSelDlg`) — renderers in flight
-      (`startup_options_dlg.rs` / `startup_plrsel.rs` partials).
+- [x] **Options and Player-Selection dialogs pixel-exact (2026-06-10).**
+      App-level dumps vs F9 refs: options **98.69%**, plrsel **95.63%**
+      bit-identical, all residuals channel-delta 1; zero structural diffs
+      outside masks (cursor sprite; plrsel list content — the app has no
+      packed-`.c4p` player discovery yet, so the live dialog shows the empty
+      state while the ref shows Tyler). Renderers
+      `startup_options_dlg.rs` / `startup_plrsel.rs`. More engine quirks
+      pinned with tests: `ReadPNG` and `SetPixDw` squash fully-transparent
+      texels to BLACK (C4Surface.cpp:972,733 — GL tile padding stays
+      transparent WHITE), which bleeds through GL_LINEAR on alpha-edged
+      stretched assets; `fill_quad_dw` scanline ties are
+      left-inclusive/right-exclusive.
+- [ ] Player discovery for the plrsel dialog: read packed `.c4p` groups
+      (portrait/BigIcon/Player.txt) in lc-resources, feed `PlrSelPlayer`s.
+- [ ] Options interactivity: the parity sheet is display-only; control
+      clicks still route to the old keyboard-rebind UI semantics (ESC works).
+- [ ] Consolidate the three duplicated shadowless book-font builders and the
+      per-dialog draw helpers (box/3D-frame/caption-bar/scrollbar) into one
+      shared module (deliberate duplication from parallel agent ownership).
 - [ ] Scen-sel interactivity beyond select/open/back clicks: search filter,
       scrollbar drag, right-page selection info, folder icons from
       Folder.txt/Icon assets (list rows currently use kind-default icons).
