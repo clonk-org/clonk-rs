@@ -24,6 +24,12 @@ pub enum ControlPacket {
     PlayerControl(PlayerControlData),
     /// Deterministic state checksum used for desync detection (`CID_SyncCheck`).
     SyncCheck(SyncCheckPacket),
+    /// Player join (`CID_JoinPlr`, C4Control.cpp:689-786): executes
+    /// C4Game::JoinPlayer with the carried player file.
+    JoinPlayer(JoinPlayerControlData),
+    /// Player info update (`CID_PlrInfo`, C4Control.cpp:1264-1282):
+    /// registers C4PlayerInfo entries before the join references them.
+    PlayerInfo(PlayerInfoControlData),
     /// A control packet that is not yet interpreted by the Rust runtime.
     Unknown {
         id: ControlPacketId,
@@ -39,6 +45,40 @@ pub struct PlayerControlData {
     pub command: i32,
     pub data: i32,
     pub by_client: i32,
+}
+
+/// `C4ControlJoinPlayer` (CompileFunc at C4Control.cpp:852-863).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinPlayerControlData {
+    pub filename: String,
+    pub at_client: i32,
+    pub info_id: i32,
+    pub by_res: bool,
+    /// The raw player file (`PlrData`, a StdBuf of the .c4p bytes) for
+    /// non-resource joins.
+    pub player_data: Vec<u8>,
+}
+
+/// One `C4PlayerInfo` of a `C4ClientPlayerInfos`
+/// (C4PlayerInfo.cpp:177-268).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlPlayerInfoEntry {
+    pub id: i32,
+    pub name: String,
+    pub team: i32,
+    pub color: u32,
+    /// `Type=Script` (C4PT_Script).
+    pub script_player: bool,
+    /// `NoScenarioInit` flag (PIF_NoScenarioInit).
+    pub no_scenario_init: bool,
+}
+
+/// `C4ControlPlayerInfo` body (C4ClientPlayerInfos,
+/// C4PlayerInfo.cpp:601-633).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerInfoControlData {
+    pub client_id: i32,
+    pub players: Vec<ControlPlayerInfoEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +308,10 @@ struct RawPacket {
     id: Option<u8>,
     name: Option<String>,
     fields: HashMap<String, String>,
+    /// Ordered nested sections with their own ordered fields — needed by
+    /// packets whose bodies carry repeated subsections (C4ClientPlayerInfos
+    /// writes one [Player] per info, C4PlayerInfo.cpp:629-630).
+    sections: Vec<(String, Vec<(String, String)>)>,
 }
 
 #[allow(dead_code)]
@@ -277,7 +321,15 @@ impl RawPacket {
             id: None,
             name: None,
             fields: HashMap::new(),
+            sections: Vec::new(),
         }
+    }
+
+    fn section_fields(&self, name: &str) -> Option<&[(String, String)]> {
+        self.sections
+            .iter()
+            .find(|(section, _)| section.eq_ignore_ascii_case(name))
+            .map(|(_, fields)| fields.as_slice())
     }
 
     fn into_control_packet(self) -> Result<Option<ControlPacket>, ControlParseError> {
@@ -293,6 +345,85 @@ impl RawPacket {
 
         if id == PID_NONE {
             return Ok(None);
+        }
+
+        const CID_JOIN_PLR: u8 = 0x91; // CID_First|0x11 (C4PacketBase.h:160)
+        const CID_PLR_INFO: u8 = 0x90; // CID_First|0x10 (C4PacketBase.h:159)
+
+        if id == CID_JOIN_PLR {
+            // C4ControlJoinPlayer::CompileFunc (C4Control.cpp:852-863).
+            let filename = self
+                .fields
+                .get("Filename")
+                .cloned()
+                .unwrap_or_default();
+            let at_client = parse_int_field(&self.fields, "AtClient").unwrap_or(-1);
+            let info_id = parse_int_field(&self.fields, "InfoID").unwrap_or(-1);
+            let by_res = self
+                .fields
+                .get("ByRes")
+                .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
+                .unwrap_or(false);
+            let player_data = self
+                .fields
+                .get("PlrData")
+                .map(|value| parse_std_buf(value))
+                .unwrap_or_default();
+            return Ok(Some(ControlPacket::JoinPlayer(JoinPlayerControlData {
+                filename,
+                at_client,
+                info_id,
+                by_res,
+                player_data,
+            })));
+        }
+
+        if id == CID_PLR_INFO {
+            // C4ClientPlayerInfos (C4PlayerInfo.cpp:601-633): client ID and
+            // flags in the packet body, one [Player] section per info
+            // (C4PlayerInfo CompileFunc keys, C4PlayerInfo.cpp:177-268).
+            let body = self
+                .section_fields("Player Info")
+                .unwrap_or(&[]);
+            let field = |fields: &[(String, String)], key: &str| -> Option<String> {
+                fields
+                    .iter()
+                    .find(|(entry, _)| entry.eq_ignore_ascii_case(key))
+                    .map(|(_, value)| value.clone())
+            };
+            let client_id = field(body, "ID")
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or(-1);
+            let players = self
+                .sections
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("Player"))
+                .map(|(_, fields)| {
+                    let int = |key: &str| -> i32 {
+                        field(fields, key)
+                            .and_then(|value| value.parse::<i64>().ok())
+                            .unwrap_or(0) as i32
+                    };
+                    ControlPlayerInfoEntry {
+                        id: int("ID"),
+                        name: field(fields, "Name").unwrap_or_default(),
+                        team: int("Team"),
+                        color: field(fields, "Color")
+                            .and_then(|value| value.parse::<i64>().ok())
+                            .unwrap_or(0) as u32,
+                        script_player: field(fields, "Type")
+                            .map(|value| value.eq_ignore_ascii_case("Script"))
+                            .unwrap_or(false),
+                        no_scenario_init: field(fields, "Flags")
+                            .map(|value| value.contains("NoScenarioInit"))
+                            .unwrap_or(false),
+                    }
+                })
+                .collect();
+            return Ok(Some(ControlPacket::PlayerInfo(PlayerInfoControlData {
+                client_id,
+                players,
+            })));
         }
 
         if id == CID_PLR_CONTROL {
@@ -379,7 +510,10 @@ pub fn parse_control_ini(input: &str) -> Result<Vec<ControlPacket>, ControlParse
                         current = Some(RawPacket::new());
                         state = ParserState::InPacket;
                     } else if let Some(active) = current.as_mut() {
-                        active.name = Some(section.to_string());
+                        if active.name.is_none() {
+                            active.name = Some(section.to_string());
+                        }
+                        active.sections.push((section.to_string(), Vec::new()));
                     } else {
                         return Err(ControlParseError::UnexpectedSection {
                             section: section.to_string(),
@@ -410,6 +544,9 @@ pub fn parse_control_ini(input: &str) -> Result<Vec<ControlPacket>, ControlParse
                         })?;
                 packet.id = Some(parsed);
             } else {
+                if let Some((_, section_fields)) = packet.sections.last_mut() {
+                    section_fields.push((key.to_string(), value.clone()));
+                }
                 packet.fields.insert(key.to_string(), value);
             }
         } else {
@@ -430,6 +567,74 @@ pub fn parse_control_ini(input: &str) -> Result<Vec<ControlPacket>, ControlParse
     }
 
     Ok(packets)
+}
+
+/// StdBuf textual form: `<size>:"escaped bytes"` (StdBuf::CompileFunc
+/// writes the int-packed size, SEP_PART2 `:`, then the raw data escaped —
+/// StdBuf.cpp:86-101, StdCompiler.cpp:79,383-396).
+fn parse_std_buf(value: &str) -> Vec<u8> {
+    let Some((size_text, rest)) = value.split_once(':') else {
+        return Vec::new();
+    };
+    let size = size_text.trim().parse::<usize>().unwrap_or(0);
+    let trimmed = rest.trim();
+    let quoted = trimmed
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    let mut bytes = unescape_value_bytes(quoted);
+    if bytes.len() > size {
+        bytes.truncate(size);
+    }
+    bytes
+}
+
+/// Byte-level unescape of an INI escaped string (StdCompilerINIWrite
+/// WriteEscaped): named escapes plus octal `\NNN` per byte. The OCTAL form
+/// covers every non-printable byte, so escaped data round-trips as ASCII.
+fn unescape_value_bytes(value: &str) -> Vec<u8> {
+    let raw = value.as_bytes();
+    let mut bytes = Vec::with_capacity(raw.len());
+    let mut index = 0;
+    while index < raw.len() {
+        let byte = raw[index];
+        if byte != b'\\' {
+            bytes.push(byte);
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let Some(&escape) = raw.get(index) else {
+            break;
+        };
+        index += 1;
+        match escape {
+            b'"' => bytes.push(b'"'),
+            b'\\' => bytes.push(b'\\'),
+            b'n' => bytes.push(b'\n'),
+            b'r' => bytes.push(b'\r'),
+            b't' => bytes.push(b'\t'),
+            b'b' => bytes.push(0x08),
+            b'f' => bytes.push(0x0c),
+            b'a' => bytes.push(0x07),
+            b'v' => bytes.push(0x0b),
+            digit @ b'0'..=b'7' => {
+                let mut octal = u32::from(digit - b'0');
+                for _ in 0..2 {
+                    match raw.get(index) {
+                        Some(&next @ b'0'..=b'7') => {
+                            octal = octal * 8 + u32::from(next - b'0');
+                            index += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                bytes.push(octal as u8);
+            }
+            other => bytes.push(other),
+        }
+    }
+    bytes
 }
 
 #[allow(dead_code)]
@@ -526,6 +731,89 @@ mod tests {
                 by_client: 1
             })]
         );
+    }
+
+    #[test]
+    fn parses_join_player_packet() {
+        // C4ControlJoinPlayer::CompileFunc (C4Control.cpp:852-863):
+        // Filename (mkNetFilenameAdapt), AtClient/InfoID (int-packed),
+        // ByRes, and the raw player file as PlrData — a StdBuf, written as
+        // `<size>:"escaped bytes"` (StdBuf::CompileFunc size + SEP_PART2
+        // ':' + Raw RCT_Escaped, StdBuf.cpp:86-101, StdCompiler.cpp:79,
+        // 383-396). CID_JoinPlr = 0x80|0x11 = 145 (C4PacketBase.h:160),
+        // packet section name "Join Player" (C4Packet2.cpp:112).
+        let input = "\
+[Control]\r\n\
+  [IDPacket]\r\n\
+    ID=145\r\n\
+    [Join Player]\r\n\
+      Filename=\"Tyler.c4p\"\r\n\
+      AtClient=-1\r\n\
+      InfoID=1\r\n\
+      ByRes=false\r\n\
+      PlrData=5:\"ab\\000\\377c\"\r\n\
+      ByClient=0\r\n";
+        let packets = parse_control_ini(input).expect("parse control log");
+        assert_eq!(packets.len(), 1);
+        match &packets[0] {
+            ControlPacket::JoinPlayer(join) => {
+                assert_eq!(join.filename, "Tyler.c4p");
+                assert_eq!(join.at_client, -1);
+                assert_eq!(join.info_id, 1);
+                assert!(!join.by_res);
+                assert_eq!(join.player_data, vec![b'a', b'b', 0x00, 0xff, b'c']);
+            }
+            other => panic!("expected JoinPlayer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_player_info_packet_with_nested_players() {
+        // C4ControlPlayerInfo wraps a C4ClientPlayerInfos
+        // (C4PlayerInfo.cpp:601-633): client ID, flags, then one [Player]
+        // section per C4PlayerInfo (CompileFunc keys at
+        // C4PlayerInfo.cpp:177-268). CID_PlrInfo = 144, section name
+        // "Player Info" (C4Packet2.cpp:111). The nested [Player] sections
+        // must not collapse into the packet's flat fields.
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=144\n\
+    [Player Info]\n\
+      ID=0\n\
+      Flags=Initial\n\
+      [Player]\n\
+        Name=\"Tyler\"\n\
+        Flags=\n\
+        ID=1\n\
+        Type=User\n\
+        Color=15997440\n\
+        Team=0\n\
+      [Player]\n\
+        Name=\"Rival\"\n\
+        ID=2\n\
+        Type=Script\n\
+        Color=255\n\
+        Team=7\n\
+    ByClient=0\n";
+        let packets = parse_control_ini(input).expect("parse control log");
+        assert_eq!(packets.len(), 1);
+        match &packets[0] {
+            ControlPacket::PlayerInfo(info) => {
+                assert_eq!(info.client_id, 0);
+                assert_eq!(info.players.len(), 2);
+                assert_eq!(info.players[0].id, 1);
+                assert_eq!(info.players[0].name, "Tyler");
+                assert_eq!(info.players[0].color, 15997440);
+                assert_eq!(info.players[0].team, 0);
+                assert!(!info.players[0].script_player);
+                assert_eq!(info.players[1].id, 2);
+                assert_eq!(info.players[1].name, "Rival");
+                assert_eq!(info.players[1].team, 7);
+                assert!(info.players[1].script_player);
+            }
+            other => panic!("expected PlayerInfo, got {other:?}"),
+        }
     }
 
     #[test]
