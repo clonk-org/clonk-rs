@@ -30,7 +30,7 @@ impl<'a> Parser<'a> {
         // Parse directives, variable declarations, and functions
         // Directives and variable declarations can be interspersed
         let mut includes = Vec::new();
-        let mut appendto = None;
+        let mut appends = Vec::new();
         let mut strict_level = None;
         let mut var_decls = Vec::new();
         let mut functions = Vec::new();
@@ -56,7 +56,7 @@ impl<'a> Parser<'a> {
                     }
                     "#appendto" => {
                         let next = self.next()?;
-                        appendto = Some(match &next.kind {
+                        appends.push(match &next.kind {
                             TokenKind::Identifier(id) | TokenKind::C4Id(id) => {
                                 AppendTo::Id(id.clone())
                             }
@@ -69,6 +69,15 @@ impl<'a> Parser<'a> {
                                 ))
                             }
                         });
+                        // Optional `nowarn` suffix (C4AUL_NoWarn,
+                        // C4AulParse.cpp:1463-1472) suppresses the
+                        // missing-target warning; parse-wise just consume.
+                        if let Ok(token) = self.peek() {
+                            if matches!(&token.kind, TokenKind::Identifier(word) if word == "nowarn")
+                            {
+                                self.next()?;
+                            }
+                        }
                     }
                     "#strict" => {
                         // Default to level 1
@@ -111,7 +120,7 @@ impl<'a> Parser<'a> {
             functions,
             var_decls,
             includes,
-            appendto,
+            appends,
             strict_level,
         ))
     }

@@ -14,7 +14,7 @@ pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Se
 pub struct Script {
     functions: HashMap<String, Function>,
     includes: Vec<String>,
-    appendto: Option<crate::ast::AppendTo>,
+    appends: Vec<crate::ast::AppendTo>,
     strict_level: Option<u8>,
     var_decls: Vec<VarDecl>, // Script-level variable declarations
 }
@@ -37,7 +37,7 @@ impl Script {
         Self {
             functions,
             includes: ast.includes,
-            appendto: ast.appendto,
+            appends: ast.appends,
             strict_level: ast.strict_level,
             var_decls: ast.var_decls,
         }
@@ -51,8 +51,8 @@ impl Script {
         &self.includes
     }
 
-    pub fn appendto(&self) -> Option<&crate::ast::AppendTo> {
-        self.appendto.as_ref()
+    pub fn appends(&self) -> &[crate::ast::AppendTo] {
+        &self.appends
     }
 
     pub fn strict_level(&self) -> Option<u8> {

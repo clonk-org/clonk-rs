@@ -36,7 +36,9 @@ pub struct Script {
     pub functions: Vec<Function>,
     pub var_decls: Vec<VarDecl>,    // Top-level variable declarations
     pub includes: Vec<String>,      // List of included definition IDs
-    pub appendto: Option<AppendTo>, // Optional append target
+    /// `#appendto` targets (C++ `C4AulScript::Appends`, a LIST —
+    /// C4AulParse.cpp:1485; scripts may carry several).
+    pub appends: Vec<AppendTo>,
     pub strict_level: Option<u8>,   // Strict mode level (1, 2, or 3)
 }
 
@@ -47,7 +49,7 @@ impl Script {
             functions,
             var_decls: Vec::new(),
             includes: Vec::new(),
-            appendto: None,
+            appends: Vec::new(),
             strict_level: None,
         }
     }
@@ -56,14 +58,14 @@ impl Script {
         functions: Vec<Function>,
         var_decls: Vec<VarDecl>,
         includes: Vec<String>,
-        appendto: Option<AppendTo>,
+        appends: Vec<AppendTo>,
         strict_level: Option<u8>,
     ) -> Self {
         Self {
             functions,
             var_decls,
             includes,
-            appendto,
+            appends,
             strict_level,
         }
     }
