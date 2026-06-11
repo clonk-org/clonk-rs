@@ -1136,7 +1136,9 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
         CollectParticlesFromList(object->BackParticles, ParticleLayer::ObjectBack, object_id, buffer);
         SnapshotEntry entry;
         entry.snapshot.id = static_cast<uint64_t>(object->Number);
-        entry.definition = object->Def ? object->Def->GetName() : "";
+        // The runtime keys objects by C4ID text; the display name would make
+        // every per-definition comparison miss.
+        entry.definition = object->Def ? C4IdText(object->Def->id) : "";
         entry.snapshot.position_x = fixtoi(object->fix_x);
         entry.snapshot.position_y = fixtoi(object->fix_y);
         entry.snapshot.velocity_x = fixtoi(object->xdir);

@@ -1338,10 +1338,35 @@ fn runtime_snapshot_mismatch(
     }
 
     if expected.objects.len() != actual.objects.len() {
+        // Name the difference: a per-definition histogram diff turns
+        // "count mismatch" into an actionable worklist.
+        let histogram = |objects: &[ObjectSnapshot]| {
+            let mut counts: BTreeMap<String, i64> = BTreeMap::new();
+            for object in objects {
+                *counts.entry(object.definition_id.clone()).or_default() += 1;
+            }
+            counts
+        };
+        let ours = histogram(&expected.objects);
+        let theirs = histogram(&actual.objects);
+        let mut missing: Vec<String> = Vec::new();
+        let mut extra: Vec<String> = Vec::new();
+        let ids: std::collections::BTreeSet<&String> = ours.keys().chain(theirs.keys()).collect();
+        for id in ids {
+            let have = ours.get(id).copied().unwrap_or(0);
+            let want = theirs.get(id).copied().unwrap_or(0);
+            match have.cmp(&want) {
+                std::cmp::Ordering::Less => missing.push(format!("{}x {id}", want - have)),
+                std::cmp::Ordering::Greater => extra.push(format!("{}x {id}", have - want)),
+                std::cmp::Ordering::Equal => {}
+            }
+        }
         return Some(format!(
-            "object count mismatch (expected {}, got {})",
+            "object count mismatch (expected {}, got {}; runtime missing: [{}]; runtime extra: [{}])",
             expected.objects.len(),
-            actual.objects.len()
+            actual.objects.len(),
+            missing.join(", "),
+            extra.join(", "),
         ));
     }
 
@@ -3501,6 +3526,68 @@ global func Step(state, frame, random)
         assert!(
             detail.contains("controls mismatch"),
             "detail did not mention controls: {detail}"
+        );
+    }
+
+    #[test]
+    fn runtime_mismatch_count_branch_names_per_definition_diff() {
+        // A bare "object count mismatch" is not actionable; the histogram
+        // diff names which definitions diverge. Keys are C4ID text — the
+        // bridge sends C4IdText(Def->id) (RustEngineBridge.cpp:1141), the
+        // runtime keys objects by definition_id.
+        let object = |id: u64, definition: &str| -> ObjectSnapshot {
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "definition_id": definition,
+                "position": {"x": 0, "y": 0},
+                "velocity": {"x": 0, "y": 0},
+                "energy": 0,
+            }))
+            .expect("object snapshot deserializes")
+        };
+
+        let baseline = unsafe {
+            call_make_snapshot(
+                1,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            )
+        };
+
+        let mut runtime = baseline.clone();
+        runtime.objects = vec![object(1, "ROCK"), object(2, "GOLD"), object(6, "TREE")];
+        let mut cpp = baseline;
+        cpp.objects = vec![
+            object(1, "ROCK"),
+            object(3, "GOLD"),
+            object(4, "GOLD"),
+            object(5, "BNDT"),
+        ];
+
+        let detail = runtime_snapshot_mismatch(&runtime, &cpp).expect("should report mismatch");
+        assert!(
+            detail.contains("runtime missing: [1x BNDT, 1x GOLD]"),
+            "detail did not name the missing definitions: {detail}"
+        );
+        assert!(
+            detail.contains("runtime extra: [1x TREE]"),
+            "detail did not name the extra definitions: {detail}"
         );
     }
 
