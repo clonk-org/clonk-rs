@@ -1,0 +1,137 @@
+//! `obj->Method(args)` is a DIRECT OBJECT CALL (AB_CALL/AB_CALLFS,
+//! C4AulExec.cpp:1216-1305): the target value is evaluated, a falsy target
+//! throws even for `->~` (:1224-1226), and the function resolves against the
+//! TARGET's context — not the calling script. The VM is world-agnostic, so
+//! an engine-registered method-dispatch hook performs the cross-object
+//! resolution; only self-calls stay in-VM.
+
+use std::sync::{Arc, Mutex};
+
+use lc_script::{Engine, Script, Value};
+
+#[test]
+fn object_target_routes_through_the_method_dispatch_hook() {
+    let source = r#"
+        global func Probe(target) { return target->Who(5, "x"); }
+    "#;
+    let log: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = Engine::new();
+    engine.add_script(Script::compile(source).expect("script compiles"));
+    {
+        let log = Arc::clone(&log);
+        engine.register_method_dispatch(Arc::new(move |args: &[Value]| {
+            log.lock().unwrap().push(args.to_vec());
+            Ok(Value::Int(99))
+        }));
+    }
+    assert_eq!(
+        engine
+            .call("Probe", &[Value::Object(7)])
+            .expect("call succeeds"),
+        Value::Int(99)
+    );
+    let calls = log.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0],
+        vec![
+            Value::Object(7),
+            Value::String("Who".into()),
+            Value::Bool(false),
+            Value::Int(5),
+            Value::String("x".into()),
+        ]
+    );
+}
+
+#[test]
+fn failsafe_arrow_passes_the_failsafe_flag() {
+    let source = r#"
+        global func Probe(target) { return target->~Maybe(); }
+    "#;
+    let log: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = Engine::new();
+    engine.add_script(Script::compile(source).expect("script compiles"));
+    {
+        let log = Arc::clone(&log);
+        engine.register_method_dispatch(Arc::new(move |args: &[Value]| {
+            log.lock().unwrap().push(args.to_vec());
+            Ok(Value::Nil)
+        }));
+    }
+    engine
+        .call("Probe", &[Value::Object(7)])
+        .expect("call succeeds");
+    assert_eq!(
+        log.lock().unwrap()[0][2],
+        Value::Bool(true),
+        "->~ sets the failsafe flag"
+    );
+}
+
+#[test]
+fn falsy_target_is_an_error_even_for_failsafe_calls() {
+    // C4AulExec.cpp:1224-1226: "Object call: target is zero!" — the ~ only
+    // covers a MISSING FUNCTION, not a missing target.
+    let source = r#"
+        global func Probe() { return nil->~Maybe(); }
+    "#;
+    let mut engine = Engine::new();
+    engine.add_script(Script::compile(source).expect("script compiles"));
+    engine.register_method_dispatch(Arc::new(|_: &[Value]| Ok(Value::Nil)));
+    let error = engine.call("Probe", &[]).expect_err("falsy target throws");
+    assert!(
+        error.to_string().contains("target is zero"),
+        "got: {error}"
+    );
+}
+
+#[test]
+fn id_target_dispatches_a_definition_call() {
+    // AB_CALL accepts "object" or "id" targets (C4AulExec.cpp:1229-1247).
+    let source = r#"
+        global func Probe() { return ROCK->Density(); }
+    "#;
+    let log: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = Engine::new();
+    engine.add_script(Script::compile(source).expect("script compiles"));
+    {
+        let log = Arc::clone(&log);
+        engine.register_method_dispatch(Arc::new(move |args: &[Value]| {
+            log.lock().unwrap().push(args.to_vec());
+            Ok(Value::Int(50))
+        }));
+    }
+    assert_eq!(
+        engine.call("Probe", &[]).expect("call succeeds"),
+        Value::Int(50)
+    );
+    assert_eq!(log.lock().unwrap()[0][0], Value::C4Id("ROCK".into()));
+}
+
+#[test]
+fn self_target_calls_stay_in_the_vm() {
+    // this()->Method() resolves on the executing object like a plain call
+    // (FindSameNameFunc with pDestDef == own def): no dispatch round-trip,
+    // own locals stay live.
+    let source = r#"
+        global func Who() { return 42; }
+        global func Probe() { return this()->Who(); }
+    "#;
+    let mut engine = Engine::new();
+    engine.add_script(Script::compile(source).expect("script compiles"));
+    engine.register_method_dispatch(Arc::new(|_: &[Value]| {
+        Err(lc_script::RuntimeError::new(
+            "self calls must not dispatch".to_string(),
+        ))
+    }));
+    let (value, _) = engine
+        .call_with_locals_and_this(
+            "Probe",
+            &[],
+            &std::collections::HashMap::new(),
+            Value::Object(3),
+        )
+        .expect("call succeeds");
+    assert_eq!(value, Value::Int(42));
+}

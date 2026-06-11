@@ -26471,6 +26471,90 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn arrow_calls_resolve_on_the_target_object_like_cpp() {
+        // `obj->Method(args)` is AB_CALL (C4AulExec.cpp:1216-1305): the
+        // function resolves on the TARGET's def via FindSameNameFunc
+        // (C4Aul.cpp:130-148 — own script functions, then global/engine
+        // functions running with the TARGET's context). `->~` forgives only
+        // a MISSING FUNCTION (:1262-1267); a falsy target throws even for
+        // `->~` (:1224-1226).
+        let caller_script = r#"
+        global func Poke(target) { return target->Secret(21); }
+        global func PokeMissing(target) { return target->NoSuch(); }
+        global func PokeMissingSafe(target) { return target->~NoSuch(); }
+        global func PokeNil() { return nil->~Anything(); }
+        global func PokeEngineFn(target) { return target->GetID(); }
+        "#;
+        let probe_script = r#"
+        local tag;
+        public func Secret(v) {
+            tag = v;
+            return v * 2;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLLR", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CLLR"))
+            .expect("caller spawns");
+        let probe = engine
+            .spawn_object(SpawnConfig::new("PROB"))
+            .expect("probe spawns");
+        engine.tick().expect("tick succeeds");
+
+        let caller_idx = engine.find_object_index(caller).expect("caller exists");
+        let target_arg = vec![Value::Object(probe.as_u64())];
+
+        // Resolves Secret on PROB (the caller has no Secret) and runs it
+        // with PROB's context: its local var commits.
+        let result = engine
+            .call_object_function(caller_idx, "Poke", target_arg.clone())
+            .expect("arrow call succeeds");
+        assert_eq!(result, Value::Int(42));
+        let probe_idx = engine.find_object_index(probe).expect("probe exists");
+        assert_eq!(
+            engine.objects[probe_idx].state.local_vars.get("tag"),
+            Some(&Value::Int(21)),
+            "the callee ran on the TARGET object"
+        );
+
+        // Engine functions resolve through the FindSameNameFunc global
+        // fallback and run with the TARGET's context.
+        let result = engine
+            .call_object_function(caller_idx, "PokeEngineFn", target_arg.clone())
+            .expect("engine-fn arrow call succeeds");
+        assert_eq!(result, Value::C4Id("PROB".into()), "GetID of the TARGET");
+
+        // Missing function: error for `->`, nil for `->~`.
+        // (The engine wraps the VM error; the distinction that matters is
+        // error-vs-nil between -> and ->~ below.)
+        engine
+            .call_object_function(caller_idx, "PokeMissing", target_arg.clone())
+            .expect_err("missing function on -> is an error");
+        let result = engine
+            .call_object_function(caller_idx, "PokeMissingSafe", target_arg)
+            .expect("->~ forgives the missing function");
+        assert_eq!(result, Value::Nil);
+
+        // Falsy target: error even for `->~` (the exact "target is zero"
+        // message is pinned by the lc-script unit test).
+        engine
+            .call_object_function(caller_idx, "PokeNil", Vec::new())
+            .expect_err("falsy target throws even for ->~");
+    }
+
+    #[test]
     fn object_call_family_runs_target_def_script_function_like_cpp() {
         // FnObjectCall/FnProtectedCall/FnPrivateCall (C4Script.cpp:3434-3449,
         // 3502-3534): all three resolve in the TARGET object's def script

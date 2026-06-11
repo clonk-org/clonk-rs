@@ -73,6 +73,11 @@ pub struct Engine {
     /// Game.ScriptEngine in C++): shared across every script host, resolved
     /// after the own script and before host functions.
     global_functions: Option<Arc<HashMap<String, Function>>>,
+    /// `obj->Method(args)` cross-object resolver (AB_CALL,
+    /// C4AulExec.cpp:1216-1305): the VM is world-agnostic, so the engine
+    /// registers this hook to run the function on the TARGET object's
+    /// script. Called with [target, name, failsafe, args...].
+    method_dispatch: Option<HostFunction>,
 }
 
 impl Engine {
@@ -84,6 +89,7 @@ impl Engine {
             var_decls: Vec::new(),
             constants: HashMap::new(),
             global_functions: None,
+            method_dispatch: None,
         }
     }
 
@@ -184,6 +190,13 @@ impl Engine {
         self.host_functions.remove(name)
     }
 
+    /// Registers the cross-object method resolver for `obj->Method(args)`
+    /// (AB_CALL, C4AulExec.cpp:1216-1305). Arguments: [target, name,
+    /// failsafe, args...].
+    pub fn register_method_dispatch(&mut self, dispatch: HostFunction) {
+        self.method_dispatch = Some(dispatch);
+    }
+
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, ScriptError> {
         let vm = Vm::new(
             &self.functions,
@@ -192,7 +205,8 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref());
+        .with_optional_globals(self.global_functions.as_deref())
+        .with_method_dispatch(self.method_dispatch.as_ref());
         vm.call(name, args).map_err(ScriptError::from)
     }
 
@@ -214,7 +228,8 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref());
+        .with_optional_globals(self.global_functions.as_deref())
+        .with_method_dispatch(self.method_dispatch.as_ref());
         let cells: Vec<crate::vm::ValueCell> =
             args.iter().cloned().map(crate::vm::value_cell).collect();
         let call_args = cells
@@ -241,7 +256,8 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_constants(&self.constants)
-        .with_optional_globals(self.global_functions.as_deref());
+        .with_optional_globals(self.global_functions.as_deref())
+        .with_method_dispatch(self.method_dispatch.as_ref());
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)
     }
@@ -264,6 +280,7 @@ impl Engine {
         )
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
+        .with_method_dispatch(self.method_dispatch.as_ref())
         .with_this(this);
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)

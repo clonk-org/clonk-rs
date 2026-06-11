@@ -2514,6 +2514,60 @@ fn object_call(args: &[Value]) -> Result<Value, RuntimeError> {
     call_world_object_script_function(target, name, &pars).unwrap_or(Ok(Value::Nil))
 }
 
+/// `obj->Method(args)` / `obj->~Method(args)` — the AB_CALL/AB_CALLFS
+/// direct object call (C4AulExec.cpp:1216-1305), forwarded by the VM as
+/// [target, name, failsafe, args...]. Resolution is FindSameNameFunc on the
+/// target (C4Aul.cpp:130-148): its own script functions first, then
+/// global/engine functions running with the TARGET's context. A missing
+/// function errors unless failsafe (`->~`), which yields nil; falsy targets
+/// were already rejected in the VM.
+fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target_value = args.first().cloned().unwrap_or(Value::Nil);
+    let Some(Value::String(name)) = args.get(1) else {
+        return Err(RuntimeError::new(
+            "Object call: missing function name".to_string(),
+        ));
+    };
+    let failsafe = args.get(2).map(Value::as_bool).unwrap_or(false);
+    let pars: Vec<Value> = args.iter().skip(3).collect::<Vec<_>>().into_iter().cloned().collect();
+
+    if let Value::C4Id(def_id) = &target_value {
+        // Definition call (C4AulExec.cpp:1235-1245): the definition must be
+        // known — that error is NOT covered by the failsafe.
+        let script = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.world.definition_script(def_id).cloned())
+        });
+        let Some(script) = script else {
+            return Err(RuntimeError::new(format!(
+                "Definition call: Definition for id {def_id} not found!"
+            )));
+        };
+        return match call_scoped_script_function(script, name, &pars) {
+            Some(result) => result,
+            None if failsafe => Ok(Value::Nil),
+            None => Err(RuntimeError::new(format!(
+                "Definition call: No function \"{name}\" in definition \"{def_id}\"!"
+            ))),
+        };
+    }
+
+    let Some(target) = object_id_from_value(&target_value) else {
+        return Err(RuntimeError::new(format!(
+            "Object call: Invalid target type {}, expected object or id!",
+            target_value.type_name()
+        )));
+    };
+    match call_world_object_function(target, name, &pars) {
+        Some(result) => result,
+        None if failsafe => Ok(Value::Nil),
+        None => Err(RuntimeError::new(format!(
+            "Object call: No function \"{name}\" in object {target}!"
+        ))),
+    }
+}
+
 /// Runs `function` on a script host with NO object context (Obj=nullptr,
 /// C4AulExec.cpp:343): the active object scope is parked on the dormant
 /// stack while the nested VM runs, so host functions see no `this`. Used by
@@ -2784,6 +2838,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Contained", contained);
     script.register_host_function("GetCategory", get_category);
     script.register_host_function("SetCategory", set_category);
+    script.register_method_dispatch(std::sync::Arc::new(arrow_method_dispatch));
     script.register_host_function("NoContainer", no_container);
     script.register_host_function("AnyContainer", any_container);
     script.register_host_function("ActIdle", act_idle);

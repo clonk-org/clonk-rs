@@ -369,10 +369,14 @@ pub struct Vm<'a> {
     /// Engine-global script functions (System.c4g `global func`s): the
     /// resolution fallback between the own script and host functions.
     global_functions: Option<&'a HashMap<String, Function>>,
-    /// The object context the call runs on, returned by `Expr::This`. Host-opaque
-    /// (in lc-engine an object reference is `Proplist {"id": <number>}`). Nil when
-    /// the call has no object context (e.g. global functions).
+    /// The object context the call runs on, returned by `Expr::This`
+    /// (`Value::Object` in lc-engine). Nil when the call has no object
+    /// context (e.g. global functions).
     this_value: Value,
+    /// The cross-object resolver for `obj->Method(args)` (AB_CALL,
+    /// C4AulExec.cpp:1216-1305), registered by the engine. Called with
+    /// [target, name, failsafe, args...].
+    method_dispatch: Option<&'a HostFunction>,
 }
 
 impl<'a> Vm<'a> {
@@ -390,6 +394,7 @@ impl<'a> Vm<'a> {
             constants: None,
             global_functions: None,
             this_value: Value::Nil,
+            method_dispatch: None,
         }
     }
 
@@ -410,6 +415,13 @@ impl<'a> Vm<'a> {
     /// `None` = no globals installed.
     pub fn with_optional_globals(mut self, functions: Option<&'a HashMap<String, Function>>) -> Self {
         self.global_functions = functions;
+        self
+    }
+
+    /// Attach the cross-object method resolver for `obj->Method(args)`
+    /// (AB_CALL, C4AulExec.cpp:1216-1305).
+    pub fn with_method_dispatch(mut self, dispatch: Option<&'a HostFunction>) -> Self {
+        self.method_dispatch = dispatch;
         self
     }
 
@@ -863,28 +875,15 @@ impl<'a> Vm<'a> {
                 // instead of throwing an error
                 if *is_optional {
                     match callee.as_ref() {
-                        Expr::Property(_base, name) => {
-                            // Try to find the function
-                            if !self.functions.contains_key(name)
-                                && !self.host_functions.contains_key(name)
-                            {
-                                // Method doesn't exist - return nil without evaluating args
-                                return Ok(Value::Nil);
-                            }
-                            let function = self.functions.get(name);
-                            let mut evaluated_args =
-                                self.build_call_args(function, args, env, depth + 1)?;
-                            if *forward_rest {
-                                Self::append_forwarded_args(&mut evaluated_args, env);
-                            }
-                            // If the call fails for other reasons (arity, runtime error), propagate
-                            self.invoke_value(
-                                name,
-                                evaluated_args,
-                                depth + 1,
-                                env.object_state.clone(),
-                            )
-                        }
+                        Expr::Property(base, name) => self.invoke_property_call(
+                            base,
+                            name,
+                            args,
+                            true,
+                            *forward_rest,
+                            env,
+                            depth,
+                        ),
                         _ => {
                             // Optional calls only make sense for property access
                             Err(RuntimeError::new(
@@ -1026,22 +1025,15 @@ impl<'a> Vm<'a> {
                                 env.object_state.clone(),
                             )
                         }
-                        Expr::Property(_base, name) => {
-                            // For now, just call the method name directly
-                            // TODO: Implement proper object method dispatch when we have object support
-                            let function = self.functions.get(name);
-                            let mut evaluated_args =
-                                self.build_call_args(function, args, env, depth + 1)?;
-                            if *forward_rest {
-                                Self::append_forwarded_args(&mut evaluated_args, env);
-                            }
-                            self.invoke_value(
-                                name,
-                                evaluated_args,
-                                depth + 1,
-                                env.object_state.clone(),
-                            )
-                        }
+                        Expr::Property(base, name) => self.invoke_property_call(
+                            base,
+                            name,
+                            args,
+                            false,
+                            *forward_rest,
+                            env,
+                            depth,
+                        ),
                         _ => Err(RuntimeError::new(format!(
                             "cannot call non-function expression: {:?}",
                             callee
@@ -1438,6 +1430,100 @@ impl<'a> Vm<'a> {
                 other.type_name()
             ))),
         }
+    }
+
+    /// `base->name(args)` / `base->~name(args)`: the direct object call
+    /// (AB_CALL/AB_CALLFS, C4AulExec.cpp:1216-1305). The target evaluates
+    /// first; a FALSY target throws even for the failsafe form (:1224-1226);
+    /// object and id targets resolve on the TARGET's context through the
+    /// engine-registered method dispatch; self-targets stay in-VM (same
+    /// resolution, live locals). The `~` only forgives a missing FUNCTION.
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_property_call(
+        &self,
+        base: &Expr,
+        name: &str,
+        args: &[Expr],
+        failsafe: bool,
+        forward_rest: bool,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        let target = self.evaluate(base, env, depth + 1)?;
+        match &target {
+            Value::Nil | Value::Int(0) | Value::Bool(false) => Err(RuntimeError::new(
+                "Object call: target is zero!".to_string(),
+            )),
+            Value::Object(_) | Value::C4Id(_)
+                if self.method_dispatch.is_some() && target != self.this_value =>
+            {
+                let function = self.functions.get(name);
+                let mut evaluated_args = self.build_call_args(function, args, env, depth + 1)?;
+                if forward_rest {
+                    Self::append_forwarded_args(&mut evaluated_args, env);
+                }
+                let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
+                dispatch_args.push(target.clone());
+                dispatch_args.push(Value::String(name.to_string()));
+                dispatch_args.push(Value::Bool(failsafe));
+                for arg in &evaluated_args {
+                    dispatch_args.push(arg.read()?);
+                }
+                let dispatch = self
+                    .method_dispatch
+                    .ok_or_else(|| RuntimeError::new("method dispatch vanished".to_string()))?;
+                dispatch(&dispatch_args)
+            }
+            Value::Object(_) | Value::C4Id(_) => {
+                // Self-target (or a bare engine without a world): resolve in
+                // the executing context — FindSameNameFunc with
+                // pDestDef == own def is the plain own->global->host chain.
+                self.invoke_property_call_local(name, args, failsafe, forward_rest, env, depth)
+            }
+            other => {
+                if self.method_dispatch.is_some() {
+                    Err(RuntimeError::new(format!(
+                        "Object call: Invalid target type {}, expected object or id!",
+                        other.type_name()
+                    )))
+                } else {
+                    // Bare scripting engines have no object world: keep the
+                    // legacy resolve-by-name behavior for their tests.
+                    self.invoke_property_call_local(name, args, failsafe, forward_rest, env, depth)
+                }
+            }
+        }
+    }
+
+    fn invoke_property_call_local(
+        &self,
+        name: &str,
+        args: &[Expr],
+        failsafe: bool,
+        forward_rest: bool,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<Value, RuntimeError> {
+        let function = self.functions.get(name);
+        if failsafe
+            && function.is_none()
+            && !self.host_functions.contains_key(name)
+            && !self
+                .global_functions
+                .map(|functions| functions.contains_key(name))
+                .unwrap_or(false)
+        {
+            // ->~ on a missing function: the parameters still evaluate (they
+            // are on the stack before AB_CALLFS pops them, C4AulExec.cpp:
+            // 1262-1267), the result is nil.
+            let _ = self.build_call_args(function, args, env, depth + 1)?;
+            return Ok(Value::Nil);
+        }
+        let mut evaluated_args = self.build_call_args(function, args, env, depth + 1)?;
+        if forward_rest {
+            Self::append_forwarded_args(&mut evaluated_args, env);
+        }
+        self.invoke_value(name, evaluated_args, depth + 1, env.object_state.clone())
     }
 
     fn build_call_args(
