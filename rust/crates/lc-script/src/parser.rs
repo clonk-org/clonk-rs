@@ -155,6 +155,8 @@ impl<'a> Parser<'a> {
             returns_reference,
             // Stamped with the script's #strict level in Script::from_ast.
             strict_level: None,
+            // Linked when a later script or an #include overload collides.
+            overloaded: None,
         })
     }
 
@@ -164,6 +166,12 @@ impl<'a> Parser<'a> {
             return Ok(params);
         }
         loop {
+            // `...` ends the parameter list: the function takes anything via
+            // Par() and declares no further names (C4AulParse.cpp:1642-1648).
+            if self.consume_if_symbol(Symbol::Ellipsis)?.is_some() {
+                break;
+            }
+
             // Check for optional type annotation
             let type_annotation = self.parse_type_annotation()?;
 
@@ -1596,6 +1604,18 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier(_) | TokenKind::C4Id(_) => {
                 self.consume()?;
                 Ok(token)
+            }
+            // C4Aul keywords are contextual: the C++ tokenizer emits plain
+            // ATT_IDTF for every word, so names like `var func, objhgt`
+            // (planet/System.c4g/Commits.c:269) are legal. Normalize to an
+            // identifier token so callers extract the name uniformly.
+            TokenKind::Keyword(keyword) => {
+                self.consume()?;
+                Ok(Token::new(
+                    TokenKind::Identifier(keyword.lexeme().to_string()),
+                    token.line,
+                    token.column,
+                ))
             }
             _ => Err(ParseError::new(
                 message.to_string(),

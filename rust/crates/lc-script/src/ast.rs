@@ -157,6 +157,10 @@ pub struct Function {
     /// owning script's strict level for `==`/`!=`, `Fn->pOrgScript->Strict`).
     /// `None` = no `#strict` directive (NONSTRICT). Stamped in `Script::from_ast`.
     pub strict_level: Option<u8>,
+    /// The function this one overloaded (C++ `Fn->OwnerOverloaded`): a later
+    /// script redefining the name, or an #include'd parent's same-name
+    /// function. `inherited(...)`/`_inherited(...)` call it.
+    pub overloaded: Option<std::sync::Arc<Function>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -14,6 +14,10 @@ use crate::value::{Literal, Value};
 /// (C4AulExec.cpp:62). A script recursing within this bound runs; beyond it the
 /// VM returns a clean error (C++ throws "call stack overflow", :143-145).
 const MAX_CALL_DEPTH: usize = 512;
+/// C4AUL_MAX_Par: every C4Aul call frame carries exactly 10 parameter slots
+/// (C4Aul.h); `Par(n)` beyond them reads nil and `F(...)` forwards at most
+/// this many.
+const MAX_CALL_PARAMETERS: usize = 10;
 
 /// Run `f` with native-stack headroom, growing the stack when it runs low. Each
 /// script-call level of this tree-walking interpreter uses several KiB of native
@@ -530,6 +534,7 @@ impl<'a> Vm<'a> {
             function.strict_level,
             object_state,
         )?;
+        env.inherited_target = function.overloaded.clone();
 
         // Script-level `local` declarations are object-local storage. Nested
         // calls share the same object state, matching C++ pObj->Local/LocalNamed.
@@ -867,11 +872,10 @@ impl<'a> Vm<'a> {
                                 return Ok(Value::Nil);
                             }
                             let function = self.functions.get(name);
-                            let evaluated_args =
+                            let mut evaluated_args =
                                 self.build_call_args(function, args, env, depth + 1)?;
-                            // TODO: Handle forward_rest - append remaining args from current function
                             if *forward_rest {
-                                // For now, just ignore - proper implementation needs access to current call args
+                                Self::append_forwarded_args(&mut evaluated_args, env);
                             }
                             // If the call fails for other reasons (arity, runtime error), propagate
                             self.invoke_value(
@@ -911,13 +915,64 @@ impl<'a> Vm<'a> {
                             };
                             return self.get_target_value(env, &target);
                         }
-                    }
-                    // TODO: Handle forward_rest - append remaining args from current function
-                    if *forward_rest {
-                        // For now, just ignore - proper implementation needs access to current call args
+                        // `Par(n)` reads the executing call's parameter slot n;
+                        // outside 0..ParCnt it is nil (C4AulExec.cpp:1127-1140).
+                        if name == "Par"
+                            && args.len() <= 1
+                            && !self.functions.contains_key(name)
+                            && !self.host_functions.contains_key(name)
+                        {
+                            let index = args
+                                .first()
+                                .map(|arg| self.evaluate(arg, env, depth + 1))
+                                .transpose()?
+                                .map(|value| match value {
+                                    Value::Int(index) => Ok(index),
+                                    Value::Nil => Ok(0),
+                                    Value::Bool(flag) => Ok(i32::from(flag)),
+                                    other => Err(RuntimeError::new(format!(
+                                        "Par: index of type {}, int expected",
+                                        other.type_name()
+                                    ))),
+                                })
+                                .transpose()?
+                                .unwrap_or(0);
+                            return Ok(usize::try_from(index)
+                                .ok()
+                                .filter(|index| *index < MAX_CALL_PARAMETERS)
+                                .and_then(|index| env.call_args.get(index).cloned())
+                                .unwrap_or(Value::Nil));
+                        }
                     }
                     // Extract function name from callee expression
                     match callee.as_ref() {
+                        Expr::Variable(name) if name == "inherited" || name == "_inherited" => {
+                            // `inherited` calls the overloaded function; the
+                            // `_inherited` spelling yields nil when there is
+                            // none (C4AulParse.cpp:2775-2798).
+                            let Some(target) = env.inherited_target.clone() else {
+                                return if name == "_inherited" {
+                                    Ok(Value::Nil)
+                                } else {
+                                    Err(RuntimeError::new(
+                                        "inherited: no overloaded function".to_string(),
+                                    ))
+                                };
+                            };
+                            let mut evaluated_args =
+                                self.build_call_args(Some(&target), args, env, depth + 1)?;
+                            if *forward_rest {
+                                Self::append_forwarded_args(&mut evaluated_args, env);
+                            }
+                            self.invoke_script_function(
+                                &target.name.clone(),
+                                &target,
+                                evaluated_args,
+                                depth + 1,
+                                env.object_state.clone(),
+                            )?
+                            .as_value()
+                        }
                         Expr::Variable(name) => {
                             // Old-style constant calls: below #strict 2, a
                             // global constant used as `OCF_Chop()` yields the
@@ -938,8 +993,11 @@ impl<'a> Vm<'a> {
                                 }
                             }
                             let function = self.functions.get(name);
-                            let evaluated_args =
+                            let mut evaluated_args =
                                 self.build_call_args(function, args, env, depth + 1)?;
+                            if *forward_rest {
+                                Self::append_forwarded_args(&mut evaluated_args, env);
+                            }
                             self.invoke_value(
                                 name,
                                 evaluated_args,
@@ -951,8 +1009,11 @@ impl<'a> Vm<'a> {
                             // For now, just call the method name directly
                             // TODO: Implement proper object method dispatch when we have object support
                             let function = self.functions.get(name);
-                            let evaluated_args =
+                            let mut evaluated_args =
                                 self.build_call_args(function, args, env, depth + 1)?;
+                            if *forward_rest {
+                                Self::append_forwarded_args(&mut evaluated_args, env);
+                            }
                             self.invoke_value(
                                 name,
                                 evaluated_args,
@@ -1010,63 +1071,45 @@ impl<'a> Vm<'a> {
             Expr::PreIncrement(expr) => {
                 let target = Self::expr_to_assignment_target(expr)?;
                 let old_value = self.get_target_value(env, &target)?;
-                let new_value = match old_value {
-                    Value::Int(i) => Value::Int(i + 1),
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "cannot increment non-integer value: {:?}",
-                            other
-                        )))
-                    }
-                };
+                let new_value = Value::Int(Self::counter_operand(old_value, "increment")? + 1);
                 self.assign_target(env, &target, new_value.clone())?;
                 Ok(new_value)
             }
             Expr::PreDecrement(expr) => {
                 let target = Self::expr_to_assignment_target(expr)?;
                 let old_value = self.get_target_value(env, &target)?;
-                let new_value = match old_value {
-                    Value::Int(i) => Value::Int(i - 1),
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "cannot decrement non-integer value: {:?}",
-                            other
-                        )))
-                    }
-                };
+                let new_value = Value::Int(Self::counter_operand(old_value, "decrement")? - 1);
                 self.assign_target(env, &target, new_value.clone())?;
                 Ok(new_value)
             }
             Expr::PostIncrement(expr) => {
                 let target = Self::expr_to_assignment_target(expr)?;
-                let old_value = self.get_target_value(env, &target)?;
-                let new_value = match &old_value {
-                    Value::Int(i) => Value::Int(i + 1),
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "cannot increment non-integer value: {:?}",
-                            other
-                        )))
-                    }
-                };
-                self.assign_target(env, &target, new_value)?;
-                Ok(old_value)
+                let old_value =
+                    Self::counter_operand(self.get_target_value(env, &target)?, "increment")?;
+                self.assign_target(env, &target, Value::Int(old_value + 1))?;
+                Ok(Value::Int(old_value))
             }
             Expr::PostDecrement(expr) => {
                 let target = Self::expr_to_assignment_target(expr)?;
-                let old_value = self.get_target_value(env, &target)?;
-                let new_value = match &old_value {
-                    Value::Int(i) => Value::Int(i - 1),
-                    other => {
-                        return Err(RuntimeError::new(format!(
-                            "cannot decrement non-integer value: {:?}",
-                            other
-                        )))
-                    }
-                };
-                self.assign_target(env, &target, new_value)?;
-                Ok(old_value)
+                let old_value =
+                    Self::counter_operand(self.get_target_value(env, &target)?, "decrement")?;
+                self.assign_target(env, &target, Value::Int(old_value - 1))?;
+                Ok(Value::Int(old_value))
             }
+        }
+    }
+
+    /// `++`/`--` operand conversion: CheckOpPar<C4V_Int> converts nil to 0 and
+    /// bool to int before the operation (C4AulExec.cpp:450-458,
+    /// C4Value.cpp:453-466 FnCnvGuess); other types stay errors.
+    fn counter_operand(value: Value, operation: &str) -> Result<i32, RuntimeError> {
+        match value {
+            Value::Int(value) => Ok(value),
+            Value::Nil => Ok(0),
+            Value::Bool(flag) => Ok(i32::from(flag)),
+            other => Err(RuntimeError::new(format!(
+                "cannot {operation} non-integer value: {other:?}"
+            ))),
         }
     }
 
@@ -1397,6 +1440,24 @@ impl<'a> Vm<'a> {
         Ok(evaluated_args)
     }
 
+    /// `Callee(args, ...)`: after the explicit arguments, forward every
+    /// parameter slot of the executing function past its named parameters,
+    /// stopping at the 10-slot frame limit (C4AulParse.cpp:2293-2306).
+    fn append_forwarded_args(evaluated_args: &mut Vec<CallArg>, env: &Environment) {
+        let mut index = env.named_param_count;
+        while evaluated_args.len() < MAX_CALL_PARAMETERS && index < MAX_CALL_PARAMETERS {
+            let value = env.call_args.get(index).cloned().unwrap_or(Value::Nil);
+            evaluated_args.push(CallArg::Value(value));
+            index += 1;
+        }
+        // C++ callees always see 10 slots and cannot tell a missing argument
+        // from an explicit nil, so dropping the nil tail is observationally
+        // identical — and keeps host functions that count arguments honest.
+        while matches!(evaluated_args.last(), Some(CallArg::Value(Value::Nil))) {
+            evaluated_args.pop();
+        }
+    }
+
     fn expr_can_be_lvalue(expr: &Expr) -> bool {
         matches!(
             expr,
@@ -1702,6 +1763,15 @@ struct Environment {
     /// are per-call; `local_slots` round-trip through the object's `local_vars`.
     var_slots: SlotMap,
     object_state: ObjectState,
+    /// The full argument slots of the executing call: `Par(i)` reads them
+    /// (C4AulExec.cpp:1127-1140) and `Callee(...)` forwards the slots past
+    /// `named_param_count` (C4AulParse.cpp:2293-2306, ParNamed.iSize).
+    call_args: Rc<Vec<Value>>,
+    named_param_count: usize,
+    /// The function the executing one overloaded — the `inherited(...)` /
+    /// `_inherited(...)` target (C++ Fn->OwnerOverloaded,
+    /// C4AulParse.cpp:2775-2798).
+    inherited_target: Option<std::sync::Arc<Function>>,
 }
 
 impl Environment {
@@ -1724,11 +1794,18 @@ impl Environment {
             };
             base.insert(param.name.clone(), binding);
         }
+        let call_args = args
+            .iter()
+            .map(CallArg::read)
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             scopes,
             strict_level,
             var_slots: Rc::new(RefCell::new(HashMap::new())),
             object_state,
+            call_args: Rc::new(call_args),
+            named_param_count: params.len(),
+            inherited_target: None,
         })
     }
 

@@ -43,6 +43,10 @@ fn main() -> Result<()> {
             let tail: Vec<String> = args.collect();
             scenario_sweep_command(&tail)
         }
+        Some("scenario-errors") => {
+            let tail: Vec<String> = args.collect();
+            scenario_errors_command(&tail)
+        }
         Some(cmd) => bail!("unknown command `{}` (try `cargo xtask --help`)", cmd),
     }
 }
@@ -307,6 +311,89 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
         }
     }
     tracing::info!("{report}");
+    Ok(())
+}
+
+/// Loads + applies one scenario the way lc-app does (materials, System.c4g,
+/// player registration, simulation ticks) so every script-error warning the
+/// C++ engine would not produce becomes visible headlessly. The C++ engine
+/// runs official content without script errors; each distinct warning this
+/// prints is a parity gap.
+fn scenario_errors_command(args: &[String]) -> Result<()> {
+    let filter = args
+        .first()
+        .filter(|arg| !arg.starts_with("--"))
+        .cloned()
+        .ok_or_else(|| anyhow!("Usage: cargo xtask scenario-errors <filter> [--ticks N]"))?;
+    let ticks: u32 = args
+        .iter()
+        .position(|arg| arg == "--ticks")
+        .and_then(|index| args.get(index + 1))
+        .map(|value| value.parse())
+        .transpose()
+        .context("parsing --ticks")?
+        .unwrap_or(120);
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("cannot locate repo root from xtask manifest dir"))?;
+    let content_root = repo_root.join("content");
+
+    let scenario_path = WalkDir::new(&content_root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path().to_path_buf())
+        .find(|path| {
+            path.extension()
+                .map(|ext| ext.eq_ignore_ascii_case("c4s"))
+                .unwrap_or(false)
+                && path.to_string_lossy().contains(filter.as_str())
+        })
+        .ok_or_else(|| anyhow!("no content/**/*.c4s matches `{filter}`"))?;
+    tracing::info!("scenario-errors: {}", scenario_path.display());
+
+    let material_library = lc_resources::MaterialLibrary::from_group(
+        &lc_resources::Group::open(content_root.join("Material.c4g"))
+            .context("opening content/Material.c4g")?,
+    )
+    .map_err(|error| anyhow!("loading material library: {error}"))?;
+    let system_scripts = lc_resources::Group::open(repo_root.join("planet/System.c4g"))
+        .ok()
+        .and_then(|group| lc_engine::scenario::load_system_scripts(&group).ok())
+        .unwrap_or_default();
+
+    let mut roots: Vec<PathBuf> = scenario_path
+        .ancestors()
+        .skip(1)
+        .take_while(|ancestor| ancestor.starts_with(&content_root))
+        .map(Path::to_path_buf)
+        .collect();
+    roots.push(content_root.clone());
+    roots.push(repo_root.clone());
+    let resolver = SweepResolver { roots };
+
+    let scenario = lc_engine::Scenario::load_from_path_with(&scenario_path, &resolver)
+        .map_err(|error| anyhow!("load failed: {error}"))?;
+    let mut engine = lc_engine::Engine::new();
+    engine.configure_materials_from_library(&material_library);
+    engine.install_global_scripts(&system_scripts);
+    scenario
+        .apply(&mut engine)
+        .map_err(|error| anyhow!("apply failed: {error}"))?;
+
+    engine
+        .register_player(lc_engine::PlayerConfig::new(0, "Tester"))
+        .map_err(|error| anyhow!("register_player failed: {error}"))?;
+
+    for frame in 0..ticks {
+        if let Err(error) = engine.tick() {
+            tracing::error!(frame, %error, "tick failed");
+            break;
+        }
+    }
+    tracing::info!("scenario-errors: done ({ticks} ticks)");
     Ok(())
 }
 
