@@ -7629,6 +7629,9 @@ pub struct Engine {
     /// re-cloning every ActionLibrary there dominated tick time).
     definition_metadata_cache: std::cell::RefCell<Option<Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>>>,
     materials: MaterialSet,
+    /// Shared view of `materials` for host contexts (FnMaterial);
+    /// invalidated when the library is (re)configured.
+    materials_shared: std::cell::RefCell<Option<Rc<MaterialSet>>>,
     objects: Vec<Object>,
     next_object_id: u64,
     pub(crate) rng: LcgRng,
@@ -8884,6 +8887,7 @@ impl Engine {
             object_index_cache: std::cell::RefCell::new((0, HashMap::new())),
             definition_metadata_cache: std::cell::RefCell::new(None),
             materials: MaterialSet::default(),
+            materials_shared: std::cell::RefCell::new(None),
             objects: Vec::new(),
             next_object_id: 1,
             rng: LcgRng::seed_from_u64(seed),
@@ -10022,7 +10026,20 @@ impl Engine {
         &mut self.materials
     }
 
+    fn materials_shared(&self) -> Rc<MaterialSet> {
+        let mut cache = self.materials_shared.borrow_mut();
+        match cache.as_ref() {
+            Some(shared) => Rc::clone(shared),
+            None => {
+                let shared = Rc::new(self.materials.clone());
+                *cache = Some(Rc::clone(&shared));
+                shared
+            }
+        }
+    }
+
     pub fn configure_materials_from_library(&mut self, library: &lc_resources::MaterialLibrary) {
+        self.materials_shared.borrow_mut().take();
         self.materials = MaterialSet::from_resource_library(library);
         let capacity = self.materials.len();
         for object in &mut self.objects {
@@ -10294,6 +10311,13 @@ impl Engine {
                             construction_offset: definition.construction_offset(),
                             basement: definition.basement(),
                             physical: *definition.physical(),
+                            components: definition
+                                .components()
+                                .iter()
+                                .map(|component| {
+                                    (component.id.as_str().to_string(), component.count)
+                                })
+                                .collect(),
                         },
                     )
                 })
@@ -10368,6 +10392,7 @@ impl Engine {
         )
         .with_particle_defs(self.particle_system.def_names())
         .with_crew_ranks(Rc::clone(&self.crew_ranks))
+        .with_materials(Some(self.materials_shared()))
         .with_definition_scripts(
             self.definitions
                 .iter()
@@ -20330,6 +20355,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     construction_offset: 0,
                     basement: 0,
                     physical: lc_resources::PhysicalInfo::default(),
+                    components: Vec::new(),
                 },
             )
         })

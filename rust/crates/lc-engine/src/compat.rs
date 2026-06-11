@@ -13,6 +13,7 @@ use crate::message::{
     HORIZONTAL_POSITION_FLAGS, VERTICAL_POSITION_FLAGS,
 };
 use crate::ocf;
+use crate::material::MaterialSet;
 use crate::rng::LcgRng;
 use crate::sector::{SectorMap, SectorObject};
 #[cfg(test)]
@@ -116,6 +117,9 @@ pub(crate) struct DefinitionMetadata {
     pub basement: i32,
     /// The `[Physical]` section (GetPhysical's def form, C4Script.cpp:652).
     pub physical: PhysicalInfo,
+    /// DefCore `Components` in list order (C4IDList; GetComponent's
+    /// count/index forms, C4Script.cpp:2685-2709).
+    pub components: Vec<(String, u32)>,
 }
 
 /// `SetPhysical`/`GetPhysical` modes (C4Script.cpp:552-555).
@@ -397,6 +401,9 @@ pub(crate) struct HostWorldContext {
     /// functions can run script functions on other objects mid-VM-call
     /// (Find_Func/Sort_Func, GameCall). Empty in legacy fixture contexts.
     definition_scripts: Rc<HashMap<DefinitionId, Arc<ScriptEngine>>>,
+    /// The material table (Game.Material): name lookups for FnMaterial
+    /// (C4Script.cpp:2488-2491). `None` in legacy fixture contexts.
+    materials: Option<Rc<MaterialSet>>,
     /// Crew object ranks from the engine's crew infos (`pObj->Info->Rank`;
     /// GetHiRank reads them, C4Player.cpp:1012). Objects without an entry
     /// behave like info-less crew (rank -1).
@@ -426,6 +433,7 @@ impl Default for HostWorldContext {
             definition_scripts: Rc::new(HashMap::new()),
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
+            materials: None,
         }
     }
 }
@@ -540,6 +548,7 @@ impl HostWorldContext {
             definition_scripts: Rc::new(HashMap::new()),
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
+            materials: None,
         }
     }
 
@@ -589,6 +598,16 @@ impl HostWorldContext {
     ) -> Self {
         self.particle_defs = Some(Rc::new(defs));
         self
+    }
+
+    /// Attach the material table (FnMaterial name lookups).
+    pub(crate) fn with_materials(mut self, materials: Option<Rc<MaterialSet>>) -> Self {
+        self.materials = materials;
+        self
+    }
+
+    pub(crate) fn materials(&self) -> Option<&MaterialSet> {
+        self.materials.as_deref()
     }
 
     /// Attach the engine's crew-info rank table (see `crew_ranks` docs).
@@ -1408,7 +1427,296 @@ fn get_plr_value_gain(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetComponent (C4Script.cpp:2685-2709): with `idDef` the def's
+/// component list answers; otherwise the object's (scope object when no
+/// target). `idComponent` selects the count form, else the indexed form.
+/// The object's component ORDER follows its def's list (our object
+/// component store is unordered; divergence noted in PORT_STATUS).
+fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
+    let component = parse_definition_argument(args.first(), "GetComponent")?;
+    let index = parse_optional_i32(args.get(1), "GetComponent", "index")?.unwrap_or(0);
+    let target =
+        parse_object_reference_argument(args.get(2).unwrap_or(&Value::Nil), "GetComponent", "obj")?;
+    let definition = parse_definition_argument(args.get(3), "GetComponent")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let indexed = |components: &[(String, u32)], index: i32| -> Value {
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| components.get(index))
+                .map(|(id, _)| Value::C4Id(id.clone()))
+                .unwrap_or(Value::Nil)
+        };
+        if let Some(def_id) = definition {
+            let Some(metadata) = context.world.definition_metadata(&DefinitionId::from(def_id.as_str()))
+            else {
+                return Ok(Value::Nil);
+            };
+            if let Some(component) = component {
+                let count = metadata
+                    .components
+                    .iter()
+                    .find(|(id, _)| id.eq_ignore_ascii_case(&component))
+                    .map(|(_, count)| *count as i32)
+                    .unwrap_or(0);
+                return Ok(Value::Int(count));
+            }
+            return Ok(indexed(&metadata.components, index));
+        }
+        let object = match target {
+            Some(id) => context.get_world_object(id),
+            None => context
+                .object_context()
+                .map(|object| object.id())
+                .and_then(|id| context.get_world_object(id)),
+        };
+        let Some(object) = object else {
+            return Ok(Value::Nil);
+        };
+        let state_components = object.full_state().map(|state| state.components.clone());
+        let def_order = context
+            .world
+            .definition_metadata(object.definition_id())
+            .map(|metadata| metadata.components.clone())
+            .unwrap_or_default();
+        if let Some(component) = component {
+            let count = state_components
+                .as_ref()
+                .and_then(|components| {
+                    components
+                        .iter()
+                        .find(|(id, _)| id.as_str().eq_ignore_ascii_case(&component))
+                        .map(|(_, count)| *count as i32)
+                })
+                .or_else(|| {
+                    def_order
+                        .iter()
+                        .find(|(id, _)| id.eq_ignore_ascii_case(&component))
+                        .map(|(_, count)| *count as i32)
+                })
+                .unwrap_or(0);
+            return Ok(Value::Int(count));
+        }
+        Ok(indexed(&def_order, index))
+    })
+}
+
+/// FnInLiquid (C4Script.cpp:1864-1868): C++ reads the per-frame InLiquid
+/// flag (UpdateInLiquid, C4Object.cpp:6070-6090). The flag is not modeled
+/// yet — approximated with the landscape liquid test at the object's
+/// position (PORT_STATUS).
+fn in_liquid(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target =
+        parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "InLiquid", "obj")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let position = match target {
+            Some(id) => context.get_world_object(id).map(|object| object.position()),
+            None => context
+                .object_context()
+                .map(|object| object.effective_position()),
+        };
+        let Some(position) = position else {
+            return Ok(Value::Nil);
+        };
+        let wet = context
+            .world
+            .landscape_ref()
+            .map(|landscape| landscape.is_liquid_at(position.x, position.y))
+            .unwrap_or(false);
+        Ok(Value::Bool(wet))
+    })
+}
+
+/// FnMaterial (C4Script.cpp:2488-2491): material number by name, -1 when
+/// unknown (Game.Material.Get).
+fn material(args: &[Value]) -> Result<Value, RuntimeError> {
+    let name = parse_optional_string(args.first(), "Material", "name")?;
+    let Some(name) = name else {
+        return Ok(Value::Int(MATERIAL_NONE));
+    };
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let result = borrow
+            .as_ref()
+            .and_then(|context| context.world.materials())
+            .and_then(|materials| materials.get(&name))
+            .map(|material| material.id().index() as i32)
+            .unwrap_or(MATERIAL_NONE);
+        Ok(Value::Int(result))
+    })
+}
+
+/// FnObjectSetAction (C4Script.cpp:782-789): SetActionByName on ANOTHER
+/// object (with start/abort calls). Routed through the reentrancy seam so
+/// the target's SetAction host fn runs in the target's scope.
+fn object_set_action(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(target) =
+        parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "ObjectSetAction", "obj")?
+    else {
+        return Ok(Value::Bool(false));
+    };
+    let Some(action) = parse_optional_string(args.get(1), "ObjectSetAction", "action")? else {
+        return Ok(Value::Bool(false)); // !szAction
+    };
+    let mut forwarded: Vec<Value> = vec![Value::String(action)];
+    forwarded.extend(args.iter().skip(2).take(3).cloned());
+    match call_world_object_function(target, "SetAction", &forwarded) {
+        Some(result) => result,
+        None => Ok(Value::Bool(false)),
+    }
+}
+
+/// FnSmoke (C4Script.cpp:2188-2192) -> Smoke (C4Effect.cpp:859-866): with
+/// the standard particle system one Smoke particle spawns at
+/// (x, y - level/2), size `level`, color `dwClr`.
+fn smoke(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut x = value_to_i32(args.first().unwrap_or(&Value::Nil), "Smoke", "x")?;
+    let mut y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "Smoke", "y")?;
+    let level = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "Smoke", "level")?;
+    let color = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "Smoke", "clr")?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        if let Some(object) = context.object_context() {
+            let position = object.effective_position();
+            x = x.saturating_add(position.x);
+            y = y.saturating_add(position.y);
+        }
+        context.register_particle(ParticleCommand::Create(ParticleConfig {
+            definition_id: "Smoke".to_string(),
+            position: FloatVector2::new(x as f32, (y - level / 2) as f32),
+            velocity: FloatVector2::new(0.0, 0.0),
+            life: 0,
+            parameter_a: level as f32,
+            parameter_b: color,
+            layer: ParticleLayer::Global,
+        }));
+        Ok(Value::Nil)
+    })
+}
+
+/// FnSetPortrait (C4Script.cpp:5333-5341): portraits are crew-info
+/// PRESENTATION data, no simulation state; validate like C++ and
+/// acknowledge (PORT_STATUS).
+fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
+    let name = parse_optional_string(args.first(), "SetPortrait", "portrait")?;
+    if name.as_deref().map(str::is_empty).unwrap_or(true) {
+        return Ok(Value::Bool(false));
+    }
+    Ok(Value::Bool(true))
+}
+
+/// FnSetVisibility (C4Script.cpp:3860-3869): a draw gate
+/// (pObj->Visibility), not modeled in the simulation yet — acknowledged
+/// (PORT_STATUS).
+fn set_visibility(args: &[Value]) -> Result<Value, RuntimeError> {
+    let _ = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetVisibility", "visibility")?;
+    Ok(Value::Bool(true))
+}
+
+/// FnSetClrModulation (C4Script.cpp:3879-3896): graphics color modulation
+/// — presentation-only; acknowledged (PORT_STATUS).
+fn set_clr_modulation(args: &[Value]) -> Result<Value, RuntimeError> {
+    let _ = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetClrModulation", "clr")?;
+    Ok(Value::Bool(true))
+}
+
+/// FnEnter (C4Script.cpp:365-370): pObj (or the scope object) enters the
+/// container pTarget (C4Object::Enter; the entry/departure callbacks run
+/// when the container change folds, apply_container_change). A FOREIGN
+/// subject routes through the reentrancy seam so the change lands in the
+/// subject's own scope; the seam re-runs this function with the subject
+/// active, which terminates in the self branch.
+fn enter(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(target) =
+        parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "Enter", "target")?
+    else {
+        return Ok(Value::Bool(false)); // C4Object::Enter(nullptr)
+    };
+    let subject =
+        parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "Enter", "obj")?;
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    if let Some(subject) = subject {
+        if Some(subject) != active {
+            return match call_world_object_function(
+                subject,
+                "Enter",
+                &[object_reference_value(target)],
+            ) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if object.id() == target {
+            return Ok(Value::Bool(false)); // cannot contain itself
+        }
+        object.set_container(Some(target));
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnExit (C4Script.cpp:372-390): pObj leaves its container
+/// (C4Object::Exit; fails when not contained). The exit position falls to
+/// the container-change fold; the optional offset/rotation/speed
+/// parameters are not modeled yet (PORT_STATUS).
+fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
+    let subject =
+        parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "Exit", "obj")?;
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    if let Some(subject) = subject {
+        if Some(subject) != active {
+            return match call_world_object_function(subject, "Exit", &[]) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if object.container().is_none() {
+            return Ok(Value::Bool(false)); // not contained
+        }
+        object.set_container(None);
+        Ok(Value::Bool(true))
+    })
+}
+
 fn get_hi_rank(args: &[Value]) -> Result<Value, RuntimeError> {
+
+
     // FnGetHiRank (C4Script.cpp:2792-2796) ->
     // C4Player::GetHiRankActiveCrew(false) (C4Player.cpp:1003-1020): walk
     // the crew in order, rank from the linked Info (no info = -1); only a
@@ -2801,6 +3109,16 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlrKnowledge", get_plr_knowledge);
     script.register_host_function("GetCrew", get_crew);
     script.register_host_function("GetHiRank", get_hi_rank);
+    script.register_host_function("Enter", enter);
+    script.register_host_function("Exit", exit_container);
+    script.register_host_function("GetComponent", get_component);
+    script.register_host_function("InLiquid", in_liquid);
+    script.register_host_function("Material", material);
+    script.register_host_function("ObjectSetAction", object_set_action);
+    script.register_host_function("Smoke", smoke);
+    script.register_host_function("SetPortrait", set_portrait);
+    script.register_host_function("SetVisibility", set_visibility);
+    script.register_host_function("SetClrModulation", set_clr_modulation);
     script.register_host_function("GetCrewCount", get_crew_count);
     script.register_host_function("GetCursor", get_cursor_host);
     script.register_host_function("GetViewCursor", get_view_cursor);
@@ -9875,6 +10193,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 construction_offset: 0,
                 basement: 0,
                 physical: PhysicalInfo::default(),
+                components: Vec::new(),
             });
         let definition_category = metadata.category;
 
@@ -10059,6 +10378,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 construction_offset: 0,
                 basement: 0,
                 physical: PhysicalInfo::default(),
+                components: Vec::new(),
             });
         let definition_category = metadata.category;
 
@@ -11437,6 +11757,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 construction_offset: 0,
                 basement: 0,
                 physical: PhysicalInfo::default(),
+                components: Vec::new(),
             });
 
         let mut last = Value::Nil;
@@ -13707,7 +14028,6 @@ impl ObjectScopeContext {
         }
     }
 
-    #[allow(dead_code)]
     fn set_container(&mut self, container: Option<ObjectId>) {
         if self.container() == container {
             return;
@@ -14196,6 +14516,8 @@ mod tests {
         "DoHomebaseMaterial",
         "DoHomebaseProduction",
         "EffectVar",
+        "Enter",
+        "Exit",
         "FindContents",
         "FindObject",
         "FindObject2",
@@ -14219,6 +14541,7 @@ mod tests {
         "GetCategory",
         "GetClimate",
         "GetComDir",
+        "GetComponent",
         "GetCon",
         "GetContact",
         "GetCrew",
@@ -14271,7 +14594,9 @@ mod tests {
         "GetXDir",
         "GetY",
         "GetYDir",
+        "InLiquid",
         "Log",
+        "Material",
         "Max",
         "Message",
         "Min",
@@ -14280,6 +14605,7 @@ mod tests {
         "ObjectCount",
         "ObjectCount2",
         "ObjectDistance",
+        "ObjectSetAction",
         "PathFree",
         "PlayerMessage",
         "PlrMessage",
@@ -14298,6 +14624,7 @@ mod tests {
         "SetBridgeActionData",
         "SetCategory",
         "SetClimate",
+        "SetClrModulation",
         "SetColorDw",
         "SetComDir",
         "SetCommand",
@@ -14312,6 +14639,7 @@ mod tests {
         "SetPhase",
         "SetPhysical",
         "SetPlrKnowledge",
+        "SetPortrait",
         "SetPosition",
         "SetR",
         "SetRDir",
@@ -14319,12 +14647,14 @@ mod tests {
         "SetTemperature",
         "SetTransferZone",
         "SetVertex",
+        "SetVisibility",
         "SetWealth",
         "SetWind",
         "SetXDir",
         "SetYDir",
         "ShakeFree",
         "Sin",
+        "Smoke",
         "Sound",
         "SoundLevel",
         "Sqrt",
@@ -15504,6 +15834,7 @@ mod tests {
                 construction_offset: 0,
                 basement: 0,
                 physical: PhysicalInfo::default(),
+                components: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -15542,6 +15873,7 @@ mod tests {
                     construction_offset: 0,
                     basement: 0,
                     physical: PhysicalInfo::default(),
+                    components: Vec::new(),
                 },
             ),
             (
@@ -15558,6 +15890,7 @@ mod tests {
                     construction_offset: 0,
                     basement: 0,
                     physical: PhysicalInfo::default(),
+                    components: Vec::new(),
                 },
             ),
         ]);
@@ -15598,6 +15931,7 @@ mod tests {
                 construction_offset: 0,
                 basement: 0,
                 physical: PhysicalInfo::default(),
+                components: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -15651,6 +15985,7 @@ mod tests {
                 construction_offset: 0,
                 basement: 0,
                 physical: PhysicalInfo::default(),
+                components: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -15694,6 +16029,87 @@ mod tests {
         let parsed = parse_definition_argument(Some(&Value::C4Id("NOPC".into())), "FindObject")
             .expect("C4Id accepted");
         assert_eq!(parsed.as_deref(), Some("NOPC"));
+    }
+
+    #[test]
+    fn get_component_answers_def_counts_and_indexed_ids() {
+        // FnGetComponent (C4Script.cpp:2685-2709): with idDef the def's
+        // component list answers; idComponent selects the count form,
+        // otherwise the index form returns the id (C4VID).
+        let mut metadata = DefinitionMetadata {
+            category: 0,
+            ocf_base: 0,
+            crew_member: false,
+            action_library: ActionLibrary::default(),
+            value: 0,
+            mass: 0,
+            constructable: false,
+            shape: None,
+            construction_offset: 0,
+            basement: 0,
+            physical: lc_resources::PhysicalInfo::default(),
+            components: Vec::new(),
+        };
+        metadata.components = vec![("WOOD".to_string(), 3), ("METL".to_string(), 1)];
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            HashMap::from([(DefinitionId::from("HUTT"), metadata)]),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        );
+        let (result, _) = with_effect_context(None, &[], world.clone(), 1, || {
+            let count = get_component(&[
+                Value::C4Id("WOOD".into()),
+                Value::Int(0),
+                Value::Nil,
+                Value::C4Id("HUTT".into()),
+            ])?;
+            assert_eq!(count, Value::Int(3), "count form");
+            get_component(&[
+                Value::Nil,
+                Value::Int(1),
+                Value::Nil,
+                Value::C4Id("HUTT".into()),
+            ])
+        });
+        assert_eq!(
+            result.expect("GetComponent succeeds"),
+            Value::C4Id("METL".into()),
+            "index form returns the id"
+        );
+    }
+
+    #[test]
+    fn material_resolves_names_to_numbers_like_cpp() {
+        // FnMaterial (C4Script.cpp:2488-2491): Game.Material.Get — the
+        // material number, -1 for unknown names.
+        let library = lc_resources::MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=50\n",
+        )
+        .expect("library builds");
+        let materials = MaterialSet::from_resource_library(&library);
+        let expected = materials.get("Earth").expect("earth exists").id().index() as i32;
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            None,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        )
+        .with_materials(Some(Rc::new(materials)));
+        let (result, _) = with_effect_context(None, &[], world.clone(), 1, || {
+            let known = material(&[Value::String("Earth".into())])?;
+            assert_eq!(known, Value::Int(expected));
+            material(&[Value::String("Unobtainium".into())])
+        });
+        assert_eq!(result.expect("Material succeeds"), Value::Int(MATERIAL_NONE));
     }
 
     #[test]
@@ -16048,6 +16464,7 @@ mod tests {
                 construction_offset: 0,
                 basement: 0,
                 physical: PhysicalInfo::default(),
+                components: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -16085,6 +16502,7 @@ mod tests {
                 construction_offset: 0,
                 basement: 0,
                 physical: PhysicalInfo::default(),
+                components: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -16138,6 +16556,7 @@ mod tests {
                 construction_offset: 0,
                 basement: 0,
                 physical: PhysicalInfo::default(),
+                components: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -19315,6 +19734,7 @@ mod tests {
                 construction_offset: 0,
                 basement: 0,
                 physical: PhysicalInfo::default(),
+                components: Vec::new(),
             },
         )]);
         let world = HostWorldContext::with_landscape(
@@ -19365,6 +19785,7 @@ mod tests {
             construction_offset: 0,
             basement: 0,
             physical: PhysicalInfo::default(),
+            components: Vec::new(),
         };
         let definitions = HashMap::from([
             ("Workshop".to_string(), workshop_metadata.clone()),
