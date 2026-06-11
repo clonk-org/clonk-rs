@@ -96,10 +96,26 @@ All done + unit-tested against the C++ formulas, 2026-05-30 (`lc-graphics`, 33 t
       bug worth fixing; the live window is NOT shifted.)
 - [ ] Remaining menu polish: none known at the main menu beyond the ±1-LSB GPU
       filter residual.
-- [ ] Other startup dialogs: scenario-selection "book", options, player select,
-      about — layouts to match their `C4Startup*Dlg` (the shared font/gamma/
-      blit machinery above now makes these mostly layout work).
-- [ ] Scenario-selection "book" (`C4StartupScenSelDlg`) — the parallax 3D book.
+- [x] **About, Scenario-Selection book, Network dialogs pixel-exact
+      (2026-06-10).** App-level `--dump-menu-frame --menu-view about|scenarios|net`
+      vs F9 refs (`build/Screenshots/ref-*.png`, row-shift + masks applied):
+      about **96.15%**, scensel **95.56%**, net **97.36%** bit-identical, and in
+      all three EVERY residual pixel is channel-delta 1 (GPU bilinear rounding
+      on the stretched 800x600 backgrounds) — zero structural diffs.
+      Renderers: `lc-frontend/src/startup_{about_dlg,scensel,netdlg}.rs`
+      (spec-driven, every formula cited; specs in `target/parity-specs/`).
+      New empirics baked in: `DrawLineDw` drops its end pixel (GL_LINES
+      diamond-exit) so `Draw3DFrame` corners blend once; shadowless book fonts
+      (`build_book_font_set`); zoomed `DrawBar` branch for the 23px GUICaption
+      bar. Masks: cursor sprite baked into refs at ~(637,356); scensel list +
+      right page (live entries differ from the ref's empty exe-dir scan); net
+      list client (nondeterministic masterserver content).
+- [ ] Options (`C4StartupOptionsDlg`, Program tab) and Player Selection
+      (`C4StartupPlrSelDlg`) — renderers in flight
+      (`startup_options_dlg.rs` / `startup_plrsel.rs` partials).
+- [ ] Scen-sel interactivity beyond select/open/back clicks: search filter,
+      scrollbar drag, right-page selection info, folder icons from
+      Folder.txt/Icon assets (list rows currently use kind-default icons).
 
 ### R3 — in-game scene (largest; depends on simulation correctness)
 - [x] **Verification capability**: `lc-app --dump-frame <png> [--sandbox] --test-frames N`
