@@ -16,6 +16,12 @@ pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Se
 pub type GlobalVariables =
     std::rc::Rc<std::cell::RefCell<HashMap<String, crate::vm::ValueCell>>>;
 
+/// Supplies a live cell for a FOREIGN object's named local —
+/// FnLocalN returns `pVarN->GetRef()` (C4Script.cpp:4591-4605), a
+/// reference into the target's locals, so cross-object reads AND lvalue
+/// writes go through it. Registered by the engine like method_dispatch.
+pub type LocalCellHook = std::rc::Rc<dyn Fn(&Value, &str) -> Option<crate::vm::ValueCell>>;
+
 pub fn new_global_variables() -> GlobalVariables {
     std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()))
 }
@@ -95,6 +101,8 @@ pub struct Engine {
     /// The shared `static` table; `None` keeps the legacy per-host
     /// fallback (fixtures without an engine).
     globals_named: Option<GlobalVariables>,
+    /// Cross-object LocalN cell supplier (see [`LocalCellHook`]).
+    local_cell_hook: Option<LocalCellHook>,
 }
 
 impl Engine {
@@ -108,6 +116,7 @@ impl Engine {
             global_functions: None,
             method_dispatch: None,
             globals_named: None,
+            local_cell_hook: None,
         }
     }
 
@@ -291,6 +300,12 @@ impl Engine {
         });
     }
 
+    /// Registers the cross-object LocalN cell supplier (FnLocalN's
+    /// by-reference foreign-local access, C4Script.cpp:4591-4605).
+    pub fn register_local_cell_hook(&mut self, hook: LocalCellHook) {
+        self.local_cell_hook = Some(hook);
+    }
+
     pub fn register_method_dispatch(&mut self, dispatch: HostFunction) {
         self.method_dispatch = Some(dispatch);
     }
@@ -305,7 +320,8 @@ impl Engine {
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_global_variables(self.globals_named.as_deref());
+        .with_global_variables(self.globals_named.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref());
         vm.call(name, args).map_err(ScriptError::from)
     }
 
@@ -329,7 +345,8 @@ impl Engine {
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_global_variables(self.globals_named.as_deref());
+        .with_global_variables(self.globals_named.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref());
         let cells: Vec<crate::vm::ValueCell> =
             args.iter().cloned().map(crate::vm::value_cell).collect();
         let call_args = cells
@@ -358,7 +375,8 @@ impl Engine {
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
-        .with_global_variables(self.globals_named.as_deref());
+        .with_global_variables(self.globals_named.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref());
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)
     }
@@ -383,6 +401,7 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_global_variables(self.globals_named.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_this(this);
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)

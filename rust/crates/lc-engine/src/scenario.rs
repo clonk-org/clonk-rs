@@ -5946,6 +5946,53 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn cross_object_localn_folds_into_the_target_like_cpp() {
+        // The GoldRush WSKI pattern (Goldrush.c4s/Script.c:58-62):
+        //   pObj = CreateContents(WSKI, pWagon);
+        //   LocalN("iWater", pObj) = 90;
+        //   pObj->~UpdateGraphics();
+        // FnLocalN returns a reference into the TARGET's named locals
+        // (C4Script.cpp:4591-4605): the write lands on the fresh object
+        // and the nested call right after it sees the new value.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "global func Initialize(state, random) {\n\
+                 var obj = CreateObject(GOOD, 50, 50, -1);\n\
+                 LocalN(\"iWater\", obj) = 90;\n\
+                 obj->Check();\n\
+                 LocalN(\"iWater\", obj) += 10;\n\
+                 return nil;\n\
+             }\n",
+        );
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "#strict\nlocal iWater;\nlocal seen;\n\
+             public func Check() { seen = iWater; return seen; }\n",
+        )
+        .expect("write target script");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let snapshot = engine.snapshot();
+        let object = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GOOD")
+            .expect("object created");
+        assert_eq!(
+            object.local_vars.get("seen"),
+            Some(&lc_script::Value::Int(90)),
+            "the nested call right after the write saw the new value"
+        );
+        assert_eq!(
+            object.local_vars.get("iWater"),
+            Some(&lc_script::Value::Int(100)),
+            "the final cell value (write + compound add) folded onto the object"
+        );
+    }
+
+    #[test]
     fn join_name_sources_and_map_zoom_follow_cpp() {
         // New crew infos draw their name from the def's ClonkNames list
         // when it has one (C4ObjectInfoList.cpp:160-164, C4Def.cpp:645-652),

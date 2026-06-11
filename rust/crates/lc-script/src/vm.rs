@@ -380,6 +380,8 @@ pub struct Vm<'a> {
     /// The engine-global `static` table (GlobalNamed); resolved after
     /// locals, before global constants (C4AulParse.cpp:2836-2839).
     globals_named: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
+    /// Cross-object LocalN cell supplier (crate::engine::LocalCellHook).
+    local_cell_hook: Option<&'a crate::engine::LocalCellHook>,
 }
 
 impl<'a> Vm<'a> {
@@ -399,6 +401,7 @@ impl<'a> Vm<'a> {
             this_value: Value::Nil,
             method_dispatch: None,
             globals_named: None,
+            local_cell_hook: None,
         }
     }
 
@@ -435,6 +438,41 @@ impl<'a> Vm<'a> {
     ) -> Self {
         self.globals_named = table;
         self
+    }
+
+    pub fn with_local_cell_hook(
+        mut self,
+        hook: Option<&'a crate::engine::LocalCellHook>,
+    ) -> Self {
+        self.local_cell_hook = hook;
+        self
+    }
+
+    /// Resolves a LocalN target cell: falsy targets and the executing
+    /// object use the VM's own object locals (FnLocalN's
+    /// `if (!pObj) pObj = cthr->Obj`, C4Script.cpp:4593-4596); anything
+    /// else asks the host hook for the foreign object's live cell. A
+    /// hook miss falls back to self like C++'s nullptr conversion of
+    /// dead objects.
+    fn localn_cell(
+        &self,
+        env: &mut Environment,
+        local_name: &str,
+        target: Option<Value>,
+    ) -> ValueCell {
+        let foreign = target.filter(|value| {
+            !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false))
+                && *value != self.this_value
+        });
+        if let Some(target) = foreign {
+            if let Some(cell) = self
+                .local_cell_hook
+                .and_then(|hook| hook(&target, local_name))
+            {
+                return cell;
+            }
+        }
+        env.object_state.named_local_cell(local_name)
     }
 
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeError> {
@@ -941,7 +979,7 @@ impl<'a> Vm<'a> {
                         // pObj defaulting to cthr->Obj). The two-argument
                         // cross-object form goes to the host.
                         if name == "LocalN"
-                            && args.len() == 1
+                            && (1..=2).contains(&args.len())
                             && !self.functions.contains_key(name)
                         {
                             let local_name = match self.evaluate(&args[0], env, depth + 1)? {
@@ -953,7 +991,11 @@ impl<'a> Vm<'a> {
                                     )))
                                 }
                             };
-                            let cell = env.object_state.named_local_cell(&local_name);
+                            let target = args
+                                .get(1)
+                                .map(|arg| self.evaluate(arg, env, depth + 1))
+                                .transpose()?;
+                            let cell = self.localn_cell(env, &local_name, target);
                             let value = cell.borrow().clone();
                             return Ok(value);
                         }
@@ -1632,6 +1674,24 @@ impl<'a> Vm<'a> {
             } => {
                 // Evaluate the object to get its identity
                 let object_value = self.evaluate(object, env, 0)?;
+                // `LocalN("name", obj) = v` / `obj->LocalN("name") = v`:
+                // FnLocalN returns a reference into the TARGET's named
+                // locals (C4Script.cpp:4591-4605) — write through the
+                // resolved cell (self or host-supplied foreign cell).
+                if method == "LocalN" && args.len() == 1 {
+                    let local_name = match self.evaluate(&args[0], env, 0)? {
+                        Value::String(local_name) => local_name,
+                        other => {
+                            return Err(RuntimeError::new(format!(
+                                "LocalN: expected string for name, got {}",
+                                other.type_name()
+                            )))
+                        }
+                    };
+                    let cell = self.localn_cell(env, &local_name, Some(object_value));
+                    *cell.borrow_mut() = value;
+                    return Ok(());
+                }
                 let object_id = match object_value {
                     Value::Int(n) => n.to_string(),
                     Value::String(s) => s.clone(),
@@ -1698,6 +1758,23 @@ impl<'a> Vm<'a> {
             } => {
                 // Evaluate the object to get its identity
                 let object_value = self.evaluate(object, env, 0)?;
+                // `LocalN("name", obj)` / `obj->LocalN("name")` reads the
+                // TARGET's named local through the resolved cell (FnLocalN
+                // by-reference access, C4Script.cpp:4591-4605).
+                if method == "LocalN" && args.len() == 1 {
+                    let local_name = match self.evaluate(&args[0], env, 0)? {
+                        Value::String(local_name) => local_name,
+                        other => {
+                            return Err(RuntimeError::new(format!(
+                                "LocalN: expected string for name, got {}",
+                                other.type_name()
+                            )))
+                        }
+                    };
+                    let cell = self.localn_cell(env, &local_name, Some(object_value));
+                    let value = cell.borrow().clone();
+                    return Ok(value);
+                }
                 let object_id = match object_value {
                     Value::Int(n) => n.to_string(),
                     Value::String(s) => s.clone(),
@@ -1756,10 +1833,14 @@ impl<'a> Vm<'a> {
                 Ok(env.var_slot_lvalue(index))
             }
             AssignmentTarget::FunctionCall { name, args }
-                if name == "LocalN" && args.len() == 1 && !self.functions.contains_key(name) =>
+                if name == "LocalN"
+                    && (1..=2).contains(&args.len())
+                    && !self.functions.contains_key(name) =>
             {
                 // FnLocalN returns pVarN->GetRef() (C4Script.cpp:4604):
-                // `LocalN("x") = v` writes the named object local through.
+                // `LocalN("x") = v` writes the named object local through;
+                // the two-argument form targets ANOTHER object's local via
+                // the host cell hook.
                 let local_name = match self.evaluate(&args[0], env, depth + 1)? {
                     Value::String(local_name) => local_name,
                     other => {
@@ -1769,14 +1850,39 @@ impl<'a> Vm<'a> {
                         )))
                     }
                 };
-                Ok(LValueRef::Cell(
-                    env.object_state.named_local_cell(&local_name),
-                ))
+                let target = args
+                    .get(1)
+                    .map(|arg| self.evaluate(arg, env, depth + 1))
+                    .transpose()?;
+                Ok(LValueRef::Cell(self.localn_cell(env, &local_name, target)))
             }
             AssignmentTarget::FunctionCall { name, args } => {
                 let function = self.functions.get(name);
                 let args = self.build_call_args(function, args, env, depth + 1)?;
                 self.invoke_reference(name, args, depth + 1, env.object_state.clone())
+            }
+            // `LocalN("name", obj) += v` and friends: the foreign-local
+            // cell IS the reference (FnLocalN, C4Script.cpp:4591-4605).
+            AssignmentTarget::MethodSlot {
+                object,
+                method,
+                args,
+            } if method == "LocalN" && args.len() == 1 => {
+                let object_value = self.evaluate(object, env, depth + 1)?;
+                let local_name = match self.evaluate(&args[0], env, depth + 1)? {
+                    Value::String(local_name) => local_name,
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "LocalN: expected string for name, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                Ok(LValueRef::Cell(self.localn_cell(
+                    env,
+                    &local_name,
+                    Some(object_value),
+                )))
             }
             AssignmentTarget::EffectSlot(_) | AssignmentTarget::MethodSlot { .. } => Err(
                 RuntimeError::new("this assignment target cannot be passed by reference"),

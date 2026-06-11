@@ -2877,6 +2877,20 @@ fn object_call(args: &[Value]) -> Result<Value, RuntimeError> {
     call_world_object_script_function(target, name, &pars).unwrap_or(Ok(Value::Nil))
 }
 
+/// The VM's cross-object LocalN cell supplier (FnLocalN by-reference
+/// foreign-local access, C4Script.cpp:4591-4605): hands out live cells
+/// managed by the active host context. `None` for non-object targets —
+/// the VM then falls back to the executing object like C++'s nullptr
+/// conversion.
+fn foreign_local_cell_hook(target: &Value, name: &str) -> Option<lc_script::ValueCell> {
+    let target = object_id_from_value(target)?;
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .map(|context| context.foreign_local_cell(target, name))
+    })
+}
+
 /// `obj->Method(args)` / `obj->~Method(args)` — the AB_CALL/AB_CALLFS
 /// direct object call (C4AulExec.cpp:1216-1305), forwarded by the VM as
 /// [target, name, failsafe, args...]. Resolution is FindSameNameFunc on the
@@ -3214,6 +3228,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetCategory", get_category);
     script.register_host_function("SetCategory", set_category);
     script.register_method_dispatch(std::sync::Arc::new(arrow_method_dispatch));
+    script.register_local_cell_hook(std::rc::Rc::new(foreign_local_cell_hook));
     script.register_host_function("NoContainer", no_container);
     script.register_host_function("AnyContainer", any_container);
     script.register_host_function("ActIdle", act_idle);
@@ -13037,6 +13052,13 @@ struct EffectHostContext {
     /// folded into `EffectContextOutcome::other_objects` in first-call order.
     nested_objects: HashMap<ObjectId, NestedScopeState>,
     nested_order: Vec<ObjectId>,
+    /// Live cells handed to the VM for cross-object LocalN references
+    /// (FnLocalN by-reference access, C4Script.cpp:4591-4605): seeded from
+    /// the target's current locals, overlaid into nested calls, synced
+    /// back after them, and folded into the outcomes. Targets whose scope
+    /// is the suspended OUTER call see the pre-call snapshot (the same
+    /// divergence prepare_nested_call documents).
+    foreign_local_cells: HashMap<(ObjectId, String), lc_script::ValueCell>,
 }
 
 impl EffectHostContext {
@@ -13144,6 +13166,7 @@ impl EffectHostContext {
             dormant_scopes: Vec::new(),
             nested_objects: HashMap::new(),
             nested_order: Vec::new(),
+            foreign_local_cells: HashMap::new(),
         }
     }
 
@@ -13210,6 +13233,50 @@ impl EffectHostContext {
         }
     }
 
+    /// The live cell for a FOREIGN object's named local (cross-object
+    /// LocalN). Seeded from the freshest known value: an accumulated
+    /// nested-call state first, the world snapshot otherwise.
+    fn foreign_local_cell(&mut self, target: ObjectId, name: &str) -> lc_script::ValueCell {
+        if let Some(cell) = self.foreign_local_cells.get(&(target, name.to_string())) {
+            return cell.clone();
+        }
+        let seed = self
+            .nested_objects
+            .get(&target)
+            .and_then(|state| state.local_vars.get(name).cloned())
+            .or_else(|| {
+                self.get_world_object(target)
+                    .and_then(|object| object.full_state().map(|state| state.local_vars.clone()))
+                    .and_then(|locals| locals.get(name).cloned())
+            })
+            .unwrap_or(Value::Nil);
+        let cell = lc_script::value_cell(seed);
+        self.foreign_local_cells
+            .insert((target, name.to_string()), cell.clone());
+        cell
+    }
+
+    /// Cross-object LocalN writes must be visible to a later nested call
+    /// on the same target (C++ mutates live state mid-call).
+    fn overlay_foreign_cells(&self, target: ObjectId, locals: &mut HashMap<String, Value>) {
+        for ((object, name), cell) in &self.foreign_local_cells {
+            if *object == target {
+                locals.insert(name.clone(), cell.borrow().clone());
+            }
+        }
+    }
+
+    /// ...and a nested call's writes must be visible to later LocalN reads.
+    fn sync_foreign_cells(&mut self, target: ObjectId, locals: &HashMap<String, Value>) {
+        for ((object, name), cell) in &self.foreign_local_cells {
+            if *object == target {
+                if let Some(value) = locals.get(name) {
+                    *cell.borrow_mut() = value.clone();
+                }
+            }
+        }
+    }
+
     /// Phase 1 of a nested call (borrow held): resolve the target's script
     /// and move its scope to active. Function resolution follows
     /// `FindSameNameFunc` (C4Aul.cpp:130-148): the target def's own script
@@ -13233,10 +13300,13 @@ impl EffectHostContext {
         }
         // VM sessions own their locals, so a call onto an in-flight scope
         // reads the pre-call snapshot (divergence noted in PORT_STATUS).
-        let snapshot_locals = world_object
+        let mut snapshot_locals = world_object
             .full_state()
             .map(|state| state.local_vars.clone())
             .unwrap_or_default();
+        // Earlier cross-object LocalN writes are part of the target's
+        // current state.
+        self.overlay_foreign_cells(target, &mut snapshot_locals);
         if self.object.as_ref().map(ObjectScopeContext::id) == Some(target) {
             return Some(NestedCallPrep {
                 script,
@@ -13258,10 +13328,11 @@ impl EffectHostContext {
                 origin: Some(NestedScopeOrigin::Dormant(index)),
             });
         }
-        let (scope, local_vars) = match self.nested_objects.remove(&target) {
+        let (scope, mut local_vars) = match self.nested_objects.remove(&target) {
             Some(state) => (state.scope, state.local_vars),
             None => self.nested_scope_for(&world_object)?,
         };
+        self.overlay_foreign_cells(target, &mut local_vars);
         self.dormant_scopes.push(self.object.take());
         self.object = Some(scope);
         Some(NestedCallPrep {
@@ -13326,6 +13397,9 @@ impl EffectHostContext {
         origin: NestedScopeOrigin,
         local_vars: HashMap<String, Value>,
     ) {
+        // The call's writes become visible to later cross-object LocalN
+        // reads on the same target.
+        self.sync_foreign_cells(target, &local_vars);
         let finished = self.object.take();
         self.object = self.dormant_scopes.pop().unwrap_or(None);
         match origin {
@@ -13439,12 +13513,26 @@ impl EffectHostContext {
             self.dormant_scopes.is_empty(),
             "all nested calls must have finished before the context closes"
         );
+        // Cross-object LocalN cells fold like any other foreign mutation:
+        // merged into the target's outcome locals (cells hold the LATEST
+        // value, after any nested calls), with cell-only targets getting a
+        // locals-only outcome seeded from their current state.
+        let mut cell_locals: HashMap<ObjectId, HashMap<String, Value>> = HashMap::new();
+        for ((object, name), cell) in &self.foreign_local_cells {
+            cell_locals
+                .entry(*object)
+                .or_default()
+                .insert(name.clone(), cell.borrow().clone());
+        }
         let mut other_objects = Vec::new();
         for id in mem::take(&mut self.nested_order) {
-            let Some(NestedScopeState { scope, local_vars }) = self.nested_objects.remove(&id)
+            let Some(NestedScopeState { scope, mut local_vars }) = self.nested_objects.remove(&id)
             else {
                 continue;
             };
+            if let Some(cells) = cell_locals.remove(&id) {
+                local_vars.extend(cells);
+            }
             let mut update = scope.pending_update;
             // Mirror the outer call's unconditional local-vars store
             // (Definition::call_object_function).
@@ -13456,6 +13544,34 @@ impl EffectHostContext {
                 commands: scope.queued_commands,
                 command_operations: scope.command_operations,
                 destroy: scope.destroy,
+            });
+        }
+        // Cell-only targets (LocalN writes without any nested call): a
+        // locals-only outcome, full map seeded from the current state so
+        // the unconditional store does not drop untouched locals. Sorted
+        // for a deterministic fold order.
+        let mut cell_only: Vec<ObjectId> = cell_locals.keys().copied().collect();
+        cell_only.sort_unstable();
+        for id in cell_only {
+            let Some(cells) = cell_locals.remove(&id) else {
+                continue;
+            };
+            let mut local_vars = self
+                .get_world_object(id)
+                .and_then(|object| object.full_state().map(|state| state.local_vars.clone()))
+                .unwrap_or_default();
+            local_vars.extend(cells);
+            let update = ObjectUpdate {
+                local_vars: Some(local_vars),
+                ..ObjectUpdate::default()
+            };
+            other_objects.push(NestedObjectOutcome {
+                object_id: id,
+                effects: Vec::new(),
+                update: Some(update),
+                commands: Vec::new(),
+                command_operations: Vec::new(),
+                destroy: false,
             });
         }
         let (object_effects, object_update, object_commands, command_operations, destroy) =
