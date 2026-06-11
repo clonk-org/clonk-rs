@@ -32,11 +32,11 @@ fn concat_string(value: &Value) -> String {
     }
 }
 
-type ValueCell = Rc<RefCell<Value>>;
+pub(crate) type ValueCell = Rc<RefCell<Value>>;
 type SlotMap = Rc<RefCell<HashMap<i32, ValueCell>>>;
 type NamedLocalMap = Rc<RefCell<HashMap<String, ValueCell>>>;
 
-fn value_cell(value: Value) -> ValueCell {
+pub(crate) fn value_cell(value: Value) -> ValueCell {
     Rc::new(RefCell::new(value))
 }
 
@@ -142,7 +142,7 @@ impl Binding {
 }
 
 #[derive(Clone)]
-enum LValueRef {
+pub(crate) enum LValueRef {
     Cell(ValueCell),
     Path {
         root: ValueCell,
@@ -189,7 +189,7 @@ impl LValueRef {
 }
 
 #[derive(Clone)]
-enum PathSegment {
+pub(crate) enum PathSegment {
     Property(String),
     Index(Value),
 }
@@ -319,7 +319,7 @@ fn write_path(
     }
 }
 
-enum CallArg {
+pub(crate) enum CallArg {
     Value(Value),
     Reference(LValueRef),
 }
@@ -390,6 +390,12 @@ impl<'a> Vm<'a> {
 
     pub fn call(&self, name: &str, args: &[Value]) -> Result<Value, RuntimeError> {
         let args = args.iter().cloned().map(CallArg::Value).collect();
+        self.invoke_value(name, args, 0, ObjectState::default())
+    }
+
+    /// Call with caller-prepared arguments (reference cells included) — the
+    /// host-side C4AulParSet pattern where pars carry `GetRef()` values.
+    pub(crate) fn call_args(&self, name: &str, args: Vec<CallArg>) -> Result<Value, RuntimeError> {
         self.invoke_value(name, args, 0, ObjectState::default())
     }
 

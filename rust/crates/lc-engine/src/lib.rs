@@ -7134,25 +7134,27 @@ impl ScenarioScript {
         environment: EnvironmentSettings,
         audio: AudioRegistry,
         game_over_triggered: bool,
-    ) -> (Option<Value>, ScenarioBatch, AudioRegistry, LcgRng) {
+    ) -> (Option<Value>, Vec<Value>, ScenarioBatch, AudioRegistry, LcgRng) {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
         let guard = enter_random_context(rng);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
+        // Arguments go in as reference cells (the C4AulParSet GetRef pattern,
+        // C4Material.cpp:814-815) so callee `&` params can write back.
         let (result, host_effects) = compat::with_effect_context_with_state(
             None,
             global_effects,
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call(function, args),
+            || self.script.call_with_ref_args(function, args),
         );
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
         let mut environment_delta = env_guard.finish();
-        let value = match result {
-            Ok(value) => Some(value),
+        let (value, finals) = match result {
+            Ok((value, finals)) => (Some(value), finals),
             Err(error) => {
                 tracing::warn!(
                     script = %self.name,
@@ -7160,7 +7162,10 @@ impl ScenarioScript {
                     %error,
                     "material reaction script error (continuing like C++ fail-safe exec)"
                 );
-                None
+                // The unwound call loses the cells; C++ would keep par
+                // mutations made before the error — narrow documented
+                // divergence, the original values stand in.
+                (None, args.to_vec())
             }
         };
 
@@ -7213,7 +7218,7 @@ impl ScenarioScript {
             batch.trigger_game_over = true;
         }
         let audio_state = audio_guard.finish();
-        (value, batch, audio_state, rng)
+        (value, finals, batch, audio_state, rng)
     }
 }
 
@@ -17591,10 +17596,8 @@ impl Engine {
             // mrfScript (C4Material.cpp:800-835): mrfUserCheck already ran
             // in the prologue (Script entries are always user-defined); a
             // missing/unresolvable function is a no-op (null pScriptFunc).
-            // Params are the C++ 9-int set; a truthy return kills the PXS.
-            // OPEN (PORT_STATUS): the C++ by-ref write-back of
-            // X/Y/XDir/YDir/PxsMat after the call needs reference-argument
-            // support in lc-script's public call API.
+            // X/Y/XDir/YDir/PxsMat go in by reference (GetRef pars at slots
+            // 0/1/4/5/6, :814-815); a truthy return kills the PXS.
             MaterialReactionKind::Script { func } => {
                 let Some(function) = self
                     .materials
@@ -17603,28 +17606,63 @@ impl Engine {
                 else {
                     return false;
                 };
+                // fixtoi(fDir, 100) (C4Material.cpp:812-813)
+                let xdir1 = math::fixtoi_prec(pixel.xdir, 100);
+                let ydir1 = math::fixtoi_prec(pixel.ydir, 100);
                 let args = [
                     Value::Int(*x),
                     Value::Int(*y),
                     Value::Int(ls_x),
                     Value::Int(ls_y),
-                    // fixtoi(fXDir, 100) (C4Material.cpp:812-813)
-                    Value::Int(math::fixtoi_prec(pixel.xdir, 100)),
-                    Value::Int(math::fixtoi_prec(pixel.ydir, 100)),
+                    Value::Int(xdir1),
+                    Value::Int(ydir1),
                     Value::Int(pixel.mat.index() as i32),
                     Value::Int(
                         ls_mat.map(|id| id.index() as i32).unwrap_or(-1), // MNone
                     ),
                     Value::Int(event.index() as i32),
                 ];
-                match self.call_material_reaction_script(&function, &args) {
-                    None => false,
-                    // `if (pScriptFunc->Exec(...)) return true;` — raw
-                    // C4Value truthiness kills the PXS (C4Material.cpp:818)
-                    Some(value) => {
-                        !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false))
-                    }
+                let Some((value, finals)) =
+                    self.call_material_reaction_script(&function, &args)
+                else {
+                    return false;
+                };
+                // `if (pScriptFunc->Exec(...)) return true;` — raw C4Value
+                // truthiness kills the PXS (C4Material.cpp:818)
+                if !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false)) {
+                    return true;
                 }
+                // Write back parameters (C4Material.cpp:822-832).
+                let final_int = |index: usize| {
+                    finals
+                        .get(index)
+                        .and_then(Value::as_c4_int)
+                        .unwrap_or(0)
+                };
+                // iPxsMat writes back UNCONDITIONALLY. C++ keeps even an
+                // invalid index (the PXS dies on its next Execute via the
+                // MatValid check); MaterialId cannot hold one, so the
+                // pixel is killed here — one tick early, no sim effects.
+                let new_mat = final_int(6);
+                match usize::try_from(new_mat)
+                    .ok()
+                    .and_then(MaterialId::new)
+                    .filter(|id| self.materials.get_by_id(*id).is_some())
+                {
+                    Some(id) => pixel.mat = id,
+                    None => return true,
+                }
+                let (x2, y2) = (final_int(0), final_int(1));
+                let (xdir2, ydir2) = (final_int(4), final_int(5));
+                if *x != x2 || *y != y2 || xdir1 != xdir2 || ydir1 != ydir2 {
+                    // changes to pos/speed detected
+                    *pos_changed = true;
+                    *x = x2;
+                    *y = y2;
+                    pixel.xdir = math::fixed100(xdir2);
+                    pixel.ydir = math::fixed100(ydir2);
+                }
+                false
             }
             // mrfInsert (C4Material.cpp:773-798)
             MaterialReactionKind::Insert => {
@@ -17665,7 +17703,7 @@ impl Engine {
         &mut self,
         function: &str,
         args: &[Value],
-    ) -> Option<Value> {
+    ) -> Option<(Value, Vec<Value>)> {
         if function.is_empty()
             || !self
                 .scenario_script
@@ -17677,7 +17715,7 @@ impl Engine {
         }
         let world = self.host_world_context();
         let rng = self.rng.clone();
-        let (value, batch, audio_state, rng) = self.scenario_script.as_ref()?.call_value(
+        let (value, finals, batch, audio_state, rng) = self.scenario_script.as_ref()?.call_value(
             function,
             args,
             world,
@@ -17694,7 +17732,7 @@ impl Engine {
         if let Err(error) = self.apply_scenario_batch(batch) {
             tracing::warn!(%error, "material reaction script batch failed to apply");
         }
-        Some(value.unwrap_or(Value::Nil))
+        Some((value.unwrap_or(Value::Nil), finals))
     }
 
     /// `Smoke()` (C4Effect.cpp:859-865): create a "Smoke" particle if the def
@@ -21441,6 +21479,86 @@ mod tests {
             1,
             "an unresolvable ScriptFunc leaves the PXS alive"
         );
+    }
+
+    #[test]
+    fn script_reaction_writes_back_ref_params_like_cpp() {
+        // mrfScript write-back (C4Material.cpp:814-832): X/Y/XDir/YDir/PxsMat
+        // are passed by reference; after a falsy return, PxsMat writes back
+        // UNCONDITIONALLY, and a change to any of pos/speed writes all four
+        // back (dirs through the lossy FIXED100 round trip) and sets
+        // pfPosChanged (→ the fStopMovement snap, C4PXS.cpp:106-112).
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Goo]
+            Name=Goo
+            Density=25
+            Friction=10
+
+            [Reaction]
+            Type=Script
+            ScriptFunc=Deflect
+            TargetSpec=Earth
+            CheckSlide=0
+
+            [Material Water]
+            Name=Water
+            Density=25
+            Friction=0
+
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let goo = materials.id_of("Goo").expect("goo exists");
+        let water = materials.id_of("Water").expect("water exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut engine = Engine::with_seed(21);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(5, 10, Some(earth)));
+        engine
+            .install_scenario_script(
+                "Scenario",
+                r#"
+                global func Deflect(&x, &y, lsx, lsy, &xdir, &ydir, &pxs_mat, ls_mat, event) {
+                    xdir = 150;
+                    ydir = -100;
+                    pxs_mat = 1; // Water's material index
+                    return 0;    // keep the pixel
+                }
+                "#,
+            )
+            .expect("scenario script installs");
+
+        assert!(engine.pxs_system.create(
+            goo,
+            math::itofix(2),
+            math::itofix(9),
+            math::C4Fixed::ZERO,
+            math::itofix(1),
+        ));
+        engine.tick_pxs();
+        let survivors: Vec<pxs::Pxs> = engine.pxs_system.iter().copied().collect();
+        assert_eq!(survivors.len(), 1, "falsy return keeps the pixel");
+        assert_eq!(survivors[0].mat, water, "PxsMat writes back unconditionally");
+        assert_eq!(
+            survivors[0].xdir,
+            math::fixed100(150),
+            "XDir writes back via FIXED100"
+        );
+        assert_eq!(
+            survivors[0].ydir,
+            math::fixed100(-100),
+            "YDir writes back via FIXED100"
+        );
+        // pos_changed → fStopMovement: the pixel snapped to its int position
+        assert_eq!(survivors[0].x, math::itofix(2));
+        assert_eq!(survivors[0].y, math::itofix(9));
     }
 
     #[test]

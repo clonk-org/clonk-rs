@@ -153,6 +153,34 @@ impl Engine {
         vm.call(name, args).map_err(ScriptError::from)
     }
 
+    /// Calls a function passing every argument as a REFERENCE cell — the
+    /// host-side C4AulParSet-of-refs pattern (C4Material.cpp:814-815):
+    /// callee `&` parameters alias the cells so their writes are visible in
+    /// the returned final argument values; plain parameters receive
+    /// dereferenced copies (C4Value.cpp:586-597). Returns the call result
+    /// plus the final value of every argument cell.
+    pub fn call_with_ref_args(
+        &self,
+        name: &str,
+        args: &[Value],
+    ) -> Result<(Value, Vec<Value>), ScriptError> {
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            &self.var_decls,
+            self.debugger_hooks.clone(),
+        );
+        let cells: Vec<crate::vm::ValueCell> =
+            args.iter().cloned().map(crate::vm::value_cell).collect();
+        let call_args = cells
+            .iter()
+            .map(|cell| crate::vm::CallArg::Reference(crate::vm::LValueRef::Cell(cell.clone())))
+            .collect();
+        let result = vm.call_args(name, call_args).map_err(ScriptError::from)?;
+        let finals = cells.iter().map(|cell| cell.borrow().clone()).collect();
+        Ok((result, finals))
+    }
+
     /// Call a function with per-object local variable context
     /// Returns (result, updated_local_vars)
     pub fn call_with_locals(
