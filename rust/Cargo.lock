@@ -4939,6 +4939,7 @@ dependencies = [
  "anyhow",
  "lc-core",
  "lc-engine",
+ "lc-resources",
  "tracing",
  "walkdir",
  "zip",

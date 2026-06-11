@@ -9,4 +9,5 @@ walkdir = "2"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 lc-engine = { path = "../crates/lc-engine" }
 lc-core = { path = "../crates/lc-core" }
+lc-resources = { path = "../crates/lc-resources" }
 tracing = "0.1"

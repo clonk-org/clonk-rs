@@ -39,14 +39,235 @@ fn main() -> Result<()> {
             let tail: Vec<String> = args.collect();
             parity_command(&tail)
         }
+        Some("scenario-sweep") => {
+            let tail: Vec<String> = args.collect();
+            scenario_sweep_command(&tail)
+        }
         Some(cmd) => bail!("unknown command `{}` (try `cargo xtask --help`)", cmd),
     }
 }
 
 fn print_usage() {
     tracing::info!(
-        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask ffi [options]           Build staticlib/cdylib artifacts for C++ integration.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md)."
+        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask ffi [options]           Build staticlib/cdylib artifacts for C++ integration.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard."
     );
+}
+
+// ── scenario-sweep: the scenario-load parity scoreboard ─────────────────────
+//
+// Loads and applies every `*.c4s` under `content/` with real definitions and
+// materials, then reports failures grouped by error class. C++ load parity is
+// reached when every scenario the C++ engine can start also loads+applies
+// here.
+
+struct SweepResolver {
+    roots: Vec<PathBuf>,
+}
+
+impl lc_engine::scenario::LegacyDefinitionResolver for SweepResolver {
+    fn resolve_definition_groups(
+        &self,
+        scenario: &lc_resources::Group,
+        identifier: &str,
+    ) -> std::result::Result<Vec<lc_resources::Group>, lc_engine::ScenarioError> {
+        let mut groups = Vec::new();
+        let normalized = identifier.replace('\\', "/");
+        let path = Path::new(&normalized);
+
+        // Scenario-local definitions win (the C++ search starts at the
+        // scenario group), then walk the configured roots.
+        if let Ok(child) = scenario.open_child(path) {
+            groups.push(child);
+        }
+        for root in &self.roots {
+            let candidate = root.join(path);
+            if !candidate.exists() {
+                continue;
+            }
+            let group = lc_resources::Group::open(&candidate)?;
+            if groups
+                .iter()
+                .all(|existing| existing.root() != group.root())
+            {
+                groups.push(group);
+            }
+        }
+
+        if groups.is_empty() {
+            return Err(lc_engine::ScenarioError::LegacyDefinitionNotFound {
+                path: identifier.to_string(),
+            });
+        }
+        Ok(groups)
+    }
+}
+
+/// Collapses error messages into bucket keys: backtick-quoted names and
+/// numbers vary per scenario, the remaining text is the failure class.
+fn classify_error(message: &str) -> String {
+    let mut class = String::with_capacity(message.len());
+    let mut in_quote = false;
+    for ch in message.chars() {
+        match ch {
+            '`' => {
+                in_quote = !in_quote;
+                if !in_quote {
+                    class.push('*');
+                }
+            }
+            _ if in_quote => {}
+            '0'..='9' => {
+                if !class.ends_with('#') {
+                    class.push('#');
+                }
+            }
+            _ => class.push(ch),
+        }
+    }
+    class
+}
+
+fn scenario_sweep_command(args: &[String]) -> Result<()> {
+    let mut filter: Option<String> = None;
+    let mut verbose = false;
+    for arg in args {
+        match arg.as_str() {
+            "--verbose" | "-v" => verbose = true,
+            "--help" | "-h" => {
+                tracing::info!(
+                    "Usage: cargo xtask scenario-sweep [filter] [--verbose]\n  Loads + applies every content/**/*.c4s; reports failures by class."
+                );
+                return Ok(());
+            }
+            other => filter = Some(other.to_string()),
+        }
+    }
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("cannot locate repo root from xtask manifest dir"))?;
+    let content_root = repo_root.join("content");
+    if !content_root.exists() {
+        bail!("content directory not found at {}", content_root.display());
+    }
+
+    let material_library = lc_resources::MaterialLibrary::from_group(
+        &lc_resources::Group::open(content_root.join("Material.c4g"))
+            .context("opening content/Material.c4g")?,
+    )
+    .map_err(|error| anyhow!("loading material library: {error}"))?;
+
+    let mut scenario_paths: Vec<PathBuf> = WalkDir::new(&content_root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .map(|ext| ext.eq_ignore_ascii_case("c4s"))
+                .unwrap_or(false)
+        })
+        .map(|entry| entry.path().to_path_buf())
+        .filter(|path| {
+            filter
+                .as_ref()
+                .map(|needle| path.to_string_lossy().contains(needle.as_str()))
+                .unwrap_or(true)
+        })
+        .collect();
+    scenario_paths.sort();
+
+    let total = scenario_paths.len();
+    let mut loaded = 0usize;
+    let mut applied = 0usize;
+    let mut load_failures: Vec<(String, String)> = Vec::new();
+    let mut apply_failures: Vec<(String, String)> = Vec::new();
+
+    for path in &scenario_paths {
+        let label = path
+            .strip_prefix(&content_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        // Definition search: scenario ancestors up to content/, then
+        // content/ itself, then the repo root (planet/System.c4g layout).
+        let mut roots: Vec<PathBuf> = path
+            .ancestors()
+            .skip(1)
+            .take_while(|ancestor| ancestor.starts_with(&content_root))
+            .map(Path::to_path_buf)
+            .collect();
+        roots.push(content_root.clone());
+        roots.push(repo_root.clone());
+        let resolver = SweepResolver { roots };
+
+        let scenario = match lc_engine::Scenario::load_from_path_with(path, &resolver) {
+            Ok(scenario) => {
+                loaded += 1;
+                scenario
+            }
+            Err(error) => {
+                if verbose {
+                    tracing::info!("LOAD FAIL {label}: {error}");
+                }
+                load_failures.push((label, error.to_string()));
+                continue;
+            }
+        };
+
+        let mut engine = lc_engine::Engine::new();
+        engine.configure_materials_from_library(&material_library);
+        match scenario.apply(&mut engine) {
+            Ok(_) => {
+                applied += 1;
+                if verbose {
+                    tracing::info!("OK        {label}");
+                }
+            }
+            Err(error) => {
+                if verbose {
+                    tracing::info!("APPLY FAIL {label}: {error}");
+                }
+                apply_failures.push((label, error.to_string()));
+            }
+        }
+    }
+
+    let mut report = String::new();
+    report.push_str(&format!(
+        "\nscenario sweep: {total} scenarios — {loaded} load ({load_pct}%), {applied} apply ({apply_pct}%)\n",
+        load_pct = if total > 0 { loaded * 100 / total } else { 0 },
+        apply_pct = if total > 0 { applied * 100 / total } else { 0 },
+    ));
+    for (title, failures) in [
+        ("LOAD failures", &load_failures),
+        ("APPLY failures", &apply_failures),
+    ] {
+        if failures.is_empty() {
+            continue;
+        }
+        report.push_str(&format!("\n{title} ({}):\n", failures.len()));
+        let mut by_class: std::collections::BTreeMap<String, Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for (label, error) in failures {
+            by_class
+                .entry(classify_error(error))
+                .or_default()
+                .push(label.as_str());
+        }
+        let mut classes: Vec<_> = by_class.into_iter().collect();
+        classes.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        for (class, scenarios) in classes {
+            report.push_str(&format!("  {:3}x {class}\n", scenarios.len()));
+            for sample in scenarios.iter().take(3) {
+                report.push_str(&format!("       e.g. {sample}\n"));
+            }
+        }
+    }
+    tracing::info!("{report}");
+    Ok(())
 }
 
 fn engine_snapshots_command(args: &[String]) -> Result<()> {
