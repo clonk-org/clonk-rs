@@ -599,6 +599,50 @@ impl RgbColor {
     }
 }
 
+/// What a joining player brings to `Engine::join_player` — the data
+/// C4Player::Init/ScenarioInit reads from the C4PlayerInfo and the loaded
+/// .c4p file (C4Player.cpp:246-352, 670-777).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinPlayerConfig {
+    /// Player name (from C4PlayerInfo; falls back to the file core name).
+    pub name: String,
+    /// Team id (0/None when teamless).
+    pub team: Option<i32>,
+    /// Resolved 24-bit player color (`pInfo->GetColor()`,
+    /// C4Player.cpp:692).
+    pub color_dw: u32,
+    /// Indexed color preference (`PrefColor`, C4Player.cpp:680-685).
+    pub pref_color: i32,
+    /// Start-position preference (`PrefPosition`, C4Player.cpp:717-732).
+    pub pref_position: i32,
+    /// The crew roster from the player file (C4Player::CrewInfoList).
+    pub crew: Vec<player_file::CrewInfo>,
+    /// `Game.Parameters.StartupPlayerCount` — gates the standard-position
+    /// distribution (C4Player.cpp:719).
+    pub startup_player_count: i32,
+}
+
+/// `Engine::join_player` outcome: the assigned number plus the start
+/// position and base that ScenarioInit passed to InitializePlayer
+/// (C4Player.cpp:769-775).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinedPlayer {
+    pub number: i32,
+    pub start_x: i32,
+    pub start_y: i32,
+    pub first_base: Option<ObjectId>,
+}
+
+/// The `pObj->Info` data a crew object carries (CreateInfoObject links the
+/// C4ObjectInfo, C4Game.cpp:1156-1170): name shown by GetName, rank used
+/// by GetHiRank.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrewObjectInfo {
+    pub name: String,
+    pub rank: i32,
+    pub experience: i32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum WeatherEvent {
     Lightning { position: i32 },
@@ -4574,6 +4618,12 @@ pub struct Definition {
     action_library: ActionLibrary,
     action_graphics: HashMap<String, DefinitionActionGraphics>,
     crew_member: bool,
+    /// DefCore `CanBeBase` (C4Def.cpp; FirstBase detection in
+    /// PlaceReadyBase, C4Player.cpp:596-599).
+    can_be_base: bool,
+    /// The def's ClonkNames list content (C4Def.cpp:645-652,
+    /// C4CFN_ClonkNames): overrides Game.Names for new crew infos.
+    clonk_names: Option<String>,
     movement: MovementProfile,
     category: i32,
     ocf_base: u32,
@@ -4690,6 +4740,8 @@ impl Definition {
             action_library: ActionLibrary::default(),
             action_graphics: HashMap::new(),
             crew_member: false,
+            can_be_base: false,
+            clonk_names: None,
             movement: MovementProfile::default(),
             category: DEFAULT_CATEGORY,
             ocf_base: OCF_NORMAL,
@@ -4985,6 +5037,22 @@ impl Definition {
 
     pub fn is_crew(&self) -> bool {
         self.crew_member
+    }
+
+    pub fn can_be_base(&self) -> bool {
+        self.can_be_base
+    }
+
+    pub fn set_can_be_base(&mut self, can_be_base: bool) {
+        self.can_be_base = can_be_base;
+    }
+
+    pub fn clonk_names(&self) -> Option<&str> {
+        self.clonk_names.as_deref()
+    }
+
+    pub fn set_clonk_names(&mut self, clonk_names: Option<String>) {
+        self.clonk_names = clonk_names;
     }
 
     pub fn set_crew_member(&mut self, crew_member: bool) {
@@ -7465,7 +7533,7 @@ pub struct Engine {
     materials: MaterialSet,
     objects: Vec<Object>,
     next_object_id: u64,
-    rng: LcgRng,
+    pub(crate) rng: LcgRng,
     frame: u64,
     landscape: Option<Landscape>,
     sectors: Option<SectorMap>,
@@ -7503,6 +7571,19 @@ pub struct Engine {
     /// The four C4SPlrStart slots retained from the scenario: consumed at
     /// player JOIN by the ScenarioInit port (C4Player.cpp:670-777).
     player_starts: Vec<scenario::PlayerStart>,
+    /// `Game.Names` — the standard clonk-name list (planet System.c4g
+    /// Names.txt, overridable by a scenario Names.txt; C4Game.cpp:2772,
+    /// 3288-3289). Crew-info creation draws names from it.
+    standard_names: Option<String>,
+    /// `[Landscape] MapZoom` retained as a C4SVal: ScenarioInit evaluates
+    /// it per start coordinate (C4Player.cpp:713-714) — synced RNG draws.
+    map_zoom: scenario::LegacyC4SVal,
+    /// Per-player crew info lists (C4Player::CrewInfoList): the roster
+    /// GetIdle/New recruit from at join.
+    crew_rosters: HashMap<i32, Vec<player_file::CrewInfo>>,
+    /// Crew object -> its C4ObjectInfo data (name/rank/experience), the
+    /// `pObj->Info` link of CreateInfoObject (C4Game.cpp:1156-1170).
+    crew_object_infos: HashMap<ObjectId, CrewObjectInfo>,
     team_home_base_rule: bool,
     construction_needs_material: bool,
     structures_need_energy: bool,
@@ -8732,6 +8813,10 @@ impl Engine {
                 scenario::PlayerStart::default();
                 scenario::MAX_PLAYER_STARTS
             ],
+            standard_names: None,
+            map_zoom: scenario::LegacyC4SVal::new(10, 0, 5, 15),
+            crew_rosters: HashMap::new(),
+            crew_object_infos: HashMap::new(),
             team_home_base_rule: false,
             construction_needs_material: false,
             structures_need_energy: false,
@@ -8813,6 +8898,729 @@ impl Engine {
     /// players use slot `Number % C4S_MaxPlayer` (C4Player.cpp:673).
     pub fn player_start(&self, index: usize) -> Option<&scenario::PlayerStart> {
         self.player_starts.get(index)
+    }
+
+    /// `Game.Names` (C4Game.cpp:2772, 3288-3289): the standard clonk-name
+    /// list crew-info creation draws from when the def has no ClonkNames.
+    pub fn set_standard_names(&mut self, names: Option<String>) {
+        self.standard_names = names;
+    }
+
+    /// `[Landscape] MapZoom` as a C4SVal — ScenarioInit evaluates it per
+    /// configured start coordinate (C4Player.cpp:713-714).
+    pub fn set_map_zoom(&mut self, map_zoom: scenario::LegacyC4SVal) {
+        self.map_zoom = map_zoom;
+    }
+
+    /// The C4ObjectInfo data linked to a crew object (CreateInfoObject,
+    /// C4Game.cpp:1156-1170).
+    pub fn crew_object_info(&self, id: ObjectId) -> Option<&CrewObjectInfo> {
+        self.crew_object_infos.get(&id)
+    }
+
+    /// `C4Game::JoinPlayer` -> `C4PlayerList::Join` -> `C4Player::Init`
+    /// with fScenarioInit (C4Game.cpp:3511-3534, C4PlayerList.cpp:271-318,
+    /// C4Player.cpp:246-352): registers the player, broadcasts
+    /// PreInitializePlayer, runs the ScenarioInit placement (crew, ready
+    /// material/vehicles/base, synced RNG draws) and broadcasts
+    /// InitializePlayer. Script-player NoScenarioInit joins are not ported
+    /// yet.
+    pub fn join_player(&mut self, config: JoinPlayerConfig) -> Result<JoinedPlayer, EngineError> {
+        // C4PlayerList::GetFreeNumber: lowest unused player number.
+        let number = (0..)
+            .find(|candidate| !self.players.contains_key(candidate))
+            .unwrap_or_default();
+
+        let color = RgbColor::new(
+            ((config.color_dw >> 16) & 0xff) as u8,
+            ((config.color_dw >> 8) & 0xff) as u8,
+            (config.color_dw & 0xff) as u8,
+        );
+        let mut player_config = PlayerConfig::new(number, config.name.clone());
+        if config.team.is_some() {
+            player_config = player_config.with_team(config.team);
+        }
+        let player = player_config.with_color(Some(color)).build();
+        self.players.insert(number, player);
+        self.players_registered = true;
+        self.crew_rosters.insert(number, config.crew.clone());
+        self.sync_player_cursor(number);
+        self.sync_team_home_base_for(number);
+
+        // Player preinit broadcast before ScenarioInit (C4Player.cpp:347;
+        // fail-safe exec, the join continues on script errors).
+        tolerate_script_error(
+            self.broadcast_scenario_function("PreInitializePlayer", vec![Value::Int(number)]),
+        )?;
+
+        let joined = self.scenario_init_for_player(number, &config)?;
+
+        self.sync_player_cursor(number);
+        self.refresh_elimination_state();
+        self.check_game_over()?;
+        Ok(joined)
+    }
+
+    /// `C4Player::ScenarioInit` (C4Player.cpp:670-777). The RNG draw order
+    /// is load-bearing: Wealth.Evaluate, optional MapZoom.Evaluate per
+    /// configured coordinate, the all-random start position, then the
+    /// PlaceReady* draws in Base/Material/Vehicles/Crew order.
+    fn scenario_init_for_player(
+        &mut self,
+        number: i32,
+        config: &JoinPlayerConfig,
+    ) -> Result<JoinedPlayer, EngineError> {
+        // Start index by player number; team start-index overrides
+        // (C4Team::GetPlrStartIndex) are not ported yet.
+        let start_index = (number.max(0) as usize) % scenario::MAX_PLAYER_STARTS;
+        let start = self
+            .player_starts
+            .get(start_index)
+            .cloned()
+            .unwrap_or_default();
+
+        // Indexed color (C4Player.cpp:678-685): take PrefColor unless
+        // another player owns it; C4MaxColor = 12 (C4Constants.h:38).
+        const C4_MAX_COLOR: i32 = 12;
+        let mut color_index = config.pref_color.clamp(0, C4_MAX_COLOR - 1);
+        while self
+            .players
+            .values()
+            .any(|player| player.id() != number && player.color_index() == color_index)
+        {
+            color_index = (color_index + 1) % C4_MAX_COLOR;
+            if color_index == config.pref_color {
+                break;
+            }
+        }
+
+        // Wealth, home base material/production, knowledge
+        // (C4Player.cpp:702-711); ConsolidateValids keeps known defs only.
+        // The Magic list (C4Player.cpp:709-711) has no engine state yet —
+        // it gates spell knowledge, not objects or RNG draws.
+        let wealth = start.wealth.evaluate(&mut self.rng);
+        let valid_counts = |entries: &[(String, i32)]| -> HashMap<DefinitionId, u32> {
+            entries
+                .iter()
+                .filter(|(id, _)| self.definitions.contains_key(&DefinitionId::from(id.as_str())))
+                .map(|(id, count)| (DefinitionId::from(id.as_str()), (*count).max(0) as u32))
+                .collect()
+        };
+        let home_base_material = valid_counts(&start.home_base_material);
+        let home_base_production = valid_counts(&start.home_base_production);
+        let knowledge: Vec<DefinitionId> = start
+            .build_knowledge
+            .iter()
+            .filter(|(id, _)| self.definitions.contains_key(&DefinitionId::from(id.as_str())))
+            .map(|(id, _)| DefinitionId::from(id.as_str()))
+            .collect();
+        {
+            let player = self.player_mut(number)?;
+            player.set_color_index(color_index);
+            player.set_wealth(wealth);
+            player.set_home_base_material(home_base_material);
+            player.set_home_base_production(home_base_production);
+            for id in knowledge {
+                player.grant_knowledge(id);
+            }
+        }
+        self.sync_team_home_base_for(number);
+
+        // Starting position (C4Player.cpp:713-755).
+        let (world_width, world_height) = self
+            .landscape
+            .as_ref()
+            .map(|landscape| (landscape.width() as i32, landscape.estimated_height()))
+            .unwrap_or((0, 0));
+        let mut ptx = start.position[0];
+        let mut pty = start.position[1];
+        if ptx > -1 {
+            let zoom = self.map_zoom.evaluate(&mut self.rng);
+            ptx = (ptx * zoom).clamp(0, (world_width - 1).max(0));
+        }
+        if pty > -1 {
+            let zoom = self.map_zoom.evaluate(&mut self.rng);
+            pty = (pty * zoom).clamp(0, (world_height - 1).max(0));
+        }
+        // Standard position by PrefPosition (C4Player.cpp:717-732);
+        // C4P_MaxPosition = 4 (C4Constants.h:82).
+        if ptx < 0 && config.startup_player_count >= 2 {
+            const C4P_MAX_POSITION: i32 = 4;
+            let max_pos = config.startup_player_count;
+            let start_pos =
+                (config.pref_position * max_pos / C4P_MAX_POSITION).clamp(0, max_pos - 1);
+            let mut position = start_pos;
+            while self
+                .players
+                .values()
+                .any(|player| player.id() != number && player.position_index() == position)
+            {
+                position = (position + 1) % max_pos;
+                if position == start_pos {
+                    break;
+                }
+            }
+            self.player_mut(number)?.set_position_index(position);
+            ptx = (16 + position * (world_width - 32) / (max_pos - 1)).clamp(0, world_width - 16);
+        }
+        // All-random position (C4Player.cpp:745-746) — synced draws.
+        if ptx < 0 {
+            ptx = 16 + self.rng.random(world_width - 32);
+        }
+        if pty < 0 {
+            pty = 16 + self.rng.random(world_height - 32);
+        }
+        // Settle on solid ground, then a construction-site spot
+        // (C4Player.cpp:748-755).
+        if !start.enforce_position {
+            if let Some((nx, ny)) = self
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.find_solid_ground(ptx, pty, 30))
+            {
+                ptx = nx;
+                pty = ny;
+            }
+            if let Some((nx, ny)) =
+                self.placement_con_site_spot(ptx, pty, 30, 50, CATEGORY_STRUCTURE, 400)
+            {
+                ptx = nx;
+                pty = ny;
+            }
+        }
+
+        // Place readies in C++ order (C4Player.cpp:757-760).
+        let mut first_base: Option<ObjectId> = None;
+        self.place_ready_base(number, &start, &mut ptx, &mut pty, &mut first_base)?;
+        self.place_ready_material(number, &start, ptx - 10, ptx + 10, pty, first_base)?;
+        self.place_ready_vehic(number, &start, ptx - 30, ptx + 30, pty, first_base)?;
+        self.place_ready_crew(number, &start, ptx - 30, ptx + 30, pty, first_base)?;
+
+        // Team hostility and FoW init are not ported (no teams table /
+        // presentation state in the runtime yet).
+
+        // Scenario script init broadcast (C4Player.cpp:769-775): fail-safe
+        // exec, the join never aborts on script errors.
+        let base_value = first_base
+            .map(object_reference_value)
+            .unwrap_or(Value::Nil);
+        tolerate_script_error(self.broadcast_scenario_function(
+            "InitializePlayer",
+            vec![
+                Value::Int(number),
+                Value::Int(ptx),
+                Value::Int(pty),
+                base_value,
+                Value::Int(config.team.unwrap_or(0)),
+                Value::Nil,
+            ],
+        ))?;
+
+        Ok(JoinedPlayer {
+            number,
+            start_x: ptx,
+            start_y: pty,
+            first_base,
+        })
+    }
+
+    /// Resolves a PlayerStart ID token against the loaded definitions with
+    /// the legacy loader's semantics (C4Id match first, then a lenient
+    /// name match — mirrors find_definition_by_token). Ties resolve to the
+    /// lexicographically smallest id for determinism.
+    fn resolve_definition_token(&self, token: &str) -> Option<DefinitionId> {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.len() == 4
+            && trimmed
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            if let Some(id) = self
+                .definitions
+                .keys()
+                .filter(|id| id.as_str().eq_ignore_ascii_case(trimmed))
+                .min_by(|a, b| a.as_str().cmp(b.as_str()))
+            {
+                return Some(id.clone());
+            }
+        }
+        self.definitions
+            .iter()
+            .filter(|(id, definition)| {
+                id.as_str().eq_ignore_ascii_case(trimmed)
+                    || definition.name().eq_ignore_ascii_case(trimmed)
+            })
+            .map(|(id, _)| id.clone())
+            .min_by(|a, b| a.as_str().cmp(b.as_str()))
+    }
+
+    /// `Game.OverlapObject` (C4Game.cpp:1298-1313): any active,
+    /// uncontained object whose category intersects `category` within
+    /// C4D_SortLimit and whose shape rect overlaps the given rect.
+    fn placement_overlaps_object(
+        objects: &[Object],
+        x: i32,
+        y: i32,
+        wdt: i32,
+        hgt: i32,
+        category: i32,
+    ) -> bool {
+        objects.iter().any(|object| {
+            if !object.state.status.is_active()
+                || object.destroyed
+                || object.state.container.is_some()
+            {
+                return false;
+            }
+            if object.state.category & category & CATEGORY_SORT_LIMIT == 0 {
+                return false;
+            }
+            let position = object.state.position;
+            let rect = object
+                .current_shape_rect()
+                .map(|rect| {
+                    DefinitionRect::new(
+                        position.x.saturating_add(rect.x),
+                        position.y.saturating_add(rect.y),
+                        rect.width,
+                        rect.height,
+                    )
+                })
+                .or_else(|| vertex_bounds_rect(position, &object.state.vertices))
+                .unwrap_or_else(|| DefinitionRect::new(position.x, position.y, 1, 1));
+            x < rect.x + rect.width
+                && rect.x < x + wdt
+                && y < rect.y + rect.height
+                && rect.y < y + hgt
+        })
+    }
+
+    /// `FindConSiteSpot` with the engine-side object-overlap veto
+    /// (C4Landscape.cpp:1982-2043 + C4Game.cpp:1298-1313).
+    fn placement_con_site_spot(
+        &self,
+        x: i32,
+        y: i32,
+        wdt: i32,
+        hgt: i32,
+        category: i32,
+        hrange: i32,
+    ) -> Option<(i32, i32)> {
+        let landscape = self.landscape.as_ref()?;
+        let objects = &self.objects;
+        landscape.find_con_site_spot(x, y, wdt, hgt, hrange, |rx, ry, rw, rh| {
+            Self::placement_overlaps_object(objects, rx, ry, rw, rh, category)
+        })
+    }
+
+    fn definition_shape_size(&self, id: &DefinitionId) -> (i32, i32) {
+        self.definitions
+            .get(id)
+            .and_then(|definition| definition.shape_rect())
+            .map(|rect| (rect.width, rect.height))
+            .unwrap_or((0, 0))
+    }
+
+    /// `C4Player::PlaceReadyBase` (C4Player.cpp:580-617). Power-line
+    /// auto-connections (C4RULE_StructuresNeedEnergy, :608-616) are not
+    /// ported yet — they need the CreateLine object machinery.
+    fn place_ready_base(
+        &mut self,
+        number: i32,
+        start: &scenario::PlayerStart,
+        tx: &mut i32,
+        ty: &mut i32,
+        first_base: &mut Option<ObjectId>,
+    ) -> Result<(), EngineError> {
+        for (token, count) in &start.ready_base {
+            let Some(definition_id) = self.resolve_definition_token(token) else {
+                continue;
+            };
+            let Some(definition) = self.definitions.get(&definition_id) else {
+                continue;
+            };
+            let (wdt, hgt) = definition
+                .shape_rect()
+                .map(|rect| (rect.width, rect.height))
+                .unwrap_or((0, 0));
+            let category = definition.category();
+            let can_be_base = definition.can_be_base();
+            for _ in 0..(*count).max(0) {
+                let mut ctx = *tx;
+                let mut cty = *ty;
+                let mut placeable = start.enforce_position;
+                if !placeable {
+                    if let Some((nx, ny)) =
+                        self.placement_con_site_spot(ctx, cty, wdt, hgt, category, 20)
+                    {
+                        ctx = nx;
+                        cty = ny;
+                        placeable = true;
+                    }
+                }
+                if !placeable {
+                    continue;
+                }
+                let id = self.spawn_object(
+                    SpawnConfig::new(definition_id.as_str())
+                        .with_position(Vector2::new(ctx, cty))
+                        .with_owner(number),
+                )?;
+                if first_base.is_none() && can_be_base {
+                    *first_base = Some(id);
+                    if let Some(index) = self.find_object_index(id) {
+                        *tx = self.objects[index].state.position.x;
+                        *ty = self.objects[index].state.position.y;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `C4Player::PlaceReadyMaterial` (C4Player.cpp:642-668): into the
+    /// first base via CreateContentsByList, otherwise spread on the ground
+    /// with one Random(tx2-tx1) draw per item.
+    fn place_ready_material(
+        &mut self,
+        number: i32,
+        start: &scenario::PlayerStart,
+        tx1: i32,
+        tx2: i32,
+        ty: i32,
+        first_base: Option<ObjectId>,
+    ) -> Result<(), EngineError> {
+        if let Some(base) = first_base {
+            for (token, count) in &start.ready_material {
+                let Some(definition_id) = self.resolve_definition_token(token) else {
+                    continue;
+                };
+                for _ in 0..(*count).max(0) {
+                    self.spawn_object(
+                        SpawnConfig::new(definition_id.as_str())
+                            .with_owner(number)
+                            .with_container(base),
+                    )?;
+                }
+            }
+            return Ok(());
+        }
+        for (token, count) in &start.ready_material {
+            let Some(definition_id) = self.resolve_definition_token(token) else {
+                continue;
+            };
+            let (wdt, _) = self.definition_shape_size(&definition_id);
+            for _ in 0..(*count).max(0) {
+                let mut ctx = tx1 + self.rng.random(tx2 - tx1);
+                let mut cty = ty;
+                if !start.enforce_position {
+                    if let Some((nx, ny)) = self
+                        .landscape
+                        .as_ref()
+                        .and_then(|landscape| landscape.find_solid_ground(ctx, cty, wdt))
+                    {
+                        ctx = nx;
+                        cty = ny;
+                    }
+                }
+                self.spawn_object(
+                    SpawnConfig::new(definition_id.as_str())
+                        .with_position(Vector2::new(ctx, cty))
+                        .with_owner(number),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `C4Player::PlaceReadyVehic` (C4Player.cpp:619-640). The base-entry
+    /// exit command (:636) is not queued yet — the vehicle still enters the
+    /// base.
+    fn place_ready_vehic(
+        &mut self,
+        number: i32,
+        start: &scenario::PlayerStart,
+        tx1: i32,
+        tx2: i32,
+        ty: i32,
+        first_base: Option<ObjectId>,
+    ) -> Result<(), EngineError> {
+        for (token, count) in &start.ready_vehic {
+            let Some(definition_id) = self.resolve_definition_token(token) else {
+                continue;
+            };
+            let (wdt, _) = self.definition_shape_size(&definition_id);
+            for _ in 0..(*count).max(0) {
+                let mut ctx = tx1 + self.rng.random(tx2 - tx1);
+                let mut cty = ty;
+                if !start.enforce_position {
+                    if let Some((nx, ny)) = self
+                        .landscape
+                        .as_ref()
+                        .and_then(|landscape| landscape.find_level_ground(ctx, cty, wdt, 6))
+                    {
+                        ctx = nx;
+                        cty = ny;
+                    }
+                }
+                let mut config = SpawnConfig::new(definition_id.as_str())
+                    .with_position(Vector2::new(ctx, cty))
+                    .with_owner(number);
+                if let Some(base) = first_base {
+                    config = config.with_container(base);
+                }
+                self.spawn_object(config)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `C4Player::PlaceReadyCrew` (C4Player.cpp:481-570): old spec (no
+    /// ready-crew list) evaluates the Clonks C4SVal for a count of
+    /// NativeCrew members; new spec walks the ready-crew ID list. Each
+    /// member is recruited from the roster (GetIdle, else New with its
+    /// synced name draw), placed with one Random(tx2-tx1) draw, and gets
+    /// the fail-safe Recruitment callback (PSF_OnJoinCrew, C4Script.h:107).
+    #[allow(clippy::too_many_arguments)]
+    fn place_ready_crew(
+        &mut self,
+        number: i32,
+        start: &scenario::PlayerStart,
+        tx1: i32,
+        tx2: i32,
+        ty: i32,
+        first_base: Option<ObjectId>,
+    ) -> Result<(), EngineError> {
+        if start.ready_crew.is_empty() {
+            // Old specification (C4Player.cpp:489-526).
+            let crew_count = start.crew_count.evaluate(&mut self.rng);
+            let native = start.native_crew.clone().unwrap_or_default();
+            for _ in 0..crew_count.max(0) {
+                self.place_one_crew_member(number, &native, start, tx1, tx2, ty, first_base)?;
+            }
+        } else {
+            // New specification (C4Player.cpp:528-570): minimum one per
+            // listed id.
+            for (token, count) in start.ready_crew.clone() {
+                for _ in 0..count.max(1) {
+                    self.place_one_crew_member(number, &token, start, tx1, tx2, ty, first_base)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn place_one_crew_member(
+        &mut self,
+        number: i32,
+        id_token: &str,
+        start: &scenario::PlayerStart,
+        tx1: i32,
+        tx2: i32,
+        ty: i32,
+        first_base: Option<ObjectId>,
+    ) -> Result<(), EngineError> {
+        // Select from home crew, adding new info as necessary
+        // (C4Player.cpp:502-506/541-545) — no position draw when no info
+        // or definition is available.
+        // ID tokens resolve like C4Id parsing did at compile time; an
+        // unresolvable token leaves recruit unable to create infos (no
+        // position draw, like C++ skipping on `!C4Id2Def`).
+        let resolved = if id_token.is_empty() {
+            String::new()
+        } else {
+            self.resolve_definition_token(id_token)
+                .map(|id| id.as_str().to_string())
+                .unwrap_or_else(|| id_token.to_string())
+        };
+        let Some(info) = self.recruit_crew_info(number, &resolved) else {
+            return Ok(());
+        };
+        let definition_id = DefinitionId::from(info.id.as_str());
+        if !self.definitions.contains_key(&definition_id) {
+            return Ok(());
+        }
+        let (wdt, _) = self.definition_shape_size(&definition_id);
+
+        // Crew placement location (C4Player.cpp:507-510/547-550).
+        let mut ctx = tx1 + self.rng.random(tx2 - tx1);
+        let mut cty = ty;
+        if !start.enforce_position {
+            if let Some((nx, ny)) = self
+                .landscape
+                .as_ref()
+                .and_then(|landscape| landscape.find_solid_ground(ctx, cty, wdt * 3))
+            {
+                ctx = nx;
+                cty = ny;
+            }
+        }
+
+        // Game.CreateInfoObject (C4Game.cpp:1156-1170): same creation path
+        // as CreateObject, with the info linked.
+        let mut config = SpawnConfig::new(definition_id.as_str())
+            .with_position(Vector2::new(ctx, cty))
+            .with_owner(number)
+            .with_crew_member(true);
+        if let Some(base) = first_base {
+            // Enter the base; the exit command (C4Player.cpp:517/564) is
+            // not queued yet.
+            config = config.with_container(base);
+        }
+        let id = self.spawn_object(config)?;
+        self.crew_object_infos.insert(
+            id,
+            CrewObjectInfo {
+                name: info.name.clone(),
+                rank: info.rank,
+                experience: info.experience,
+            },
+        );
+
+        // Fail-safe Recruitment callback (PSF_OnJoinCrew = "~Recruitment",
+        // C4Script.h:107; C4Player.cpp:520-524/565-568).
+        let has_recruitment = self
+            .definitions
+            .get(&definition_id)
+            .map(|definition| definition.has_function("Recruitment"))
+            .unwrap_or(false);
+        if has_recruitment {
+            if let Some(index) = self.find_object_index(id) {
+                tolerate_script_error(
+                    self.call_object_function(index, "Recruitment", vec![Value::Int(number)])
+                        .map(|_| ()),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The `while (!(pInfo = GetIdle)) if (!New) break;` recruit loop
+    /// (C4Player.cpp:502-504/541-543). Returns the recruited info (marked
+    /// InAction) or None when no info could be created.
+    fn recruit_crew_info(
+        &mut self,
+        number: i32,
+        id_token: &str,
+    ) -> Option<player_file::CrewInfo> {
+        loop {
+            if let Some(index) = self.idle_crew_info_index(number, id_token) {
+                let roster = self.crew_rosters.entry(number).or_default();
+                roster[index].in_action = true; // pHiExp->Recruit()
+                return Some(roster[index].clone());
+            }
+            if !self.create_crew_info(number, id_token) {
+                return None;
+            }
+        }
+    }
+
+    /// `C4ObjectInfoList::GetIdle` (C4ObjectInfoList.cpp:113-142): the
+    /// highest-experience idle entry whose def is loaded; first of equal
+    /// experience wins. The empty-id NativeCrew exclusion (`!c_id &&
+    /// !pDef->NativeCrew`) is approximated as any-def until the DefCore
+    /// NativeCrew flag is parsed.
+    fn idle_crew_info_index(&self, number: i32, id_token: &str) -> Option<usize> {
+        let roster = self.crew_rosters.get(&number)?;
+        let mut best: Option<usize> = None;
+        for (index, info) in roster.iter().enumerate() {
+            if !self
+                .definitions
+                .contains_key(&DefinitionId::from(info.id.as_str()))
+            {
+                continue;
+            }
+            if !id_token.is_empty() && info.id != id_token {
+                continue;
+            }
+            if info.participation != 1 || info.in_action || info.has_died {
+                continue;
+            }
+            match best {
+                Some(current) if roster[current].experience >= info.experience => {}
+                _ => best = Some(index),
+            }
+        }
+        best
+    }
+
+    /// `C4ObjectInfoList::New` (C4ObjectInfoList.cpp:144-185) +
+    /// `C4ObjectInfoCore::Default` (C4InfoCore.cpp:372-417): fresh info
+    /// with a name drawn from the def's ClonkNames (or the standard names)
+    /// via ONE synced Random over the newline count, then numbered unique
+    /// by MakeValidName (C4ObjectInfoList.cpp:93-101).
+    fn create_crew_info(&mut self, number: i32, id_token: &str) -> bool {
+        // Default type clonk if none specified (C4ObjectInfoList.cpp:150).
+        let id = if id_token.is_empty() { "CLNK" } else { id_token };
+        let Some(definition) = self.definitions.get(&DefinitionId::from(id)) else {
+            return false;
+        };
+        let names_source = definition
+            .clonk_names()
+            .map(str::to_owned)
+            .or_else(|| self.standard_names.clone());
+        const C4_MAX_NAME: usize = 30; // C4Constants.h:26
+        let mut name = match names_source {
+            Some(names) => {
+                if names.to_ascii_lowercase().contains("names.txt") {
+                    // GetAName always eats the Random so having or not
+                    // having a Names.txt makes no difference
+                    // (C4InfoCore.cpp:36-38); the file itself is not
+                    // reachable from the engine, so the fallback name
+                    // applies.
+                    self.rng.random(1000);
+                    "Clonk".to_string()
+                } else {
+                    let newline_count = names.bytes().filter(|&byte| byte == b'\n').count() as i32;
+                    let segment_index = self.rng.random(newline_count) as usize;
+                    let segment = names
+                        .split('\n')
+                        .nth(segment_index)
+                        .unwrap_or_default()
+                        .replace('\r', "");
+                    let cleaned: String = segment.trim().chars().take(C4_MAX_NAME).collect();
+                    if cleaned.is_empty() {
+                        "Clonk".to_string()
+                    } else {
+                        cleaned
+                    }
+                }
+            }
+            None => "Clonk".to_string(),
+        };
+
+        let roster = self.crew_rosters.entry(number).or_default();
+        // MakeValidName (C4ObjectInfoList.cpp:93-101): number duplicates
+        // from 2, overwriting the tail to stay within C4MaxName.
+        let base = name.clone();
+        let mut next_number = 2;
+        while roster
+            .iter()
+            .any(|info| info.name.eq_ignore_ascii_case(&name))
+        {
+            let digits = next_number.to_string();
+            let keep = base
+                .chars()
+                .count()
+                .min(C4_MAX_NAME.saturating_sub(digits.len()));
+            name = base.chars().take(keep).collect::<String>() + &digits;
+            next_number += 1;
+        }
+
+        roster.push(player_file::CrewInfo {
+            id: id.to_string(),
+            name,
+            rank: 0,
+            experience: 0,
+            participation: 1,
+            in_action: false,
+            has_died: false,
+        });
+        true
     }
 
     pub fn register_player(&mut self, config: PlayerConfig) -> Result<(), EngineError> {

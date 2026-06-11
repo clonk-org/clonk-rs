@@ -367,9 +367,10 @@ impl Scenario {
 
         let script = load_legacy_scenario_script(group)?;
         let landscape = load_legacy_landscape(group, &manifest)?;
-        let mut initial_spawns = collect_initial_spawns(&manifest.sections, &collected)?;
-        let mut object_spawns = collect_legacy_objects(group, &collected)?;
-        initial_spawns.append(&mut object_spawns);
+        // Crew never spawns at scenario load: C4Game::InitPlayers queues
+        // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
+        // (C4Player.cpp:481-570) — see Engine::join_player.
+        let initial_spawns = collect_legacy_objects(group, &collected)?;
         let physics = derive_legacy_physics(&manifest)?;
         let environment = derive_legacy_environment(&manifest)?;
 
@@ -2431,107 +2432,6 @@ fn load_legacy_scenario_script(
         }));
     }
     Ok(None)
-}
-
-fn collect_initial_spawns(
-    sections: &HashMap<String, Vec<(String, String)>>,
-    definitions: &[ScenarioDefinition],
-) -> Result<Vec<ScenarioSpawn>, ScenarioError> {
-    let mut spawns = Vec::new();
-    let mut player_sections: Vec<(&str, &Vec<(String, String)>)> = sections
-        .iter()
-        .filter_map(|(section, entries)| {
-            if section.starts_with("player") {
-                Some((section.as_str(), entries))
-            } else {
-                None
-            }
-        })
-        .collect();
-    player_sections.sort_by(|a, b| a.0.cmp(b.0));
-
-    for (section_name, entries) in player_sections {
-        let owner = match owner_index_from_section(section_name) {
-            Some(owner) => owner,
-            None => continue,
-        };
-        let position = entries.iter().find_map(|(key, value)| {
-            if key.eq_ignore_ascii_case("Position") {
-                parse_player_position(value)
-            } else {
-                None
-            }
-        });
-
-        // `StandardCrew=` names the native crew def and `Clonks=` is its
-        // C4SVal COUNT (C4SPlrStart: NativeCrew + Crew C4SVal(1,0,1,10),
-        // C4Scenario.cpp:261,278-279) — NOT a crew-ID list. The count uses
-        // Std bounded to [Min,Max]; the synced Evaluate draw waits on the
-        // player-join port.
-        let standard_crew = entries
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case("StandardCrew"))
-            .map(|(_, value)| value.trim())
-            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("None"));
-        if let Some(token) = standard_crew {
-            let count = entries
-                .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case("Clonks"))
-                .and_then(|(key, value)| {
-                    parse_legacy_c4s_value(key, value, LegacyC4SVal::new(1, 0, 1, 10)).ok()
-                })
-                .unwrap_or(LegacyC4SVal::new(1, 0, 1, 10))
-                .base()
-                .max(0);
-            match find_definition_by_token(definitions, token) {
-                Some(definition) => {
-                    for _ in 0..count {
-                        let mut config = SpawnConfig::new(&definition.id)
-                            .with_owner(owner)
-                            .with_crew_member(true);
-                        if let Some(position) = position {
-                            config = config.with_position(position);
-                        }
-                        spawns.push(ScenarioSpawn {
-                            handle: None,
-                            container_handle: None,
-                            config,
-                        });
-                    }
-                }
-                None => tracing::warn!(
-                    section = section_name,
-                    definition = token,
-                    "StandardCrew names an unknown definition; no native crew placed"
-                ),
-            }
-        }
-
-        for (_, value) in entries
-            .iter()
-            .filter(|(key, _)| key.eq_ignore_ascii_case("Crew"))
-        {
-            for (token, count) in parse_crew_entries(value) {
-                let definition = find_definition_by_token(definitions, &token)
-                    .ok_or_else(|| ScenarioError::UnknownDefinition(token.clone()))?;
-                for _ in 0..count {
-                    let mut config = SpawnConfig::new(&definition.id)
-                        .with_owner(owner)
-                        .with_crew_member(true);
-                    if let Some(position) = position {
-                        config = config.with_position(position);
-                    }
-                    spawns.push(ScenarioSpawn {
-                        handle: None,
-                        container_handle: None,
-                        config,
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(spawns)
 }
 
 /// Collects the global scripts of a System.c4g group (the `*.c` entries,
@@ -5656,6 +5556,148 @@ global func Step(state, frame, random)
         (engine, created)
     }
 
+    /// Joins a default test player: the fixture's `[Player1] Crew=Good=1`
+    /// places its crew at JOIN like C++ (C4Player::PlaceReadyCrew,
+    /// C4Player.cpp:481-570). Returns the objects created by the join.
+    fn join_test_player(engine: &mut Engine) -> Vec<ObjectId> {
+        let before: std::collections::HashSet<ObjectId> = engine
+            .snapshot()
+            .objects
+            .iter()
+            .map(|object| object.id)
+            .collect();
+        engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Tester".to_string(),
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+            })
+            .expect("join succeeds");
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .map(|object| object.id)
+            .filter(|id| !before.contains(id))
+            .collect()
+    }
+
+    #[test]
+    fn join_player_runs_scenario_init_with_the_cpp_draw_ledger() {
+        // C4Player::ScenarioInit (C4Player.cpp:670-777) consumes the synced
+        // RNG in this exact order: Wealth.Evaluate (one draw,
+        // C4Scenario.cpp:43-46), all-random start x/y (C4Player.cpp:745-746,
+        // 16 + Random(GBack - 32) each), then PlaceReadyCrew draws one
+        // Random(tx2 - tx1) per crew member (C4Player.cpp:548) with
+        // FindSolidGround settling each position. Crew objects are created
+        // at JOIN time — never at scenario load (C4Game::InitPlayers queues
+        // CID_JoinPlr; nothing spawns crew during load).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Join\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=64\nMapHeight=40\nMapZoom=10\n\n\
+             [Player1]\nCrew=GOOD=2\nWealth=20,5,0,250\n",
+        )
+        .expect("write scenario core");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(7);
+        scenario.apply(&mut engine).expect("scenario applies");
+        assert_eq!(
+            engine.snapshot().objects.len(),
+            0,
+            "no crew at load — crew joins with the player like C++"
+        );
+
+        let mut replay = engine.rng.clone();
+        let landscape = engine.landscape().expect("landscape set").clone();
+        let world_width = landscape.width() as i32;
+        let world_height = landscape.estimated_height();
+        assert_eq!((world_width, world_height), (640, 400));
+
+        // Replay the ledger independently.
+        let expected_wealth = LegacyC4SVal::new(20, 5, 0, 250).evaluate(&mut replay);
+        let mut ptx = 16 + replay.random(world_width - 32);
+        let mut pty = 16 + replay.random(world_height - 32);
+        if let Some((nx, ny)) = landscape.find_solid_ground(ptx, pty, 30) {
+            ptx = nx;
+            pty = ny;
+        }
+        if let Some((nx, ny)) =
+            landscape.find_con_site_spot(ptx, pty, 30, 50, 400, |_, _, _, _| false)
+        {
+            ptx = nx;
+            pty = ny;
+        }
+        let mut expected_positions = Vec::new();
+        for _ in 0..2 {
+            let mut ctx = (ptx - 30) + replay.random(60);
+            let mut cty = pty;
+            if let Some((nx, ny)) = landscape.find_solid_ground(ctx, cty, 0) {
+                ctx = nx;
+                cty = ny;
+            }
+            expected_positions.push(Vector2::new(ctx, cty));
+        }
+
+        let joined = engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Tyler".to_string(),
+                team: None,
+                color_dw: 0xf40000,
+                pref_color: 3,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+            })
+            .expect("join succeeds");
+        assert_eq!(joined.number, 0);
+        assert_eq!((joined.start_x, joined.start_y), (ptx, pty));
+        assert!(joined.first_base.is_none());
+
+        // The engine consumed exactly the replayed ledger: same draw count,
+        // same LCG state.
+        assert_eq!(engine.rng, replay, "RNG stream stays lockstep");
+
+        let player = engine.player(0).expect("player registered");
+        assert_eq!(player.wealth(), expected_wealth);
+        assert_eq!(player.color_index(), 3, "free PrefColor is taken as-is");
+
+        let snapshot = engine.snapshot();
+        let crew: Vec<_> = snapshot
+            .objects
+            .iter()
+            .filter(|object| object.owner == 0 && object.crew_member)
+            .collect();
+        assert_eq!(crew.len(), 2, "two ready-crew members placed");
+        let positions: Vec<_> = crew.iter().map(|object| object.position).collect();
+        assert_eq!(positions, expected_positions);
+
+        // Fresh infos: no roster, no name sources -> "Clonk", numbered by
+        // MakeValidName (C4ObjectInfoList.cpp:93-101).
+        let names: Vec<_> = crew
+            .iter()
+            .map(|object| {
+                engine
+                    .crew_object_info(object.id)
+                    .expect("crew info recorded")
+                    .name
+                    .clone()
+            })
+            .collect();
+        assert_eq!(names, vec!["Clonk".to_string(), "Clonk2".to_string()]);
+    }
+
     #[test]
     fn legacy_player_starts_are_retained_for_the_join_pipeline() {
         // C4SPlrStart (compiled at C4Scenario.cpp:276-291) feeds
@@ -5765,8 +5807,7 @@ global func Step(state, frame, random)
         // C4SPlrStart, default C4SVal(1,0,1,10) (C4Scenario.cpp:261,279) —
         // and `StandardCrew=` names the native crew def (NativeCrew, :278).
         // It is NOT a crew-ID list ('Clonks=5,0,1,10' must not become
-        // "unknown definition `5,0,1,10`"). The count uses Std (the synced
-        // Evaluate draw waits on the player-join port).
+        // "unknown definition `5,0,1,10`").
         let dir = tempdir().expect("tempdir");
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
         std::fs::write(
@@ -5774,10 +5815,31 @@ global func Step(state, frame, random)
             "[Head]\nTitle=NativeCrew\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nStandardCrew=GOOD\nClonks=2,0,1,10\nPosition=120,160\n",
         )
         .expect("write scenario core");
-        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
-        assert_eq!(created.len(), 2, "Clonks Std=2 native crew spawn");
-        for id in &created {
-            let object = engine.object_snapshot(*id).expect("crew exists");
+        // Old-spec PlaceReadyCrew (C4Player.cpp:489-526) evaluates the
+        // count with a synced draw and places NativeCrew members at JOIN
+        // time — nothing spawns at load.
+        let (mut engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(created.len(), 0, "no crew at load");
+
+        engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Tester".to_string(),
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+            })
+            .expect("join succeeds");
+        let snapshot = engine.snapshot();
+        let crew: Vec<_> = snapshot
+            .objects
+            .iter()
+            .filter(|object| object.owner == 0 && object.crew_member)
+            .collect();
+        assert_eq!(crew.len(), 2, "Clonks Std=2 native crew at join");
+        for object in &crew {
             assert_eq!(object.definition_id, "GOOD");
         }
     }
@@ -5940,13 +6002,24 @@ global func Step(state, frame, random)
             "func Initialize() { RemoveObject(); return 1; }\n",
         )
         .expect("write self-removing script");
-        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
-        assert_eq!(created.len(), 1, "the spawn itself succeeds");
-        let gone = engine
-            .object_snapshot(created[0])
-            .map(|snapshot| snapshot.status != ObjectStatus::Normal)
-            .unwrap_or(true);
-        assert!(gone, "the object ends removed like C++");
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Tester".to_string(),
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+            })
+            .expect("the join itself succeeds");
+        let lingering = engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.crew_member && object.status == ObjectStatus::Normal);
+        assert!(!lingering, "the object ends removed like C++");
     }
 
     #[test]
@@ -5960,9 +6033,10 @@ global func Step(state, frame, random)
             "func Initialize() { CreateObject(\"XXXX\", 0, 0, -1); return 1; }\n",
         )
         .expect("write spawning script");
-        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
-        assert_eq!(created.len(), 1);
-        assert!(engine.object_snapshot(created[0]).is_some());
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let joined = join_test_player(&mut engine);
+        assert_eq!(joined.len(), 1, "only the crew member itself spawns");
+        assert!(engine.object_snapshot(joined[0]).is_some());
     }
 
     #[test]
@@ -6037,8 +6111,12 @@ global func Step(state, frame, random)
             Some(("BRKN", "func {{{ not a script\n")),
             "global func Initialize(state, random) { return nil; }\n",
         );
-        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
-        assert_eq!(created.len(), 1, "the good crew member still spawns");
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(
+            join_test_player(&mut engine).len(),
+            1,
+            "the good crew member still spawns at join"
+        );
         assert!(
             engine.definitions.contains_key("BRKN"),
             "the broken-script definition is registered script-less (C4Def.cpp:632)"
@@ -6059,13 +6137,15 @@ global func Step(state, frame, random)
             "func Construction() { return NoSuchFunctionAnywhere(); }\n",
         )
         .expect("write erroring script");
-        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let (mut engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(created.len(), 0, "crew joins with the player, not at load");
+        let joined = join_test_player(&mut engine);
         assert_eq!(
-            created.len(),
+            joined.len(),
             1,
-            "the object spawns despite the Construction error"
+            "the crew object spawns despite the Construction error"
         );
-        assert!(engine.object_snapshot(created[0]).is_some());
+        assert!(engine.object_snapshot(joined[0]).is_some());
     }
 
     #[test]
@@ -6078,11 +6158,15 @@ global func Step(state, frame, random)
             None,
             "global func Initialize(state, random) { return BadCall(); }\n",
         );
-        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
-        assert_eq!(created.len(), 1, "crew spawned before Initialize ran");
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         assert!(
             engine.scenario_script.is_some(),
             "the scenario script stays installed after the Initialize error"
+        );
+        assert_eq!(
+            join_test_player(&mut engine).len(),
+            1,
+            "the round continues: a player can still join"
         );
     }
 
@@ -6093,11 +6177,15 @@ global func Step(state, frame, random)
         let dir = tempdir().expect("tempdir");
         let scenario_dir =
             write_resilience_fixture(dir.path(), None, "global func {{{ broken\n");
-        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
-        assert_eq!(created.len(), 1);
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         assert!(
             engine.scenario_script.is_none(),
             "no scenario script installed when it cannot compile"
+        );
+        assert_eq!(
+            join_test_player(&mut engine).len(),
+            1,
+            "the scenario still runs without its script"
         );
     }
 
@@ -6152,12 +6240,13 @@ global func Step(state, frame, random)
         let created = scenario
             .apply(&mut engine)
             .expect("legacy scenario applies");
-        assert_eq!(
-            created.len(),
-            2,
-            "expected two crew spawns from legacy scenario"
-        );
-        for id in &created {
+        assert_eq!(created.len(), 0, "crew joins with the player, not at load");
+        // The `[Player1] Crew=Foo=2` list places at JOIN
+        // (C4Player::PlaceReadyCrew new spec, C4Player.cpp:528-570); the
+        // exact placement positions are pinned by the draw-ledger test.
+        let joined = join_test_player(&mut engine);
+        assert_eq!(joined.len(), 2, "two ready-crew members at join");
+        for id in &joined {
             let object = engine.object_snapshot(*id).expect("spawned object present");
             assert_eq!(object.definition_id, "FOOO");
             assert_eq!(object.owner, 0);
@@ -6165,7 +6254,6 @@ global func Step(state, frame, random)
                 object.crew_member,
                 "legacy crew should be marked as crew member"
             );
-            assert_eq!(object.position, Vector2::new(120, 160));
         }
         let snapshot = engine.snapshot();
         assert!(

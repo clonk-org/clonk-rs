@@ -130,6 +130,13 @@ pub struct Player {
     production_unit: u32,
     color: Option<RgbColor>,
     hostility: HashSet<i32>,
+    /// The indexed player color chosen at ScenarioInit
+    /// (C4Player.cpp:678-685; C4PlayerList::ColorTaken scans it). -1 until
+    /// the join assigns one.
+    color_index: i32,
+    /// The startup position slot taken at ScenarioInit
+    /// (C4Player.cpp:717-732; C4PlayerList::PositionTaken). -1 when unset.
+    position_index: i32,
 }
 
 impl Player {
@@ -158,6 +165,8 @@ impl Player {
             production_unit: 0,
             color: None,
             hostility: HashSet::new(),
+            color_index: -1,
+            position_index: -1,
         }
     }
 
@@ -209,6 +218,8 @@ impl Player {
             production_unit,
             color,
             hostility: HashSet::new(),
+            color_index: -1,
+            position_index: -1,
         };
         player.sort_crew();
         player
@@ -264,6 +275,8 @@ impl Player {
             production_unit,
             color,
             hostility: hostility.into_iter().collect(),
+            color_index: -1,
+            position_index: -1,
         };
         player.sort_crew();
         player
@@ -491,6 +504,22 @@ impl Player {
 
     pub fn crew(&self) -> &[ObjectId] {
         &self.crew
+    }
+
+    pub fn color_index(&self) -> i32 {
+        self.color_index
+    }
+
+    pub fn set_color_index(&mut self, index: i32) {
+        self.color_index = index;
+    }
+
+    pub fn position_index(&self) -> i32 {
+        self.position_index
+    }
+
+    pub fn set_position_index(&mut self, index: i32) {
+        self.position_index = index;
     }
 
     pub fn set_crew(&mut self, crew: Vec<ObjectId>) {
