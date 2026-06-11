@@ -185,6 +185,12 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
     let mut load_failures: Vec<(String, String)> = Vec::new();
     let mut apply_failures: Vec<(String, String)> = Vec::new();
 
+    enum SweepOutcome {
+        Applied,
+        LoadFailed(String),
+        ApplyFailed(String),
+    }
+
     for path in &scenario_paths {
         let label = path
             .strip_prefix(&content_root)
@@ -201,36 +207,59 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
             .collect();
         roots.push(content_root.clone());
         roots.push(repo_root.clone());
-        let resolver = SweepResolver { roots };
 
-        let scenario = match lc_engine::Scenario::load_from_path_with(path, &resolver) {
-            Ok(scenario) => {
-                loaded += 1;
-                scenario
-            }
-            Err(error) => {
-                if verbose {
-                    tracing::info!("LOAD FAIL {label}: {error}");
+        // Each scenario runs on a watchdog thread: a script whose loop
+        // depends on engine state we model differently can hang forever —
+        // a timeout makes that a reportable failure class instead.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker_path = path.clone();
+        let worker_library = material_library.clone();
+        std::thread::spawn(move || {
+            let resolver = SweepResolver { roots };
+            let outcome = match lc_engine::Scenario::load_from_path_with(&worker_path, &resolver)
+            {
+                Ok(scenario) => {
+                    let mut engine = lc_engine::Engine::new();
+                    engine.configure_materials_from_library(&worker_library);
+                    match scenario.apply(&mut engine) {
+                        Ok(_) => SweepOutcome::Applied,
+                        Err(error) => SweepOutcome::ApplyFailed(error.to_string()),
+                    }
                 }
-                load_failures.push((label, error.to_string()));
-                continue;
-            }
-        };
+                Err(error) => SweepOutcome::LoadFailed(error.to_string()),
+            };
+            let _ = sender.send(outcome);
+        });
 
-        let mut engine = lc_engine::Engine::new();
-        engine.configure_materials_from_library(&material_library);
-        match scenario.apply(&mut engine) {
-            Ok(_) => {
+        match receiver.recv_timeout(std::time::Duration::from_secs(120)) {
+            Ok(SweepOutcome::Applied) => {
+                loaded += 1;
                 applied += 1;
                 if verbose {
                     tracing::info!("OK        {label}");
                 }
             }
-            Err(error) => {
+            Ok(SweepOutcome::ApplyFailed(error)) => {
+                loaded += 1;
                 if verbose {
                     tracing::info!("APPLY FAIL {label}: {error}");
                 }
-                apply_failures.push((label, error.to_string()));
+                apply_failures.push((label, error));
+            }
+            Ok(SweepOutcome::LoadFailed(error)) => {
+                if verbose {
+                    tracing::info!("LOAD FAIL {label}: {error}");
+                }
+                load_failures.push((label, error));
+            }
+            Err(_) => {
+                if verbose {
+                    tracing::info!("HUNG      {label}");
+                }
+                apply_failures
+                    .push((label, "HUNG: apply did not finish within 120s".to_string()));
+                // The worker thread is abandoned; the sweep process exits at
+                // the end regardless.
             }
         }
     }
