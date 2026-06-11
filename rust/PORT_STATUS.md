@@ -1,8 +1,42 @@
 # LegacyClonk Rust Port — Status & GAP LIST
 
-> Living document. Last updated 2026-06-10. The C++ engine in `../src/` is the
+> Living document. Last updated 2026-06-11. The C++ engine in `../src/` is the
 > **golden oracle**; parity = bit-for-bit match on simulation state. This file
 > tracks every divergence from that goal.
+
+## Scenario-load parity epic (2026-06-11, ACTIVE)
+
+Goal: every real scenario in `content/` loads + applies like C++.
+Scoreboard: `cargo xtask scenario-sweep` (per-scenario watchdog; slow in
+debug — per-spawn snapshot cost). **93 scenarios: 92 load (98%), 90 apply
+(96%)** — baseline before the epic was 60 load / 6 apply. Landed:
+- Fail-safe script errors everywhere C++ is fail-safe (`tolerate_script_error`):
+  def-script load failures register script-less (C4Def.cpp:632);
+  Construction/Initialize/scenario-Initialize/action StartCall-family
+  log-and-continue (C4AulExec.cpp:1318-1342). Unknown Objects.txt defs skip
+  the object like C4Id2Def. OPEN: the lc-app sim-tick script error still
+  exits the app (event loop) — same treatment needed.
+- Loader leniency: strtol-style numbers (trailing junk ok), MapZoom
+  C4SVal(10,0,5,15) default+bounds, `Clonks=` is the C4SVal crew COUNT with
+  `StandardCrew=` the native def, out-of-enum Dir/ComDir warn-keep-default
+  (the engine Dir model is still two-way — multi-directional Dir pending),
+  Objects.txt Latin-1 fallback.
+- Parser: `??`/`??=` (priority 3, nil-only, short-circuit), contextual
+  keyword identifiers (params + expression position).
+- `itofix`/`itofix_prec` wrap like C++ int32 (Objects.txt `Size=100000`
+  panicked debug builds).
+- The 292-entry C4ScriptConstMap constants table (script_constants.rs) with
+  VM identifier fallback; System.c4g global scripts on `Game.ScriptEngine`
+  semantics (`Engine::install_global_scripts`, own-def → global → host
+  resolution, shared Arc table); call arity pads missing args with nil
+  (C4AulParSet).
+REMAINING: 2× container-dependency-cycle failures (Drachenfels, Hammerfest —
+likely Contained= references to skipped unknown-def objects), 1× hung
+Initialize loop (Dunkelfels — a script loop whose exit depends on engine
+state we model differently); lc-app wiring for install_global_scripts (the
+sweep has it; activate_loaded_scenario does not yet); full-fidelity
+definition apply (from_resource path) + DefCore key fixes; #appendto
+linking.
 
 ## State: broadly scaffolded, not yet lockstep-parity-capable
 
