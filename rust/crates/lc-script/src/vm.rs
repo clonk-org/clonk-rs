@@ -402,13 +402,8 @@ impl<'a> Vm<'a> {
         self
     }
 
-    /// Attach the engine-global script functions (System.c4g global funcs).
-    pub fn with_global_functions(mut self, functions: &'a HashMap<String, Function>) -> Self {
-        self.global_functions = Some(functions);
-        self
-    }
-
-    /// `with_global_functions` for an optional table (None = no globals).
+    /// Attach the engine-global script functions (System.c4g global funcs);
+    /// `None` = no globals installed.
     pub fn with_optional_globals(mut self, functions: Option<&'a HashMap<String, Function>>) -> Self {
         self.global_functions = functions;
         self
