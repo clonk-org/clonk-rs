@@ -172,9 +172,31 @@ full-scenario shadow-diff (see Parity harnesses).
 - **Phase 2 LIVE (2026-06-11, commit 4b5ee060)** — the shadow-diff runs
   end-to-end: `LC_RUST_ENGINE_RUNTIME=1 build-x86/.../clonk <scenario>
   <player.c4p>` shadows a live Rust runtime per frame and logs the first
-  divergence to Clonk.log. FIRST HARVEST (GoldRush): 'object count
-  mismatch (expected 737, got 810)' — the runtime lacks the player-join
-  pipeline (task #23). Build runbook in the commit message. Previous recon
+  divergence to Clonk.log. Diagnostics: `LC_RUST_ENGINE_LOG=<filter>`
+  installs a stderr tracing subscriber in the embedded runtime;
+  `LC_RUST_ENGINE_CONTROL_DUMP=<path>` makes the bridge dump every
+  serialised control frame (the ground truth for the Rust INI parser).
+- **Player-join pipeline LANDED (task #23, 2026-06-11)** — the live
+  GoldRush session executes CID_PlrInfo/CID_JoinPlr end-to-end:
+  Engine::join_player ports C4Player::ScenarioInit (synced RNG ledger,
+  PlaceReady*, crew GetIdle/New with ClonkNames draws, Recruitment
+  callback, InitializePlayer args), the FFI runtime loads the .c4p
+  (gz-wrapped C4Group support landed) and joins at frame 0 BEFORE that
+  frame's tick (advance_to_frame was off by one for ALL control).
+  Divergence moved 737-vs-810 -> 731-vs-810: the remaining gap is the
+  InitializePlayer cascade (GoldRush's DoInitialize aborts at
+  pObj->SetAI, defined in Locals.c4d/AI.c4d via '#appendto CLNK' — task
+  #16), plus full-fidelity defs (#15). Known join gaps (documented in
+  code): power-line auto-connections in PlaceReadyBase, base-exit
+  commands, team start-index/hostility, the Magic list, the NativeCrew
+  flag for empty-id GetIdle, GetAName file-based names, CrewDisabled for
+  GetHiRank, StartupPlayerCount approximation (infos seen so far), and
+  crew infos are not yet persisted in snapshots. NOTE: the GoldRush
+  zero-script-error claim (#17) does not hold at current HEAD — the
+  baseline already showed ~210 warnings (unknown host fns GetComponent/
+  InLiquid/SetClrModulation/..., #appendto-related Construction errors);
+  the headless join harness (`cargo xtask scenario-errors`, now joining
+  via Tyler.c4p when present) is the triage scoreboard. Previous recon
   (now superseded) — the
   bridge ALREADY implements live shadow execution AND divergence reporting:
   `LC_RUST_ENGINE_RUNTIME=1` advances a Rust engine per frame and
