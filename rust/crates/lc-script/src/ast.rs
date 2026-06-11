@@ -163,6 +163,42 @@ pub struct Function {
     pub overloaded: Option<std::sync::Arc<Function>>,
 }
 
+impl Function {
+    /// Hang `parent` at the tail of this function's overload chain (C++
+    /// `Fn->OwnerOverloaded`). Idempotent: include resolution re-merges to a
+    /// fixpoint, so a parent already on the chain is replaced (it may have
+    /// gained its own chain since) rather than appended twice.
+    pub fn push_overload(&mut self, parent: Function) {
+        fn same_definition(a: &Function, b: &Function) -> bool {
+            a.name == b.name
+                && a.params == b.params
+                && a.body == b.body
+                && a.access == b.access
+                && a.returns_reference == b.returns_reference
+                && a.strict_level == b.strict_level
+        }
+        let mut tail = &mut self.overloaded;
+        loop {
+            let found = tail
+                .as_deref()
+                .is_some_and(|next| same_definition(next, &parent));
+            if found {
+                if parent.overloaded.is_some() {
+                    *tail = Some(std::sync::Arc::new(parent));
+                }
+                return;
+            }
+            match tail {
+                Some(next) => tail = &mut std::sync::Arc::make_mut(next).overloaded,
+                None => {
+                    *tail = Some(std::sync::Arc::new(parent));
+                    return;
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     VarDecl {

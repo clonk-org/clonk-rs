@@ -120,46 +120,12 @@ impl Engine {
             // A redefinition overloads the earlier function: `inherited`
             // reaches it (C++ Fn->OwnerOverloaded).
             if let Some(previous) = self.functions.remove(&name) {
-                Self::append_overload(&mut function, previous);
+                function.push_overload(previous);
             }
             self.functions.insert(name, function);
         }
         // Store local variable declarations from the script
         self.var_decls.extend(script.var_decls);
-    }
-
-    /// Hang `parent` at the tail of `function`'s overload chain. Idempotent:
-    /// include resolution re-merges to a fixpoint, so a parent already on the
-    /// chain is replaced (it may have gained its own chain since) rather than
-    /// appended twice.
-    fn append_overload(function: &mut Function, parent: Function) {
-        fn same_definition(a: &Function, b: &Function) -> bool {
-            a.name == b.name
-                && a.params == b.params
-                && a.body == b.body
-                && a.access == b.access
-                && a.returns_reference == b.returns_reference
-                && a.strict_level == b.strict_level
-        }
-        let mut tail = &mut function.overloaded;
-        loop {
-            let found = tail
-                .as_deref()
-                .is_some_and(|next| same_definition(next, &parent));
-            if found {
-                if parent.overloaded.is_some() {
-                    *tail = Some(std::sync::Arc::new(parent));
-                }
-                return;
-            }
-            match tail {
-                Some(next) => tail = &mut std::sync::Arc::make_mut(next).overloaded,
-                None => {
-                    *tail = Some(std::sync::Arc::new(parent));
-                    return;
-                }
-            }
-        }
     }
 
     pub fn merge_from(&mut self, other: &Engine) {
@@ -168,7 +134,7 @@ impl Engine {
                 // Child overrides parent, but the parent's function stays
                 // reachable as the child's `inherited` target (C++ include
                 // linking sets OwnerOverloaded).
-                Some(own) => Self::append_overload(own, function.clone()),
+                Some(own) => own.push_overload(function.clone()),
                 None => {
                     self.functions.insert(name.clone(), function.clone());
                 }
