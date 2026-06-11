@@ -15,6 +15,7 @@
 )]
 
 mod action;
+mod script_constants;
 mod command;
 mod compat;
 mod control;

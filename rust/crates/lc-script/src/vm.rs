@@ -359,6 +359,9 @@ pub struct Vm<'a> {
     host_functions: &'a HashMap<String, HostFunction>,
     var_decls: &'a [VarDecl], // Script-level variable declarations
     debugger: Option<DebuggerHooks>,
+    /// Engine-registered script constants (`RegisterGlobalConstant`,
+    /// C4Script.cpp:6581): consulted when an identifier matches no variable.
+    constants: Option<&'a HashMap<String, Value>>,
     /// The object context the call runs on, returned by `Expr::This`. Host-opaque
     /// (in lc-engine an object reference is `Proplist {"id": <number>}`). Nil when
     /// the call has no object context (e.g. global functions).
@@ -377,6 +380,7 @@ impl<'a> Vm<'a> {
             host_functions,
             var_decls,
             debugger,
+            constants: None,
             this_value: Value::Nil,
         }
     }
@@ -385,6 +389,12 @@ impl<'a> Vm<'a> {
     /// share it (they run on the same object).
     pub fn with_this(mut self, this: Value) -> Self {
         self.this_value = this;
+        self
+    }
+
+    /// Attach the engine constants table consulted on variable-lookup misses.
+    pub fn with_constants(mut self, constants: &'a HashMap<String, Value>) -> Self {
+        self.constants = Some(constants);
         self
     }
 
@@ -772,9 +782,16 @@ impl<'a> Vm<'a> {
             // `this` yields the object context the call runs on (host-provided),
             // mirroring C4Script's `this` (C4V_C4Object); Nil for global calls.
             Expr::This => Ok(self.this_value.clone()),
-            Expr::Variable(name) => env
-                .get(name)?
-                .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'"))),
+            Expr::Variable(name) => match env.get(name)? {
+                Some(value) => Ok(value),
+                // Engine script constants (RegisterGlobalConstant): bare
+                // identifiers fall through to the constants table —
+                // variables shadow them.
+                None => self
+                    .constants
+                    .and_then(|constants| constants.get(name).cloned())
+                    .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'"))),
+            },
             Expr::Unary(op, expr) => {
                 let value = self.evaluate(expr, env, depth)?;
                 self.eval_unary(op, value)

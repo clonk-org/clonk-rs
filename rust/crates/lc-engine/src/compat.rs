@@ -2615,6 +2615,9 @@ fn game_call_ex(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 pub fn register_host_functions(script: &mut ScriptEngine) {
+    // Every script host knows the engine constant table
+    // (RegisterGlobalConstant, C4Script.cpp:6580-6581).
+    crate::script_constants::register_script_constants(script);
     script.register_host_function("AddEffect", add_effect);
     script.register_host_function("RemoveEffect", remove_effect);
     script.register_host_function("GetEffect", get_effect);

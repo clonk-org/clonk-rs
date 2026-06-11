@@ -66,6 +66,9 @@ pub struct Engine {
     host_functions: HashMap<String, HostFunction>,
     debugger_hooks: Option<DebuggerHooks>,
     var_decls: Vec<VarDecl>, // Script-level variable declarations (local variables)
+    /// Engine script constants (RegisterGlobalConstant, C4Script.cpp:6581),
+    /// consulted by the VM when an identifier matches no variable.
+    constants: HashMap<String, Value>,
 }
 
 impl Engine {
@@ -75,7 +78,15 @@ impl Engine {
             host_functions: HashMap::new(),
             debugger_hooks: None,
             var_decls: Vec::new(),
+            constants: HashMap::new(),
         }
+    }
+
+    /// Registers an engine script constant (RegisterGlobalConstant,
+    /// C4Script.cpp:6581): identifiers resolve to it when no variable
+    /// matches; variables shadow constants.
+    pub fn register_constant(&mut self, name: impl Into<String>, value: Value) {
+        self.constants.insert(name.into(), value);
     }
 
     pub fn load_script(&mut self, source: &str) -> Result<(), ScriptError> {
@@ -149,7 +160,8 @@ impl Engine {
             &self.host_functions,
             &self.var_decls,
             self.debugger_hooks.clone(),
-        );
+        )
+        .with_constants(&self.constants);
         vm.call(name, args).map_err(ScriptError::from)
     }
 
@@ -169,7 +181,8 @@ impl Engine {
             &self.host_functions,
             &self.var_decls,
             self.debugger_hooks.clone(),
-        );
+        )
+        .with_constants(&self.constants);
         let cells: Vec<crate::vm::ValueCell> =
             args.iter().cloned().map(crate::vm::value_cell).collect();
         let call_args = cells
@@ -194,7 +207,8 @@ impl Engine {
             &self.host_functions,
             &self.var_decls,
             self.debugger_hooks.clone(),
-        );
+        )
+        .with_constants(&self.constants);
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)
     }
@@ -215,6 +229,7 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
+        .with_constants(&self.constants)
         .with_this(this);
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)
