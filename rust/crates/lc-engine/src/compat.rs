@@ -2610,6 +2610,25 @@ fn parse_container_filter(
     }
 }
 
+/// `vContainer` (C4Script.cpp:2122-2127): an object filters by that exact
+/// container; the NO_CONTAINER/ANY_CONTAINER int sentinels
+/// (C4Object.h:83-84) filter by containment; anything else is
+/// `C4Value::getObj()` = nil, i.e. no filter — never an error.
+fn container_filter_from_value(value: Option<&Value>) -> ContainerFilter {
+    match value {
+        Some(Value::Int(raw)) if *raw == ANY_CONTAINER_SENTINEL => {
+            ContainerFilter::RequiresContainer
+        }
+        Some(Value::Int(raw)) if *raw == NO_CONTAINER_SENTINEL => {
+            ContainerFilter::RequiresNoContainer
+        }
+        Some(value @ (Value::Object(_) | Value::Proplist(_))) => object_id_from_value(value)
+            .map(ContainerFilter::Exact)
+            .unwrap_or(ContainerFilter::Any),
+        _ => ContainerFilter::Any,
+    }
+}
+
 fn squared_distance(position: Vector2, x: i32, y: i32) -> i64 {
     let dx = position.x as i64 - x as i64;
     let dy = position.y as i64 - y as i64;
@@ -2633,6 +2652,62 @@ struct FindObjectParams {
 }
 
 impl FindObjectParams {
+    /// FnFindObject's script layout (C4Script.cpp:2113-2135): (id, x, y,
+    /// wdt, hgt, dwOCF, szAction, pActionTarget, vContainer, pFindNext).
+    /// Local calls exclude the caller and adjust x/y by its position
+    /// (cthr->Obj). The owner filter is not script-settable here
+    /// (C++ passes ANY_OWNER); FindObjectOwner injects it after parsing.
+    fn parse_cpp_call(
+        args: &[Value],
+        function: &str,
+        caller: Option<(ObjectId, Vector2)>,
+    ) -> Result<Self, RuntimeError> {
+        let definition = parse_definition_argument(args.first(), function)?;
+        let mut x = parse_optional_i32(args.get(1), function, "x")?.unwrap_or(0);
+        let mut y = parse_optional_i32(args.get(2), function, "y")?.unwrap_or(0);
+        let width = parse_optional_i32(args.get(3), function, "width")?.unwrap_or(0);
+        let height = parse_optional_i32(args.get(4), function, "height")?.unwrap_or(0);
+        // Adjust default ocf: an explicit 0 means OCF_All (C4Script.cpp:2120).
+        let ocf_mask = parse_optional_u32(args.get(5), function, "ocf")?
+            .filter(|&mask| mask != 0)
+            .unwrap_or(crate::ocf::ALL);
+        let action = parse_optional_string(args.get(6), function, "action")?;
+        let treat_idle = matches!(action.as_deref(), Some("Idle") | Some("ActIdle"));
+        let action_target = parse_object_reference_argument(
+            args.get(7).unwrap_or(&Value::Nil),
+            function,
+            "action_target",
+        )?;
+        let container = container_filter_from_value(args.get(8));
+        let find_next = parse_object_reference_argument(
+            args.get(9).unwrap_or(&Value::Nil),
+            function,
+            "find_next",
+        )?;
+        // Local call adjust coordinates (C4Script.cpp:2115-2119).
+        if let Some((_, position)) = caller {
+            if x != 0 || y != 0 || width != 0 || height != 0 {
+                x += position.x;
+                y += position.y;
+            }
+        }
+        Ok(Self {
+            definition,
+            x,
+            y,
+            width,
+            height,
+            ocf_mask,
+            action,
+            treat_idle,
+            action_target,
+            exclude: caller.map(|(id, _)| id),
+            container,
+            owner: OWNER_ANY,
+            find_next,
+        })
+    }
+
     fn parse(args: &[Value]) -> Result<Self, RuntimeError> {
         if args.len() > 12 {
             return Err(RuntimeError::new(
@@ -9093,13 +9168,26 @@ fn object_count2(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn find_object(args: &[Value]) -> Result<Value, RuntimeError> {
-    let params = FindObjectParams::parse(args)?;
+    find_object_cpp(args, "FindObject", None)
+}
+
+/// Shared FnFindObject search (C4Script.cpp:2113-2135) with an optional
+/// owner filter injected by FindObjectOwner (C4Script.cpp:2137-2161).
+fn find_object_cpp(
+    args: &[Value],
+    function: &str,
+    owner_override: Option<i32>,
+) -> Result<Value, RuntimeError> {
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let context = match borrow.as_ref() {
             Some(context) => context,
             None => return Ok(Value::Nil),
         };
+        let mut params = FindObjectParams::parse_cpp_call(args, function, context.caller_scope())?;
+        if let Some(owner) = owner_override {
+            params.owner = owner;
+        }
         let result = if params.is_closest_query() {
             find_object_closest(context, &params)
         } else {
@@ -9134,7 +9222,7 @@ fn find_object_owner(args: &[Value]) -> Result<Value, RuntimeError> {
     if !owner_valid {
         return Ok(Value::Nil);
     }
-    let mut remapped: Vec<Value> = Vec::with_capacity(12);
+    let mut remapped: Vec<Value> = Vec::with_capacity(10);
     remapped.push(args.first().cloned().unwrap_or(Value::Nil)); // id
     for slot in 2..=5 {
         remapped.push(args.get(slot).cloned().unwrap_or(Value::Nil)); // x y wdt hgt
@@ -9142,11 +9230,9 @@ fn find_object_owner(args: &[Value]) -> Result<Value, RuntimeError> {
     remapped.push(args.get(6).cloned().unwrap_or(Value::Nil)); // ocf
     remapped.push(args.get(7).cloned().unwrap_or(Value::Nil)); // action
     remapped.push(args.get(8).cloned().unwrap_or(Value::Nil)); // action target
-    remapped.push(Value::Nil); // exclude (caller exclusion is context-based)
-    remapped.push(Value::Nil); // container
-    remapped.push(Value::Int(owner));
+    remapped.push(Value::Nil); // container (not script-settable here)
     remapped.push(args.get(9).cloned().unwrap_or(Value::Nil)); // find next
-    find_object(&remapped)
+    find_object_cpp(&remapped, "FindObjectOwner", Some(owner))
 }
 
 fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
@@ -9231,13 +9317,19 @@ fn find_objects(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn object_count(args: &[Value]) -> Result<Value, RuntimeError> {
-    let params = FindObjectParams::parse(args)?;
+    // FnObjectCount (C4Script.cpp:2085-2111): the FindObject layout with
+    // iOwner instead of pFindNext as the 10th parameter; an owner of 0
+    // becomes ANY_OWNER ("incomplete useless implementation").
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let context = match borrow.as_ref() {
             Some(context) => context,
             None => return Ok(Value::Int(0)),
         };
+        let mut params =
+            FindObjectParams::parse_cpp_call(&args[..args.len().min(9)], "ObjectCount", context.caller_scope())?;
+        let owner = parse_optional_i32(args.get(9), "ObjectCount", "owner")?.unwrap_or(0);
+        params.owner = if owner == 0 { OWNER_ANY } else { owner };
         let matches_len = if params.is_closest_query() {
             collect_closest_matches(context, &params).len()
         } else {
@@ -13425,11 +13517,29 @@ impl EffectHostContext {
     }
 
     fn get_world_object(&self, id: ObjectId) -> Option<HostWorldObject> {
-        if let Some(object) = self.pending_objects.get(&id) {
-            Some(object.clone())
+        let mut object = if let Some(object) = self.pending_objects.get(&id) {
+            object.clone()
         } else {
-            self.world.get(id).cloned()
+            self.world.get(id).cloned()?
+        };
+        // C++ mutates live state mid-call: reflect the freshest known
+        // containment (Enter/Exit in the active or a finished nested
+        // scope) so container-filtered searches see it (FnFindObject
+        // vContainer, C4Script.cpp:2122-2127).
+        if let Some(container) = self
+            .object
+            .as_ref()
+            .filter(|scope| scope.id == id)
+            .map(|scope| scope.current_container)
+            .or_else(|| {
+                self.nested_objects
+                    .get(&id)
+                    .map(|state| state.scope.current_container)
+            })
+        {
+            object.container = container;
         }
+        Some(object)
     }
 
     /// The live cell for a FOREIGN object's named local (cross-object
@@ -13640,6 +13750,15 @@ impl EffectHostContext {
         let mut ids = self.world.object_ids().to_vec();
         ids.extend(self.pending_order.iter().copied());
         ids
+    }
+
+    /// `cthr->Obj` for the executing host call: the FindObject family
+    /// excludes the caller and searches caller-relative coordinates on
+    /// local calls (C4Script.cpp:2115-2131).
+    fn caller_scope(&self) -> Option<(ObjectId, Vector2)> {
+        self.object
+            .as_ref()
+            .map(|scope| (scope.id, scope.current_position))
     }
 
     fn definition_category(&self, id: &str) -> Option<i32> {
@@ -21323,7 +21442,7 @@ mod tests {
     }
 
     #[test]
-    fn find_object_respects_owner_filter() {
+    fn find_object_has_no_owner_parameter_like_cpp() {
         let world = HostWorldContext::from_objects(vec![
             HostWorldObject::new(
                 ObjectId::new(10),
@@ -21362,6 +21481,8 @@ mod tests {
                 None,
             ),
         ]);
+        // FnFindObject has NO owner parameter — C++ always searches with
+        // ANY_OWNER (C4Script.cpp:2133); only FindObjectOwner filters.
         let args = [
             Value::String("Dummy".into()),
             Value::Nil,
@@ -21376,8 +21497,12 @@ mod tests {
             Value::Int(2),
         ];
         let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
-        let value = result.expect("FindObject owner succeeds");
-        assert_eq!(value, object_reference_value(ObjectId::new(11)));
+        let value = result.expect("FindObject succeeds");
+        assert_eq!(
+            value,
+            object_reference_value(ObjectId::new(10)),
+            "the trailing int is beyond pFindNext and ignored; owner never filters"
+        );
     }
 
     #[test]
@@ -21444,8 +21569,7 @@ mod tests {
             Value::Nil,
             Value::Nil,
             Value::Nil,
-            Value::Nil,
-            Value::Nil,
+            // pFindNext is FindObject's 10th parameter (C4Script.cpp:2113).
             Value::Proplist(find_next),
         ];
         let (second_result, _) =
@@ -22250,7 +22374,7 @@ mod tests {
             Value::Nil,
             Value::Nil,
             Value::Nil,
-            Value::Nil,
+            // iOwner is ObjectCount's 10th parameter (C4Script.cpp:2085).
             Value::Int(2),
         ];
         let (result, _) = with_effect_context(None, &[], world, 1, || object_count(&args));

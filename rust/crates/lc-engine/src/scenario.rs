@@ -6047,6 +6047,88 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn find_object_uses_the_cpp_argument_layout_and_caller_context() {
+        // FnFindObject (C4Script.cpp:2113-2135): parameters are (id, x, y,
+        // wdt, hgt, dwOCF, szAction, pActionTarget, vContainer, pFindNext).
+        // Local calls EXCLUDE the caller and adjust x/y by the caller's
+        // position; vContainer takes an object or the NO_CONTAINER=124 /
+        // ANY_CONTAINER=123 sentinels (C4Object.h:83-84) — any other int is
+        // simply no filter (C4Value::getObj() yields nil), never an error.
+        // GoldRush's cannon Initialize chain depends on this layout
+        // (Cannon.c4d/Script.c:31 passes NoContainer() as 9th argument).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            Some(("BOXD", "// box\n")),
+            "global func Initialize() {\n\
+                 var a = CreateObject(GOOD, 50, 50, -1);\n\
+                 var b = CreateObject(GOOD, 55, 52, -1);\n\
+                 var box = CreateObject(BOXD, 90, 90, -1);\n\
+                 var c = CreateObject(GOOD, 90, 90, -1);\n\
+                 c->Enter(box);\n\
+                 a->Probe(b, c);\n\
+                 return 1;\n\
+             }\n",
+        );
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "#strict\n\
+             local iExcluded; local iNoContainer; local iAnyContainer;\n\
+             local iFindNext; local iIntTolerant; local iRelative;\n\
+             public func Probe(pOther, pContained) {\n\
+                 if (FindObject(GOOD) == pOther) iExcluded = 1;\n\
+                 if (!FindObject(GOOD, 0,0,0,0, 0, 0, 0, NoContainer(), pOther)) iNoContainer = 1;\n\
+                 if (FindObject(GOOD, 0,0,0,0, 0, 0, 0, AnyContainer()) == pContained) iAnyContainer = 1;\n\
+                 if (FindObject(GOOD, 0,0,0,0, 0, 0, 0, 0, pOther) == pContained) iFindNext = 1;\n\
+                 if (FindObject(GOOD, 0,0,0,0, 0, 0, 0, 7) == pOther) iIntTolerant = 1;\n\
+                 if (FindObject(GOOD, -10,-10, 20,20) == pOther) iRelative = 1;\n\
+             }\n",
+        )
+        .expect("write prober script");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let snapshot = engine.snapshot();
+        let prober = snapshot
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "GOOD")
+            .min_by_key(|object| object.id)
+            .expect("prober created");
+        let flag = |name: &str| prober.local_vars.get(name).cloned();
+        assert_eq!(
+            flag("iExcluded"),
+            Some(lc_script::Value::Int(1)),
+            "local calls exclude the caller (C4Script.cpp:2131)"
+        );
+        assert_eq!(
+            flag("iNoContainer"),
+            Some(lc_script::Value::Int(1)),
+            "NO_CONTAINER in the 9th slot filters contained objects"
+        );
+        assert_eq!(
+            flag("iAnyContainer"),
+            Some(lc_script::Value::Int(1)),
+            "ANY_CONTAINER in the 9th slot requires containment"
+        );
+        assert_eq!(
+            flag("iFindNext"),
+            Some(lc_script::Value::Int(1)),
+            "the 10th slot is pFindNext"
+        );
+        assert_eq!(
+            flag("iIntTolerant"),
+            Some(lc_script::Value::Int(1)),
+            "a non-sentinel int container is no filter, not an error"
+        );
+        assert_eq!(
+            flag("iRelative"),
+            Some(lc_script::Value::Int(1)),
+            "local calls offset the search rect by the caller's position \
+             (C4Script.cpp:2115-2119)"
+        );
+    }
+
+    #[test]
     fn join_broadcasts_initialize_player_to_rule_objects_like_cpp() {
         // C4GameScriptHost::GRBroadcast (C4ScriptHost.cpp:234-249): every
         // live object with a C4D_Goal|C4D_Rule|C4D_Environment category bit
