@@ -161,6 +161,9 @@ pub struct Scenario {
     /// the global script engine (C4Game::LoadScenarioScripts,
     /// C4Game.cpp:3317-3343).
     system_scripts: Vec<(String, String)>,
+    /// The four C4SPlrStart slots, consumed by joining players
+    /// (C4Player::ScenarioInit, C4Player.cpp:670-777).
+    player_starts: Vec<PlayerStart>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -389,6 +392,7 @@ impl Scenario {
             base_sell_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_SELL) != 0,
             landscape_insert_thrust: manifest.core.game.realism.landscape_insert_thrust != 0,
             system_scripts: load_scenario_system_scripts(group)?,
+            player_starts: PlayerStart::slots_from_legacy(&manifest.core.players),
         })
     }
 
@@ -448,6 +452,9 @@ impl Scenario {
             engine.install_additional_global_scripts(&self.system_scripts);
         }
         engine.configure_objectives(self.objectives.clone());
+        // C4SPlrStart outlives scenario load: ScenarioInit reads it when a
+        // player joins (C4Player.cpp:670-777).
+        engine.set_player_starts(self.player_starts.clone());
         if let Some(landscape) = &self.landscape {
             engine.set_landscape(landscape.clone());
         } else {
@@ -931,6 +938,7 @@ impl Scenario {
             base_sell_enabled: false,
             landscape_insert_thrust: false,
             system_scripts: Vec::new(),
+            player_starts: PlayerStart::slots_from_legacy(&[]),
         })
     }
 }
@@ -1146,6 +1154,91 @@ impl Default for LegacyPlayer {
             home_base_production: Vec::new(),
             magic: Vec::new(),
         }
+    }
+}
+
+/// `C4S_MaxPlayer` (C4Scenario.h): four `[PlayerN]` start slots; a joining
+/// player uses slot `Number % C4S_MaxPlayer` (C4Player.cpp:673).
+pub const MAX_PLAYER_STARTS: usize = 4;
+
+/// One `C4SPlrStart` slot (compiled at C4Scenario.cpp:276-291), retained
+/// after `Scenario::apply` because `C4Player::ScenarioInit`
+/// (C4Player.cpp:670-777) consumes it at JOIN time, not load time. ID lists
+/// keep their file order — placement iterates them in order, drawing from
+/// the synced RNG per entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerStart {
+    /// `StandardCrew` (old crew spec; C4ID_None when absent).
+    pub native_crew: Option<String>,
+    /// `Clonks` — the old-spec crew COUNT C4SVal.
+    pub crew_count: LegacyC4SVal,
+    /// `Wealth`.
+    pub wealth: LegacyC4SVal,
+    /// `Position` (map coordinates; -1 = unset).
+    pub position: [i32; 2],
+    /// `EnforcePosition`.
+    pub enforce_position: bool,
+    /// `Crew` — the new-spec ready-crew ID list.
+    pub ready_crew: Vec<(String, i32)>,
+    /// `Buildings`.
+    pub ready_base: Vec<(String, i32)>,
+    /// `Vehicles`.
+    pub ready_vehic: Vec<(String, i32)>,
+    /// `Material`.
+    pub ready_material: Vec<(String, i32)>,
+    /// `Knowledge`.
+    pub build_knowledge: Vec<(String, i32)>,
+    /// `HomeBaseMaterial`.
+    pub home_base_material: Vec<(String, i32)>,
+    /// `HomeBaseProduction`.
+    pub home_base_production: Vec<(String, i32)>,
+    /// `Magic`.
+    pub magic: Vec<(String, i32)>,
+}
+
+impl Default for PlayerStart {
+    fn default() -> Self {
+        PlayerStart::from_legacy(&LegacyPlayer::default())
+    }
+}
+
+impl PlayerStart {
+    fn from_legacy(player: &LegacyPlayer) -> Self {
+        // A bare `ID` entry counts as 1 (C4IDList textual entries always
+        // carry counts; the default covers hand-written content), while an
+        // explicit `ID=0` stays zero (GoldRush pins `Magic=EXTG=0;`).
+        let id_list = |entries: &LegacyIdList| {
+            entries
+                .iter()
+                .map(|entry| (entry.id.clone(), entry.count.unwrap_or(1)))
+                .collect()
+        };
+        Self {
+            native_crew: player.standard_crew.clone(),
+            crew_count: player.clonks,
+            wealth: player.wealth,
+            position: player.position,
+            enforce_position: player.enforce_position,
+            ready_crew: id_list(&player.crew),
+            ready_base: id_list(&player.buildings),
+            ready_vehic: id_list(&player.vehicles),
+            ready_material: id_list(&player.material),
+            build_knowledge: id_list(&player.knowledge),
+            home_base_material: id_list(&player.home_base_material),
+            home_base_production: id_list(&player.home_base_production),
+            magic: id_list(&player.magic),
+        }
+    }
+
+    fn slots_from_legacy(players: &[LegacyPlayer]) -> Vec<PlayerStart> {
+        (0..MAX_PLAYER_STARTS)
+            .map(|index| {
+                players
+                    .get(index)
+                    .map(PlayerStart::from_legacy)
+                    .unwrap_or_default()
+            })
+            .collect()
     }
 }
 
@@ -2262,16 +2355,16 @@ fn parse_c4sval_std(value: &str) -> Option<i32> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct LegacyC4SVal {
-    std: i32,
-    rnd: i32,
-    min: i32,
-    max: i32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyC4SVal {
+    pub std: i32,
+    pub rnd: i32,
+    pub min: i32,
+    pub max: i32,
 }
 
 impl LegacyC4SVal {
-    const fn new(std: i32, rnd: i32, min: i32, max: i32) -> Self {
+    pub const fn new(std: i32, rnd: i32, min: i32, max: i32) -> Self {
         Self { std, rnd, min, max }
     }
 
@@ -2284,7 +2377,7 @@ impl LegacyC4SVal {
     /// `BoundBy(Std + Random(2 * Rnd + 1) - Rnd, Min, Max)`. BoundBy makes no
     /// ordered-bounds assumption (Standard.h), so this avoids `clamp`'s
     /// min<=max panic.
-    fn evaluate(self, rng: &mut crate::rng::LcgRng) -> i32 {
+    pub fn evaluate(self, rng: &mut crate::rng::LcgRng) -> i32 {
         let value = self.std + rng.random(2 * self.rnd + 1) - self.rnd;
         if value < self.min {
             self.min
@@ -5369,6 +5462,7 @@ global func Step(state, frame, random)
             base_sell_enabled: true,
             landscape_insert_thrust: false,
             system_scripts: Vec::new(),
+            player_starts: PlayerStart::slots_from_legacy(&[]),
         };
 
         let mut engine = Engine::with_seed(11);
@@ -5451,6 +5545,7 @@ global func Step(state, frame, random)
             base_sell_enabled: true,
             landscape_insert_thrust: false,
             system_scripts: Vec::new(),
+            player_starts: PlayerStart::slots_from_legacy(&[]),
         };
 
         let mut engine = Engine::with_seed(7);
@@ -5559,6 +5654,59 @@ global func Step(state, frame, random)
             .apply(&mut engine)
             .expect("apply tolerates script errors like C++");
         (engine, created)
+    }
+
+    #[test]
+    fn legacy_player_starts_are_retained_for_the_join_pipeline() {
+        // C4SPlrStart (compiled at C4Scenario.cpp:276-291) feeds
+        // C4Player::ScenarioInit at join time (C4Player.cpp:670-777):
+        // after apply the engine must still know all four start slots —
+        // wealth/crew/position/ready lists — for joining players.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Starts\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Player1]\nWealth=50,10,0,250\nCrew=GOOD=2\nBuildings=GOOD=1\n\
+             Vehicles=GOOD=1\nMaterial=GOOD=2\nKnowledge=GOOD=1\n\
+             HomeBaseMaterial=GOOD=3\nHomeBaseProduction=GOOD=2\nMagic=GOOD=0\n\
+             Position=120,160\nEnforcePosition=1\nStandardCrew=GOOD\nClonks=2,0,1,10\n",
+        )
+        .expect("write scenario core");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let start = engine.player_start(0).expect("start slot 0 exists");
+        assert_eq!(start.wealth, LegacyC4SVal::new(50, 10, 0, 250));
+        assert_eq!(start.crew_count, LegacyC4SVal::new(2, 0, 1, 10));
+        assert_eq!(start.native_crew.as_deref(), Some("GOOD"));
+        assert_eq!(start.position, [120, 160]);
+        assert!(start.enforce_position);
+        assert_eq!(start.ready_crew, vec![("GOOD".to_string(), 2)]);
+        assert_eq!(start.ready_base, vec![("GOOD".to_string(), 1)]);
+        assert_eq!(start.ready_vehic, vec![("GOOD".to_string(), 1)]);
+        assert_eq!(start.ready_material, vec![("GOOD".to_string(), 2)]);
+        assert_eq!(start.build_knowledge, vec![("GOOD".to_string(), 1)]);
+        assert_eq!(start.home_base_material, vec![("GOOD".to_string(), 3)]);
+        assert_eq!(start.home_base_production, vec![("GOOD".to_string(), 2)]);
+        // A zero count stays zero (GoldRush pins `Magic=EXTG=0;`).
+        assert_eq!(start.magic, vec![("GOOD".to_string(), 0)]);
+
+        // Unconfigured slots carry the C4SPlrStart defaults
+        // (C4Scenario.cpp:294-300 Default()): Wealth (0,0,0,250),
+        // Clonks (1,0,1,10), Position (-1,-1).
+        let other = engine.player_start(3).expect("start slot 3 exists");
+        assert_eq!(other.wealth, LegacyC4SVal::new(0, 0, 0, 250));
+        assert_eq!(other.crew_count, LegacyC4SVal::new(1, 0, 1, 10));
+        assert_eq!(other.position, [-1, -1]);
+        assert!(other.ready_crew.is_empty());
+        assert!(engine.player_start(4).is_none(), "only four start slots");
     }
 
     #[test]

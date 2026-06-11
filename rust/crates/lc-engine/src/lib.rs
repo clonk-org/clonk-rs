@@ -72,7 +72,10 @@ pub use message::{
 pub use pathfinder::{PathFinder, PathWaypoint};
 pub use player::{Player, PlayerConfig, PlayerState, PlayerStatus, PlayerViewport};
 pub use record::{Playback, PlaybackError, Recorder, Recording};
-pub use scenario::{Scenario, ScenarioError, ScenarioObjectives, SkyConfig};
+pub use scenario::{
+    LegacyC4SVal, PlayerStart, Scenario, ScenarioError, ScenarioObjectives, SkyConfig,
+    MAX_PLAYER_STARTS,
+};
 pub use sky::{SkyFrame, SkyParallaxMode, SkySettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7496,6 +7499,9 @@ pub struct Engine {
     players: HashMap<i32, Player>,
     crew_selection: HashMap<i32, CrewSelection>,
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
+    /// The four C4SPlrStart slots retained from the scenario: consumed at
+    /// player JOIN by the ScenarioInit port (C4Player.cpp:670-777).
+    player_starts: Vec<scenario::PlayerStart>,
     team_home_base_rule: bool,
     construction_needs_material: bool,
     structures_need_energy: bool,
@@ -8721,6 +8727,10 @@ impl Engine {
             players: HashMap::new(),
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
+            player_starts: vec![
+                scenario::PlayerStart::default();
+                scenario::MAX_PLAYER_STARTS
+            ],
             team_home_base_rule: false,
             construction_needs_material: false,
             structures_need_energy: false,
@@ -8788,6 +8798,20 @@ impl Engine {
     pub fn set_landscape_insert_thrust(&mut self, enabled: bool) {
         self.landscape_insert_thrust = enabled;
         self.mass_movers.set_landscape_insert_thrust(enabled);
+    }
+
+    /// Installs the scenario's C4SPlrStart slots (set by `Scenario::apply`;
+    /// C4Player::ScenarioInit reads them at join, C4Player.cpp:670-777).
+    pub fn set_player_starts(&mut self, starts: Vec<scenario::PlayerStart>) {
+        self.player_starts = starts;
+        self.player_starts
+            .resize_with(scenario::MAX_PLAYER_STARTS, Default::default);
+    }
+
+    /// One C4SPlrStart slot; `None` past `C4S_MaxPlayer` (4). Joining
+    /// players use slot `Number % C4S_MaxPlayer` (C4Player.cpp:673).
+    pub fn player_start(&self, index: usize) -> Option<&scenario::PlayerStart> {
+        self.player_starts.get(index)
     }
 
     pub fn register_player(&mut self, config: PlayerConfig) -> Result<(), EngineError> {
