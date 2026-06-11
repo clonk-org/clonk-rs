@@ -12677,6 +12677,24 @@ fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
         target_id = parse_object_reference_argument(arg, "RemoveObject", "target")?;
     }
 
+    // FnRemoveObject (C4Script.cpp:455-460): no argument means the calling
+    // object, and ANY object may be removed — a foreign target's removal
+    // lands in its own scope (GoldRush's DoInitialize culls placed editor
+    // leftovers via RemoveObject(FindObject(_ETG))).
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    if let Some(target) = target_id {
+        if Some(target) != active {
+            return match call_world_object_function(target, "RemoveObject", &[]) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = match borrow.as_mut() {
@@ -12688,12 +12706,6 @@ fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
-        }
 
         object.mark_destroy();
         Ok(Value::Bool(true))

@@ -333,6 +333,14 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         .transpose()
         .context("parsing --ticks")?
         .unwrap_or(120);
+    // `--defs FXU1,CPFR`: log per-definition object counts at each stage —
+    // the shadow-diff histogram's headless counterpart.
+    let watched_defs: Vec<String> = args
+        .iter()
+        .position(|arg| arg == "--defs")
+        .and_then(|index| args.get(index + 1))
+        .map(|value| value.split(',').map(str::to_string).collect())
+        .unwrap_or_default();
 
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -391,10 +399,31 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         .apply(&mut engine)
         .map_err(|error| anyhow!("apply failed: {error}"))?;
 
+    let log_watched = |engine: &lc_engine::Engine, stage: &str| {
+        if watched_defs.is_empty() {
+            return;
+        }
+        let snapshot = engine.snapshot();
+        let counts: Vec<String> = watched_defs
+            .iter()
+            .map(|id| {
+                let count = snapshot
+                    .objects
+                    .iter()
+                    .filter(|object| object.definition_id == *id)
+                    .count();
+                let known = engine.definition_ids().any(|known| known == id);
+                format!("{id}={count}{}", if known { "" } else { " (def missing)" })
+            })
+            .collect();
+        tracing::info!(stage, counts = counts.join(" "), "watched defs");
+    };
+
     tracing::info!(
         objects = engine.snapshot().objects.len(),
         "scenario-errors: applied"
     );
+    log_watched(&engine, "applied");
 
     // Join like the real game does (CID_JoinPlr -> C4Game::JoinPlayer ->
     // ScenarioInit): crew and player-owned objects arrive here, then
@@ -434,6 +463,7 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         start_y = joined.start_y,
         "scenario-errors: player joined"
     );
+    log_watched(&engine, "joined");
     for frame in 0..ticks {
         let started = std::time::Instant::now();
         match engine.tick() {
@@ -453,6 +483,7 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
             }
         }
     }
+    log_watched(&engine, "ticked");
     tracing::info!("scenario-errors: done ({ticks} ticks)");
     Ok(())
 }

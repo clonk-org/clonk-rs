@@ -20565,6 +20565,52 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
     Value::Proplist(map)
 }
 
+/// The live `ObjectState` a snapshot entry describes — the full scope
+/// nested calls require (mirrors the restore_state mapping; container and
+/// contents come straight from the snapshot since no two-phase
+/// denumeration is needed for a read-mostly scope seed).
+fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
+    ObjectState {
+        position: snapshot.position,
+        velocity: snapshot.velocity,
+        rotation: snapshot.rotation.rem_euclid(360),
+        energy: snapshot.energy,
+        construction: snapshot.construction,
+        damage: snapshot.damage,
+        magic_energy: snapshot.magic_energy,
+        magic_capacity: snapshot.magic_capacity,
+        action: snapshot.action.clone(),
+        direction: snapshot.direction,
+        command_direction: snapshot.command_direction,
+        effects: snapshot.effects.clone(),
+        vertices: snapshot.vertices.clone(),
+        container: snapshot.container,
+        layer: None,
+        contents: snapshot.contents.clone(),
+        components: snapshot.components.clone(),
+        status: snapshot.status,
+        owner: snapshot.owner,
+        category: snapshot.category,
+        crew_member: snapshot.crew_member,
+        alive: snapshot.alive,
+        base_graphics: snapshot.base_graphics.clone(),
+        graphics_overlays: snapshot.graphics_overlays.clone(),
+        draw_transform: snapshot.draw_transform,
+        local_vars: snapshot.local_vars.clone(),
+        on_fire: snapshot.on_fire,
+        fire_phase: snapshot.fire_phase,
+        fire_caused_by: snapshot.fire_caused_by,
+        info_physical: snapshot.info_physical,
+        temporary_physical: snapshot.temporary_physical,
+        physical_changes: snapshot.physical_changes.clone(),
+        breath: snapshot.breath,
+        entrance_status: false,
+        color: 0,
+        shape_override: None,
+        ocf: OCF_NORMAL,
+    }
+}
+
 fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldContext {
     let next_object_id = snapshot
         .objects
@@ -20627,6 +20673,11 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.container,
                 object.draw_transform,
             )
+            // Nested calls (obj->Method, foreign RemoveObject) need a full
+            // scope for WORLD objects too — GoldRush re-runs the placed
+            // cannon's Initialize from InitializePlayer
+            // (Goldrush.c4s/Script.c:262 → pObj->~Initialize()).
+            .with_full_state(Rc::new(object_state_from_snapshot(object)))
         }),
         snapshot.landscape.clone(),
         definition_metadata,

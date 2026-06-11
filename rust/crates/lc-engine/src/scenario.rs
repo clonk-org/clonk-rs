@@ -7229,6 +7229,71 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn scenario_initialize_finds_and_removes_placed_objects_like_cpp() {
+        // GoldRush's DoInitialize culls placed editor leftovers:
+        //   if(FindObject(_ETG)) RemoveObject(FindObject(_ETG));
+        // (Goldrush.c4s/Script.c:28) and re-runs the placed cannon's
+        // Initialize via FindObject(CCAN). The scenario script must see
+        // Objects.txt placements through FindObject.
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let box_core = defs_root.join("Box.c4d");
+        std::fs::create_dir_all(&box_core).expect("box definition dir");
+        std::fs::write(
+            box_core.join("DefCore.txt"),
+            "[DefCore]\nid=BOX1\nName=Box\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write box defcore");
+        std::fs::write(box_core.join("Script.c"), "// box\n").expect("box script");
+
+        let scenario_dir = dir.path().join("LegacyObjects.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Legacy Objects\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=BOX1\nNumber=100\nStatus=1\nCategory=0\nX=10\nY=20\n",
+        )
+        .expect("write objects");
+        std::fs::write(
+            scenario_dir.join("Script.c"),
+            "#strict\nprotected func InitializePlayer(int iPlr) {\n\
+                 if(FindObject(BOX1)) RemoveObject(FindObject(BOX1));\n\
+                 return 1;\n\
+             }\n",
+        )
+        .expect("write scenario script");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("legacy scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("legacy scenario applies");
+        join_test_player(&mut engine);
+
+        // AssignRemoval clears Status immediately (C4Object.cpp); the
+        // carcass is purged at frame end.
+        let count = engine
+            .snapshot()
+            .objects
+            .iter()
+            .filter(|object| {
+                object.definition_id == "BOX1" && object.status != ObjectStatus::Deleted
+            })
+            .count();
+        assert_eq!(
+            count, 0,
+            "the scenario script's FindObject saw the placed object and removed it"
+        );
+    }
+
+    #[test]
     fn objects_txt_placements_do_not_fire_construction_callbacks_like_cpp() {
         // C4GameObjects::Load (C4GameObjects.cpp:535-618) only compiles the
         // entries and denumerates pointers — Construction/Initialize fire
