@@ -1,6 +1,5 @@
 use crate::landscape::Landscape;
-use crate::rng::LcgRng;
-use crate::{MaterialId, MaterialSet};
+use crate::{Engine, MaterialId, MaterialSet};
 
 const MAX_MASS_MOVERS: usize = 10_000;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -128,32 +127,24 @@ impl MassMoverSet {
     }
 
     #[allow(dead_code)]
-    pub fn create(
-        &mut self,
-        landscape: &mut Landscape,
-        materials: &MaterialSet,
-        x: i32,
-        y: i32,
-        execute_immediately: bool,
-        rng: &mut LcgRng,
-    ) -> bool {
+    pub fn create(&mut self, engine: &mut Engine, x: i32, y: i32, execute_immediately: bool) -> bool {
         self.spawn_queue.push(MassMoverSpawn {
             x,
             y,
             execute_immediately,
         });
         let previous = self.count;
-        self.flush_spawn_queue(landscape, materials, rng);
+        self.flush_spawn_queue(engine);
         self.count > previous
     }
 
-    pub fn execute(
-        &mut self,
-        landscape: &mut Landscape,
-        materials: &MaterialSet,
-        rng: &mut LcgRng,
-    ) {
-        self.flush_spawn_queue(landscape, materials, rng);
+    /// Runs every mover for the frame. Takes the whole engine so material
+    /// reactions can dispatch `Type=Script` functions mid-loop (the
+    /// C4MassMover.cpp:163-167 call position — RNG order depends on the
+    /// script draws landing exactly here). The set itself is taken OUT of
+    /// the engine for the duration (`Engine::tick_mass_movers`).
+    pub fn execute(&mut self, engine: &mut Engine) {
+        self.flush_spawn_queue(engine);
         // C4MassMoverSet::Execute (C4MassMover.cpp:50-65): two speed passes,
         // slots walked DESCENDING from the last chunk entry.
         self.ensure_slots();
@@ -164,12 +155,12 @@ impl MassMoverSet {
                 if self.slots[index].is_none() {
                     continue;
                 }
-                if !self.execute_mover_at(index, landscape, materials, rng) {
+                if !self.execute_mover_at(engine, index) {
                     self.release_slot(index);
                 }
             }
         }
-        self.flush_spawn_queue(landscape, materials, rng);
+        self.flush_spawn_queue(engine);
     }
 
     fn release_slot(&mut self, index: usize) {
@@ -178,65 +169,43 @@ impl MassMoverSet {
         }
     }
 
-    fn flush_spawn_queue(
-        &mut self,
-        landscape: &mut Landscape,
-        materials: &MaterialSet,
-        rng: &mut LcgRng,
-    ) {
+    fn flush_spawn_queue(&mut self, engine: &mut Engine) {
         while let Some(spawn) = self.spawn_queue.pop() {
-            let Some(index) = self.try_add_mover(landscape, materials, spawn.x, spawn.y) else {
+            let Some(index) = self.try_add_mover(engine, spawn.x, spawn.y) else {
                 continue;
             };
-            if spawn.execute_immediately && !self.execute_mover_at(index, landscape, materials, rng)
-            {
+            if spawn.execute_immediately && !self.execute_mover_at(engine, index) {
                 self.release_slot(index);
             }
         }
     }
 
-    fn execute_mover_at(
-        &mut self,
-        index: usize,
-        landscape: &mut Landscape,
-        materials: &MaterialSet,
-        rng: &mut LcgRng,
-    ) -> bool {
+    fn execute_mover_at(&mut self, engine: &mut Engine, index: usize) -> bool {
         let landscape_insert_thrust = self.landscape_insert_thrust;
         let (alive, spawn) = {
             let Some(mover) = self.slots.get_mut(index).and_then(Option::as_mut) else {
                 return false;
             };
-            mover.execute(landscape, materials, rng, landscape_insert_thrust)
+            mover.execute(engine, landscape_insert_thrust)
         };
         if let Some(spawn) = spawn {
-            self.spawn_mover(landscape, materials, rng, spawn);
+            self.spawn_mover(engine, spawn);
         }
         alive
     }
 
-    fn spawn_mover(
-        &mut self,
-        landscape: &mut Landscape,
-        materials: &MaterialSet,
-        rng: &mut LcgRng,
-        spawn: MassMoverSpawn,
-    ) {
-        let Some(index) = self.try_add_mover(landscape, materials, spawn.x, spawn.y) else {
+    fn spawn_mover(&mut self, engine: &mut Engine, spawn: MassMoverSpawn) {
+        let Some(index) = self.try_add_mover(engine, spawn.x, spawn.y) else {
             return;
         };
-        if spawn.execute_immediately && !self.execute_mover_at(index, landscape, materials, rng) {
+        if spawn.execute_immediately && !self.execute_mover_at(engine, index) {
             self.release_slot(index);
         }
     }
 
-    fn try_add_mover(
-        &mut self,
-        landscape: &Landscape,
-        materials: &MaterialSet,
-        x: i32,
-        y: i32,
-    ) -> Option<usize> {
+    fn try_add_mover(&mut self, engine: &Engine, x: i32, y: i32) -> Option<usize> {
+        let landscape = engine.landscape.as_ref()?;
+        let materials = &engine.materials;
         let material_id = landscape.material_at(x, y)?;
         let material = materials.get_by_id(material_id)?;
         if !material.instable() {
@@ -259,49 +228,61 @@ impl MassMover {
 
     fn execute(
         &mut self,
-        landscape: &mut Landscape,
-        materials: &MaterialSet,
-        rng: &mut LcgRng,
+        engine: &mut Engine,
         landscape_insert_thrust: bool,
     ) -> (bool, Option<MassMoverSpawn>) {
         if !self.active {
             return (false, None);
         }
 
-        let Some(current_material) = landscape.material_at(self.x, self.y) else {
-            return (false, None);
+        let target = {
+            let Some(landscape) = engine.landscape.as_ref() else {
+                return (false, None);
+            };
+            let materials = &engine.materials;
+            let Some(current_material) = landscape.material_at(self.x, self.y) else {
+                return (false, None);
+            };
+            if current_material != self.material {
+                return (false, None);
+            }
+
+            let (surface_x, surface_y) =
+                landscape.find_liquid_surface(self.material, self.x, self.y, materials);
+            self.x = surface_x;
+            self.y = surface_y;
+
+            find_liquid_target(landscape, materials, self.material, self.x, self.y)
         };
-        if current_material != self.material {
-            return (false, None);
-        }
 
-        let (surface_x, surface_y) =
-            landscape.find_liquid_surface(self.material, self.x, self.y, materials);
-        self.x = surface_x;
-        self.y = surface_y;
-
-        let Some(target) = find_liquid_target(landscape, materials, self.material, self.x, self.y)
-        else {
+        let Some(target) = target else {
+            // Corrosion check (C4MassMover.cpp:163-167): the reaction —
+            // including Type=Script functions — runs through the engine.
             for (dx, dy) in [(0, 1), (-1, 0), (1, 0)] {
-                if materials
+                if engine
                     .execute_mass_move_reaction(
-                        landscape,
                         self.material,
                         self.x,
                         self.y,
                         self.x + dx,
                         self.y + dy,
-                        rng,
                     )
                     .consumes_material()
                 {
-                    let _ = landscape.extract_material_at(self.x, self.y);
+                    if let Some(landscape) = engine.landscape.as_mut() {
+                        let _ = landscape.extract_material_at(self.x, self.y);
+                    }
                     return (true, None);
                 }
             }
             return (false, None);
         };
 
+        let Some(landscape) = engine.landscape.as_mut() else {
+            return (false, None);
+        };
+        let materials = &engine.materials;
+        let rng = &mut engine.rng;
         let displaced_material = if landscape_insert_thrust {
             landscape.material_at(target.0, target.1)
         } else {
@@ -402,6 +383,20 @@ mod tests {
         )
     }
 
+    /// Engine harness: install materials/landscape and seed the movers like
+    /// the dig/blast rescan path does.
+    fn engine_with(materials: MaterialSet, landscape: Landscape) -> Engine {
+        let mut engine = Engine::with_seed(2);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        if let Some(landscape) = engine.landscape.as_ref() {
+            engine
+                .mass_movers
+                .seed_from_landscape(landscape, &engine.materials);
+        }
+        engine
+    }
+
     #[test]
     fn transfer_consumes_random10_before_rnd3_for_each_move() {
         let materials = materials(
@@ -420,21 +415,18 @@ mod tests {
             1,
             vec![crate::LiquidSegment::with_material(0, 0, Some(water))],
         );
+        let mut engine = engine_with(materials, landscape);
 
-        let mut movers = MassMoverSet::new();
-        movers.seed_from_landscape(&landscape, &materials);
-        let mut rng = LcgRng::seed_from_u64(2);
-
-        let mut expected = LcgRng::seed_from_u64(2);
+        let mut expected = engine.rng.clone();
         let _ = expected.random(10);
         let _ = expected.rnd3();
         let _ = expected.random(10);
         let _ = expected.rnd3();
 
-        movers.execute(&mut landscape, &materials, &mut rng);
+        engine.tick_mass_movers();
 
-        assert_eq!(rng.count, expected.count);
-        assert_eq!(rng.hold, expected.hold);
+        assert_eq!(engine.rng.count, expected.count);
+        assert_eq!(engine.rng.hold, expected.hold);
     }
 
     #[test]
@@ -462,12 +454,9 @@ mod tests {
             1,
             vec![crate::LiquidSegment::with_material(4, 4, Some(acid))],
         );
+        let mut engine = engine_with(materials, landscape);
 
-        let mut movers = MassMoverSet::new();
-        movers.seed_from_landscape(&landscape, &materials);
-        let mut rng = LcgRng::seed_from_u64(2);
-
-        let mut expected = LcgRng::seed_from_u64(2);
+        let mut expected = engine.rng.clone();
         assert!(crate::material::evaluate_corrosion(
             100,
             100,
@@ -476,9 +465,79 @@ mod tests {
         ));
         crate::material::consume_corrosion_effect_rng(&mut expected);
 
-        movers.execute(&mut landscape, &materials, &mut rng);
+        engine.tick_mass_movers();
 
-        assert_eq!(rng.count, expected.count);
-        assert_eq!(rng.hold, expected.hold);
+        assert_eq!(engine.rng.count, expected.count);
+        assert_eq!(engine.rng.hold, expected.hold);
+    }
+
+    #[test]
+    fn blocked_mover_runs_mass_move_script_reaction_like_cpp() {
+        // mrfScript on meeMassMove (C4MassMover.cpp:163-167 +
+        // C4Material.cpp:800-835): the reaction script runs at the
+        // corrosion-check position with xdir=ydir=0 and pfPosChanged=null —
+        // only the return value matters: truthy consumes the material
+        // (ExtractMaterial), and the by-ref write-backs land in discarded
+        // locals.
+        let materials = materials(
+            r#"
+            [Material Goo]
+            Name=Goo
+            Density=25
+            Instable=1
+            MaxSlide=0
+
+            [Reaction]
+            Type=Script
+            ScriptFunc=GooEats
+            TargetSpec=Rock
+
+            [Material Rock]
+            Name=Rock
+            Density=80
+            "#,
+        );
+        let goo = materials.id_of("Goo").expect("goo material");
+        let rock = materials.id_of("Rock").expect("rock material");
+        let mut landscape = Landscape::flat_with_material(3, 5, Some(rock));
+        landscape.set_default_liquid_material(Some(goo));
+        landscape.set_liquid_column(
+            1,
+            vec![crate::LiquidSegment::with_material(4, 4, Some(goo))],
+        );
+        let mut engine = engine_with(materials, landscape);
+        engine
+            .install_scenario_script(
+                "Scenario",
+                r#"
+                global func GooEats(x, y, lsx, lsy, xdir, ydir, pxs_mat, ls_mat, event) {
+                    // meeMassMove = 2; dirs are Fix0; the landscape side is
+                    // a real material
+                    if (event != 2) { return 0; }
+                    if (xdir != 0) { return 0; }
+                    if (ydir != 0) { return 0; }
+                    if (ls_mat < 0) { return 0; }
+                    return 1;
+                }
+                "#,
+            )
+            .expect("scenario installs");
+
+        let had_goo = engine
+            .landscape
+            .as_ref()
+            .and_then(|landscape| landscape.material_at(1, 4));
+        assert_eq!(had_goo, Some(goo), "fixture: goo sits at (1,4)");
+
+        engine.tick_mass_movers();
+
+        let remaining = engine
+            .landscape
+            .as_ref()
+            .and_then(|landscape| landscape.material_at(1, 4));
+        assert_eq!(
+            remaining, None,
+            "the truthy script return consumed the goo (ExtractMaterial)"
+        );
     }
 }

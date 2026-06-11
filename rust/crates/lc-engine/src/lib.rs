@@ -10694,20 +10694,7 @@ impl Engine {
         self.control_ticks();
         self.tick_pxs();
         self.tick_particles();
-        let mut rescan_mass_movers = false;
-        if let Some(landscape) = self.landscape.as_mut() {
-            self.mass_movers
-                .execute(landscape, &self.materials, &mut self.rng);
-            if landscape.take_mass_mover_dirty() {
-                rescan_mass_movers = true;
-            }
-        }
-        if rescan_mass_movers {
-            if let Some(landscape) = self.landscape.as_ref() {
-                self.mass_movers
-                    .seed_from_landscape(landscape, &self.materials);
-            }
-        }
+        self.tick_mass_movers();
         self.weather_events.clear();
         self.environment.advance_frame(&mut self.rng, frame);
         self.tick_weather_events(frame)?;
@@ -17704,6 +17691,100 @@ impl Engine {
                 true
             }
         }
+    }
+
+    /// `C4MassMoverSet::Execute` for the frame. The set is taken OUT of the
+    /// engine for the duration so movers can dispatch `Type=Script` material
+    /// reactions through `&mut Engine` at the exact C++ call position
+    /// (C4MassMover.cpp:163-167 — RNG order). Nothing reaches the empty
+    /// placeholder while the loop runs (no host function creates movers).
+    fn tick_mass_movers(&mut self) {
+        if self.landscape.is_none() {
+            return;
+        }
+        let mut movers = std::mem::take(&mut self.mass_movers);
+        movers.execute(self);
+        self.mass_movers = movers;
+        let dirty = self
+            .landscape
+            .as_mut()
+            .map(Landscape::take_mass_mover_dirty)
+            .unwrap_or(false);
+        if dirty {
+            if let Some(landscape) = self.landscape.as_ref() {
+                self.mass_movers
+                    .seed_from_landscape(landscape, &self.materials);
+            }
+        }
+    }
+
+    /// One mass-move reaction (meeMassMove) through the engine, so
+    /// `Type=Script` functions can run (mrfScript on meeMassMove,
+    /// C4MassMover.cpp:163-167: xdir=ydir=Fix0, pfPosChanged=nullptr — the
+    /// by-ref write-backs land in discarded locals; only a truthy return
+    /// matters, consuming the material). Builtin kinds delegate to the
+    /// MaterialSet path unchanged.
+    fn execute_mass_move_reaction(
+        &mut self,
+        pxs_material: MaterialId,
+        pxs_x: i32,
+        pxs_y: i32,
+        landscape_x: i32,
+        landscape_y: i32,
+    ) -> material::MaterialReactionExecution {
+        let landscape_material = self
+            .landscape
+            .as_ref()
+            .and_then(|landscape| landscape.material_at(landscape_x, landscape_y));
+        let reaction = self.materials.reaction_for_event(
+            Some(pxs_material),
+            landscape_material,
+            MaterialInteractionEvent::MassMove,
+        );
+        if let MaterialReactionKind::Script { func } = reaction.kind {
+            let Some(function) = self
+                .materials
+                .script_reaction_name(func)
+                .map(str::to_string)
+            else {
+                return material::MaterialReactionExecution::Unhandled;
+            };
+            let args = [
+                Value::Int(pxs_x),
+                Value::Int(pxs_y),
+                Value::Int(landscape_x),
+                Value::Int(landscape_y),
+                Value::Int(0),
+                Value::Int(0),
+                Value::Int(pxs_material.index() as i32),
+                Value::Int(
+                    landscape_material
+                        .map(|id| id.index() as i32)
+                        .unwrap_or(-1), // MNone
+                ),
+                Value::Int(MaterialInteractionEvent::MassMove.index() as i32),
+            ];
+            return match self.call_material_reaction_script(&function, &args) {
+                Some((value, _finals))
+                    if !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false)) =>
+                {
+                    material::MaterialReactionExecution::Consumed
+                }
+                _ => material::MaterialReactionExecution::Unhandled,
+            };
+        }
+        let Some(landscape) = self.landscape.as_mut() else {
+            return material::MaterialReactionExecution::Unhandled;
+        };
+        self.materials.execute_mass_move_reaction(
+            landscape,
+            pxs_material,
+            pxs_x,
+            pxs_y,
+            landscape_x,
+            landscape_y,
+            &mut self.rng,
+        )
     }
 
     /// Runs a `Type=Script` material reaction function (mrfScript,
