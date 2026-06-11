@@ -150,6 +150,14 @@ impl Group {
         }
     }
 
+    /// Opens a packed group from in-memory bytes (gz-wrapped or raw) —
+    /// e.g. the PlrData blob a CID_JoinPlr control packet carries
+    /// (C4ControlJoinPlayer, C4Control.cpp:731-744 writes the .c4p file
+    /// contents into the packet). `path` only labels error messages.
+    pub fn from_memory(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
+        Self::from_packed_bytes(path, data)
+    }
+
     fn from_packed_bytes(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
         let packed = PackedGroup::from_memory(path, data)?;
         Ok(Self {

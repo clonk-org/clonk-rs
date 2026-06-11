@@ -3,6 +3,7 @@ use crate::rng::LcgRng;
 use crate::{
     control::{
         interpret_player_control_command, parse_control_ini, ControlEvent, ControlPacket,
+        ControlPlayerInfoEntry, JoinPlayerControlData,
         PlayerControlData,
     },
     ActionState, CommandDirection, CommandStackSnapshot, CrewCommandTarget, CrewRole,
@@ -366,6 +367,9 @@ pub struct RuntimeHandle {
     control_log_strings: BTreeMap<u64, Vec<String>>,
     control_packets: BTreeMap<u64, Vec<ControlPacket>>,
     player_controls: HashMap<i32, PlayerInputState>,
+    /// C4PlayerInfo registry (Game.PlayerInfos): CID_PlrInfo fills it,
+    /// CID_JoinPlr resolves `InfoID` against it (C4Control.cpp:716-722).
+    player_infos: HashMap<i32, ControlPlayerInfoEntry>,
 }
 
 impl RecorderHandle {
@@ -392,6 +396,7 @@ impl RuntimeHandle {
             control_log_strings: BTreeMap::new(),
             control_packets: BTreeMap::new(),
             player_controls: HashMap::new(),
+            player_infos: HashMap::new(),
         }
     }
 
@@ -401,11 +406,101 @@ impl RuntimeHandle {
             None => return Ok(()),
         };
         for packet in packets {
-            if let ControlPacket::PlayerControl(data) = packet {
-                self.apply_player_control(&data)
-                    .map_err(|error| format!("{error} (player {})", data.player))?;
+            match packet {
+                ControlPacket::PlayerControl(data) => {
+                    self.apply_player_control(&data)
+                        .map_err(|error| format!("{error} (player {})", data.player))?;
+                }
+                ControlPacket::PlayerInfo(info) => {
+                    // C4ControlPlayerInfo::Execute adds the infos to
+                    // Game.PlayerInfos (C4Control.cpp:1264-1282).
+                    for entry in info.players {
+                        self.player_infos.insert(entry.id, entry);
+                    }
+                }
+                ControlPacket::JoinPlayer(join) => {
+                    self.handle_join_player(&join)?;
+                }
+                _ => {}
             }
         }
+        Ok(())
+    }
+
+    /// `C4ControlJoinPlayer::Execute` (C4Control.cpp:710-775), local
+    /// branch: resolve the info, load the player file (the local filename
+    /// first, the embedded PlrData bytes otherwise) and run the join.
+    fn handle_join_player(&mut self, join: &JoinPlayerControlData) -> Result<(), String> {
+        let Some(info) = self.player_infos.get(&join.info_id).cloned() else {
+            // "Ghost player join: No info" (C4Control.cpp:719-722) — C++
+            // logs and skips.
+            tracing::warn!(info_id = join.info_id, "join without player info; skipped");
+            return Ok(());
+        };
+        if info.script_player || info.no_scenario_init {
+            // Script players skip ScenarioInit (C4Player.cpp:327-343); not
+            // ported yet.
+            tracing::warn!(
+                info_id = join.info_id,
+                "script-player / NoScenarioInit join not supported yet; skipped"
+            );
+            return Ok(());
+        }
+
+        let file = {
+            let path = PathBuf::from(&join.filename);
+            if !join.filename.is_empty() && path.exists() {
+                crate::player_file::PlayerFile::load_from_path(&path)
+                    .map_err(|error| format!("player file {} failed: {error}", path.display()))
+                    .ok()
+            } else if !join.player_data.is_empty() {
+                lc_resources::Group::from_memory(
+                    PathBuf::from(&join.filename),
+                    join.player_data.clone(),
+                )
+                .and_then(|group| {
+                    crate::player_file::PlayerFile::load(&group)
+                        .map_err(|error| lc_resources::GroupError::InvalidGroup(error.to_string()))
+                })
+                .map_err(|error| {
+                    tracing::warn!(%error, "embedded PlrData failed to parse");
+                    error
+                })
+                .ok()
+            } else {
+                None
+            }
+        };
+        let (file_name, pref_color, pref_position, crew) = file
+            .map(|file| (file.name, file.pref_color, file.pref_position, file.crew))
+            .unwrap_or_else(|| ("Neuling".to_string(), 0, 0, Vec::new()));
+
+        let name = if info.name.is_empty() {
+            file_name
+        } else {
+            info.name.clone()
+        };
+        // StartupPlayerCount: the number of players at game start
+        // (C4GameParameters); approximated by the infos seen so far.
+        let startup_player_count = self.player_infos.len().max(1) as i32;
+        let joined = self
+            .engine
+            .join_player(crate::JoinPlayerConfig {
+                name,
+                team: (info.team != 0).then_some(info.team),
+                color_dw: info.color & 0xffffff,
+                pref_color,
+                pref_position,
+                crew,
+                startup_player_count,
+            })
+            .map_err(|error| format!("join failed: {error}"))?;
+        tracing::info!(
+            number = joined.number,
+            start_x = joined.start_x,
+            start_y = joined.start_y,
+            "player joined via control"
+        );
         Ok(())
     }
 
@@ -1480,6 +1575,15 @@ fn load_scenario_into_runtime(
             if let Ok(sources) = crate::scenario::load_system_scripts(&group) {
                 runtime.engine.install_global_scripts(&sources);
             }
+            // Game.Names: the standard clonk names live next to the
+            // System.c4g scripts (C4Game.cpp:2772); the scenario's own
+            // Names.txt overrides them at apply.
+            runtime.engine.set_standard_names(
+                group
+                    .read_file("Names.txt")
+                    .ok()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+            );
         }
     }
     scenario
@@ -1491,6 +1595,11 @@ fn load_scenario_into_runtime(
     runtime.control_log_strings.clear();
     runtime.control_packets.clear();
     runtime.player_controls.clear();
+    runtime.player_infos.clear();
+    runtime.player_infos.clear();
+    runtime.player_infos.clear();
+    runtime.player_infos.clear();
+    runtime.player_infos.clear();
     Ok(())
 }
 
@@ -1611,6 +1720,11 @@ pub extern "C" fn lc_engine_runtime_reset(
         runtime.control_log_strings.clear();
         runtime.control_packets.clear();
         runtime.player_controls.clear();
+        runtime.player_infos.clear();
+        runtime.player_infos.clear();
+        runtime.player_infos.clear();
+        runtime.player_infos.clear();
+        runtime.player_infos.clear();
         return true;
     };
 
@@ -3688,6 +3802,90 @@ global func Step(state, frame, random)
             message.contains("precedes current engine frame"),
             "unexpected error wording: {message}"
         );
+    }
+
+    #[test]
+    fn join_control_packets_run_the_join_pipeline() {
+        // CID_PlrInfo registers the C4PlayerInfo, CID_JoinPlr executes
+        // C4Game::JoinPlayer with the named player file
+        // (C4Control.cpp:710-775, local-control branch) — both at frame 0
+        // before the first compare (Control.Execute runs before
+        // ExecObjects, C4Game.cpp:776-854).
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // A minimal legacy scenario with one crew def.
+        let defs = dir.path().join("Defs.c4d/Good.c4d");
+        std::fs::create_dir_all(&defs).expect("def dir");
+        std::fs::write(
+            defs.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=1\n",
+        )
+        .expect("defcore");
+        std::fs::write(defs.join("Script.c"), "// crew\n").expect("script");
+        let scenario_dir = dir.path().join("Join.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Join\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=64\nMapHeight=40\nMapZoom=10\n\n\
+             [Player1]\nCrew=GOOD=2\n",
+        )
+        .expect("scenario core");
+
+        // A directory-format player file with one crew info.
+        let player_dir = dir.path().join("Tester.c4p");
+        std::fs::create_dir_all(&player_dir).expect("player dir");
+        std::fs::write(
+            player_dir.join("Player.txt"),
+            "[Player]\nName=Tyler\n\n[Preferences]\nColor=2\nColorDw=15997440\n",
+        )
+        .expect("player core");
+
+        let mut runtime = RuntimeHandle::new();
+        load_scenario_into_runtime(&mut runtime, &scenario_dir.to_path_buf(), 7)
+            .expect("scenario loads");
+        assert!(runtime.engine.player(0).is_none());
+
+        let control = format!(
+            "[Control]\n\
+              [IDPacket]\n\
+                ID=144\n\
+                [Player Info]\n\
+                  ID=0\n\
+                  Flags=Initial\n\
+                  [Player]\n\
+                    Name=\"Tyler\"\n\
+                    ID=1\n\
+                    Type=User\n\
+                    Color=15997440\n\
+                    Team=0\n\
+                ByClient=0\n\
+              [IDPacket]\n\
+                ID=145\n\
+                [Join Player]\n\
+                  Filename=\"{}\"\n\
+                  AtClient=-1\n\
+                  InfoID=1\n\
+                  ByRes=false\n\
+                  ByClient=0\n",
+            player_dir.display()
+        );
+        let packets = parse_control_ini(&control).expect("control parses");
+        runtime.control_packets.insert(0, packets);
+        runtime
+            .apply_control_packets_for_frame(0)
+            .expect("join control applies");
+
+        let player = runtime.engine.player(0).expect("player joined");
+        assert_eq!(player.name(), "Tyler");
+        let crew_count = runtime
+            .engine
+            .snapshot()
+            .objects
+            .iter()
+            .filter(|object| object.owner == 0 && object.crew_member)
+            .count();
+        assert_eq!(crew_count, 2, "ready crew placed by the join");
     }
 
     #[test]
