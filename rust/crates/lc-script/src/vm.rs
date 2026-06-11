@@ -915,6 +915,27 @@ impl<'a> Vm<'a> {
                             };
                             return self.get_target_value(env, &target);
                         }
+                        // `LocalN("name")` is a reference to the executing
+                        // object's named local (FnLocalN, C4Script.cpp:4591-4605,
+                        // pObj defaulting to cthr->Obj). The two-argument
+                        // cross-object form goes to the host.
+                        if name == "LocalN"
+                            && args.len() == 1
+                            && !self.functions.contains_key(name)
+                        {
+                            let local_name = match self.evaluate(&args[0], env, depth + 1)? {
+                                Value::String(local_name) => local_name,
+                                other => {
+                                    return Err(RuntimeError::new(format!(
+                                        "LocalN: expected string for name, got {}",
+                                        other.type_name()
+                                    )))
+                                }
+                            };
+                            let cell = env.object_state.named_local_cell(&local_name);
+                            let value = cell.borrow().clone();
+                            return Ok(value);
+                        }
                         // `Par(n)` reads the executing call's parameter slot n;
                         // outside 0..ParCnt it is nil (C4AulExec.cpp:1127-1140).
                         if name == "Par"
@@ -1624,6 +1645,24 @@ impl<'a> Vm<'a> {
             AssignmentTarget::VarSlot(index_expr) => {
                 let index = self.evaluate_slot_index("Var()", index_expr, env, depth)?;
                 Ok(env.var_slot_lvalue(index))
+            }
+            AssignmentTarget::FunctionCall { name, args }
+                if name == "LocalN" && args.len() == 1 && !self.functions.contains_key(name) =>
+            {
+                // FnLocalN returns pVarN->GetRef() (C4Script.cpp:4604):
+                // `LocalN("x") = v` writes the named object local through.
+                let local_name = match self.evaluate(&args[0], env, depth + 1)? {
+                    Value::String(local_name) => local_name,
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "LocalN: expected string for name, got {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                Ok(LValueRef::Cell(
+                    env.object_state.named_local_cell(&local_name),
+                ))
             }
             AssignmentTarget::FunctionCall { name, args } => {
                 let function = self.functions.get(name);

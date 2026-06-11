@@ -1893,6 +1893,16 @@ pub struct ObjectState {
     /// the physicals at birth (C4Object.cpp:193).
     #[serde(default)]
     pub breath: i32,
+    /// EntranceStatus flag toggled by SetEntrance (C4Script.cpp:690-695).
+    #[serde(default)]
+    pub entrance_status: bool,
+    /// Object color from SetColorDw (C4Script.cpp:3661-3668, C4Object Color).
+    #[serde(default)]
+    pub color: u32,
+    /// Per-object shape rectangle from SetShape (C4Script.cpp:5182-5196);
+    /// None means the definition shape applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_override: Option<DefinitionRect>,
 }
 
 #[derive(Debug, Clone)]
@@ -2228,6 +2238,15 @@ pub struct ObjectUpdate {
     /// (SetPhysical/TrainPhysical/ResetPhysical, C4Script.cpp:552-636).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub physicals: Option<PhysicalsUpdate>,
+    /// SetEntrance (C4Script.cpp:690-695).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrance_status: Option<bool>,
+    /// SetColorDw (C4Script.cpp:3661-3668).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
+    /// SetShape (C4Script.cpp:5182-5196).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_override: Option<DefinitionRect>,
 }
 
 /// The complete per-object physical state as left by a script callback —
@@ -4284,7 +4303,7 @@ impl From<ResourcePictureRect> for DefinitionPicture {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefinitionRect {
     pub x: i32,
     pub y: i32,
@@ -11809,6 +11828,9 @@ impl Engine {
             vertices,
             graphics_overlays,
             physicals,
+            entrance_status: update_entrance_status,
+            color: update_color,
+            shape_override: update_shape_override,
             ..
         } = update;
 
@@ -11898,6 +11920,15 @@ impl Engine {
             }
             if let Some(alive) = alive {
                 object.state.alive = alive;
+            }
+            if let Some(entrance_status) = update_entrance_status {
+                object.state.entrance_status = entrance_status;
+            }
+            if let Some(color) = update_color {
+                object.state.color = color;
+            }
+            if let Some(shape_override) = update_shape_override {
+                object.state.shape_override = Some(shape_override);
             }
             if let Some(status) = status {
                 object.apply_status(status);
@@ -12975,6 +13006,9 @@ impl Engine {
                     temporary_physical: snapshot.temporary_physical,
                     physical_changes: snapshot.physical_changes.clone(),
                     breath: snapshot.breath,
+                    entrance_status: false,
+                    color: 0,
+                    shape_override: None,
                 },
                 shape_template,
                 snapshot.own_vertices.clone(),
@@ -18365,6 +18399,9 @@ impl Engine {
                 temporary_physical: None,
                 physical_changes: Vec::new(),
                 breath: 0,
+                entrance_status: false,
+                color: 0,
+                shape_override: None,
             },
             shape_template,
             own_shape_vertices,

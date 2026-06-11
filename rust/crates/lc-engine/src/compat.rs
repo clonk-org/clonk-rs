@@ -2738,6 +2738,16 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Contained", contained);
     script.register_host_function("GetCategory", get_category);
     script.register_host_function("SetCategory", set_category);
+    script.register_host_function("NoContainer", no_container);
+    script.register_host_function("AnyContainer", any_container);
+    script.register_host_function("ActIdle", act_idle);
+    script.register_host_function("CreateContents", create_contents);
+    script.register_host_function("GetActMapVal", get_act_map_val);
+    script.register_host_function("GetObjectVal", get_object_val);
+    script.register_host_function("SetEntrance", set_entrance);
+    script.register_host_function("SetColorDw", set_color_dw);
+    script.register_host_function("SetShape", set_shape);
+    script.register_host_function("SetVertex", set_vertex);
     script.register_host_function("SetAlive", set_alive);
     script.register_host_function("GetAlive", get_alive);
     script.register_host_function("SetOwner", set_owner);
@@ -11141,6 +11151,457 @@ fn get_category(args: &[Value]) -> Result<Value, RuntimeError> {
         Ok(Value::Int(object.category()))
     })
 }
+/// FnCreateContents (C4Script.cpp:1938-1951): create `count` (default 1)
+/// objects of `c_id` inside the container, returning the last one. C++
+/// routes through pObj->CreateContents -> CreateObject + Enter, with the
+/// container's owner.
+fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
+    let definition = match args.first().unwrap_or(&Value::Nil) {
+        Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
+        Value::String(_) | Value::C4Id(_) | Value::Nil | Value::Int(0) => return Ok(Value::Nil),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "CreateContents: expected id for definition, got {}",
+                other.type_name()
+            )))
+        }
+    };
+
+    let mut index = 1;
+    let target_id = consume_optional_object_reference_argument(
+        args,
+        &mut index,
+        "CreateContents",
+        "container",
+    )?;
+    let count = match args.get(index) {
+        // C++: `if (!iCount) ++iCount;`
+        Some(arg) => match value_to_i32(arg, "CreateContents", "count")? {
+            0 => 1,
+            value => value,
+        },
+        None => 1,
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("CreateContents requires an active engine context"))?;
+
+        let (container, position, owner) = if let Some(target) = target_id {
+            match context.object_context() {
+                Some(object) if target == object.id() => {
+                    (target, object.effective_position(), object.owner())
+                }
+                _ => match context.get_world_object(target) {
+                    Some(other) => (target, other.position, other.owner),
+                    None => return Ok(Value::Nil),
+                },
+            }
+        } else {
+            match context.object_context() {
+                Some(object) => (object.id(), object.effective_position(), object.owner()),
+                None => return Ok(Value::Nil),
+            }
+        };
+
+        let metadata = context
+            .definition_metadata(&definition)
+            .cloned()
+            .unwrap_or_else(|| DefinitionMetadata {
+                category: context
+                    .definition_category(&definition)
+                    .unwrap_or(DEFAULT_CATEGORY),
+                ocf_base: ocf::NORMAL,
+                crew_member: false,
+                action_library: ActionLibrary::default(),
+                value: 0,
+                mass: 0,
+                constructable: false,
+                shape: None,
+                construction_offset: 0,
+                basement: 0,
+                physical: PhysicalInfo::default(),
+            });
+
+        let mut last = Value::Nil;
+        for _ in 0..count {
+            let id = context.allocate_object_id();
+            let spawn = SpawnConfig::new(definition.clone())
+                .with_position(position)
+                .with_owner(owner)
+                .with_category(metadata.category)
+                .with_container(container)
+                .with_id(id);
+            let preview_ocf = ocf::compute(
+                metadata.ocf_base,
+                metadata.crew_member,
+                true,
+                ObjectStatus::Normal,
+                false,
+                FULL_CON,
+            );
+            let preview = HostWorldObject::with_category(
+                id,
+                definition.clone(),
+                ObjectStatus::Normal,
+                "Idle",
+                None,
+                None,
+                None,
+                owner,
+                metadata.category,
+                0,
+                FULL_CON,
+                0,
+                position,
+                Vector2::ZERO,
+                0,
+                Vec::new(),
+                0,
+                0,
+                0,
+                None,
+                None,
+            )
+            .with_ocf(preview_ocf);
+            context.register_spawn(spawn, preview);
+            last = object_reference_value(id);
+        }
+        Ok(last)
+    })
+}
+
+/// FnGetActMapVal (C4Script.cpp:4216-4241): one entry of one action in a
+/// definition's ActMap, addressed by its serialization name
+/// (C4ActionDef::CompileFunc, C4Def.cpp). Unknown definition, action or
+/// entry -> nil. C4ActionDef compile defaults: Length 1, Delay 0, strings "".
+fn get_act_map_val(args: &[Value]) -> Result<Value, RuntimeError> {
+    let entry = match args.first().unwrap_or(&Value::Nil) {
+        Value::String(name) => name.clone(),
+        Value::Nil => return Ok(Value::Nil),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "GetActMapVal: expected string for entry, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let action = match args.get(1).unwrap_or(&Value::Nil) {
+        Value::String(name) => name.clone(),
+        Value::Nil => return Ok(Value::Nil),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "GetActMapVal: expected string for action, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let definition = match args.get(2).unwrap_or(&Value::Nil) {
+        Value::String(name) | Value::C4Id(name) if !name.is_empty() => Some(name.clone()),
+        _ => None,
+    };
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        // `idDef` defaults to the executing definition (cthr->Def).
+        let library = match definition {
+            Some(id) => match context.definition_metadata(&id) {
+                Some(metadata) => metadata.action_library.clone(),
+                None => return Ok(Value::Nil),
+            },
+            None => match context.object_context() {
+                Some(object) => object.action_library.clone(),
+                None => return Ok(Value::Nil),
+            },
+        };
+        let Some(spec) = library.specs().get(&action) else {
+            return Ok(Value::Nil);
+        };
+
+        Ok(match entry.as_str() {
+            "Name" => Value::String(action.clone()),
+            "Procedure" => Value::String(spec.procedure.clone().unwrap_or_default()),
+            "Length" => Value::Int(spec.length.unwrap_or(1) as i32),
+            "Delay" => Value::Int(spec.delay.unwrap_or(0) as i32),
+            "Attach" => Value::Int(spec.attach as i32),
+            "NextAction" => Value::String(spec.next.clone().unwrap_or_default()),
+            "StartCall" => Value::String(spec.start_call.clone().unwrap_or_default()),
+            "EndCall" => Value::String(spec.end_call.clone().unwrap_or_default()),
+            "AbortCall" => Value::String(spec.abort_call.clone().unwrap_or_default()),
+            "PhaseCall" => Value::String(spec.phase_call.clone().unwrap_or_default()),
+            "NoOtherAction" => Value::Int(i32::from(spec.no_other_action)),
+            "DigFree" => Value::Int(spec.dig_free.unwrap_or(0)),
+            _ => Value::Nil,
+        })
+    })
+}
+
+/// FnGetObjectVal (C4Script.cpp:4184-4195): reflect one entry of the
+/// object's serialization (C4Object::CompileFunc; the Shape is compiled
+/// inline, so "Width"/"Height" are the shape rect, C4Shape.cpp:496-516).
+/// Entries outside our model -> nil.
+fn get_object_val(args: &[Value]) -> Result<Value, RuntimeError> {
+    let entry = match args.first().unwrap_or(&Value::Nil) {
+        Value::String(name) => name.clone(),
+        Value::Nil => return Ok(Value::Nil),
+        other => {
+            return Err(RuntimeError::new(format!(
+                "GetObjectVal: expected string for entry, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    // args[1] is the section name; every entry name we serve is unique.
+    let mut index = 2;
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "GetObjectVal", "target")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let self_id = context.object_context().map(|object| object.id());
+        let resolved_target = target_id.or(self_id);
+        let Some(target) = resolved_target else {
+            return Ok(Value::Nil);
+        };
+
+        if Some(target) == self_id {
+            if let Some(object) = context.object_context() {
+                match entry.as_str() {
+                    "Owner" => return Ok(Value::Int(object.owner())),
+                    "Category" => return Ok(Value::Int(object.category())),
+                    "Energy" => return Ok(Value::Int(object.current_energy)),
+                    "Damage" => return Ok(Value::Int(object.current_damage)),
+                    _ => {}
+                }
+            }
+        }
+
+        let Some(world_object) = context.get_world_object(target) else {
+            return Ok(Value::Nil);
+        };
+        Ok(match entry.as_str() {
+            "Owner" => Value::Int(world_object.owner),
+            "Category" => Value::Int(world_object.category),
+            "Energy" => Value::Int(world_object.energy),
+            "Damage" => Value::Int(world_object.damage),
+            "Width" | "Height" => context
+                .definition_metadata(world_object.definition_id())
+                .and_then(|metadata| metadata.shape)
+                .map(|shape| {
+                    Value::Int(if entry == "Width" {
+                        shape.width
+                    } else {
+                        shape.height
+                    })
+                })
+                .unwrap_or(Value::Nil),
+            _ => Value::Nil,
+        })
+    })
+}
+
+/// FnSetEntrance (C4Script.cpp:690-695): toggle the object's EntranceStatus.
+fn set_entrance(args: &[Value]) -> Result<Value, RuntimeError> {
+    let enabled = args.first().unwrap_or(&Value::Nil).as_bool();
+    let mut index = 1;
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "SetEntrance", "target")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetEntrance requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+        object.pending_update.entrance_status = Some(enabled);
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnSetColorDw (C4Script.cpp:3661-3668): set the object's 32-bit color.
+fn set_color_dw(args: &[Value]) -> Result<Value, RuntimeError> {
+    let value = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetColorDw", "value")?;
+    let mut index = 1;
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "SetColorDw", "target")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetColorDw requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+        object.pending_update.color = Some(value as u32);
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnSetShape (C4Script.cpp:5182-5196): overwrite the object's shape rect.
+fn set_shape(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetShape", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "SetShape", "y")?;
+    let width = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "SetShape", "wdt")?;
+    let height = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "SetShape", "hgt")?;
+    let mut index = 4;
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut index, "SetShape", "target")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetShape requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+        object.pending_update.shape_override = Some(DefinitionRect::new(x, y, width, height));
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnSetVertex (C4Script.cpp:1237-1271): set one vertex attribute (VTX_X=0,
+/// VTX_Y=1, VTX_CNAT=2, VTX_Friction=3); unknown attributes fall back to
+/// VtxY like the old-style C++ behaviour. Own-vertex mode offsets the index
+/// by C4D_VertexCpyPos = C4D_MaxVertex/2 = 15 (C4Shape.h:27).
+fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
+    const MAX_VERTEX: usize = 30;
+    let index_arg = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetVertex", "index")?;
+    let kind = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "SetVertex", "attribute")?;
+    let value = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "SetVertex", "value")?;
+    let mut arg_index = 3;
+    let target_id =
+        consume_optional_object_reference_argument(args, &mut arg_index, "SetVertex", "target")?;
+    let own_vertex_mode = match args.get(arg_index) {
+        Some(arg) => value_to_i32(arg, "SetVertex", "own vertex mode")?,
+        None => 0,
+    };
+
+    let mut vertex_index = index_arg;
+    if own_vertex_mode != 0 {
+        vertex_index += 15;
+    }
+    let Ok(vertex_index) = usize::try_from(vertex_index) else {
+        return Ok(Value::Bool(false));
+    };
+    if vertex_index >= MAX_VERTEX {
+        return Ok(Value::Bool(false));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetVertex requires an active engine context"))?;
+        let object = match context.object_context_mut() {
+            Some(object) => object,
+            None => return Ok(Value::Bool(false)),
+        };
+        if let Some(target) = target_id {
+            if target != object.id() {
+                return Ok(Value::Bool(false));
+            }
+        }
+
+        let mut vertices = object
+            .pending_update
+            .vertices
+            .clone()
+            .unwrap_or_else(|| object.vertices.clone());
+        if vertices.len() <= vertex_index {
+            vertices.resize(vertex_index + 1, ObjectVertex::default());
+        }
+        match kind {
+            0 => vertices[vertex_index].x = value,
+            2 => vertices[vertex_index].cnat = value as u32,
+            3 => vertices[vertex_index].friction = value,
+            // VTX_Y and the old-style fallback for any other attribute.
+            _ => vertices[vertex_index].y = value,
+        }
+        object.pending_update.vertices = Some(vertices);
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FindObject container sentinels (C4Object.h:83-84): `NoContainer()` = 124,
+/// `AnyContainer()` = 123 (FnNoContainer/FnAnyContainer,
+/// C4Script.cpp:6731-6732).
+fn no_container(_args: &[Value]) -> Result<Value, RuntimeError> {
+    Ok(Value::Int(124))
+}
+
+fn any_container(_args: &[Value]) -> Result<Value, RuntimeError> {
+    Ok(Value::Int(123))
+}
+
+/// FnActIdle (C4Script.cpp:1831-1836): true when the object has no action
+/// (C++ Act == ActIdle; our engine stores that as an empty or "Idle" name),
+/// nil without an object.
+fn act_idle(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let target_id = consume_optional_object_reference_argument(args, &mut index, "ActIdle", "target")?;
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = match borrow.as_ref() {
+            Some(context) => context,
+            None => return Ok(Value::Nil),
+        };
+
+        let action_name = if let Some(target) = target_id {
+            match context.object_context() {
+                Some(object) if target == object.id() => {
+                    Some(object.effective_action_name().to_string())
+                }
+                _ => context
+                    .get_world_object(target)
+                    .map(|other| other.action_name.clone()),
+            }
+        } else {
+            context
+                .object_context()
+                .map(|object| object.effective_action_name().to_string())
+        };
+
+        Ok(action_name
+            .map(|name| Value::Bool(name.is_empty() || name == "Idle"))
+            .unwrap_or(Value::Nil))
+    })
+}
+
 
 fn set_category(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.is_empty() {
@@ -13483,9 +13944,11 @@ mod tests {
 
     const EXPECTED_HOST_FUNCTIONS: &[&str] = &[
         "Abs",
+        "ActIdle",
         "AddCommand",
         "AddEffect",
         "AddMessage",
+        "AnyContainer",
         "AppendCommand",
         "BlastFree",
         "BoundBy",
@@ -13499,6 +13962,7 @@ mod tests {
         "Cos",
         "CreateArray",
         "CreateConstruction",
+        "CreateContents",
         "CreateObject",
         "CreateParticle",
         "CustomMessage",
@@ -13525,6 +13989,7 @@ mod tests {
         "GameCall",
         "GameCallEx",
         "GameOver",
+        "GetActMapVal",
         "GetActTime",
         "GetAction",
         "GetActionData",
@@ -13552,6 +14017,7 @@ mod tests {
         "GetMaterial",
         "GetOCF",
         "GetObjectStatus",
+        "GetObjectVal",
         "GetOwner",
         "GetPath",
         "GetPhase",
@@ -13587,6 +14053,7 @@ mod tests {
         "Max",
         "Message",
         "Min",
+        "NoContainer",
         "ObjectCall",
         "ObjectCount",
         "ObjectCount2",
@@ -13609,9 +14076,11 @@ mod tests {
         "SetBridgeActionData",
         "SetCategory",
         "SetClimate",
+        "SetColorDw",
         "SetComDir",
         "SetCommand",
         "SetDir",
+        "SetEntrance",
         "SetGraphics",
         "SetGravity",
         "SetObjDrawTransform",
@@ -13624,8 +14093,10 @@ mod tests {
         "SetPosition",
         "SetR",
         "SetRDir",
+        "SetShape",
         "SetTemperature",
         "SetTransferZone",
+        "SetVertex",
         "SetWealth",
         "SetWind",
         "SetXDir",
@@ -13804,6 +14275,23 @@ mod tests {
             other => panic!("expected array, got {:?}", other),
         }
     }
+
+    #[test]
+    fn no_container_and_any_container_return_cpp_sentinels() {
+        // FnNoContainer/FnAnyContainer return the FindObject container
+        // sentinels NO_CONTAINER=124 / ANY_CONTAINER=123 (C4Object.h:83-84,
+        // C4Script.cpp:6731-6732).
+        assert_eq!(no_container(&[]).expect("NoContainer"), Value::Int(124));
+        assert_eq!(any_container(&[]).expect("AnyContainer"), Value::Int(123));
+    }
+
+    #[test]
+    fn act_idle_without_context_is_nil() {
+        // FnActIdle returns nullopt -> nil without an object
+        // (C4Script.cpp:1831-1836).
+        assert_eq!(act_idle(&[]).expect("ActIdle"), Value::Nil);
+    }
+
     #[test]
     fn falsy_zero_converts_to_any_parameter_type_like_cpp() {
         // Pre-strict3 callers reset any falsy parameter to nil before the
