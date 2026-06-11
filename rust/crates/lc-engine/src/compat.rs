@@ -963,6 +963,11 @@ fn consume_optional_object_reference_argument(
 fn value_to_i32(value: &Value, function: &str, parameter: &str) -> Result<i32, RuntimeError> {
     match value {
         Value::Int(int) => Ok(*int),
+        // Unfilled parameter slots are nil and convert to 0; bools convert
+        // directly (C4AulExec.cpp:1364-1396 CheckConvertFunctionParameters,
+        // C4Value.cpp FnCnvGuess / Bool->Int CnvOK).
+        Value::Nil => Ok(0),
+        Value::Bool(flag) => Ok(i32::from(*flag)),
         other => Err(RuntimeError::new(format!(
             "{}: expected integer for {}, got {}",
             function,
@@ -7362,14 +7367,10 @@ fn g_back_common(
     function: &str,
     query: LandscapeQuery,
 ) -> Result<Value, RuntimeError> {
-    if args.len() != 2 {
-        return Err(RuntimeError::new(format!(
-            "{function} expects 2 arguments: x, y"
-        )));
-    }
-
-    let local_x = value_to_i32(&args[0], function, "x")?;
-    let local_y = value_to_i32(&args[1], function, "y")?;
+    // Unfilled parameter slots are nil -> 0 (C4Aul.h:104-121,
+    // C4AulExec.cpp:1364-1396): GBackSolid() queries the object's position.
+    let local_x = value_to_i32(args.first().unwrap_or(&Value::Nil), function, "x")?;
+    let local_y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), function, "y")?;
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
@@ -9587,12 +9588,14 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
+    // FnCreateObject takes a C4ID (C4Script.cpp:1892); our resources address
+    // definitions by their id string, so id values and strings coincide.
     let definition = match &args[0] {
-        Value::String(name) if !name.is_empty() => name.clone(),
-        Value::String(_) | Value::Nil => return Ok(Value::Nil),
+        Value::String(name) | Value::C4Id(name) if !name.is_empty() => name.clone(),
+        Value::String(_) | Value::C4Id(_) | Value::Nil | Value::Int(0) => return Ok(Value::Nil),
         other => {
             return Err(RuntimeError::new(format!(
-                "CreateObject: expected string for definition, got {}",
+                "CreateObject: expected id for definition, got {}",
                 other.type_name()
             )))
         }
@@ -10719,6 +10722,9 @@ fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
     let graphics_name = match &args[0] {
         Value::String(name) if !name.is_empty() => Some(name.clone()),
         Value::String(_) | Value::Nil => None,
+        // Falsy parameters reset to nil before the type check
+        // (C4AulExec.cpp:1372): SetGraphics(0) selects the default graphics.
+        Value::Int(0) | Value::Bool(false) => None,
         other => {
             return Err(RuntimeError::new(format!(
                 "SetGraphics: expected string or nil for graphics name, got {}",
@@ -13798,6 +13804,47 @@ mod tests {
             other => panic!("expected array, got {:?}", other),
         }
     }
+    #[test]
+    fn falsy_zero_converts_to_any_parameter_type_like_cpp() {
+        // Pre-strict3 callers reset any falsy parameter to nil before the
+        // type check (C4AulExec.cpp:1372 `!pPars[i]` -> Set0), and nil
+        // converts to every type (C4Value.cpp FnCnvGuess). TIPI's
+        // Initialize calls SetGraphics(0) meaning "default graphics".
+        match set_graphics(&[Value::Int(0)]) {
+            Ok(_) => {}
+            Err(error) => assert!(
+                !error.message().contains("expected string"),
+                "SetGraphics(0) must mean default graphics, got: {}",
+                error.message()
+            ),
+        }
+    }
+
+    #[test]
+    fn engine_function_parameters_default_to_nil_zero_like_cpp() {
+        // Every C4Aul call carries 10 parameter slots, unfilled = nil
+        // (C4Aul.h:104-121); nil converts to int 0, so GBackSolid() with no
+        // arguments queries the object's own position (DRAI/WTFL/LAFL
+        // action-start scripts call it bare).
+        let solid = g_back_solid(&[]).expect("GBackSolid() succeeds");
+        assert!(matches!(solid, Value::Bool(_)));
+        let liquid = g_back_liquid(&[Value::Nil]).expect("GBackLiquid(nil) succeeds");
+        assert!(matches!(liquid, Value::Bool(_)));
+    }
+
+    #[test]
+    fn create_object_accepts_id_values_like_cpp() {
+        // FnCreateObject's first parameter is a C4ID (C4Script.cpp:1892);
+        // content passes id literals (BAS7/_ROA/NTIP Construction).
+        let error = create_object(&[Value::C4Id("ROCK".into())])
+            .expect_err("no engine context in unit test");
+        assert!(
+            !error.message().contains("expected string"),
+            "id must be a valid definition argument, got: {}",
+            error.message()
+        );
+    }
+
 
     #[test]
     fn get_keys_rejects_nil() {
