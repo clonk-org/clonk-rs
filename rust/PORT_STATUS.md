@@ -169,10 +169,20 @@ full-scenario shadow-diff (see Parity harnesses).
   `cargo xtask parity record`. See `parity/README.md`.
 - **`cargo xtask engine-snapshots verify`** — Rust-vs-Rust determinism
   *regression* check only (NOT a parity check).
-- **Phase 2 (OPEN)** — live full-scenario shadow-diff. The per-pixel collision
-  loop, landscape, and materials are uncovered. The `USE_RUST_ENGINE_VALIDATION`
-  bridge compiles (`ffi` feature) and carries raw `C4Fixed` state across the ABI
-  but still needs shadow execution + per-field divergence reporting.
+- **Phase 2 (recon done 2026-06-11; end-to-end run OPEN, task #22)** — the
+  bridge ALREADY implements live shadow execution AND divergence reporting:
+  `LC_RUST_ENGINE_RUNTIME=1` advances a Rust engine per frame and
+  `lc_engine_runtime_compare_snapshot` diffs every snapshot field, logging
+  'Rust runtime parity mismatch' (RustEngineBridge.cpp OnFrame, :1934+;
+  record/playback/authoritative modes too). What remains: rebuild both
+  sides native arm64 (build/clonk.app is a stale x86_64 binary from Oct
+  2025; `cargo xtask ffi --release` works again after the ffi.rs snapshot
+  catch-up — lc_core + lc_resources staticlibs also needed per
+  CMakeLists.txt:73-107), a headless scenario driver, then harvest the
+  first mismatch per scenario as the divergence worklist. The C ABI
+  snapshot lacks the new fire/physicals/breath/pxs_fixed fields (defaults
+  on conversion); per-pixel collision, landscape and materials remain
+  uncovered by the snapshot set.
 
 ## Gates
 
