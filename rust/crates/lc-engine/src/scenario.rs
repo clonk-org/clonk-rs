@@ -5843,6 +5843,55 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn scenario_statics_are_visible_to_definition_scripts() {
+        // C4Aul `static` variables live in Game.ScriptEngine.GlobalNamed —
+        // ONE table for every script host: GoldRush's scenario Script.c
+        // declares `static iDifficulty;` and the appended AI script (in a
+        // definition host) reads it (Locals.c4d/AI.c4d SetAI ->
+        // SetDifficultyPhysicals(iDifficulty)).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static shared;\n\
+             global func Initialize(state, random) {\n\
+                 shared = 4;\n\
+                 var obj = CreateObject(GOOD, 50, 50, -1);\n\
+                 obj->Remember();\n\
+                 return nil;\n\
+             }\n",
+        );
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "#strict\nlocal seen;\n\
+             public func Remember() { seen = shared; shared = shared + 1; return seen; }\n",
+        )
+        .expect("write target script");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let snapshot = engine.snapshot();
+        let object = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GOOD")
+            .expect("object created");
+        assert_eq!(
+            object.local_vars.get("seen"),
+            Some(&lc_script::Value::Int(4)),
+            "the definition script read the scenario static"
+        );
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("shared")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(5)),
+            "the definition script's write went back to the shared table"
+        );
+    }
+
+    #[test]
     fn join_name_sources_and_map_zoom_follow_cpp() {
         // New crew infos draw their name from the def's ClonkNames list
         // when it has one (C4ObjectInfoList.cpp:160-164, C4Def.cpp:645-652),

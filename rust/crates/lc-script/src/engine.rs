@@ -10,6 +10,16 @@ use crate::vm::Vm;
 
 pub type HostFunction = Arc<dyn Fn(&[Value]) -> Result<Value, RuntimeError> + Send + Sync>;
 
+/// The engine-global named-variable table (`static` declarations;
+/// C4AulScriptEngine::GlobalNamed): one shared table across every script
+/// host. Values live in cells so lvalues (x = .., x++, ...) write through.
+pub type GlobalVariables =
+    std::rc::Rc<std::cell::RefCell<HashMap<String, crate::vm::ValueCell>>>;
+
+pub fn new_global_variables() -> GlobalVariables {
+    std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()))
+}
+
 #[derive(Clone, Default)]
 pub struct Script {
     functions: HashMap<String, Function>,
@@ -58,6 +68,10 @@ impl Script {
     pub fn strict_level(&self) -> Option<u8> {
         self.strict_level
     }
+
+    pub fn var_decls(&self) -> &[crate::ast::VarDecl] {
+        &self.var_decls
+    }
 }
 
 #[derive(Clone)]
@@ -78,6 +92,9 @@ pub struct Engine {
     /// registers this hook to run the function on the TARGET object's
     /// script. Called with [target, name, failsafe, args...].
     method_dispatch: Option<HostFunction>,
+    /// The shared `static` table; `None` keeps the legacy per-host
+    /// fallback (fixtures without an engine).
+    globals_named: Option<GlobalVariables>,
 }
 
 impl Engine {
@@ -90,6 +107,7 @@ impl Engine {
             constants: HashMap::new(),
             global_functions: None,
             method_dispatch: None,
+            globals_named: None,
         }
     }
 
@@ -130,8 +148,22 @@ impl Engine {
             }
             self.functions.insert(name, function);
         }
-        // Store local variable declarations from the script
-        self.var_decls.extend(script.var_decls);
+        // Store variable declarations from the script. `static` names are
+        // ENGINE-GLOBAL (GlobalNamed) when the shared table is attached:
+        // they register there (keeping any existing value — statics
+        // persist across script loads) and never become per-object locals.
+        for var_decl in script.var_decls {
+            if var_decl.kind == crate::ast::VarDeclKind::Static {
+                if let Some(table) = &self.globals_named {
+                    table
+                        .borrow_mut()
+                        .entry(var_decl.name.clone())
+                        .or_insert_with(|| crate::vm::value_cell(Value::Nil));
+                    continue;
+                }
+            }
+            self.var_decls.push(var_decl);
+        }
     }
 
     /// `C4AulScript::AppendTo` with bHighPrio=true (C4AulLink.cpp:114-141,
@@ -218,6 +250,33 @@ impl Engine {
     /// Registers the cross-object method resolver for `obj->Method(args)`
     /// (AB_CALL, C4AulExec.cpp:1216-1305). Arguments: [target, name,
     /// failsafe, args...].
+    /// Attaches the engine-global `static` table
+    /// (C4AulScriptEngine::GlobalNamed). Scripts added afterwards register
+    /// their `static` declarations here instead of the per-object locals.
+    pub fn set_global_variables(&mut self, table: GlobalVariables) {
+        self.globals_named = Some(table);
+    }
+
+    /// Moves `static` declarations that were compiled BEFORE the table was
+    /// attached out of the per-object locals and into the shared table
+    /// (existing values persist).
+    pub fn adopt_statics_into_globals(&mut self) {
+        let Some(table) = &self.globals_named else {
+            return;
+        };
+        self.var_decls.retain(|var_decl| {
+            if var_decl.kind == crate::ast::VarDeclKind::Static {
+                table
+                    .borrow_mut()
+                    .entry(var_decl.name.clone())
+                    .or_insert_with(|| crate::vm::value_cell(Value::Nil));
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     pub fn register_method_dispatch(&mut self, dispatch: HostFunction) {
         self.method_dispatch = Some(dispatch);
     }
@@ -231,7 +290,8 @@ impl Engine {
         )
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref());
+        .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_global_variables(self.globals_named.as_deref());
         vm.call(name, args).map_err(ScriptError::from)
     }
 
@@ -254,7 +314,8 @@ impl Engine {
         )
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref());
+        .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_global_variables(self.globals_named.as_deref());
         let cells: Vec<crate::vm::ValueCell> =
             args.iter().cloned().map(crate::vm::value_cell).collect();
         let call_args = cells
@@ -282,7 +343,8 @@ impl Engine {
         )
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
-        .with_method_dispatch(self.method_dispatch.as_ref());
+        .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_global_variables(self.globals_named.as_deref());
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)
     }
@@ -306,6 +368,7 @@ impl Engine {
         .with_constants(&self.constants)
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_global_variables(self.globals_named.as_deref())
         .with_this(this);
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)

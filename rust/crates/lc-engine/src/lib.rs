@@ -4786,6 +4786,10 @@ impl Definition {
         let has_construction = script.has_function("Construction");
         let has_initialize = script.has_function("Initialize");
         let has_step = script.has_function("Step");
+        // The engine is single-threaded; Arc is shared ownership for host
+        // contexts, not cross-thread transport (the script engine holds the
+        // Rc-based GlobalNamed table).
+        #[allow(clippy::arc_with_non_send_sync)]
         Ok(Self {
             id,
             name,
@@ -7205,6 +7209,7 @@ impl ScenarioScript {
         compat::register_host_functions(&mut script);
         let has_initialize = script.has_function("Initialize");
         let has_step = script.has_function("Step");
+        #[allow(clippy::arc_with_non_send_sync)] // single-threaded sharing
         Ok(Self {
             name,
             script: Arc::new(script),
@@ -7601,6 +7606,10 @@ pub struct Engine {
     /// which decides the overload chain when several appends hit the same
     /// target function.
     definition_load_order: Vec<DefinitionId>,
+    /// The engine-global `static` table (Game.ScriptEngine.GlobalNamed):
+    /// one shared named-variable table for every script host (scenario
+    /// script, definitions, appended scripts). pub(crate) for tests.
+    pub(crate) script_globals: lc_script::GlobalVariables,
     /// Global (System.c4g) scripts that carry `#appendto` directives:
     /// retained at install, resolved with the definition appends (system
     /// hosts register before definitions in C++, so their appends apply
@@ -8869,6 +8878,7 @@ impl Engine {
         let mut engine = Self {
             definitions: HashMap::new(),
             definition_load_order: Vec::new(),
+            script_globals: lc_script::new_global_variables(),
             system_append_scripts: Vec::new(),
             objects_generation: std::cell::Cell::new(1),
             object_index_cache: std::cell::RefCell::new((0, HashMap::new())),
@@ -10392,6 +10402,11 @@ impl Engine {
         let name = name.into();
         let mut script = ScenarioScript::from_source(name, source)?;
         script.set_global_functions(self.global_script_functions.clone());
+        {
+            let host = Arc::make_mut(&mut script.script);
+            host.set_global_variables(self.script_globals.clone());
+            host.adopt_statics_into_globals();
+        }
         let snapshot = self.snapshot();
         let random = self.next_random_i32();
         let rng_state = self.rng.clone();
@@ -11408,6 +11423,13 @@ impl Engine {
         }
         let mut definition = definition;
         definition.set_global_functions(self.global_script_functions.clone());
+        {
+            // One GlobalNamed table for every script host: `static`
+            // declarations compiled into the definition move to it.
+            let script = Arc::make_mut(&mut definition.script);
+            script.set_global_variables(self.script_globals.clone());
+            script.adopt_statics_into_globals();
+        }
         self.definition_load_order.push(DefinitionId::from(id.as_str()));
         self.definitions.insert(id, definition);
         self.definition_metadata_cache.borrow_mut().take();
@@ -11444,6 +11466,18 @@ impl Engine {
                     // 29-64; system hosts register before defs in C++).
                     if !script.appends().is_empty() {
                         self.system_append_scripts.push(script.clone());
+                    }
+                    // `static` declarations register engine-globally
+                    // (GlobalNamed) regardless of which host declared them.
+                    for var_decl in script.var_decls() {
+                        if var_decl.kind == lc_script::VarDeclKind::Static {
+                            self.script_globals
+                                .borrow_mut()
+                                .entry(var_decl.name.clone())
+                                .or_insert_with(|| {
+                                    lc_script::value_cell(lc_script::Value::Nil)
+                                });
+                        }
                     }
                     for (function_name, function) in script.functions() {
                         let mut function = function.clone();
@@ -11514,7 +11548,11 @@ impl Engine {
             let (source_script, source_id) = match &source {
                 AppendSource::System(index) => {
                     let mut engine = ScriptEngine::new();
+                    // Statics in append scripts are engine-global, never
+                    // object locals of the append target.
+                    engine.set_global_variables(self.script_globals.clone());
                     engine.add_script(self.system_append_scripts[*index].clone());
+                    #[allow(clippy::arc_with_non_send_sync)] // single-threaded sharing
                     (Arc::new(engine), None)
                 }
                 AppendSource::Definition(id) => match self.definitions.get(id) {

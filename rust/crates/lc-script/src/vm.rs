@@ -36,11 +36,11 @@ fn concat_string(value: &Value) -> String {
     }
 }
 
-pub(crate) type ValueCell = Rc<RefCell<Value>>;
+pub type ValueCell = Rc<RefCell<Value>>;
 type SlotMap = Rc<RefCell<HashMap<i32, ValueCell>>>;
 type NamedLocalMap = Rc<RefCell<HashMap<String, ValueCell>>>;
 
-pub(crate) fn value_cell(value: Value) -> ValueCell {
+pub fn value_cell(value: Value) -> ValueCell {
     Rc::new(RefCell::new(value))
 }
 
@@ -377,6 +377,9 @@ pub struct Vm<'a> {
     /// C4AulExec.cpp:1216-1305), registered by the engine. Called with
     /// [target, name, failsafe, args...].
     method_dispatch: Option<&'a HostFunction>,
+    /// The engine-global `static` table (GlobalNamed); resolved after
+    /// locals, before global constants (C4AulParse.cpp:2836-2839).
+    globals_named: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
 }
 
 impl<'a> Vm<'a> {
@@ -395,6 +398,7 @@ impl<'a> Vm<'a> {
             global_functions: None,
             this_value: Value::Nil,
             method_dispatch: None,
+            globals_named: None,
         }
     }
 
@@ -422,6 +426,14 @@ impl<'a> Vm<'a> {
     /// (AB_CALL, C4AulExec.cpp:1216-1305).
     pub fn with_method_dispatch(mut self, dispatch: Option<&'a HostFunction>) -> Self {
         self.method_dispatch = dispatch;
+        self
+    }
+
+    pub fn with_global_variables(
+        mut self,
+        table: Option<&'a std::cell::RefCell<HashMap<String, ValueCell>>>,
+    ) -> Self {
+        self.globals_named = table;
         self
     }
 
@@ -798,6 +810,16 @@ impl<'a> Vm<'a> {
         }
     }
 
+    fn global_variable(&self, name: &str) -> Option<Value> {
+        self.globals_named
+            .and_then(|table| table.borrow().get(name).map(|cell| cell.borrow().clone()))
+    }
+
+    fn global_variable_cell(&self, name: &str) -> Option<ValueCell> {
+        self.globals_named
+            .and_then(|table| table.borrow().get(name).cloned())
+    }
+
     fn execute_block(
         &self,
         statements: &[Stmt],
@@ -824,12 +846,12 @@ impl<'a> Vm<'a> {
             Expr::This => Ok(self.this_value.clone()),
             Expr::Variable(name) => match env.get(name)? {
                 Some(value) => Ok(value),
-                // Engine script constants (RegisterGlobalConstant): bare
-                // identifiers fall through to the constants table —
-                // variables shadow them.
+                // Engine-global statics (GlobalNamed) resolve next; script
+                // constants last ("global constants have lowest priority",
+                // C4AulParse.cpp:2836-2839).
                 None => self
-                    .constants
-                    .and_then(|constants| constants.get(name).cloned())
+                    .global_variable(name)
+                    .or_else(|| self.constants.and_then(|constants| constants.get(name).cloned()))
                     .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'"))),
             },
             Expr::Unary(op, expr) => {
@@ -1714,6 +1736,7 @@ impl<'a> Vm<'a> {
         match target {
             AssignmentTarget::Variable(name) => env
                 .lvalue(name)
+                .or_else(|| self.global_variable_cell(name).map(LValueRef::Cell))
                 .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'"))),
             AssignmentTarget::Property(base, property) => Ok(self
                 .assignment_target_to_lvalue(env, base, depth)?
