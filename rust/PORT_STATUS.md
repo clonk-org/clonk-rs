@@ -22,11 +22,27 @@ and their local writes are discarded; Func-criterion finds read a snapshot view
 (mid-search mutations to non-target state and callback-spawned objects are not
 re-read; C++ reads live state); when the OUTER call errors, the partial outcome
 is dropped (pre-existing — C++ keeps mutations made before the error).
-Lockstep parity is still blocked by: mrfScript + GameCall/ObjectCall consumers
-of the seam, C++ string interning + full save/load + binary packet encoding,
-the command-AI per-frame rework (incl. Throw ejection + the C4ObjectInfo model)
-— and proven only by the live C++↔Rust full-scenario shadow-diff (see Parity
-harnesses).
+**Call family DONE (2026-06-10, second leg):** `Call`/`ObjectCall`/
+`ProtectedCall`/`PrivateCall`/`DefinitionCall`/`GameCall`/`GameCallEx`
+registered with C++-exact semantics (C4Script.cpp:3424-3534): script-only
+owner-scoped resolution (engine functions never found), access levels are
+log-only in C++ so the three object variants share one implementation,
+`~`-failsafe only silences logging (miss → C4VNull either way; strip ≤2
+leading `~`), DefinitionCall/GameCall run with the active scope PARKED
+(Obj=nullptr — host functions see no object context), GameCallEx broadcasts
+to live Goal/Rule/Environment objects (results discarded) then returns the
+scenario result; the scenario script rides `HostWorldContext` as an
+`Arc<ScriptEngine>`. mrfScript by-ref write-back DONE via
+`ScriptEngine::call_with_ref_args` (reference-cell args, C4AulParSet GetRef
+pattern). NOT ported (joins the documented CheckConvertFunctionParameters
+gap): the per-call par-conversion flag matrix (CalledWithStrictNil →
+falsy-par Set0 for non-strict3 callees, nil→0/false for strict3 callees,
+the FnProtectedCall/FnPrivateCall 4-arg Exec quirk).
+Lockstep parity is still blocked by: mass-mover script reactions (loop has
+no VM access), C++ string interning + full save/load + binary packet
+encoding, the command-AI per-frame rework (incl. Throw ejection + the
+C4ObjectInfo model) — and proven only by the live C++↔Rust full-scenario
+shadow-diff (see Parity harnesses).
 
 ### The two foundational breaks — current status
 
