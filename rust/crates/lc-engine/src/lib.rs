@@ -36,6 +36,7 @@ pub mod particles;
 mod pathfinder;
 pub mod pxs;
 mod player;
+pub mod player_file;
 mod record;
 mod rng;
 pub mod scenario;

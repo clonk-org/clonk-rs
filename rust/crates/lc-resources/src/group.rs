@@ -171,9 +171,33 @@ impl PackedGroup {
         match source {
             PackedSource::File(file_path) => {
                 let mut file = File::open(&file_path)?;
+                let mut magic = [0u8; 2];
+                let is_compressed = file.read_exact(&mut magic).is_ok()
+                    && (magic == C4GROUP_GZ_MAGIC || magic == GZ_MAGIC);
+                file.seek(SeekFrom::Start(0))?;
+                if is_compressed {
+                    let mut compressed = Vec::new();
+                    file.read_to_end(&mut compressed)?;
+                    let data = decompress_group(compressed)?;
+                    let data_arc = Arc::new(data);
+                    let data_clone = Arc::clone(&data_arc);
+                    let mut cursor = Cursor::new(data_clone.as_slice());
+                    return Self::parse_from_reader(
+                        path,
+                        PackedSource::Memory(data_arc),
+                        &mut cursor,
+                    );
+                }
                 Self::parse_from_reader(path, PackedSource::File(file_path), &mut file)
             }
             PackedSource::Memory(data) => {
+                let data = if data.len() >= 2
+                    && (data[..2] == C4GROUP_GZ_MAGIC || data[..2] == GZ_MAGIC)
+                {
+                    Arc::new(decompress_group(data.as_ref().clone())?)
+                } else {
+                    data
+                };
                 let data_clone = Arc::clone(&data);
                 let mut cursor = Cursor::new(data_clone.as_slice());
                 Self::parse_from_reader(path, PackedSource::Memory(data), &mut cursor)
@@ -393,6 +417,25 @@ fn c_string(buf: &[u8]) -> String {
     String::from_utf8_lossy(&buf[..nul]).trim().to_string()
 }
 
+/// On-disk C4Group files are gzip streams whose two magic bytes are
+/// replaced with `{0x1E, 0x8C}` so stock tools leave them alone
+/// (StdGzCompressedFile.h:34, StdGzCompressedFile.cpp:62-95). Restore the
+/// real magic and inflate; `MultiGzDecoder` accepts the concatenated
+/// members C4Group appends on update.
+const C4GROUP_GZ_MAGIC: [u8; 2] = [0x1E, 0x8C];
+const GZ_MAGIC: [u8; 2] = [0x1F, 0x8B];
+
+fn decompress_group(mut compressed: Vec<u8>) -> Result<Vec<u8>, GroupError> {
+    compressed[0] = GZ_MAGIC[0];
+    compressed[1] = GZ_MAGIC[1];
+    let mut decoder = flate2::read::MultiGzDecoder::new(Cursor::new(compressed));
+    let mut data = Vec::new();
+    decoder
+        .read_to_end(&mut data)
+        .map_err(|error| GroupError::InvalidGroup(format!("gzip decompression failed: {error}")))?;
+    Ok(data)
+}
+
 fn mem_unscramble(buffer: &mut [u8]) {
     for byte in buffer.iter_mut() {
         *byte ^= 237;
@@ -471,6 +514,74 @@ mod tests {
             Group::open("/path/does/not/exist"),
             Err(GroupError::Missing(_))
         ));
+    }
+
+    /// The raw (uncompressed) packed-group image used by the packed tests:
+    /// scrambled header + one entry ("hello.txt" -> b"world").
+    fn packed_group_image() -> Vec<u8> {
+        let mut image = Vec::new();
+
+        let mut header = [0u8; GROUP_HEADER_SIZE];
+        {
+            let mut cursor = Cursor::new(&mut header[..]);
+            let mut id_bytes = [0u8; 28];
+            id_bytes[..GROUP_FILE_ID.len()].copy_from_slice(GROUP_FILE_ID);
+            cursor.write_all(&id_bytes).unwrap();
+            cursor.write_i32::<LittleEndian>(1).unwrap();
+            cursor.write_i32::<LittleEndian>(2).unwrap();
+            cursor.write_i32::<LittleEndian>(1).unwrap();
+            cursor.write_all(&[0u8; 32]).unwrap(); // maker
+            cursor.write_all(&[0u8; 32 + 4 + 4 + 92]).unwrap();
+        }
+        mem_unscramble(&mut header);
+        image.extend_from_slice(&header);
+
+        let mut entry = [0u8; GROUP_ENTRY_SIZE];
+        {
+            let mut cursor = Cursor::new(&mut entry[..]);
+            let mut name = [0u8; 260];
+            name[..b"hello.txt".len()].copy_from_slice(b"hello.txt");
+            cursor.write_all(&name).unwrap();
+            cursor.write_i32::<LittleEndian>(0).unwrap();
+            cursor.write_i32::<LittleEndian>(0).unwrap();
+            cursor.write_i32::<LittleEndian>(5).unwrap();
+            cursor.write_i32::<LittleEndian>(0).unwrap();
+            cursor.write_i32::<LittleEndian>(0).unwrap();
+            cursor.write_u32::<LittleEndian>(0).unwrap();
+            cursor.write_u8(0).unwrap();
+            cursor.write_u32::<LittleEndian>(0).unwrap();
+            cursor.write_u8(0).unwrap();
+            cursor.write_all(&[0u8; 26]).unwrap();
+        }
+        image.extend_from_slice(&entry);
+        image.extend_from_slice(b"world");
+        image
+    }
+
+    #[test]
+    fn open_gz_wrapped_packed_group() {
+        // On-disk C4Group files are gzip streams with the magic bytes
+        // replaced by {0x1E, 0x8C} (StdGzCompressedFile.h:34,
+        // StdGzCompressedFile.cpp:62-95); the packed image lives inside.
+        // Real player/scenario files (e.g. Tyler.c4p) use this wrapping.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.c4p");
+
+        let mut compressed = Vec::new();
+        {
+            use std::io::Write as _;
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut compressed, flate2::Compression::default());
+            encoder.write_all(&packed_group_image()).unwrap();
+            encoder.finish().unwrap();
+        }
+        compressed[0] = 0x1E;
+        compressed[1] = 0x8C;
+        fs::write(&path, &compressed).unwrap();
+
+        let group = Group::open(&path).unwrap();
+        let data = group.read_file("hello.txt").unwrap();
+        assert_eq!(data, b"world");
     }
 
     #[test]
