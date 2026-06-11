@@ -191,7 +191,28 @@ full-scenario shadow-diff (see Parity harnesses).
   commands, team start-index/hostility, the Magic list, the NativeCrew
   flag for empty-id GetIdle, GetAName file-based names, CrewDisabled for
   GetHiRank, StartupPlayerCount approximation (infos seen so far), and
-  crew infos are not yet persisted in snapshots. NOTE: the GoldRush
+  crew infos are not yet persisted in snapshots.
+- **#appendto + statics + def-globals LANDED (task #16, 2026-06-11)** —
+  Engine::resolve_appends ports C4AulScript::ResolveAppends/AppendTo
+  (C4AulLink.cpp:29-64,114-141): definition and System.c4g scripts with
+  #appendto copy their non-global functions into the targets as
+  overrides (inherited reaches the original), system hosts first then
+  defs in load order; includes stop copying global funcs (:127). Engine
+  -global `static` table (GlobalNamed) shared across every script host
+  (NOT yet persisted in snapshots); `global func` declarations in
+  definition scripts register engine-wide (Time.c4d IsNight, MainTipi
+  GetClan). Mid-call spawns carry a callable preview scope (C++ creates
+  objects live during the call) and scenario-batch nested outcomes fold
+  after spawns. Host fns: GetComponent, Enter/Exit (foreign subjects via
+  the seam), ObjectSetAction, Material, Smoke, InLiquid (landscape
+  approximation), SetPortrait/SetVisibility/SetClrModulation acks,
+  GetHiRank, FindObjectOwner. Live divergence now 734-vs-810; GoldRush
+  warnings 282 -> ~200. NEXT cascade blocker: the cross-object LocalN
+  lvalue (`LocalN(name, pObj) = v`, GoldRush DoInitialize WSKI loop) —
+  after it, the remaining unknown host fns (GetDefCoreVal, SetGamma,
+  SetSkyParallax, ...) and per-object compare detail (#15). NOTE: the
+  GoldRush
+
   zero-script-error claim (#17) does not hold at current HEAD — the
   baseline already showed ~210 warnings (unknown host fns GetComponent/
   InLiquid/SetClrModulation/..., #appendto-related Construction errors);
