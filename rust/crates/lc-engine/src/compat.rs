@@ -5661,14 +5661,22 @@ fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn random(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() != 1 {
+    if args.len() > 1 {
         return Err(RuntimeError::new(
-            "Random expects exactly 1 argument: upper exclusive bound",
+            "Random expects at most 1 argument: upper exclusive bound",
         ));
     }
 
-    let range = match &args[0] {
+    // FnRandom's int parameter follows the C4AulExec conversion rules
+    // (C4AulExec.cpp:1364-1396): a missing/nil/bool argument converts —
+    // Random(GetActMapVal(...)) with a missing action is Random(0) in
+    // C++. The count++ happens even for range 0 (C4Random.h:43), and a
+    // negative range goes through the unsigned modulo like C++'s usual
+    // arithmetic conversions — both live in LcgRng::random.
+    let range = match args.first().unwrap_or(&Value::Nil) {
         Value::Int(value) => *value,
+        Value::Nil => 0,
+        Value::Bool(flag) => i32::from(*flag),
         other => {
             return Err(RuntimeError::new(format!(
                 "Random: expected int for range, got {}",
@@ -5676,10 +5684,6 @@ fn random(args: &[Value]) -> Result<Value, RuntimeError> {
             )))
         }
     };
-
-    if range <= 0 {
-        return Ok(Value::Int(0));
-    }
 
     RANDOM_CONTEXT.with(|cell| {
         let context = cell
@@ -17167,11 +17171,30 @@ mod tests {
     }
 
     #[test]
-    fn random_zero_or_negative_range_short_circuits() {
+    fn random_edge_ranges_follow_the_cpp_ledger() {
+        // C4Random.h:40-61: RandomCount++ is UNCONDITIONAL; range 0
+        // returns 0 without advancing the hold; nil converts to 0 at the
+        // host boundary (C4AulExec.cpp:1364-1396); a negative range goes
+        // through the unsigned modulo (usual arithmetic conversions), so
+        // the hold DOES advance.
+        let guard = enter_random_context(LcgRng::new(0));
         let zero = random(&[Value::Int(0)]).expect("zero range succeeds");
-        let negative = random(&[Value::Int(-3)]).expect("negative range succeeds");
         assert_eq!(zero, Value::Int(0));
-        assert_eq!(negative, Value::Int(0));
+        let nil = random(&[Value::Nil]).expect("nil converts to 0");
+        assert_eq!(nil, Value::Int(0));
+        let missing = random(&[]).expect("missing argument converts to 0");
+        assert_eq!(missing, Value::Int(0));
+        let negative = random(&[Value::Int(-3)]).expect("negative range succeeds");
+        let rng = guard.finish();
+        // Three zero-ish draws (count++ only) plus one negative draw that
+        // advances the hold like C++'s unsigned modulo.
+        assert_eq!(rng.count, 4, "RandomCount++ is unconditional");
+        let mut reference = LcgRng::new(0);
+        reference.random(0);
+        reference.random(0);
+        reference.random(0);
+        assert_eq!(Value::Int(reference.random(-3)), negative);
+        assert_eq!(rng.hold, reference.hold, "negative ranges advance the hold");
     }
 
     proptest! {
