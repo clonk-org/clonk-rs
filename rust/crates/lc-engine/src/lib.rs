@@ -1977,6 +1977,59 @@ struct ApplyDeltaOutcome {
     action_change: Option<ActionChange>,
 }
 
+/// The state a pending mid-call spawn would have once created — C++
+/// CreateObject fully creates objects DURING the call (Game.CreateObject
+/// -> NewObject), so nested `obj->Method()` calls on them need a callable
+/// scope before the copy-out spawn happens. Mirrors `spawn_single`'s
+/// defaults; the authoritative state is still built by the spawn, with
+/// the nested outcome folding only the touched fields on top.
+pub(crate) fn preview_spawn_state(
+    position: Vector2,
+    owner: i32,
+    category: i32,
+    construction: i32,
+) -> ObjectState {
+    ObjectState {
+        position,
+        velocity: Vector2::ZERO,
+        rotation: 0,
+        energy: 0,
+        damage: 0,
+        magic_energy: 0,
+        magic_capacity: 0,
+        construction: construction.clamp(0, FULL_CON),
+        action: ActionState::new("Idle"),
+        direction: Direction::default(),
+        command_direction: CommandDirection::default(),
+        effects: Vec::new(),
+        vertices: Vec::new(),
+        container: None,
+        layer: None,
+        contents: Vec::new(),
+        components: HashMap::new(),
+        status: ObjectStatus::Normal,
+        owner,
+        category,
+        crew_member: false,
+        alive: true,
+        base_graphics: None,
+        graphics_overlays: Vec::new(),
+        draw_transform: None,
+        local_vars: HashMap::new(),
+        on_fire: false,
+        fire_phase: 0,
+        fire_caused_by: OWNER_NONE,
+        info_physical: None,
+        temporary_physical: None,
+        physical_changes: Vec::new(),
+        breath: 0,
+        entrance_status: false,
+        color: 0,
+        shape_override: None,
+        ocf: OCF_NORMAL,
+    }
+}
+
 impl ObjectState {
     fn apply_delta(&mut self, delta: &ObjectDelta, library: &ActionLibrary) -> ApplyDeltaOutcome {
         let previous_container = self.container;
@@ -4612,6 +4665,9 @@ pub struct Definition {
     /// can execute another definition's functions mid-VM-call.
     script: Arc<ScriptEngine>,
     includes: Vec<String>,
+    /// `#appendto` targets of this definition's script
+    /// (C4AulScript::Appends; resolved by Engine::resolve_appends).
+    appends: Vec<lc_script::AppendTo>,
     has_construction: bool,
     has_initialize: bool,
     has_step: bool,
@@ -4722,6 +4778,7 @@ impl Definition {
             })?;
 
         let includes = compiled_script.includes().to_vec();
+        let appends = compiled_script.appends().to_vec();
 
         let mut script = ScriptEngine::new();
         script.add_script(compiled_script);
@@ -4734,6 +4791,7 @@ impl Definition {
             name,
             script: Arc::new(script),
             includes,
+            appends,
             has_construction,
             has_initialize,
             has_step,
@@ -4795,6 +4853,18 @@ impl Definition {
 
     pub fn includes(&self) -> &[String] {
         &self.includes
+    }
+
+    pub fn appends(&self) -> &[lc_script::AppendTo] {
+        &self.appends
+    }
+
+    /// Recomputes the lifecycle-callback gates after script linking
+    /// (appends/includes can introduce Construction/Initialize/Step).
+    fn refresh_script_flags(&mut self) {
+        self.has_construction = self.script.has_function("Construction");
+        self.has_initialize = self.script.has_function("Initialize");
+        self.has_step = self.script.has_function("Step");
     }
 
     pub fn merge_from(&mut self, parent: &Definition) {
@@ -7167,6 +7237,7 @@ impl ScenarioScript {
         environment: EnvironmentSettings,
         audio: AudioRegistry,
         particle_defs: HashSet<String>,
+        definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         if !self.has_initialize {
             return Ok((ScenarioBatch::default(), audio, rng));
@@ -7185,6 +7256,7 @@ impl ScenarioScript {
             environment,
             audio,
             particle_defs,
+            definition_scripts,
         )
     }
 
@@ -7200,6 +7272,7 @@ impl ScenarioScript {
         environment: EnvironmentSettings,
         audio: AudioRegistry,
         particle_defs: HashSet<String>,
+        definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         if !self.has_step {
             return Ok((ScenarioBatch::default(), audio, rng));
@@ -7224,6 +7297,7 @@ impl ScenarioScript {
             environment,
             audio,
             particle_defs,
+            definition_scripts,
         )
     }
 
@@ -7244,12 +7318,17 @@ impl ScenarioScript {
         environment: EnvironmentSettings,
         audio: AudioRegistry,
         particle_defs: HashSet<String>,
+        definition_scripts: HashMap<DefinitionId, Arc<ScriptEngine>>,
     ) -> Result<(ScenarioBatch, AudioRegistry, LcgRng), EngineError> {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
         let guard = enter_random_context(rng);
-        let world =
-            host_world_context_from_snapshot(snapshot).with_particle_defs(particle_defs);
+        // Definition scripts ride along so nested calls (obj->Method on
+        // objects the scenario script creates or finds) resolve like the
+        // broadcast path (FindSameNameFunc on the target's def).
+        let world = host_world_context_from_snapshot(snapshot)
+            .with_particle_defs(particle_defs)
+            .with_definition_scripts(definition_scripts);
         let next_object_id = world.next_object_id();
         let audio_guard = enter_audio_context(audio);
         let (result, host_effects) = compat::with_effect_context_with_state(
@@ -7517,6 +7596,16 @@ struct ScenarioBatch {
 
 pub struct Engine {
     definitions: HashMap<DefinitionId, Definition>,
+    /// Definition registration order — C++ links scripts in child
+    /// registration order (C4AulScript::Child0 walk, C4AulLink.cpp:31),
+    /// which decides the overload chain when several appends hit the same
+    /// target function.
+    definition_load_order: Vec<DefinitionId>,
+    /// Global (System.c4g) scripts that carry `#appendto` directives:
+    /// retained at install, resolved with the definition appends (system
+    /// hosts register before definitions in C++, so their appends apply
+    /// first).
+    system_append_scripts: Vec<lc_script::Script>,
     /// Bumped whenever `objects` changes SHAPE (push/retain/clear) so the
     /// id->index cache below can trust its entries; indices are stable
     /// between bumps (destruction only flags, removal happens in the
@@ -8779,6 +8868,8 @@ impl Engine {
     pub fn with_seed(seed: u64) -> Self {
         let mut engine = Self {
             definitions: HashMap::new(),
+            definition_load_order: Vec::new(),
+            system_append_scripts: Vec::new(),
             objects_generation: std::cell::Cell::new(1),
             object_index_cache: std::cell::RefCell::new((0, HashMap::new())),
             definition_metadata_cache: std::cell::RefCell::new(None),
@@ -10280,6 +10371,15 @@ impl Engine {
         )
     }
 
+    /// The shared definition-script table host contexts carry (nested
+    /// obj->Method resolution; see host_world_context).
+    fn definition_script_table(&self) -> HashMap<DefinitionId, Arc<ScriptEngine>> {
+        self.definitions
+            .iter()
+            .map(|(id, definition)| (id.clone(), definition.script_arc()))
+            .collect()
+    }
+
     pub fn clear_scenario_script(&mut self) {
         self.scenario_script = None;
     }
@@ -10304,6 +10404,7 @@ impl Engine {
             self.environment,
             self.audio_registry.clone(),
             self.particle_system.def_names(),
+            self.definition_script_table(),
         );
         // Initialize is a game call: a script error logs and the scenario
         // still runs WITH its script installed (C++ fail-safe exec,
@@ -10340,6 +10441,7 @@ impl Engine {
         let environment = self.environment;
         let audio_state = self.audio_registry.clone();
         let particle_defs = self.particle_system.def_names();
+        let definition_scripts = self.definition_script_table();
         let script = match self.scenario_script.as_mut() {
             Some(script) if script.has_function(function) => script,
             Some(_) => return Ok(()),
@@ -10356,6 +10458,7 @@ impl Engine {
             environment,
             audio_state,
             particle_defs,
+            definition_scripts,
         )?;
         self.rng = new_rng;
         self.audio_registry = audio_state;
@@ -10539,8 +10642,6 @@ impl Engine {
             trigger_game_over,
         } = batch;
 
-        self.apply_nested_object_outcomes(other_objects)?;
-
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
         }
@@ -10617,6 +10718,10 @@ impl Engine {
                 Err(error) => return Err(error),
             }
         }
+        // Nested-call outcomes fold AFTER the spawns: scripts arrow-call
+        // objects they just created (C++ creates them live mid-call), so
+        // outcomes may target this batch's fresh ids.
+        self.apply_nested_object_outcomes(other_objects)?;
         if trigger_game_over {
             self.request_game_over()?;
         }
@@ -11303,6 +11408,7 @@ impl Engine {
         }
         let mut definition = definition;
         definition.set_global_functions(self.global_script_functions.clone());
+        self.definition_load_order.push(DefinitionId::from(id.as_str()));
         self.definitions.insert(id, definition);
         self.definition_metadata_cache.borrow_mut().take();
         Ok(())
@@ -11316,6 +11422,7 @@ impl Engine {
     /// (and future) script host.
     pub fn install_global_scripts(&mut self, sources: &[(String, String)]) -> usize {
         self.global_script_functions = None;
+        self.system_append_scripts.clear();
         self.install_additional_global_scripts(sources)
     }
 
@@ -11332,6 +11439,12 @@ impl Engine {
         for (name, source) in sources {
             match lc_script::Script::compile(source) {
                 Ok(script) => {
+                    // Scripts with #appendto also append their functions to
+                    // the named definitions at link time (C4AulLink.cpp:
+                    // 29-64; system hosts register before defs in C++).
+                    if !script.appends().is_empty() {
+                        self.system_append_scripts.push(script.clone());
+                    }
                     for (function_name, function) in script.functions() {
                         let mut function = function.clone();
                         if let Some(previous) = functions.remove(function_name) {
@@ -11359,6 +11472,86 @@ impl Engine {
             script.set_global_functions(table.clone());
         }
         loaded
+    }
+
+    /// `C4AulScript::ResolveAppends` (C4AulLink.cpp:29-64): every script's
+    /// `#appendto` targets receive a COPY of its non-global functions as
+    /// overrides (AppendTo with bHighPrio, :114-141). MUST run before
+    /// include resolution (":27-28 ResolveAppends has to be called
+    /// first!"). System hosts register before definitions in C++, so
+    /// their appends apply first; definitions follow in registration
+    /// order — that order decides the overload chain when several appends
+    /// hit the same target function. Unknown targets warn and skip
+    /// (:42-49); `#appendto *` reaches every definition except the source
+    /// (:53-60).
+    pub fn resolve_appends(&mut self) {
+        enum AppendSource {
+            System(usize),
+            Definition(DefinitionId),
+        }
+        let mut work: Vec<(AppendSource, Vec<lc_script::AppendTo>)> = self
+            .system_append_scripts
+            .iter()
+            .enumerate()
+            .map(|(index, script)| (AppendSource::System(index), script.appends().to_vec()))
+            .collect();
+        for id in &self.definition_load_order {
+            if let Some(definition) = self.definitions.get(id) {
+                if !definition.appends.is_empty() {
+                    work.push((
+                        AppendSource::Definition(id.clone()),
+                        definition.appends.clone(),
+                    ));
+                }
+            }
+        }
+        if work.is_empty() {
+            return;
+        }
+
+        let ordered_ids = self.definition_load_order.clone();
+        for (source, targets) in work {
+            let (source_script, source_id) = match &source {
+                AppendSource::System(index) => {
+                    let mut engine = ScriptEngine::new();
+                    engine.add_script(self.system_append_scripts[*index].clone());
+                    (Arc::new(engine), None)
+                }
+                AppendSource::Definition(id) => match self.definitions.get(id) {
+                    Some(definition) => (definition.script.clone(), Some(id.clone())),
+                    None => continue,
+                },
+            };
+            for target in targets {
+                let resolved: Vec<DefinitionId> = match &target {
+                    lc_script::AppendTo::Id(token) => {
+                        let id = DefinitionId::from(token.as_str());
+                        if self.definitions.contains_key(&id) {
+                            vec![id]
+                        } else {
+                            // "script to #appendto not found"
+                            // (C4AulLink.cpp:42-49) — a warning, never an
+                            // error.
+                            tracing::warn!(target = %token, "script to #appendto not found");
+                            Vec::new()
+                        }
+                    }
+                    lc_script::AppendTo::Wildcard => ordered_ids
+                        .iter()
+                        .filter(|id| Some(*id) != source_id.as_ref())
+                        .cloned()
+                        .collect(),
+                };
+                for target_id in resolved {
+                    if let Some(definition) = self.definitions.get_mut(&target_id) {
+                        Arc::make_mut(&mut definition.script)
+                            .append_overrides_from(&source_script);
+                        definition.refresh_script_flags();
+                    }
+                }
+            }
+        }
+        self.definition_metadata_cache.borrow_mut().take();
     }
 
     pub fn resolve_includes(&mut self) -> Result<(), EngineError> {
@@ -11801,6 +11994,7 @@ impl Engine {
             let global_effects = self.global_effects.clone();
             let particle_defs = self.particle_system.def_names();
             let (batch, audio_state, new_rng) = {
+                let definition_scripts = self.definition_script_table();
                 let script = self
                     .scenario_script
                     .as_mut()
@@ -11815,6 +12009,7 @@ impl Engine {
                     environment,
                     self.audio_registry.clone(),
                     particle_defs,
+                    definition_scripts,
                 )?
             };
             self.rng = new_rng;

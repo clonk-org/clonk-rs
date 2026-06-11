@@ -9932,7 +9932,18 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             None,
             None,
         )
-        .with_ocf(preview_ocf);
+        .with_ocf(preview_ocf)
+        // A callable scope for nested calls on the fresh object — C++
+        // creates objects live mid-call (Game.CreateObject), so scripts
+        // arrow-call them immediately (GoldRush: pObj->SetAI right after
+        // CreateObject). The spawn stays authoritative; nested outcomes
+        // fold only touched fields.
+        .with_full_state(Rc::new(crate::preview_spawn_state(
+            position,
+            owner,
+            definition_category,
+            FULL_CON,
+        )));
 
         context.register_spawn(spawn, preview);
         Ok(object_reference_value(id))
@@ -10114,7 +10125,13 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             None,
             None,
         )
-        .with_ocf(preview_ocf);
+        .with_ocf(preview_ocf)
+        .with_full_state(Rc::new(crate::preview_spawn_state(
+            position,
+            owner,
+            definition_category,
+            construction_value,
+        )));
 
         context.register_spawn(spawn, preview);
         Ok(object_reference_value(id))
@@ -11462,7 +11479,13 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 None,
                 None,
             )
-            .with_ocf(preview_ocf);
+            .with_ocf(preview_ocf)
+            .with_full_state(Rc::new({
+                let mut state =
+                    crate::preview_spawn_state(position, owner, metadata.category, FULL_CON);
+                state.container = Some(container);
+                state
+            }));
             context.register_spawn(spawn, preview);
             last = object_reference_value(id);
         }

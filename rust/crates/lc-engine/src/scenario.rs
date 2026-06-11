@@ -564,8 +564,9 @@ impl Scenario {
             engine.register_definition(compiled)?;
         }
 
-        // CRITICAL: Resolve #include directives now that all definitions are registered
-        // This allows child definitions to inherit functions from parent definitions
+        // Script linking (C4Game::LinkScriptEngine -> C4AulScriptEngine::Link):
+        // appends resolve FIRST, then includes (C4AulLink.cpp:27-28).
+        engine.resolve_appends();
         engine.resolve_includes()?;
 
         let mut pending = self.initial_spawns.clone();
@@ -5739,6 +5740,109 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn appendto_scripts_link_into_their_targets_like_c4aullink() {
+        // C4AulScript::ResolveAppends (C4AulLink.cpp:29-64) + AppendTo
+        // (:114-141): a definition script with `#appendto GOOD` copies its
+        // functions into GOOD's script as OVERRIDES (the original stays
+        // reachable via inherited), and System.c4g scripts with #appendto
+        // do the same (GoldRush's dialogue and AI scripts rely on both).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "func Probe() { return 1; }\n",
+        )
+        .expect("write target script");
+        let boost = dir.path().join("Defs.c4d/Boost.c4d");
+        std::fs::create_dir_all(&boost).expect("boost dir");
+        std::fs::write(
+            boost.join("DefCore.txt"),
+            "[DefCore]\nid=BOST\nName=Boost\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write boost defcore");
+        std::fs::write(
+            boost.join("Script.c"),
+            "#strict\n#appendto GOOD\n\
+             public func Probe() { return 10 + inherited(); }\n\
+             public func SetAI(szName, iInterval) { return 7; }\n",
+        )
+        .expect("write boost script");
+        let system = scenario_dir.join("System.c4g");
+        std::fs::create_dir_all(&system).expect("system dir");
+        std::fs::write(
+            system.join("Append.c"),
+            "#strict\n#appendto GOOD\n\
+             public func FromSystem() { return 3; }\n",
+        )
+        .expect("write system append");
+
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let id = engine
+            .spawn_object(SpawnConfig::new("GOOD"))
+            .expect("target spawns");
+        let index = engine.find_object_index(id).expect("object index");
+        assert_eq!(
+            engine
+                .call_object_function(index, "Probe", Vec::new())
+                .expect("Probe call succeeds"),
+            lc_script::Value::Int(11),
+            "appendto overrides; inherited reaches the original"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(index, "SetAI", Vec::new())
+                .expect("SetAI call succeeds"),
+            lc_script::Value::Int(7),
+            "appended function exists on the target"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(index, "FromSystem", Vec::new())
+                .expect("FromSystem call succeeds"),
+            lc_script::Value::Int(3),
+            "System.c4g appends land on the target too"
+        );
+    }
+
+    #[test]
+    fn objects_created_mid_call_receive_arrow_calls_like_cpp() {
+        // C++ CreateObject fully creates the object DURING the call
+        // (Game.CreateObject -> NewObject), so `obj->Method()` on the
+        // fresh object resolves immediately (GoldRush's DoInitialize does
+        // pObj->SetAI(...) right after CreateObject). The copy-in/copy-out
+        // model must give pending spawns a callable scope, and their
+        // nested outcomes must fold onto the object once spawned.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "global func Initialize(state, random) {\n\
+                 var obj = CreateObject(GOOD, 50, 50, -1);\n\
+                 obj->Mark();\n\
+                 return nil;\n\
+             }\n",
+        );
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "#strict\nlocal hit;\npublic func Mark() { hit = 7; return hit; }\n",
+        )
+        .expect("write target script");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let snapshot = engine.snapshot();
+        let object = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GOOD")
+            .expect("object created during Initialize");
+        assert_eq!(
+            object.local_vars.get("hit"),
+            Some(&lc_script::Value::Int(7)),
+            "the nested Mark() call ran on the fresh object and folded"
+        );
+    }
+
+    #[test]
     fn join_name_sources_and_map_zoom_follow_cpp() {
         // New crew infos draw their name from the def's ClonkNames list
         // when it has one (C4ObjectInfoList.cpp:160-164, C4Def.cpp:645-652),
@@ -6880,3 +6984,4 @@ global func Step(state, frame, random)
         }
     }
 }
+

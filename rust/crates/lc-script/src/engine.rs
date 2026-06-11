@@ -134,6 +134,31 @@ impl Engine {
         self.var_decls.extend(script.var_decls);
     }
 
+    /// `C4AulScript::AppendTo` with bHighPrio=true (C4AulLink.cpp:114-141,
+    /// driven by ResolveAppends :29-64): COPIES `other`'s functions here so
+    /// they OVERRIDE same-name functions — the appended function wins and
+    /// the original stays reachable as its `inherited` target. Global
+    /// functions are skipped (":127 no need to append global funcs").
+    /// Script-level variable declarations join too: appended code reads
+    /// object locals by name, which must resolve on the target.
+    pub fn append_overrides_from(&mut self, other: &Engine) {
+        for (name, function) in other.functions.iter() {
+            if function.access == crate::ast::AccessLevel::Global {
+                continue;
+            }
+            let mut function = function.clone();
+            if let Some(previous) = self.functions.remove(name) {
+                function.push_overload(previous);
+            }
+            self.functions.insert(name.clone(), function);
+        }
+        for var_decl in other.var_decls.iter() {
+            if !self.var_decls.iter().any(|v| v.name == var_decl.name) {
+                self.var_decls.push(var_decl.clone());
+            }
+        }
+    }
+
     pub fn merge_from(&mut self, other: &Engine) {
         for (name, function) in other.functions.iter() {
             match self.functions.get_mut(name) {
