@@ -180,6 +180,15 @@ impl<'a> Parser<'a> {
                     self.consume()?;
                     (name, type_annotation)
                 }
+                // C4Aul keywords are contextual (plain ATT_IDTF words in the
+                // C++ tokenizer), so any keyword is a legal parameter name —
+                // `func SetPrivateTeleporter(bool private)` (Hazard
+                // Teleporter.c4d/Script.c:238).
+                TokenKind::Keyword(keyword) => {
+                    let name = keyword.lexeme().to_string();
+                    self.consume()?;
+                    (name, type_annotation)
+                }
                 _ if type_annotation.is_some() => {
                     // The type annotation token was actually the parameter name
                     // (e.g., "effect" in "func Foo(effect, target)")
@@ -904,7 +913,7 @@ impl<'a> Parser<'a> {
 
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
         // Parse the next higher-precedence level first
-        let left = self.parse_or()?;
+        let left = self.parse_nil_coalescing()?;
 
         // Check for assignment operators (=, +=, -=, etc.)
         let maybe_op = self.peek()?;
@@ -921,6 +930,9 @@ impl<'a> Parser<'a> {
             TokenKind::Symbol(Symbol::LeftShiftEqual) => (true, Some(Symbol::LeftShiftEqual)),
             TokenKind::Symbol(Symbol::RightShiftEqual) => (true, Some(Symbol::RightShiftEqual)),
             TokenKind::Symbol(Symbol::ConcatEqual) => (true, Some(Symbol::ConcatEqual)),
+            TokenKind::Symbol(Symbol::QuestionQuestionEqual) => {
+                (true, Some(Symbol::QuestionQuestionEqual))
+            }
             _ => (false, None),
         };
 
@@ -945,6 +957,12 @@ impl<'a> Parser<'a> {
                 Symbol::ConcatEqual => {
                     Expr::Binary(Box::new(left), BinaryOp::Concat, Box::new(value))
                 }
+                // `a ??= b` ≙ `a = a ?? b` (AB_NilCoalescingIt,
+                // C4AulParse.cpp:477): `??`'s short-circuit keeps the rhs
+                // unevaluated when `a` is non-nil.
+                Symbol::QuestionQuestionEqual => {
+                    Expr::Binary(Box::new(left), BinaryOp::NilCoalescing, Box::new(value))
+                }
                 // Bitwise compound assignments
                 Symbol::AndEqual => Expr::Binary(Box::new(left), BinaryOp::BitAnd, Box::new(value)),
                 Symbol::OrEqual => Expr::Binary(Box::new(left), BinaryOp::BitOr, Box::new(value)),
@@ -968,6 +986,17 @@ impl<'a> Parser<'a> {
         } else {
             Ok(left)
         }
+    }
+
+    /// `??` sits between `||` (priority 4) and the assignments (priority 2)
+    /// in C4ScriptOpMap (C4AulParse.cpp:463-464).
+    fn parse_nil_coalescing(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_or()?;
+        while self.consume_if_symbol(Symbol::QuestionQuestion)?.is_some() {
+            let right = self.parse_or()?;
+            expr = Expr::Binary(Box::new(expr), BinaryOp::NilCoalescing, Box::new(right));
+        }
+        Ok(expr)
     }
 
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
@@ -1416,6 +1445,21 @@ impl<'a> Parser<'a> {
                 Ok(Expr::This)
             }
             TokenKind::Identifier(name) => Ok(Expr::Variable(name)),
+            // Contextual keywords: declaration words carry no expression
+            // meaning, so in expression position they are ordinary variable
+            // references (the C++ tokenizer emits plain identifiers) —
+            // `isPrivate = private;` (Hazard Teleporter.c4d).
+            TokenKind::Keyword(
+                keyword @ (Keyword::Global
+                | Keyword::Private
+                | Keyword::Protected
+                | Keyword::Public
+                | Keyword::Local
+                | Keyword::Var
+                | Keyword::Static
+                | Keyword::Const
+                | Keyword::In),
+            ) => Ok(Expr::Variable(keyword.lexeme().to_string())),
             TokenKind::Symbol(Symbol::LParen) => {
                 let expr = self.parse_expression()?;
                 self.expect_symbol(Symbol::RParen, "expected ')' after expression")?;

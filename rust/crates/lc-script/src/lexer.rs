@@ -189,6 +189,26 @@ impl<'a> Lexer<'a> {
                     }
                     return Ok(Token::new(TokenKind::Symbol(Symbol::Dot), line, column));
                 }
+                '?' => {
+                    // Only the nil-coalescing pair exists: `??` and `??=`
+                    // (C4ScriptOpMap, C4AulParse.cpp:464,477). A lone `?`
+                    // stays an error (C4Script has no ternary operator).
+                    if self.peek_char() == Some('?') {
+                        self.bump_char();
+                        let symbol = if self.peek_char() == Some('=') {
+                            self.bump_char();
+                            Symbol::QuestionQuestionEqual
+                        } else {
+                            Symbol::QuestionQuestion
+                        };
+                        return Ok(Token::new(TokenKind::Symbol(symbol), line, column));
+                    }
+                    return Err(ParseError::new(
+                        "unexpected character '?'".to_string(),
+                        line,
+                        column,
+                    ));
+                }
                 '+' => {
                     if self.peek_char() == Some('+') {
                         self.bump_char();

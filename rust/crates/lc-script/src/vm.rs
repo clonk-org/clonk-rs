@@ -796,6 +796,15 @@ impl<'a> Vm<'a> {
                     }
                     return self.evaluate(rhs, env, depth);
                 }
+                // `??` coalesces on NIL only (0 and false are kept), with
+                // the right side skipped for non-nil left operands
+                // (AB_JUMPNOTNIL, C4AulParse.cpp:1050-1056).
+                if matches!(op, BinaryOp::NilCoalescing) {
+                    if !matches!(left, Value::Nil) {
+                        return Ok(left);
+                    }
+                    return self.evaluate(rhs, env, depth);
+                }
                 let right = self.evaluate(rhs, env, depth)?;
                 self.eval_binary(left, op, right, env.strict_level)
             }
@@ -1042,6 +1051,14 @@ impl<'a> Vm<'a> {
         match op {
             Add => self.eval_add(left, right),
             Concat => self.eval_concat(left, right),
+            // Reached only via non-short-circuit paths (the Binary arm in
+            // `evaluate` handles `??` before both sides run); keep the same
+            // nil-only semantics.
+            NilCoalescing => Ok(if matches!(left, Value::Nil) {
+                right
+            } else {
+                left
+            }),
             Sub => self.eval_int_op(left, right, |a, b| a - b, "-"),
             Mul => self.eval_int_op(left, right, |a, b| a * b, "*"),
             Div => match (left.as_c4_int(), right.as_c4_int()) {

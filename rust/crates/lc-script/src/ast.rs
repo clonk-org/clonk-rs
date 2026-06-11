@@ -279,6 +279,9 @@ pub enum BinaryOp {
     GreaterEqual,
     And,
     Or,
+    /// `??` — nil coalescing (AB_NilCoalescing, C4AulParse.cpp:464): the
+    /// right side runs only when the left is NIL (0/false are kept).
+    NilCoalescing,
     // Bitwise operators
     BitAnd,
     BitOr,

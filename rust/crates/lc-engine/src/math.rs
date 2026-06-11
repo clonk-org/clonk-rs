@@ -271,17 +271,21 @@ impl PartialOrd<i32> for C4Fixed {
 // ── Conversion functions ──────────────────────────────────────────────────────
 
 /// Integer → fixed-point. `itofix(n).val == n * 65536`. Fixed.h:226.
+/// Wrapping like the C++ int32 multiply: real content feeds values beyond
+/// ±32767 (e.g. `Size=100000` in Objects.txt) where C++ silently wraps.
 #[inline]
 pub fn itofix(x: i32) -> C4Fixed {
-    C4Fixed(x * FPF)
+    C4Fixed(x.wrapping_mul(FPF))
 }
 
 /// Integer → fixed-point with precision denominator. Fixed.h:227.
-/// `itofix_prec(x, p)` = `x/p` as a `C4Fixed`.
+/// `itofix_prec(x, p)` = `x/p` as a `C4Fixed` — wrapping i32 products like
+/// the C++ expression.
 #[inline]
 pub fn itofix_prec(x: i32, prec: i32) -> C4Fixed {
     let val = if prec < FPF {
-        x * (FPF / prec) + (x * (FPF % prec)) / prec
+        x.wrapping_mul(FPF / prec)
+            .wrapping_add(x.wrapping_mul(FPF % prec) / prec)
     } else {
         (i64::from(x) * i64::from(FPF) / i64::from(prec)) as i32
     };
@@ -459,6 +463,16 @@ mod tests {
     use super::*;
 
     // ── itofix / fixtoi ───────────────────────────────────────────────────────
+
+    #[test]
+    fn itofix_wraps_beyond_int16_range_like_cpp() {
+        // C++ `itofix` is a plain int32 multiply (Fixed.h:226) that wraps
+        // for |x| > 32767 in practice; real Objects.txt carries such values
+        // (Size=100000). The Rust port must not panic and must produce the
+        // same wrapped raw value.
+        assert_eq!(itofix(100_000).val(), 100_000i32.wrapping_mul(FPF));
+        assert_eq!(itofix(-100_000).val(), (-100_000i32).wrapping_mul(FPF));
+    }
 
     #[test]
     fn itofix_fixtoi_roundtrip() {
