@@ -50,6 +50,12 @@ pub struct Landscape {
     /// landscape; scenarios populate this via `set_tunnel_column`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     tunnels: HashMap<u32, Vec<(i32, i32)>>,
+    /// The real landscape height (`GBackHgt`, C4Landscape.h): the column
+    /// model can only estimate it from surface depths, which undershoots
+    /// when no column is all-sky. Search loops and border rules bound on
+    /// this when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    world_height: Option<i32>,
     #[serde(skip)]
     mass_mover_dirty: bool,
 }
@@ -211,6 +217,7 @@ impl Landscape {
             default_solid_material: default_material,
             default_liquid_material: None,
             tunnels: HashMap::new(),
+            world_height: None,
             mass_mover_dirty: false,
         })
     }
@@ -356,7 +363,15 @@ impl Landscape {
     }
 
     pub fn estimated_height(&self) -> i32 {
-        self.estimate_world_height()
+        self.world_height
+            .unwrap_or_else(|| self.estimate_world_height())
+    }
+
+    /// Pin the real landscape height (`GBackHgt`). The legacy loader knows
+    /// it exactly (map height × zoom); without it the estimate from surface
+    /// depths is used.
+    pub fn set_world_height(&mut self, height: i32) {
+        self.world_height = Some(height.max(0));
     }
 
     pub fn apply_temperature_conversions(
@@ -921,6 +936,280 @@ impl Landscape {
             Some(surface_y) => y >= surface_y,
             None => false,
         }
+    }
+
+    /// `GBackSemiSolid` (C4Material.h:202): density >= C4M_SemiSolid(25),
+    /// which both solid ground and liquids satisfy.
+    pub fn is_semi_solid_at(&self, x: i32, y: i32) -> bool {
+        self.is_solid_at(x, y) || self.is_liquid_at(x, y)
+    }
+
+    /// `AboveSemiSolid` (C4Landscape.cpp:1736-1755): nearest free directly
+    /// above semi-solid, scanning up and down simultaneously from `y`. The
+    /// UP scan returns the first FREE pixel once it has passed semi-solid;
+    /// the DOWN scan returns the first SEMI-SOLID pixel once it has passed
+    /// free space — the asymmetry is load-bearing for placement results.
+    pub fn above_semi_solid(&self, x: i32, y: i32) -> Option<i32> {
+        let height = self.estimated_height();
+        let (mut cy1, mut cy2) = (y, y);
+        let mut use_upwards_next_free = false;
+        let mut use_downwards_next_solid = false;
+        while cy1 >= 0 || cy2 < height {
+            if cy1 >= 0 {
+                if self.is_semi_solid_at(x, cy1) {
+                    use_upwards_next_free = true;
+                } else if use_upwards_next_free {
+                    return Some(cy1);
+                }
+            }
+            if cy2 < height {
+                if !self.is_semi_solid_at(x, cy2) {
+                    use_downwards_next_solid = true;
+                } else if use_downwards_next_solid {
+                    return Some(cy2);
+                }
+            }
+            cy1 -= 1;
+            cy2 += 1;
+        }
+        None
+    }
+
+    /// `AboveSolid` (C4Landscape.cpp:1757-1782): nearest pixel free of
+    /// SEMI-solid that rests directly on solid, scanning up and down. The
+    /// down scan is guarded by `cy2 + 1 < GBackHgt`.
+    pub fn above_solid(&self, x: i32, y: i32) -> Option<i32> {
+        let height = self.estimated_height();
+        let (mut cy1, mut cy2) = (y, y);
+        while cy1 >= 0 || cy2 < height {
+            if cy1 >= 0 && !self.is_semi_solid_at(x, cy1) && self.is_solid_at(x, cy1 + 1) {
+                return Some(cy1);
+            }
+            if cy2 + 1 < height && !self.is_semi_solid_at(x, cy2) && self.is_solid_at(x, cy2 + 1) {
+                return Some(cy2);
+            }
+            cy1 -= 1;
+            cy2 += 1;
+        }
+        None
+    }
+
+    /// `SemiAboveSolid` (C4Landscape.cpp:1784-1809): like [`above_solid`]
+    /// but only requires freedom from SOLID — a liquid surface row resting
+    /// on rock qualifies.
+    pub fn semi_above_solid(&self, x: i32, y: i32) -> Option<i32> {
+        let height = self.estimated_height();
+        let (mut cy1, mut cy2) = (y, y);
+        while cy1 >= 0 || cy2 < height {
+            if cy1 >= 0 && !self.is_solid_at(x, cy1) && self.is_solid_at(x, cy1 + 1) {
+                return Some(cy1);
+            }
+            if cy2 + 1 < height && !self.is_solid_at(x, cy2) && self.is_solid_at(x, cy2 + 1) {
+                return Some(cy2);
+            }
+            cy1 -= 1;
+            cy2 += 1;
+        }
+        None
+    }
+
+    /// `FindSolidGround` (C4Landscape.cpp:1843-1869): starting from (x, y),
+    /// search left and right for a `width`-long run of columns with solid
+    /// ground; returns the bottom center of the surface found (run-center
+    /// x, with the y settled by a final [`above_semi_solid`]). The left run
+    /// is checked first, and the per-side y trackers persist across columns
+    /// exactly like the C++ by-ref `cy1`/`cy2`.
+    pub fn find_solid_ground(&self, x: i32, y: i32, width: i32) -> Option<(i32, i32)> {
+        let back_width = self.width as i32;
+        let (mut cx1, mut cx2) = (x, x);
+        let (mut cy1, mut cy2) = (y, y);
+        let (mut rl1, mut rl2) = (0i32, 0i32);
+        while cx1 > 0 || cx2 < back_width {
+            if cx1 >= 0 {
+                match self.above_solid(cx1, cy1) {
+                    Some(adjusted) => {
+                        cy1 = adjusted;
+                        rl1 += 1;
+                    }
+                    None => rl1 = 0,
+                }
+            }
+            if cx2 < back_width {
+                match self.above_solid(cx2, cy2) {
+                    Some(adjusted) => {
+                        cy2 = adjusted;
+                        rl2 += 1;
+                    }
+                    None => rl2 = 0,
+                }
+            }
+            if rl1 >= width {
+                let rx = cx1 + rl1 / 2;
+                return Some((rx, self.above_semi_solid(rx, cy1).unwrap_or(cy1)));
+            }
+            if rl2 >= width {
+                let rx = cx2 - rl2 / 2;
+                return Some((rx, self.above_semi_solid(rx, cy2).unwrap_or(cy2)));
+            }
+            cx1 -= 1;
+            cx2 += 1;
+        }
+        None
+    }
+
+    /// `FindLevelGround` (C4Landscape.cpp:1942-1976): like
+    /// [`find_solid_ground`] but follows the surface with
+    /// [`above_semi_solid`], resets the run when the surface height jumps
+    /// by `hrange` or more, and aborts a side whose column has no surface.
+    /// The first checked columns are `x - 1` and `x + 1` (the C++ for-init
+    /// decrement/increment).
+    pub fn find_level_ground(
+        &self,
+        x: i32,
+        y: i32,
+        width: i32,
+        hrange: i32,
+    ) -> Option<(i32, i32)> {
+        let back_width = self.width as i32;
+        let (mut cx1, mut cx2) = (x, x);
+        let (mut cy1, mut cy2) = (y, y);
+        let (mut rh1, mut rh2) = (cy1, cy2);
+        let (mut rl1, mut rl2) = (0i32, 0i32);
+        cx1 -= 1;
+        cx2 += 1;
+        while cx1 > 0 || cx2 < back_width {
+            if cx1 > 0 {
+                match self.above_semi_solid(cx1, cy1) {
+                    None => cx1 = -1, // abort left
+                    Some(adjusted) => {
+                        cy1 = adjusted;
+                        if self.is_solid_at(cx1, cy1 + 1) && (cy1 - rh1).abs() < hrange {
+                            rl1 += 1;
+                        } else {
+                            rl1 = 0;
+                            rh1 = cy1;
+                        }
+                    }
+                }
+            }
+            if cx2 < back_width {
+                match self.above_semi_solid(cx2, cy2) {
+                    None => cx2 = back_width, // abort right
+                    Some(adjusted) => {
+                        cy2 = adjusted;
+                        if self.is_solid_at(cx2, cy2 + 1) && (cy2 - rh2).abs() < hrange {
+                            rl2 += 1;
+                        } else {
+                            rl2 = 0;
+                            rh2 = cy2;
+                        }
+                    }
+                }
+            }
+            if rl1 >= width {
+                let rx = cx1 + rl1 / 2;
+                return Some((rx, self.above_semi_solid(rx, cy1).unwrap_or(cy1)));
+            }
+            if rl2 >= width {
+                let rx = cx2 - rl2 / 2;
+                return Some((rx, self.above_semi_solid(rx, cy2).unwrap_or(cy2)));
+            }
+            cx1 -= 1;
+            cx2 += 1;
+        }
+        None
+    }
+
+    /// `FindConSiteSpot` (C4Landscape.cpp:1982-2043): level-ground search
+    /// for a construction site, with offset starting positions and an
+    /// object-overlap veto. `overlaps(x, y, wdt, hgt)` must answer
+    /// `Game.OverlapObject` for the site rect `(x, y - hgt - 10, wdt,
+    /// hgt + 40)` — the caller supplies it because object knowledge lives
+    /// outside the landscape. `hrange == -1` selects the standard
+    /// smooth-surface limit `max(wdt / 4, 5)`.
+    pub fn find_con_site_spot(
+        &self,
+        x: i32,
+        y: i32,
+        wdt: i32,
+        hgt: i32,
+        hrange: i32,
+        overlaps: impl Fn(i32, i32, i32, i32) -> bool,
+    ) -> Option<(i32, i32)> {
+        let hrange = if hrange == -1 {
+            (wdt / 4).max(5)
+        } else {
+            hrange
+        };
+        let back_width = self.width as i32;
+
+        // Left offset starting position; fall back to centered.
+        let mut cx1 = (x + wdt / 2).min(back_width - 1);
+        let mut cy1 = y;
+        match self.above_semi_solid(cx1, cy1) {
+            Some(adjusted) => cy1 = adjusted,
+            None => {
+                cx1 = x.min(back_width - 1);
+                cy1 = y;
+            }
+        }
+        // Right offset starting position; fall back to centered.
+        let mut cx2 = (x - wdt / 2).max(0);
+        let mut cy2 = y;
+        match self.above_semi_solid(cx2, cy2) {
+            Some(adjusted) => cy2 = adjusted,
+            None => {
+                cx2 = x.min(back_width - 1);
+                cy2 = y;
+            }
+        }
+
+        let (mut rh1, mut rh2) = (cy1, cy2);
+        let (mut rl1, mut rl2) = (0i32, 0i32);
+        cx1 -= 1;
+        cx2 += 1;
+        while cx1 > 0 || cx2 < back_width {
+            if cx1 > 0 {
+                match self.above_semi_solid(cx1, cy1) {
+                    None => cx1 = -1, // abort left
+                    Some(adjusted) => {
+                        cy1 = adjusted;
+                        if self.is_solid_at(cx1, cy1 + 1) && (cy1 - rh1).abs() < hrange {
+                            rl1 += 1;
+                        } else {
+                            rl1 = 0;
+                            rh1 = cy1;
+                        }
+                    }
+                }
+            }
+            if cx2 < back_width {
+                match self.above_semi_solid(cx2, cy2) {
+                    None => cx2 = back_width, // abort right
+                    Some(adjusted) => {
+                        cy2 = adjusted;
+                        if self.is_solid_at(cx2, cy2 + 1) && (cy2 - rh2).abs() < hrange {
+                            rl2 += 1;
+                        } else {
+                            rl2 = 0;
+                            rh2 = cy2;
+                        }
+                    }
+                }
+            }
+            if rl1 >= wdt && cx1 > 0 && !overlaps(cx1, cy1 - hgt - 10, wdt, hgt + 40) {
+                let rx = cx1 + wdt / 2;
+                return Some((rx, self.above_semi_solid(rx, cy1).unwrap_or(cy1)));
+            }
+            if rl2 >= wdt && cx2 < back_width && !overlaps(cx2 - wdt, cy2 - hgt - 10, wdt, hgt + 40)
+            {
+                let rx = cx2 - wdt / 2;
+                return Some((rx, self.above_semi_solid(rx, cy2).unwrap_or(cy2)));
+            }
+            cx1 -= 1;
+            cx2 += 1;
+        }
+        None
     }
 
     /// One 17×15 `PixCnt` cell's occupancy: whether any pixel in the cell has
@@ -1516,6 +1805,8 @@ impl<'de> Deserialize<'de> for Landscape {
             default_liquid_material: Option<MaterialId>,
             #[serde(default)]
             tunnels: HashMap<u32, Vec<(i32, i32)>>,
+            #[serde(default)]
+            world_height: Option<i32>,
         }
 
         let mut data = LandscapeData::deserialize(deserializer)?;
@@ -1551,6 +1842,7 @@ impl<'de> Deserialize<'de> for Landscape {
         landscape.solid_materials = data.solid_materials;
         landscape.default_liquid_material = data.default_liquid_material;
         landscape.tunnels = data.tunnels;
+        landscape.world_height = data.world_height;
         landscape.mass_mover_dirty = false;
         Ok(landscape)
     }
@@ -1568,6 +1860,145 @@ pub struct CollisionResolution {
 mod tests {
     use super::*;
     use lc_resources::MaterialLibrary;
+
+    /// A 100-wide world with ground from y=50 down and an explicit world
+    /// height (GBackHgt) of 400, mirroring a real zoomed map landscape.
+    fn flat_world() -> Landscape {
+        let mut landscape = Landscape::flat(100, 50);
+        landscape.set_world_height(400);
+        landscape
+    }
+
+    #[test]
+    fn explicit_world_height_overrides_the_surface_estimate() {
+        // GBackHgt is the real landscape height (C4Landscape.h `Height`),
+        // not the deepest surface column: search loops and border rules
+        // (C4Landscape.h:144-161) bound on it.
+        let mut landscape = Landscape::flat(10, 50);
+        assert_eq!(landscape.estimated_height(), 50);
+        landscape.set_world_height(400);
+        assert_eq!(landscape.estimated_height(), 400);
+        // Below the real world bottom stays border-solid.
+        assert!(landscape.is_solid_at(5, 400));
+        // Inside the ground body is solid as before.
+        assert!(landscape.is_solid_at(5, 200));
+    }
+
+    #[test]
+    fn semi_solid_includes_liquids() {
+        // GBackSemiSolid = density >= C4M_SemiSolid(25) (C4Material.h:202),
+        // which liquids satisfy; GBackSolid = density >= C4M_Solid(50).
+        let mut landscape = flat_world();
+        landscape.set_liquid_column(
+            25,
+            vec![LiquidSegment {
+                top: 40,
+                bottom: 49,
+                material: None,
+            }],
+        );
+        assert!(landscape.is_semi_solid_at(25, 45), "water is semi-solid");
+        assert!(!landscape.is_solid_at(25, 45), "water is not solid");
+        assert!(landscape.is_semi_solid_at(25, 60), "ground is semi-solid");
+        assert!(!landscape.is_semi_solid_at(25, 10), "sky is neither");
+    }
+
+    #[test]
+    fn above_semi_solid_is_asymmetric_like_cpp() {
+        // AboveSemiSolid (C4Landscape.cpp:1736-1755): scanning UP from a
+        // buried point returns the first FREE pixel; scanning DOWN from a
+        // free point returns the first SEMI-SOLID pixel.
+        let landscape = flat_world();
+        // Buried at y=70: first free pixel above ground is 49.
+        assert_eq!(landscape.above_semi_solid(10, 70), Some(49));
+        // In the air at y=30: lands ON the first solid row, 50.
+        assert_eq!(landscape.above_semi_solid(10, 30), Some(50));
+
+        // Above a lake the DOWN scan stops on the water surface row.
+        let mut with_lake = flat_world();
+        with_lake.set_liquid_column(
+            25,
+            vec![LiquidSegment {
+                top: 40,
+                bottom: 49,
+                material: None,
+            }],
+        );
+        assert_eq!(with_lake.above_semi_solid(25, 35), Some(40));
+        // Buried under the lake: first free pixel above the WATER.
+        assert_eq!(with_lake.above_semi_solid(25, 70), Some(39));
+    }
+
+    #[test]
+    fn above_solid_skips_liquids_but_semi_above_solid_accepts_them() {
+        // AboveSolid wants free-of-SEMI-solid above solid
+        // (C4Landscape.cpp:1757-1782); SemiAboveSolid only wants
+        // free-of-SOLID above solid (:1784-1809), so a water column
+        // resting on rock satisfies the latter but not the former.
+        let mut landscape = flat_world();
+        landscape.set_liquid_column(
+            25,
+            vec![LiquidSegment {
+                top: 40,
+                bottom: 49,
+                material: None,
+            }],
+        );
+        assert_eq!(landscape.above_solid(10, 30), Some(49));
+        assert_eq!(landscape.above_solid(25, 30), None);
+        assert_eq!(landscape.semi_above_solid(25, 30), Some(49));
+    }
+
+    #[test]
+    fn find_solid_ground_returns_bottom_center_of_the_left_run() {
+        // FindSolidGround (C4Landscape.cpp:1843-1869): two-sided column
+        // scan; the LEFT run is checked first, the result is the run's
+        // center x, and the final AboveSemiSolid lands the y ON the first
+        // solid row.
+        let landscape = flat_world();
+        assert_eq!(landscape.find_solid_ground(50, 30, 10), Some((46, 50)));
+    }
+
+    #[test]
+    fn find_level_ground_rejects_steps_larger_than_hrange() {
+        // FindLevelGround (C4Landscape.cpp:1942-1976): the run resets when
+        // the surface height jumps by >= hrange, so the search walks past a
+        // terrace step and settles on the flat side. The final
+        // AboveSemiSolid starts ON the solid row and so returns the free
+        // row above it (the up-scan branch of C4Landscape.cpp:1740-1745).
+        let mut surfaces = vec![50; 30];
+        surfaces.extend(vec![45; 30]);
+        let mut landscape = Landscape::new(60, surfaces).expect("landscape builds");
+        landscape.set_world_height(400);
+        assert_eq!(landscape.find_level_ground(35, 20, 10, 3), Some((41, 44)));
+    }
+
+    #[test]
+    fn find_con_site_spot_consults_the_overlap_check() {
+        // FindConSiteSpot (C4Landscape.cpp:1982-2043): a run only counts as
+        // found when the construction-site rect (x, y-hgt-10, wdt, hgt+40)
+        // is free of overlapping objects; otherwise the scan keeps walking.
+        let landscape = flat_world();
+        // No obstructions: spot right of center (left offset start walks
+        // left; the left run finds its spot first).
+        assert_eq!(
+            landscape.find_con_site_spot(50, 20, 10, 8, -1, |_, _, _, _| false),
+            Some((50, 49))
+        );
+        // Everything left of x=60 blocked: the right-hand scan walks until
+        // its rect clears the blocked region.
+        // Everything left of x=60 blocked: the right-hand scan walks until
+        // its rect clears the blocked region. The surface follower
+        // oscillates between the free row (49) and the solid row (50) each
+        // column (AboveSemiSolid asymmetry), so the y at the exit column —
+        // and hence the final adjustment — depends on that parity: here the
+        // tracker sits on the free row and the final AboveSemiSolid
+        // descends onto the solid row.
+        let blocked = landscape.find_con_site_spot(50, 20, 10, 8, -1, |x, _, _, _| x < 60);
+        let (x, y) = blocked.expect("spot found right of the blocked region");
+        assert!(x >= 60, "blocked region avoided, got x={x}");
+        assert_eq!(y, 50);
+    }
 
     fn legacy_expected_surface(initial: &[i32], center: Vector2, radius: i32) -> Vec<i32> {
         let mut surface = initial.to_vec();

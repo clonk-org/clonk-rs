@@ -2566,8 +2566,11 @@ fn load_legacy_landscape(
         }
 
         let final_width = width.saturating_mul(map_zoom_u32);
-        let landscape = Landscape::new(final_width, surfaces)
+        let mut landscape = Landscape::new(final_width, surfaces)
             .map_err(|error| ScenarioError::InvalidLandscape(error.to_string()))?;
+        // GBackHgt is known exactly here (map height × zoom); placement
+        // searches and `Random(GBackHgt - 32)` draws bound on it.
+        landscape.set_world_height(world_height);
         return Ok(Some(landscape));
     }
 
@@ -2586,7 +2589,8 @@ fn load_legacy_landscape(
     let fallback_height = fallback_map_height
         .saturating_mul(map_zoom_u32 as i32)
         .max(1);
-    let landscape = Landscape::flat(width_u32, fallback_height);
+    let mut landscape = Landscape::flat(width_u32, fallback_height);
+    landscape.set_world_height(fallback_height);
     Ok(Some(landscape))
 }
 
