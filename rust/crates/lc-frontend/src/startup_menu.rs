@@ -116,6 +116,16 @@ impl StartupMenu {
         }
     }
 
+    /// Current entries, for parity renderers that draw the list themselves.
+    pub fn entries(&self) -> &[ScenarioEntry] {
+        self.browser.entries()
+    }
+
+    /// Index of the selected entry, if any.
+    pub fn selected_index(&self) -> Option<usize> {
+        self.browser.selected_index()
+    }
+
     pub fn select_entry_by_index(
         &mut self,
         index: usize,

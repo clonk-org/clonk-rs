@@ -336,6 +336,8 @@ struct FrontendAssets {
     /// Graphics.c4g images used by the startup dialog parity renderers,
     /// keyed by file name (see `STARTUP_DIALOG_IMAGES`).
     startup_dialog_images: HashMap<String, ImageData>,
+    /// Shadowless startup "book" fonts (C4StartupGraphics::InitFonts).
+    book_fonts: Option<Arc<lc_frontend::startup_scensel::BookFontSet>>,
     base_sprites: HashMap<String, DefinitionSprite>,
     cursor_atlas: Arc<CursorAtlas>,
     hud_graphics: Arc<HudGraphics>,
@@ -345,6 +347,7 @@ impl FrontendAssets {
     fn load(paths: Option<&AppPaths>) -> Self {
         let font = Self::load_font(paths);
         let clonk_fonts = Self::load_clonk_fonts(paths);
+        let book_fonts = Self::load_book_fonts(paths);
         let mut startup_dialog_images = HashMap::new();
         let mut menu_background = None;
         let mut scenario_browser_background = None;
@@ -432,6 +435,7 @@ impl FrontendAssets {
             button_textures,
             button_highlight,
             startup_dialog_images,
+            book_fonts,
             base_sprites: sprites,
             cursor_atlas: Arc::new(cursor_atlas),
             hud_graphics: Arc::new(hud_graphics),
@@ -451,6 +455,56 @@ impl FrontendAssets {
                 None
             }
         }
+    }
+
+    /// Builds the shadowless startup book fonts (C4Startup.cpp:92-116).
+    fn load_book_fonts(
+        paths: Option<&AppPaths>,
+    ) -> Option<Arc<lc_frontend::startup_scensel::BookFontSet>> {
+        let paths = paths?;
+        let group = Group::open(paths.system_group_path()).ok()?;
+        let resource = load_endeavour_font(&group).ok()?;
+        match lc_frontend::startup_scensel::build_book_font_set(resource.bytes()) {
+            Ok(set) => Some(Arc::new(set)),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to build startup book fonts");
+                None
+            }
+        }
+    }
+
+    fn dialog_image(&self, name: &str) -> Option<ImageData> {
+        self.startup_dialog_images.get(name).cloned()
+    }
+
+    fn about_dlg_assets(&self) -> Option<lc_frontend::startup_about_dlg::AboutDlgAssets> {
+        Some(lc_frontend::startup_about_dlg::AboutDlgAssets {
+            background: self.dialog_image("LoaderWatercave1.png")?,
+            button: self.dialog_image("GUIButton.png")?,
+            scroll: self.dialog_image("GUIScroll.png")?,
+        })
+    }
+
+    fn scensel_assets(&self) -> Option<lc_frontend::startup_scensel::ScenSelAssets> {
+        Some(lc_frontend::startup_scensel::ScenSelAssets {
+            background: self.dialog_image("StartupScenSelBG.png")?,
+            book_scroll: self.dialog_image("StartupBookScroll.png")?,
+            scen_icons: self.dialog_image("StartupScenSelIcons.png")?,
+            caption_bar: self.dialog_image("GUICaption.png")?,
+            button: self.dialog_image("GUIButton.png")?,
+            checkbox: self.dialog_image("GUICheckbox.png")?,
+            icons_ex: self.dialog_image("GUIIcons2.png")?,
+        })
+    }
+
+    fn netdlg_assets(&self) -> Option<lc_frontend::startup_netdlg::NetDlgAssets> {
+        Some(lc_frontend::startup_netdlg::NetDlgAssets {
+            background: self.dialog_image("StartupNetworkBG.png")?,
+            net_get_ref: self.dialog_image("StartupNetGetRef.png")?,
+            gui_caption: self.dialog_image("GUICaption.png")?,
+            gui_button: self.dialog_image("GUIButton.png")?,
+            gui_icons_ex: self.dialog_image("GUIIcons2.png")?,
+        })
     }
 
     fn load_font(paths: Option<&AppPaths>) -> Arc<dyn TextFont> {
@@ -2304,6 +2358,7 @@ struct GameApp {
     control_options: Option<ControlOptionsState>,
     about_dialog: Option<AboutDialogState>,
     startup_view: StartupView,
+    startup_view_flags: StartupViewFlags,
     object_menu: Option<ObjectMenuState>,
     ingame_menu: Option<IngameMenuState>,
     save_browser: Option<SaveBrowserState>,
@@ -4430,6 +4485,15 @@ fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
     }
 }
 
+/// `Config.General.FairCrew` — drives the scen-sel fair-crew icon button
+/// (C4Network2Dialogs.cpp:796-816).
+fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
+    paths
+        .and_then(|paths| Config::load(paths.config_file()).ok())
+        .and_then(|config| config.get_in(Some("General"), "FairCrew").map(parse_config_bool))
+        .unwrap_or(false)
+}
+
 fn load_participants_label(paths: Option<&AppPaths>) -> String {
     // C++ C4StartupMainDlg::UpdateParticipants (C4StartupMainDlg.cpp:174-200):
     // IDS_DESC_PLRS ("Players: ") + comma-separated player file basenames
@@ -4583,6 +4647,10 @@ impl GameApp {
             control_options: None,
             about_dialog: None,
             startup_view: StartupView::MainMenu,
+            startup_view_flags: StartupViewFlags {
+                fair_crew: load_fair_crew_flag(paths),
+                record: load_recording_flag(paths),
+            },
             object_menu: None,
             ingame_menu: None,
             save_browser: None,
@@ -6220,13 +6288,8 @@ impl GameApp {
                     StartupView::NetworkGame | StartupView::PlayerSelection => Ok(()),
                     StartupView::ScenarioBrowser => {
                         if let Some(point) = self.menu_state.pointer_position() {
-                            match button_state {
-                                ElementState::Pressed => self.handle_menu_input(|state| {
-                                    state.menu().handle_pointer_down(point)
-                                })?,
-                                ElementState::Released => self.handle_menu_input(|state| {
-                                    state.menu().handle_pointer_up(point)
-                                })?,
+                            if button_state == ElementState::Released {
+                                self.handle_scensel_parity_click(point)?;
                             }
                         }
                         Ok(())
@@ -6310,15 +6373,13 @@ impl GameApp {
                         Ok(())
                     }
                     StartupView::About => {
-                        if let Some(about) = self.about_dialog.as_mut() {
-                            if let Some(point) = about.dialog.pointer_position() {
-                                let actions = match button_state {
-                                    ElementState::Pressed => {
-                                        about.dialog.handle_pointer_down(point)
-                                    }
-                                    ElementState::Released => about.dialog.handle_pointer_up(point),
-                                };
-                                self.process_about_actions(actions)?;
+                        let point = self
+                            .about_dialog
+                            .as_ref()
+                            .and_then(|about| about.dialog.pointer_position());
+                        if let Some(point) = point {
+                            if button_state == ElementState::Released {
+                                self.handle_about_parity_click(point)?;
                             }
                         }
                         Ok(())
@@ -6835,6 +6896,63 @@ impl GameApp {
         Ok(())
     }
 
+    /// Routes a click through the C++-faithful About layout
+    /// (Back / Check for updates / Licenses, C4StartupAboutDlg.cpp:277-283).
+    fn handle_about_parity_click(&mut self, point: GuiPoint) -> Result<(), EngineError> {
+        let layout = lc_frontend::startup_about_dlg::about_layout(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+        );
+        let (px, py) = (point.x as i32, point.y as i32);
+        let inside =
+            |x: i32, y: i32, w: i32, h: i32| px >= x && px < x + w && py >= y && py < y + h;
+        let back = layout.buttons[0];
+        let update = layout.buttons[1];
+        if inside(back.x, back.y, back.w, back.h) {
+            self.show_main_menu();
+        } else if inside(update.x, update.y, update.w, update.h) {
+            self.status_text = "Update checking not yet implemented in Rust port".to_string();
+        }
+        Ok(())
+    }
+
+    /// Routes a click through the C++-faithful scenario book layout
+    /// (Back / Open buttons + list rows, C4StartupScenSelDlg.cpp:1349-1382).
+    fn handle_scensel_parity_click(&mut self, point: GuiPoint) -> Result<(), EngineError> {
+        let Some(fonts) = self.assets.clonk_fonts.clone() else {
+            return Ok(());
+        };
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+            &fonts,
+        );
+        let (px, py) = (point.x as i32, point.y as i32);
+        let inside =
+            |x: i32, y: i32, w: i32, h: i32| px >= x && px < x + w && py >= y && py < y + h;
+        let (back, open, list) = (layout.back_button, layout.open_button, layout.list);
+        if inside(back.x, back.y, back.w, back.h) {
+            if self.menu_state.stack.len() <= 1 {
+                self.show_main_menu();
+            } else {
+                self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Escape))?;
+                self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Escape))?;
+            }
+        } else if inside(open.x, open.y, open.w, open.h) {
+            self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?;
+            self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?;
+        } else if inside(list.x + 3, list.y + 3, list.w - 6 - 16, list.h - 6) {
+            if let Some(book) = self.assets.book_fonts.clone() {
+                let pitch = lc_frontend::startup_scensel::scen_list_item_height(&book.text) + 1;
+                let index = ((py - (list.y + 3)) / pitch).max(0) as usize;
+                self.handle_menu_input(|menu| {
+                    menu.menu().select_entry_by_index(index).unwrap_or_default()
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     fn open_scenario_browser(&mut self) {
         self.startup_view = StartupView::ScenarioBrowser;
         self.menu_state.set_pointer_position(None);
@@ -7331,6 +7449,7 @@ impl GameApp {
                     network_lobby,
                     game_over_dialog,
                     about_dialog,
+                    self.startup_view_flags,
                     frame,
                 );
                 Ok(())
@@ -8478,12 +8597,109 @@ impl GameApp {
     }
 }
 
+/// Config-driven bits the startup parity renderers display.
+#[derive(Clone, Copy, Debug, Default)]
+struct StartupViewFlags {
+    /// `Config.General.FairCrew`.
+    fair_crew: bool,
+    /// `Config.General.Record`.
+    record: bool,
+}
+
+/// Fills the inclusive rect with an engine AARRGGBB color (inverted alpha,
+/// gamma-encoded rgb, float blend) like `DrawBoxDw` through the blit shader.
+fn fill_engine_box(
+    surface: &mut Surface,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    clr: u32,
+    gamma: &lc_graphics::GammaRamp,
+) {
+    let opacity = (255 - (clr >> 24)) as f32 / 255.0;
+    let rgb = [
+        f32::from(gamma.encode_float(((clr >> 16) & 0xff) as f32)),
+        f32::from(gamma.encode_float(((clr >> 8) & 0xff) as f32)),
+        f32::from(gamma.encode_float((clr & 0xff) as f32)),
+    ];
+    for y in y0.max(0)..=y1.min(surface.height() as i32 - 1) {
+        for x in x0.max(0)..=x1.min(surface.width() as i32 - 1) {
+            let dst = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
+            let blend = |src: f32, dst: u8| -> u8 {
+                (src * opacity + f32::from(dst) * (1.0 - opacity))
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            let out = Color::new(blend(rgb[0], dst.r), blend(rgb[1], dst.g), blend(rgb[2], dst.b), dst.a);
+            let _ = surface.set_pixel(x as u32, y as u32, out);
+        }
+    }
+}
+
+/// Draws the live scenario entries into the book list with the C++ item look
+/// (ScenListItem rows + ListBox selection bar; scrolling not yet wired).
+fn draw_scensel_entries(
+    surface: &mut Surface,
+    scenario_menu: &mut MenuState,
+    assets: &lc_frontend::startup_scensel::ScenSelAssets,
+    fonts: &lc_frontend::ClonkFontSet,
+    book_fonts: &lc_frontend::startup_scensel::BookFontSet,
+    gamma: &'static lc_graphics::GammaRamp,
+) {
+    let layout = lc_frontend::startup_scensel::scen_sel_layout(
+        surface.width() as i32,
+        surface.height() as i32,
+        fonts,
+    );
+    let item_h = lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+    let x = layout.list.x + 3;
+    let item_w = layout.list.w - 6 - 16;
+    let bottom = layout.list.y + layout.list.h - 3;
+    let selected = scenario_menu.menu().selected_index();
+    let entries: Vec<(u32, String)> = scenario_menu
+        .menu()
+        .entries()
+        .iter()
+        .map(|entry| {
+            let icon = match entry.kind {
+                lc_frontend::ScenarioKind::Folder => 0,
+                _ => 18,
+            };
+            (icon, entry.title.clone())
+        })
+        .collect();
+    let mut y = layout.list.y + 3;
+    for (index, (icon, title)) in entries.iter().enumerate() {
+        if y + item_h > bottom {
+            break;
+        }
+        if selected == Some(index) {
+            // C4GUI_ListBoxSelColor (focused list), C4GuiListBox.cpp:107-124.
+            fill_engine_box(surface, x, y, x + item_w - 1, y + item_h - 1, 0xafaf0000, gamma);
+        }
+        lc_frontend::startup_scensel::draw_scen_list_item(
+            surface,
+            &assets.scen_icons,
+            &book_fonts.text,
+            Some(gamma),
+            x,
+            y,
+            *icon,
+            title,
+            true,
+        );
+        y += item_h + 1; // C4GUI_DefaultListSpacing
+    }
+}
+
 /// The startup render gamma ramp (default config: identity + black floor).
 fn startup_gamma() -> &'static lc_graphics::GammaRamp {
     static STARTUP_GAMMA: std::sync::OnceLock<lc_graphics::GammaRamp> = std::sync::OnceLock::new();
     STARTUP_GAMMA.get_or_init(lc_graphics::GammaRamp::standard)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_startup_frame(
     graphics: &mut GraphicsSystem,
     assets: &FrontendAssets,
@@ -8494,10 +8710,85 @@ fn render_startup_frame(
     network_lobby: Option<&mut NetworkLobbyState>,
     game_over: Option<&GameOverState>,
     about_dialog: Option<&mut AboutDialogState>,
+    flags: StartupViewFlags,
     frame: &mut [u8],
 ) {
     {
         let surface = graphics.surface_mut();
+
+        // C++-faithful parity renderers draw their own backgrounds.
+        let parity_rendered = match view {
+            StartupView::About => match (assets.about_dlg_assets(), assets.clonk_fonts.as_ref()) {
+                (Some(dlg_assets), Some(fonts)) => {
+                    lc_frontend::startup_about_dlg::AboutDlgScreen::render(
+                        surface,
+                        &dlg_assets,
+                        fonts,
+                        Some(startup_gamma()),
+                    );
+                    true
+                }
+                _ => false,
+            },
+            StartupView::ScenarioBrowser => match (
+                assets.scensel_assets(),
+                assets.clonk_fonts.as_ref(),
+                assets.book_fonts.as_ref(),
+            ) {
+                (Some(dlg_assets), Some(fonts), Some(book_fonts)) => {
+                    lc_frontend::startup_scensel::ScenSelScreen::render(
+                        surface,
+                        &dlg_assets,
+                        fonts,
+                        book_fonts,
+                        Some(startup_gamma()),
+                        flags.fair_crew,
+                        flags.record,
+                    );
+                    draw_scensel_entries(
+                        surface,
+                        scenario_menu,
+                        &dlg_assets,
+                        fonts,
+                        book_fonts,
+                        startup_gamma(),
+                    );
+                    true
+                }
+                _ => false,
+            },
+            StartupView::NetworkGame => {
+                match (assets.netdlg_assets(), assets.clonk_fonts.as_ref()) {
+                    (Some(dlg_assets), Some(fonts)) => {
+                        lc_frontend::startup_netdlg::NetDlgScreen::render(
+                            surface,
+                            &dlg_assets,
+                            fonts,
+                            Some(startup_gamma()),
+                            lc_frontend::startup_netdlg::NetDlgConfig {
+                                masterserver_signup: true,
+                                record: flags.record,
+                            },
+                            0,
+                        );
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        if parity_rendered {
+            startup_gamma().apply_to_surface(surface);
+            let surface = graphics.surface();
+            let pixels = surface.pixels();
+            if pixels.len() == frame.len() {
+                frame.copy_from_slice(pixels);
+            } else {
+                copy_surface(pixels, surface.width(), surface.height(), frame);
+            }
+            return;
+        }
         let background = match view {
             StartupView::ScenarioBrowser | StartupView::NetworkLobby => {
                 assets.scenario_browser_background()

@@ -181,6 +181,10 @@ impl ScenarioBrowser {
         self.selected.and_then(|index| self.entries.get(index))
     }
 
+    pub fn selected_index(&self) -> Option<usize> {
+        self.selected
+    }
+
     fn select_entry(&mut self, index: usize) -> GuiResult<Option<ScenarioBrowserMessage>> {
         if index >= self.entries.len() {
             return Ok(None);
