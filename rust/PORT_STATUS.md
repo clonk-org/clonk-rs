@@ -38,11 +38,17 @@ pattern). NOT ported (joins the documented CheckConvertFunctionParameters
 gap): the per-call par-conversion flag matrix (CalledWithStrictNil →
 falsy-par Set0 for non-strict3 callees, nil→0/false for strict3 callees,
 the FnProtectedCall/FnPrivateCall 4-arg Exec quirk).
-Lockstep parity is still blocked by: mass-mover script reactions (loop has
-no VM access), C++ string interning + full save/load + binary packet
-encoding, the command-AI per-frame rework (incl. Throw ejection + the
-C4ObjectInfo model) — and proven only by the live C++↔Rust full-scenario
-shadow-diff (see Parity harnesses).
+**Mass-mover script reactions DONE (2026-06-10, third leg):** the mover loop
+runs through `&mut Engine` (`tick_mass_movers` takes the set out for the
+frame), so `Type=Script` reactions dispatch at the exact C++ corrosion-check
+position (C4MassMover.cpp:163-167: xdir=ydir=Fix0, write-backs discarded,
+truthy return consumes the material) — RNG draw order pinned by the
+migrated mover tests. The mrfScript epic is COMPLETE except the
+global-script-engine resolution stand-in (scenario script).
+Lockstep parity is still blocked by: C++ string interning + full save/load
++ binary packet encoding, the command-AI per-frame rework (incl. Throw
+ejection + the C4ObjectInfo model) — and proven only by the live C++↔Rust
+full-scenario shadow-diff (see Parity harnesses).
 
 ### The two foundational breaks — current status
 
