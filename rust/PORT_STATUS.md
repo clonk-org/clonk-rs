@@ -73,11 +73,17 @@ tests (one old test had enshrined the invented order and was re-pinned
 to C++). CrossCheck inner loops also reuse obj1*s stable index instead
 of re-resolving per candidate.
 
-OPEN (task #20): OCF timing parity — C4Object::UpdateOCF runs once at
-Execute-start (C4Object.cpp:1058, plus the FnCollect refresh,
-C4Script.cpp:395-400) and ALL C++ readers use the cached obj->OCF; we
-recompute at read time (timing divergence + ~15% of the remaining
-tick).
+Task #20 DONE (682b99b6): ObjectState.ocf is the cached mask, refreshed
+exactly at the C++ SetOCF/UpdateOCF points — spawn Init
+(C4Object.cpp:215), Execute-start (1058), host-driven updates
+(SetAlive C4Object.h:361, DoCon 1417, status 4139, death 1177),
+Enter/Exit both sides (1518-1597), Incinerate, snapshot-restore
+recompute (2863). Raw state pokes stay stale until the next frame like
+C++ (pinned by test). NOT modeled: NoCollectDelay/FnCollect refresh
+(C4Script.cpp:395-400), and the SetOCF-vs-UpdateOCF bit split is moot
+until the situational bits (HitSpeed1-4, In*, Chop, Entrance dynamics,
+FightReady action-gating) exist in compute_ocf — those are the next OCF
+gaps. GoldRush ~90ms/tick (from 37s at the epic start, ~400x).
 
 ## State: broadly scaffolded, not yet lockstep-parity-capable
 
