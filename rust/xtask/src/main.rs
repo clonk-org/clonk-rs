@@ -159,6 +159,15 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
     )
     .map_err(|error| anyhow!("loading material library: {error}"))?;
 
+    // System.c4g global scripts (Game.ScriptEngine in C++).
+    let system_scripts = lc_resources::Group::open(repo_root.join("planet/System.c4g"))
+        .ok()
+        .and_then(|group| lc_engine::scenario::load_system_scripts(&group).ok())
+        .unwrap_or_default();
+    if system_scripts.is_empty() {
+        tracing::warn!("no System.c4g scripts found; global functions unavailable");
+    }
+
     let mut scenario_paths: Vec<PathBuf> = WalkDir::new(&content_root)
         .into_iter()
         .filter_map(|entry| entry.ok())
@@ -214,6 +223,7 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
         let (sender, receiver) = std::sync::mpsc::channel();
         let worker_path = path.clone();
         let worker_library = material_library.clone();
+        let worker_system_scripts = system_scripts.clone();
         std::thread::spawn(move || {
             let resolver = SweepResolver { roots };
             let outcome = match lc_engine::Scenario::load_from_path_with(&worker_path, &resolver)
@@ -221,6 +231,7 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
                 Ok(scenario) => {
                     let mut engine = lc_engine::Engine::new();
                     engine.configure_materials_from_library(&worker_library);
+                    engine.install_global_scripts(&worker_system_scripts);
                     match scenario.apply(&mut engine) {
                         Ok(_) => SweepOutcome::Applied,
                         Err(error) => SweepOutcome::ApplyFailed(error.to_string()),

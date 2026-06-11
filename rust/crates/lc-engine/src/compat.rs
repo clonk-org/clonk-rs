@@ -535,12 +535,15 @@ impl HostWorldContext {
         self.definition_scripts.get(id)
     }
 
-    /// Whether any definition script or host function knows `name` — the
-    /// global-function-map lookup of `GetFirstFunc` (C4Aul.cpp:545-552).
+    /// Whether any definition script, global script, or host function knows
+    /// `name` — the global-function-map lookup of `GetFirstFunc`
+    /// (C4Aul.cpp:545-552).
     pub(crate) fn script_function_known(&self, name: &str) -> bool {
-        self.definition_scripts
-            .values()
-            .any(|script| script.has_function(name) || script.has_host_function(name))
+        self.definition_scripts.values().any(|script| {
+            script.has_function(name)
+                || script.has_global_function(name)
+                || script.has_host_function(name)
+        })
     }
 
     /// Attach the engine's particle def registry (names from

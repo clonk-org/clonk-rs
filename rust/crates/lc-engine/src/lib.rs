@@ -4882,6 +4882,14 @@ impl Definition {
         Arc::clone(&self.script)
     }
 
+    /// Shares the System.c4g global-function table into this script host.
+    pub(crate) fn set_global_functions(
+        &mut self,
+        functions: Option<Arc<HashMap<String, lc_script::Function>>>,
+    ) {
+        Arc::make_mut(&mut self.script).set_global_functions(functions);
+    }
+
     pub fn configure_actions(
         &mut self,
         default_action: Option<String>,
@@ -6957,6 +6965,14 @@ impl ScenarioScript {
         Arc::clone(&self.script)
     }
 
+    /// Shares the System.c4g global-function table into the scenario host.
+    fn set_global_functions(
+        &mut self,
+        functions: Option<Arc<HashMap<String, lc_script::Function>>>,
+    ) {
+        Arc::make_mut(&mut self.script).set_global_functions(functions);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn initialize(
         &mut self,
@@ -7346,6 +7362,9 @@ pub struct Engine {
     mass_movers: MassMoverSet,
     weather_events: Vec<WeatherEvent>,
     scenario_script: Option<ScenarioScript>,
+    /// The System.c4g global-function table (Game.ScriptEngine in C++),
+    /// shared into every script host.
+    global_script_functions: Option<Arc<HashMap<String, lc_script::Function>>>,
     game_over_triggered: bool,
     objectives: ScenarioObjectives,
     objective_check_counter: u8,
@@ -8567,6 +8586,7 @@ impl Engine {
             mass_movers: MassMoverSet::new(),
             weather_events: Vec::new(),
             scenario_script: None,
+            global_script_functions: None,
             game_over_triggered: false,
             objectives: ScenarioObjectives::default(),
             objective_check_counter: 0,
@@ -9301,6 +9321,7 @@ impl Engine {
     ) -> Result<Vec<ObjectId>, EngineError> {
         let name = name.into();
         let mut script = ScenarioScript::from_source(name, source)?;
+        script.set_global_functions(self.global_script_functions.clone());
         let snapshot = self.snapshot();
         let random = self.next_random_i32();
         let rng_state = self.rng.clone();
@@ -10301,8 +10322,47 @@ impl Engine {
         if self.definitions.contains_key(&id) {
             return Err(EngineError::DefinitionAlreadyExists(id));
         }
+        let mut definition = definition;
+        definition.set_global_functions(self.global_script_functions.clone());
         self.definitions.insert(id, definition);
         Ok(())
+    }
+
+    /// Installs the engine-global script functions — the System.c4g
+    /// `global func`s that C++ owns on `Game.ScriptEngine`
+    /// (resolution per FindSameNameFunc: own-def script first, engine-owned
+    /// fallback, C4Aul.cpp:130-148). Scripts that fail to compile log and
+    /// are skipped like C++. The table is shared into every registered
+    /// (and future) script host.
+    pub fn install_global_scripts(&mut self, sources: &[(String, String)]) -> usize {
+        let mut functions: HashMap<String, lc_script::Function> = HashMap::new();
+        let mut loaded = 0usize;
+        for (name, source) in sources {
+            match lc_script::Script::compile(source) {
+                Ok(script) => {
+                    for (function_name, function) in script.functions() {
+                        functions.insert(function_name.clone(), function.clone());
+                    }
+                    loaded += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        script = %name,
+                        %error,
+                        "global script failed to compile; skipping like C++"
+                    );
+                }
+            }
+        }
+        let table = (!functions.is_empty()).then(|| Arc::new(functions));
+        self.global_script_functions = table.clone();
+        for definition in self.definitions.values_mut() {
+            definition.set_global_functions(table.clone());
+        }
+        if let Some(script) = self.scenario_script.as_mut() {
+            script.set_global_functions(table.clone());
+        }
+        loaded
     }
 
     pub fn resolve_includes(&mut self) -> Result<(), EngineError> {
@@ -25947,6 +26007,52 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
                 Value::Object(bool_probe.as_u64()),
             ]),
             "strings rank 0 (stable, collection order); true ranks 1"
+        );
+    }
+
+    #[test]
+    fn global_scripts_resolve_after_own_definition_functions() {
+        // System.c4g `global func`s live on Game.ScriptEngine; resolution
+        // is own-def script first, engine-owned fallback (FindSameNameFunc,
+        // C4Aul.cpp:130-148). Installation reaches already-registered
+        // definitions too.
+        let def_script = r#"
+        func Shadowed() { return 2; }
+        global func Probe() { return Helper(6); }
+        global func Probe2() { return Shadowed(); }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("TSTD", "Test", def_script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let loaded = engine.install_global_scripts(&[(
+            "System.c4g/Test.c".to_string(),
+            "global func Helper(n) { return n * 7; }\nglobal func Shadowed() { return 1; }\n"
+                .to_string(),
+        )]);
+        assert_eq!(loaded, 1);
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("TSTD"))
+            .expect("object spawns");
+        engine.tick().expect("tick succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Probe", Vec::new())
+                .expect("Probe runs"),
+            Value::Int(42),
+            "the global Helper resolves from a definition script"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(idx, "Probe2", Vec::new())
+                .expect("Probe2 runs"),
+            Value::Int(2),
+            "the own-def function shadows the global of the same name"
         );
     }
 

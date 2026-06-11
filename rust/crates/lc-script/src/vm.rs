@@ -362,6 +362,9 @@ pub struct Vm<'a> {
     /// Engine-registered script constants (`RegisterGlobalConstant`,
     /// C4Script.cpp:6581): consulted when an identifier matches no variable.
     constants: Option<&'a HashMap<String, Value>>,
+    /// Engine-global script functions (System.c4g `global func`s): the
+    /// resolution fallback between the own script and host functions.
+    global_functions: Option<&'a HashMap<String, Function>>,
     /// The object context the call runs on, returned by `Expr::This`. Host-opaque
     /// (in lc-engine an object reference is `Proplist {"id": <number>}`). Nil when
     /// the call has no object context (e.g. global functions).
@@ -381,6 +384,7 @@ impl<'a> Vm<'a> {
             var_decls,
             debugger,
             constants: None,
+            global_functions: None,
             this_value: Value::Nil,
         }
     }
@@ -395,6 +399,18 @@ impl<'a> Vm<'a> {
     /// Attach the engine constants table consulted on variable-lookup misses.
     pub fn with_constants(mut self, constants: &'a HashMap<String, Value>) -> Self {
         self.constants = Some(constants);
+        self
+    }
+
+    /// Attach the engine-global script functions (System.c4g global funcs).
+    pub fn with_global_functions(mut self, functions: &'a HashMap<String, Function>) -> Self {
+        self.global_functions = Some(functions);
+        self
+    }
+
+    /// `with_global_functions` for an optional table (None = no globals).
+    pub fn with_optional_globals(mut self, functions: Option<&'a HashMap<String, Function>>) -> Self {
+        self.global_functions = functions;
         self
     }
 
@@ -465,6 +481,17 @@ impl<'a> Vm<'a> {
                 return self.invoke_script_function(name, function, args, depth, object_state);
             }
 
+            // Engine-global script functions (System.c4g `global func`s,
+            // owned by Game.ScriptEngine in C++): the fallback after the
+            // own script, before C++ engine functions — the
+            // FindSameNameFunc own-def-then-engine order (C4Aul.cpp:130-148).
+            if let Some(function) = self
+                .global_functions
+                .and_then(|functions| functions.get(name))
+            {
+                return self.invoke_script_function(name, function, args, depth, object_state);
+            }
+
             if let Some(function) = self.host_functions.get(name) {
                 let values = self.call_args_to_values(&args)?;
                 return self
@@ -486,12 +513,13 @@ impl<'a> Vm<'a> {
     ) -> Result<ReturnValue, RuntimeError> {
         // Allow calling with MORE arguments than declared (extras ignored)
         // This matches C++ OpenClonk behavior for action callbacks
-        if args.len() < function.params.len() {
-            return Err(RuntimeError::new(format!(
-                "function '{name}' expects {} arguments but received {}",
-                function.params.len(),
-                args.len()
-            )));
+        // C++ pads missing arguments with nil: every call carries a full
+        // C4AulParSet (10 slots, unfilled = nil — C4Aul.h:104-121,
+        // C4AulExec.cpp:333-336), so callees legally declare more params
+        // than the caller passes.
+        let mut args = args;
+        while args.len() < function.params.len() {
+            args.push(CallArg::Value(Value::Nil));
         }
 
         let debug_args = self.call_args_to_values(&args)?;

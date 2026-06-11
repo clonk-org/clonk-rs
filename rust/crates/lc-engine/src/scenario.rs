@@ -2343,6 +2343,26 @@ fn collect_initial_spawns(
     Ok(spawns)
 }
 
+/// Collects the global scripts of a System.c4g group (the `*.c` entries,
+/// sorted by name) for `Engine::install_global_scripts` — C++ loads these
+/// into `Game.ScriptEngine` at init (C4Game InitScriptEngine).
+pub fn load_system_scripts(group: &Group) -> Result<Vec<(String, String)>, ScenarioError> {
+    let mut sources = Vec::new();
+    for entry in group.entries()? {
+        if entry.is_directory {
+            continue;
+        }
+        let name = entry.relative_path.to_string_lossy().to_string();
+        if !name.to_ascii_lowercase().ends_with(".c") {
+            continue;
+        }
+        let bytes = group.read_file(&entry.relative_path)?;
+        sources.push((name, String::from_utf8_lossy(&bytes).into_owned()));
+    }
+    sources.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(sources)
+}
+
 /// `[Landscape] MapZoom` with the C4S default `C4SVal(10, 0, 5, 15)`
 /// (C4Scenario.cpp:307,353), Std bounded to [Min, Max] like Evaluate.
 fn legacy_map_zoom(section: Option<&Vec<(String, String)>>) -> u32 {

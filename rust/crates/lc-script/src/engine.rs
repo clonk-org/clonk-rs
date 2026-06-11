@@ -69,6 +69,10 @@ pub struct Engine {
     /// Engine script constants (RegisterGlobalConstant, C4Script.cpp:6581),
     /// consulted by the VM when an identifier matches no variable.
     constants: HashMap<String, Value>,
+    /// Engine-global script functions (System.c4g global funcs, owned by
+    /// Game.ScriptEngine in C++): shared across every script host, resolved
+    /// after the own script and before host functions.
+    global_functions: Option<Arc<HashMap<String, Function>>>,
 }
 
 impl Engine {
@@ -79,7 +83,23 @@ impl Engine {
             debugger_hooks: None,
             var_decls: Vec::new(),
             constants: HashMap::new(),
+            global_functions: None,
         }
+    }
+
+    /// Installs the engine-global script function table (System.c4g
+    /// global funcs). Shared by Arc so every definition script host sees
+    /// the same copy.
+    pub fn set_global_functions(&mut self, functions: Option<Arc<HashMap<String, Function>>>) {
+        self.global_functions = functions;
+    }
+
+    /// Whether the global table knows `name`.
+    pub fn has_global_function(&self, name: &str) -> bool {
+        self.global_functions
+            .as_ref()
+            .map(|functions| functions.contains_key(name))
+            .unwrap_or(false)
     }
 
     /// Registers an engine script constant (RegisterGlobalConstant,
@@ -161,7 +181,8 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
-        .with_constants(&self.constants);
+        .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref());
         vm.call(name, args).map_err(ScriptError::from)
     }
 
@@ -182,7 +203,8 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
-        .with_constants(&self.constants);
+        .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref());
         let cells: Vec<crate::vm::ValueCell> =
             args.iter().cloned().map(crate::vm::value_cell).collect();
         let call_args = cells
@@ -208,7 +230,8 @@ impl Engine {
             &self.var_decls,
             self.debugger_hooks.clone(),
         )
-        .with_constants(&self.constants);
+        .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref());
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)
     }
@@ -230,6 +253,7 @@ impl Engine {
             self.debugger_hooks.clone(),
         )
         .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref())
         .with_this(this);
         vm.call_with_locals(name, args, local_vars)
             .map_err(ScriptError::from)
