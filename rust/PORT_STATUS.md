@@ -8,8 +8,11 @@
 
 Goal: every real scenario in `content/` loads + applies like C++.
 Scoreboard: `cargo xtask scenario-sweep` (per-scenario watchdog; slow in
-debug — per-spawn snapshot cost). **93 scenarios: 92 load (98%), 90 apply
-(96%)** — baseline before the epic was 60 load / 6 apply. Landed:
+debug — per-spawn snapshot cost). **93 scenarios: 93 load (100%), 93 apply
+(100%)** — baseline before the epic was 60 load / 6 apply. GoldRush
+additionally runs load → apply → register_player → 60 ticks with ZERO
+script-error warnings (`cargo xtask scenario-errors Goldrush`), the
+zero-spurious-error bar the C++ engine sets on official content. Landed:
 - Fail-safe script errors everywhere C++ is fail-safe (`tolerate_script_error`):
   def-script load failures register script-less (C4Def.cpp:632);
   Construction/Initialize/scenario-Initialize/action StartCall-family
@@ -30,13 +33,42 @@ debug — per-spawn snapshot cost). **93 scenarios: 92 load (98%), 90 apply
   semantics (`Engine::install_global_scripts`, own-def → global → host
   resolution, shared Arc table); call arity pads missing args with nil
   (C4AulParSet).
-REMAINING: 2× container-dependency-cycle failures (Drachenfels, Hammerfest —
-likely Contained= references to skipped unknown-def objects), 1× hung
-Initialize loop (Dunkelfels — a script loop whose exit depends on engine
-state we model differently); lc-app wiring for install_global_scripts (the
-sweep has it; activate_loaded_scenario does not yet); full-fidelity
-definition apply (from_resource path) + DefCore key fixes; #appendto
-linking.
+- 2026-06-11 second wave (GoldRush zero-error epic): C4Aul varargs
+  (`func F(...)` ends the param list, `G(...)` forwards slots past the
+  named params, `Par(i)` reads them — C4AulParse.cpp:1642,2293,
+  C4AulExec.cpp:1127); `inherited`/`_inherited` via the OwnerOverloaded
+  chain recorded on name collisions (add_script/merge_from/global installs);
+  keywords as `var` names; `nil++` converts to 0 (CheckOpPar); C++ callback
+  argument convention for real content (no params; AbortCall gets
+  iLastPhase — C4Object.cpp:4154-4182) while command-DSL fixtures keep
+  (state, ...); fail-safe Pre/InitializePlayer (C4Player.cpp:769);
+  scenario-local System.c4g joins the global script engine
+  (C4Game::LoadScenarioScripts, C4Game.cpp:3317-3343); C++ parameter
+  coercion at the host boundary (unfilled/nil/bool → 0; falsy resets to
+  nil before the type check — C4AulExec.cpp:1364-1396; CreateObject takes
+  ids); host fns CreateContents, GetActMapVal, GetObjectVal, LocalN (VM
+  builtin, self form), ActIdle, NoContainer/AnyContainer,
+  SetEntrance/SetColorDw/SetShape/SetVertex; folder-chain (.c4f ancestor)
+  definition sources; Initialize/Construction may self-remove; unknown
+  spawns skip like C4Id2Def → nullptr.
+REMAINING (documented gaps): LocalN cross-object form (WaterTower
+`LocalN("iWater", pObj) += x`) needs world-object named-locals exposure;
+GetObjectVal Width/Height serve the definition shape and do not reflect
+SetShape overrides yet; GetActMapVal serves the ActionSpec subset (no
+Facet/Directions/FlipDir); tick performance (see below); full-fidelity
+definition apply (from_resource path) + DefCore key fixes (#15); #appendto
+linking (#16).
+
+### Tick performance (OPEN, task #18)
+
+GoldRush ticks at ~2.2s with 737 objects in debug (C++ frame budget
+~26ms). Already landed (commit 8168a0cb, 17× faster than the 37s start):
+tail-push SectorMap::rebuild (was quadratic), lazy host sector map,
+engine-cached definition-metadata table. Remaining hot spot:
+`Engine::host_world_context` clones every ObjectState into HostWorldObject
+for EVERY script callback. Fix = share the heavy parts (Rc) or one context
+per tick with exhaustive invalidation through the mutation funnels —
+staleness there is a determinism bug.
 
 ## State: broadly scaffolded, not yet lockstep-parity-capable
 
