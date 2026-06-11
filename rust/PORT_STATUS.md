@@ -59,16 +59,21 @@ Facet/Directions/FlipDir); tick performance (see below); full-fidelity
 definition apply (from_resource path) + DefCore key fixes (#15); #appendto
 linking (#16).
 
-### Tick performance (OPEN, task #18)
+### Tick performance (task #18 DONE; follow-up #19)
 
-GoldRush ticks at ~2.2s with 737 objects in debug (C++ frame budget
-~26ms). Already landed (commit 8168a0cb, 17× faster than the 37s start):
-tail-push SectorMap::rebuild (was quadratic), lazy host sector map,
-engine-cached definition-metadata table. Remaining hot spot:
-`Engine::host_world_context` clones every ObjectState into HostWorldObject
-for EVERY script callback. Fix = share the heavy parts (Rc) or one context
-per tick with exhaustive invalidation through the mutation funnels —
-staleness there is a determinism bug.
+GoldRush ticks: 37s → 2.2s (commit 8168a0cb: tail-push sector rebuild,
+lazy host sector map, cached definition-metadata table) → **0.20s**
+(commit 50775f1d: contact-callback snapshots and Step calls gated on
+ContactCalls=1/has_step, generation-stamped id→index map for
+find_object_index, per-definition SolidMask pixel extraction shared via
+Rc, cached-key rank sorts). Remaining ~90% of the 200ms is
+cross_check_reverse_area_pass area queries — and a PARITY question
+discovered there: C++ CrossCheck pass 2 enumerates area sectors
+sector-by-sector with a Marker (C4GameObjects.cpp:163-165) while our
+object_ids_in_area sorts globally by rank; if the orders differ, pair
+order → RNG order → lockstep divergence. Task #19 pins the C++ order
+with a differential test first — the faithful fix (walk sector lists
+directly, no per-query sort) is also the perf win.
 
 ## State: broadly scaffolded, not yet lockstep-parity-capable
 
