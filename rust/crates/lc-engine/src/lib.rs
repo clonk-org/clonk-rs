@@ -7187,6 +7187,9 @@ impl Definition {
 
 struct ScenarioScript {
     name: String,
+    /// C++ callback convention: no synthetic state argument, no fixture
+    /// Step calls (real content; see ScenarioScriptSource::c4_args).
+    c4_args: bool,
     /// Shared like `Definition.script`: `host_world_context()` hands `Arc`
     /// clones to host functions so GameCall/GameCallEx can run scenario
     /// functions mid-VM-call.
@@ -7212,6 +7215,7 @@ impl ScenarioScript {
         #[allow(clippy::arc_with_non_send_sync)] // single-threaded sharing
         Ok(Self {
             name,
+            c4_args: false,
             script: Arc::new(script),
             has_initialize,
             has_step,
@@ -7247,9 +7251,13 @@ impl ScenarioScript {
         if !self.has_initialize {
             return Ok((ScenarioBatch::default(), audio, rng));
         }
+        // C++: Game.Script.Call(PSF_Initialize) has NO parameters; the
+        // state/random pair is the JSON-fixture convention.
         let mut args = Vec::with_capacity(2);
-        args.push(build_scenario_state_value(snapshot));
-        args.push(Value::Int(random));
+        if !self.c4_args {
+            args.push(build_scenario_state_value(snapshot));
+            args.push(Value::Int(random));
+        }
         self.call_raw(
             "Initialize",
             args,
@@ -10424,8 +10432,21 @@ impl Engine {
         name: impl Into<String>,
         source: &str,
     ) -> Result<Vec<ObjectId>, EngineError> {
+        self.install_scenario_script_with_convention(name, source, false)
+    }
+
+    /// Like [`install_scenario_script`], with the callback convention:
+    /// `c4_args = true` for real (legacy) content — C++ passes no
+    /// synthetic state argument and has no fixture Step calls.
+    pub fn install_scenario_script_with_convention(
+        &mut self,
+        name: impl Into<String>,
+        source: &str,
+        c4_args: bool,
+    ) -> Result<Vec<ObjectId>, EngineError> {
         let name = name.into();
         let mut script = ScenarioScript::from_source(name, source)?;
+        script.c4_args = c4_args;
         script.set_global_functions(self.global_script_functions.clone());
         {
             let host = Arc::make_mut(&mut script.script);
@@ -10471,8 +10492,18 @@ impl Engine {
             return Ok(());
         }
         let snapshot = self.snapshot();
+        let c4_args = self
+            .scenario_script
+            .as_ref()
+            .map(|script| script.c4_args)
+            .unwrap_or(false);
         let mut args = Vec::with_capacity(extra_args.len() + 1);
-        args.push(build_scenario_state_value(&snapshot));
+        // GRBroadcast passes the C++ argument list as-is (e.g.
+        // PSF_InitializePlayer starts with the player number,
+        // C4Player.cpp:769-775); the state proplist is fixture-only.
+        if !c4_args {
+            args.push(build_scenario_state_value(&snapshot));
+        }
         args.append(&mut extra_args);
         let rng_state = self.rng.clone();
         let env_frame = self.frame;
@@ -12089,7 +12120,15 @@ impl Engine {
         }
         self.apply_landscape_temperature_conversions();
         self.tick_player_systems();
-        if self.scenario_script.is_some() {
+        // The per-tick scenario Step (and its `random` argument DRAW) is a
+        // JSON-fixture convention: C++ never calls Step on scenario
+        // scripts, and the draw would shift the synced stream every frame.
+        let fixture_scenario_step = self
+            .scenario_script
+            .as_ref()
+            .map(|script| !script.c4_args)
+            .unwrap_or(false);
+        if fixture_scenario_step {
             let snapshot = self.snapshot();
             let random = self.next_random_i32();
             let rng_state = self.rng.clone();
@@ -18315,6 +18354,11 @@ impl Engine {
                     requested,
                     by_object,
                 } => self.execute_dig_rect_operation(origin, width, height, requested, by_object),
+                LandscapeOperation::ClearRect {
+                    origin,
+                    width,
+                    height,
+                } => self.execute_clear_rect_operation(origin, width, height),
                 LandscapeOperation::BlastCircle {
                     center,
                     radius,
@@ -18404,7 +18448,29 @@ impl Engine {
         self.apply_dig_removal_counts(removal_counts, requested, by_object);
     }
 
+    /// `Landscape::ClearRect` (FnFreeRect, C4Script.cpp:3125-3131): the
+    /// columns clear like a dig but nothing is dug OUT — no material
+    /// accounting, no PXS.
+    fn execute_clear_rect_operation(&mut self, origin: Vector2, width: i32, height: i32) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let Some(landscape) = self.landscape.as_mut() else {
+            return;
+        };
+        let landscape_width = landscape.width() as i32;
+        let bottom = origin.y.saturating_add(height);
+        for offset in 0..width {
+            let column = origin.x.saturating_add(offset);
+            if column < 0 || column >= landscape_width {
+                continue;
+            }
+            let _ = Self::dig_column(&self.materials, landscape, column, bottom);
+        }
+    }
+
     fn apply_dig_removal_counts(
+
         &mut self,
         removal_counts: HashMap<MaterialId, i32>,
         requested: bool,

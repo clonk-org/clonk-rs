@@ -2936,6 +2936,31 @@ fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeError> {
             target_value.type_name()
         )));
     };
+    // `obj->ID::Func(...)` — the namespace operator (AB_CALLNS): resolve
+    // Func in def ID's script and run it on the target. C++ resolves at
+    // PARSE time and throws hard errors for a missing def or function
+    // (C4AulParse.cpp:3171-3181) — the failsafe `~` does not cover them.
+    if let Some((namespace, function)) = name.split_once("::") {
+        let script = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.world.definition_script(namespace).cloned())
+        });
+        let Some(script) = script else {
+            return Err(RuntimeError::new(format!(
+                "direct object call: def not found: {namespace}"
+            )));
+        };
+        if !script.has_function(function) {
+            return Err(RuntimeError::new(format!(
+                "direct object call: function {namespace}::{function} not found"
+            )));
+        }
+        return match call_world_object_function_in_scope(target, script, function, &pars) {
+            Some(result) => result,
+            None => Ok(Value::Nil),
+        };
+    }
     match call_world_object_function(target, name, &pars) {
         Some(result) => result,
         None if failsafe => Ok(Value::Nil),
@@ -3158,6 +3183,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetTransferZone", set_transfer_zone);
     script.register_host_function("DigFree", dig_free);
     script.register_host_function("DigFreeRect", dig_free_rect);
+    script.register_host_function("FreeRect", free_rect);
+    script.register_host_function("ScriptGo", script_go);
     script.register_host_function("BlastFree", blast_free);
     script.register_host_function("ShakeFree", shake_free);
     script.register_host_function("GBackSolid", g_back_solid);
@@ -4795,6 +4822,13 @@ pub(crate) enum LandscapeOperation {
         requested: bool,
         by_object: Option<ObjectId>,
     },
+    /// FnFreeRect -> Landscape::ClearRect (C4Script.cpp:3125-3131): the
+    /// rect clears outright — no dug-out material, no PXS.
+    ClearRect {
+        origin: Vector2,
+        width: i32,
+        height: i32,
+    },
     BlastCircle {
         center: Vector2,
         radius: i32,
@@ -5031,7 +5065,36 @@ fn effect_name_filter<'a>(
     }
 }
 
+/// Effect host functions accept ANY object as the state target (the
+/// C4Effect operations attach to the GIVEN object, C4Effect.cpp): a
+/// foreign target re-dispatches through the reentrancy seam so the
+/// effect operation runs in the target's own scope (and folds with its
+/// nested outcome). Returns None when the state is not a foreign object
+/// — the caller proceeds locally.
+fn redirect_foreign_effect_target(
+    function: &'static str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    let target = match args.get(1) {
+        Some(value @ (Value::Object(_) | Value::Proplist(_))) => object_id_from_value(value)?,
+        _ => return None,
+    };
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    if Some(target) == active {
+        return None;
+    }
+    Some(match call_world_object_function(target, function, args) {
+        Some(result) => result,
+        None => Ok(Value::Int(0)),
+    })
+}
+
 fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
+
     if args.len() < 2 {
         return Err(RuntimeError::new(
             "AddEffect expects at least 2 arguments: name and state",
@@ -5042,6 +5105,10 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(name) => name.to_owned(),
         None => return Ok(Value::Int(0)),
     };
+
+    if let Some(result) = redirect_foreign_effect_target("AddEffect", args) {
+        return result;
+    }
 
     let scope = determine_scope_from_state(&args[1])?;
     if matches!(scope, EffectScope::Object) {
@@ -5198,6 +5265,9 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
+    if let Some(result) = redirect_foreign_effect_target("RemoveEffect", args) {
+        return result;
+    }
     if args.len() < 2 {
         return Err(RuntimeError::new(
             "RemoveEffect expects at least 2 arguments: name and state",
@@ -5256,6 +5326,9 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
+    if let Some(result) = redirect_foreign_effect_target("GetEffect", args) {
+        return result;
+    }
     if args.len() < 2 {
         return Err(RuntimeError::new(
             "GetEffect expects at least 2 arguments: name and state",
@@ -5359,6 +5432,9 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
+    if let Some(result) = redirect_foreign_effect_target("GetEffectCount", args) {
+        return result;
+    }
     if args.len() < 2 {
         return Err(RuntimeError::new(
             "GetEffectCount expects at least 2 arguments: name and state",
@@ -6789,69 +6865,27 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let mut index = 1;
-    let mut target_id: Option<ObjectId> = None;
-
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Object(_) | Value::Proplist(_) => {
-                target_id = object_id_from_value(arg);
-                index += 1;
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {}
-        }
-    }
-
-    let mut phase: Option<i32> = None;
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Int(value) => {
-                phase = Some(*value);
-                index += 1;
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {
-                return Err(RuntimeError::new(format!(
-                    "SetAction: expected int or nil for phase, got {}",
-                    arg.type_name()
-                )))
-            }
-        }
-    }
-
-    let mut ticks: Option<u32> = None;
-    if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Int(value) if *value >= 0 => {
-                ticks = Some(*value as u32);
-                index += 1;
-            }
-            Value::Int(_) => {
-                return Err(RuntimeError::new(
-                    "SetAction: ticks must be >= 0 when provided",
-                ));
-            }
-            Value::Nil => {
-                index += 1;
-            }
-            _ => {
-                return Err(RuntimeError::new(format!(
-                    "SetAction: expected int or nil for ticks, got {}",
-                    arg.type_name()
-                )))
-            }
-        }
-    }
-
-    if index < args.len() {
-        return Err(RuntimeError::new(
-            "SetAction: additional arguments are not supported",
-        ));
+    // FnSetAction (C4Script.cpp:747-753): (szAction, pTarget, pTarget2,
+    // fDirect) — the objects are the ACTION's targets
+    // (SetActionByName(..., pTarget, pTarget2)). fDirect (skip the phase
+    // reset) is accepted and ignored for now (PORT_STATUS).
+    let target1 = args
+        .get(1)
+        .map(|arg| parse_object_reference_argument(arg, "SetAction", "target"))
+        .transpose()?
+        .flatten();
+    let update_target1 = args.get(1).is_some();
+    let target2 = args
+        .get(2)
+        .map(|arg| parse_object_reference_argument(arg, "SetAction", "target2"))
+        .transpose()?
+        .flatten();
+    let update_target2 = args.get(2).is_some();
+    if args.len() > 4 {
+        return Err(RuntimeError::new(format!(
+            "SetAction: expected at most 4 arguments, got {}",
+            args.len()
+        )));
     }
 
     let name = match action_name {
@@ -6869,12 +6903,6 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             None => return Ok(Value::Bool(false)),
         };
 
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
-        }
-
         let current_action = object.effective_action_name().to_string();
         let blocks_other_actions = object.effective_blocks_other_actions();
         let changed_action = name != current_action;
@@ -6888,13 +6916,16 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             .get_or_insert_with(ActionUpdate::default);
         update.set_name(name.clone());
         update.set_force(false);
-        if let Some(phase) = phase {
-            update.set_phase(phase);
-        }
 
-        if let Some(ticks) = ticks {
-            object.set_action_ticks(ticks);
-        } else if changed_action {
+        // SetActionByName carries the action targets
+        // (C4Object.cpp SetActionByName -> SetAction(pTarget, pTarget2)).
+        if update_target1 {
+            object.set_action_target(0, target1);
+        }
+        if update_target2 {
+            object.set_action_target(1, target2);
+        }
+        if changed_action {
             object.reset_action_ticks();
         }
 
@@ -8086,7 +8117,45 @@ fn dig_free(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnFreeRect (C4Script.cpp:3125-3131): clears the landscape rect in
+/// GLOBAL coordinates (no caller offset, unlike DigFree*) without
+/// producing dug-out material. The density-filtered form
+/// (iFreeDensity -> ClearRectDensity) clears everything in the column
+/// model (PORT_STATUS).
+/// FnScriptGo (C4Script.cpp:2782-2786): switches the scenario script
+/// counter (Game.Script.Go) that drives the timed Script%d sections. The
+/// counter subsystem is not ported yet — the switch is accepted so
+/// intro sequences do not abort their callers (PORT_STATUS).
+fn script_go(args: &[Value]) -> Result<Value, RuntimeError> {
+    let _ = args.first().map(Value::as_bool).unwrap_or(false);
+    Ok(Value::Bool(true))
+}
+
+fn free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
+
+    let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "FreeRect", "x")?;
+    let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "FreeRect", "y")?;
+    let width = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "FreeRect", "wdt")?;
+    let height = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "FreeRect", "hgt")?;
+    if width <= 0 || height <= 0 {
+        return Ok(Value::Nil);
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        context.register_landscape_operation(LandscapeOperation::ClearRect {
+            origin: Vector2::new(x, y),
+            width,
+            height,
+        });
+        Ok(Value::Nil)
+    })
+}
+
 fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
+
     if args.len() < 4 {
         return Err(RuntimeError::new(
             "DigFreeRect expects at least 4 arguments: x, y, width, height",
@@ -12961,7 +13030,19 @@ pub(crate) fn call_world_object_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_world_object_function_with(target, function, args, true)
+    call_world_object_function_with(target, function, args, true, None)
+}
+
+/// `obj->ID::Func(...)` (AB_CALLNS, C4AulParse.cpp:3160-3245): runs the
+/// NAMED def's function with the target object as context — the target's
+/// own same-name function is bypassed. Script functions only (GetSFunc).
+pub(crate) fn call_world_object_function_in_scope(
+    target: ObjectId,
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    call_world_object_function_with(target, function, args, false, Some(script))
 }
 
 /// Like [`call_world_object_function`], but resolves SCRIPT functions only —
@@ -12973,7 +13054,7 @@ pub(crate) fn call_world_object_script_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_world_object_function_with(target, function, args, false)
+    call_world_object_function_with(target, function, args, false, None)
 }
 
 fn call_world_object_function_with(
@@ -12981,11 +13062,12 @@ fn call_world_object_function_with(
     function: &str,
     args: &[Value],
     host_fallback: bool,
+    script_override: Option<Arc<ScriptEngine>>,
 ) -> Option<Result<Value, RuntimeError>> {
     let prep = HOST_CONTEXT.with(|cell| {
-        cell.borrow_mut()
-            .as_mut()
-            .and_then(|context| context.prepare_nested_call(target, function, host_fallback))
+        cell.borrow_mut().as_mut().and_then(|context| {
+            context.prepare_nested_call(target, function, host_fallback, script_override)
+        })
     })?;
     let NestedCallPrep {
         script,
@@ -13287,12 +13369,19 @@ impl EffectHostContext {
         target: ObjectId,
         function: &str,
         host_fallback: bool,
+        script_override: Option<Arc<ScriptEngine>>,
     ) -> Option<NestedCallPrep> {
         let world_object = self.get_world_object(target)?;
-        let script = self
-            .world
-            .definition_script(world_object.definition_id())?
-            .clone();
+        // Namespaced calls (`obj->ID::Func`) run the NAMED def's script in
+        // the target's scope (AB_CALLNS); plain calls resolve on the
+        // target's own def.
+        let script = match script_override {
+            Some(script) => script,
+            None => self
+                .world
+                .definition_script(world_object.definition_id())?
+                .clone(),
+        };
         let resolvable = script.has_function(function)
             || (host_fallback && script.has_host_function(function));
         if !resolvable {
@@ -14641,6 +14730,7 @@ mod tests {
         "FindObjects",
         "FindOtherContents",
         "Format",
+        "FreeRect",
         "GBackLiquid",
         "GBackSemiSolid",
         "GBackSky",
@@ -14733,6 +14823,7 @@ mod tests {
         "RemoveEffect",
         "RemoveObject",
         "ResetPhysical",
+        "ScriptGo",
         "SetAction",
         "SetActionData",
         "SetActionTargets",
@@ -17749,7 +17840,7 @@ mod tests {
                 Vector2::ZERO,
                 &[],
                 "Idle",
-                0,
+                7,
                 0,
                 ActionLibrary::default(),
                 Direction::Left,
@@ -17764,12 +17855,10 @@ mod tests {
             HostWorldContext::default(),
             1,
             || {
-                set_action(&[
-                    Value::String("Idle".into()),
-                    Value::Nil,
-                    Value::Nil,
-                    Value::Int(7),
-                ])?;
+                // Re-setting the SAME action keeps the running ticks (only
+                // an action CHANGE resets them); C++ SetAction has no
+                // ticks parameter (C4Script.cpp:747-753).
+                set_action(&[Value::String("Idle".into())])?;
                 get_act_time(&[])
             },
         );
@@ -17778,7 +17867,7 @@ mod tests {
         assert_eq!(value, Value::Int(7));
         let update = outcome.object_update.expect("action update recorded");
         let action = update.action.expect("action update exists");
-        assert_eq!(action.ticks, Some(7));
+        assert_eq!(action.ticks, None, "no ticks write: the running value stands");
     }
 
     #[test]
@@ -19190,14 +19279,19 @@ mod tests {
     }
 
     #[test]
-    fn set_action_respects_target_id() {
+    fn set_action_sets_the_action_targets_like_cpp() {
+        // FnSetAction (C4Script.cpp:747-753): the object arguments are the
+        // ACTION's targets — SetActionByName(name, pTarget, pTarget2) —
+        // never a which-object guard.
         let mut target_map = HashMap::new();
         target_map.insert("id".into(), Value::Int(2));
         let args = vec![Value::String("Jump".into()), Value::Proplist(target_map)];
         let (result, outcome) = with_object_host_context(|| set_action(&args));
         let value = result.expect("SetAction returns bool");
-        assert_eq!(value, Value::Bool(false));
-        assert!(outcome.object_update.is_none());
+        assert_eq!(value, Value::Bool(true));
+        let update = outcome.object_update.expect("action update recorded");
+        let action = update.action.expect("action update exists");
+        assert_eq!(action.target, Some(Some(ObjectId::new(2))));
     }
 
     #[test]

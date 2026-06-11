@@ -137,6 +137,11 @@ struct ScenarioSpawn {
 struct ScenarioScriptSource {
     name: String,
     source: String,
+    /// Real (legacy) content gets the C++ callback convention — no
+    /// synthetic state argument (Game.Script.Call(PSF_Initialize) has no
+    /// parameters; GRBroadcast args start with the player number,
+    /// C4Player.cpp:769-775). JSON fixtures keep the state proplist.
+    c4_args: bool,
 }
 
 #[derive(Debug)]
@@ -677,7 +682,11 @@ impl Scenario {
             // runs script-less (C4ScriptHost load behavior); Initialize
             // runtime errors are already tolerated inside
             // `install_scenario_script`.
-            match engine.install_scenario_script(&script.name, &script.source) {
+            match engine.install_scenario_script_with_convention(
+                &script.name,
+                &script.source,
+                script.c4_args,
+            ) {
                 Ok(mut additional) => created.append(&mut additional),
                 Err(EngineError::Script {
                     definition,
@@ -830,6 +839,7 @@ impl Scenario {
             Some(ScenarioScriptSource {
                 name: path,
                 source: script_source,
+                c4_args: false,
             })
         } else {
             None
@@ -2466,6 +2476,7 @@ fn load_legacy_scenario_script(
         return Ok(Some(ScenarioScriptSource {
             name: candidate.to_string(),
             source,
+            c4_args: true,
         }));
     }
     Ok(None)
@@ -5393,6 +5404,7 @@ global func Step(state, frame, random)
             script: Some(ScenarioScriptSource {
                 name: "Script.c".into(),
                 source: scenario_script.to_string(),
+                c4_args: false,
             }),
             objectives: ScenarioObjectives::default(),
             construction_needs_material: false,
@@ -5479,6 +5491,7 @@ global func Step(state, frame, random)
             script: Some(ScenarioScriptSource {
                 name: "Script.c".into(),
                 source: scenario_script.to_string(),
+                c4_args: false,
             }),
             objectives: ScenarioObjectives::default(),
             construction_needs_material: false,
@@ -5989,6 +6002,104 @@ global func Step(state, frame, random)
             object.local_vars.get("iWater"),
             Some(&lc_script::Value::Int(100)),
             "the final cell value (write + compound add) folded onto the object"
+        );
+    }
+
+    #[test]
+    fn namespaced_object_calls_run_the_named_defs_function_on_the_target() {
+        // `obj->ID::Func(...)` (AB_CALLNS, C4AulParse.cpp:3160-3245):
+        // the function resolves in def ID's script at parse time and runs
+        // with the arrow TARGET as context — GoldRush hitches the horse
+        // with pObj->CHBM::Connect(...). The target's own same-name
+        // function is bypassed.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "global func Initialize(state, random) {\n\
+                 var obj = CreateObject(GOOD, 50, 50, -1);\n\
+                 obj->HLPR::Tag();\n\
+                 return nil;\n\
+             }\n",
+        );
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "#strict\nlocal seen;\npublic func Tag() { seen = 1; return seen; }\n",
+        )
+        .expect("write target script");
+        let helper = dir.path().join("Defs.c4d/Helper.c4d");
+        std::fs::create_dir_all(&helper).expect("helper dir");
+        std::fs::write(
+            helper.join("DefCore.txt"),
+            "[DefCore]\nid=HLPR\nName=Helper\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write helper defcore");
+        std::fs::write(
+            helper.join("Script.c"),
+            "#strict\nlocal seen;\npublic func Tag() { seen = 5; return seen; }\n",
+        )
+        .expect("write helper script");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let snapshot = engine.snapshot();
+        let object = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GOOD")
+            .expect("object created");
+        assert_eq!(
+            object.local_vars.get("seen"),
+            Some(&lc_script::Value::Int(5)),
+            "HLPR's code ran with the GOOD object as context"
+        );
+    }
+
+    #[test]
+    fn legacy_scenario_callbacks_use_the_cpp_argument_convention() {
+        // C++ scenario calls pass NO synthetic state argument:
+        // Game.Script.Call(PSF_Initialize) has no parameters and
+        // GRBroadcast(PSF_InitializePlayer, {plr, x, y, base, team, extra})
+        // starts with the PLAYER NUMBER (C4Player.cpp:769-775). The
+        // state-proplist convention stays a JSON-fixture convenience —
+        // legacy content had been receiving shifted arguments
+        // (GoldRush's GetCrew(iPlr, ...) got the state map as iPlr).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static joined_player;\nstatic init_arg;\n\
+             global func Initialize(first) { init_arg = first; return nil; }\n\
+             global func InitializePlayer(plr) { joined_player = plr; return nil; }\n",
+        );
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("init_arg")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Nil),
+            "Initialize runs with NO arguments for legacy content"
+        );
+        engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Tester".to_string(),
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+            })
+            .expect("join succeeds");
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("joined_player")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(0)),
+            "InitializePlayer's first argument is the player NUMBER"
         );
     }
 
