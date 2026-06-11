@@ -2399,49 +2399,219 @@ fn normalise_precision(value: i32) -> i32 {
     }
 }
 
-/// GameCallEx - Broadcast a function call to Goal/Rule/Environment objects and scenario script
-///
-/// C++ signature: GameCallEx(string szFunction, any par0-par8)
-///
-/// Broadcasts an optional function call (prefixed with ~) to:
-/// 1. All objects with category Goal, Rule, or Environment
-/// 2. The scenario script
-///
-/// Returns the result from the scenario script call, or nil if no handlers exist.
-///
-/// TODO: Full implementation requires:
-/// - Iterating through world objects filtered by category
-/// - Calling script functions on those objects
-/// - Calling scenario script function
-/// For now, returns nil to unblock integration tests.
+/// Strips the failsafe marker(s) from a call-family function name:
+/// `GetSFunc` strips one leading '~' (C4Aul.cpp:314) and its name-only
+/// overload strips a second (C4Aul.cpp:350), so `"~~Name"` resolves to
+/// `Name`. Failsafe only changes logging — a miss returns C4VNull either
+/// way, so the marker carries no other semantics here.
+fn strip_failsafe(name: &str) -> &str {
+    let once = name.strip_prefix('~').unwrap_or(name);
+    once.strip_prefix('~').unwrap_or(once)
+}
+
+/// FnCall (C4Script.cpp:3424-3432): `Call(name, p0..p8)` runs `name` on the
+/// calling object itself — `C4Object::Call` (C4Object.cpp:2197-2201) → the
+/// object's own def script, script functions ONLY (owner-scoped GetSFunc,
+/// C4Aul.cpp:295-298,562-576; engine functions are never found). Nil name,
+/// no object context, or a removed `this` → C4VNull; callee errors
+/// propagate (fPassErrors=true); script pars[1..=9] shift to Par(0..=8).
+fn call_self(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(Value::String(name)) = args.first() else {
+        return Ok(Value::Nil);
+    };
+    let name = strip_failsafe(name);
+    if name.is_empty() {
+        return Ok(Value::Nil);
+    }
+    let target = HOST_CONTEXT.with(|cell| {
+        cell.borrow().as_ref().and_then(|context| {
+            context
+                .object_context()
+                .filter(|scope| !scope.destroy && scope.status.is_active())
+                .map(ObjectScopeContext::id)
+        })
+    });
+    let Some(target) = target else {
+        return Ok(Value::Nil);
+    };
+    let pars: Vec<Value> = args.iter().skip(1).take(9).cloned().collect();
+    call_world_object_script_function(target, name, &pars).unwrap_or(Ok(Value::Nil))
+}
+
+/// FnObjectCall/FnProtectedCall/FnPrivateCall (C4Script.cpp:3434-3449,
+/// 3502-3534): run a function on a target object's def script — failsafe
+/// resolution (silent C4VNull on a miss), script functions only, NO Status
+/// check on the target (unlike `C4Object::Call`). The three access levels
+/// (AA_PUBLIC/AA_PROTECTED/AA_PRIVATE) only LOG on violation and the call
+/// still executes (C4Aul.cpp:332-342), so one implementation serves all
+/// three names. Script pars[2..=9] shift to callee Par(0..=7).
+fn object_call(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(target) = args.first().and_then(object_id_from_value) else {
+        return Ok(Value::Nil); // !pObj → C4VNull (C4Script.cpp:3439)
+    };
+    let Some(Value::String(name)) = args.get(1) else {
+        return Ok(Value::Nil); // !szFunction → C4VNull
+    };
+    let name = strip_failsafe(name);
+    if name.is_empty() {
+        return Ok(Value::Nil);
+    }
+    let pars: Vec<Value> = args.iter().skip(2).take(8).cloned().collect();
+    call_world_object_script_function(target, name, &pars).unwrap_or(Ok(Value::Nil))
+}
+
+/// Runs `function` on a script host with NO object context (Obj=nullptr,
+/// C4AulExec.cpp:343): the active object scope is parked on the dormant
+/// stack while the nested VM runs, so host functions see no `this`. Used by
+/// DefinitionCall and GameCall/GameCallEx. Callee locals are per-call empty
+/// (C++ throws on object-local access in a definition call,
+/// C4AulExec.cpp:418-420; the Rust VM reads them as nil — documented).
+fn call_scoped_script_function(
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    if !script.has_function(function) {
+        return None;
+    }
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            let active = context.object.take();
+            context.dormant_scopes.push(active);
+        }
+    });
+    let locals = HashMap::new();
+    let call = script.call_with_locals_and_this(function, args, &locals, Value::Nil);
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.object = context.dormant_scopes.pop().unwrap_or(None);
+        }
+    });
+    Some(match call {
+        Ok((value, _locals)) => Ok(value),
+        Err(lc_script::ScriptError::Runtime(err)) => Err(err),
+        Err(other) => Err(RuntimeError::new(other.to_string())),
+    })
+}
+
+/// FnDefinitionCall (C4Script.cpp:3451-3468): runs a function on a
+/// definition's script with Obj=nullptr — always failsafe ("~" prefix,
+/// :3457-3459): unknown id or missing function → silent C4VNull. Script
+/// pars[2..=9] shift to callee Par(0..=7).
+fn definition_call(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(Value::C4Id(def_id)) = args.first() else {
+        return Ok(Value::Nil); // !idID → C4VNull (C4Script.cpp:3456)
+    };
+    let Some(Value::String(name)) = args.get(1) else {
+        return Ok(Value::Nil);
+    };
+    let name = strip_failsafe(name);
+    if name.is_empty() {
+        return Ok(Value::Nil);
+    }
+    let script = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.world.definition_script(def_id).cloned())
+    });
+    let Some(script) = script else {
+        return Ok(Value::Nil); // C4Id2Def failure → C4VNull (C4Script.cpp:3462)
+    };
+    let pars: Vec<Value> = args.iter().skip(2).take(8).cloned().collect();
+    call_scoped_script_function(script, name, &pars).unwrap_or(Ok(Value::Nil))
+}
+
+/// FnGameCall (C4Script.cpp:3470-3484): runs a function on the scenario
+/// script host ONLY (owner-scoped lookup — definition globals are not
+/// visible), always failsafe, Obj=nullptr. Script pars[1..=9] shift to
+/// callee Par(0..=8).
+fn game_call(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(Value::String(name)) = args.first() else {
+        return Ok(Value::Nil); // !szFunction → C4VNull (C4Script.cpp:3475)
+    };
+    let name = strip_failsafe(name);
+    if name.is_empty() {
+        return Ok(Value::Nil);
+    }
+    let script = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.world.scenario_script().cloned())
+    });
+    let Some(script) = script else {
+        return Ok(Value::Nil);
+    };
+    let pars: Vec<Value> = args.iter().skip(1).take(9).cloned().collect();
+    call_scoped_script_function(script, name, &pars).unwrap_or(Ok(Value::Nil))
+}
+
+/// FnGameCallEx (C4Script.cpp:3486-3500) → `C4GameScriptHost::GRBroadcast`
+/// (C4ScriptHost.cpp:234-248): calls the function on every LIVE object whose
+/// Category has a C4D_Goal|C4D_Rule|C4D_Environment bit, in list order, with
+/// results DISCARDED (fRejectTest=false) — "call objects first - scenario
+/// script might overwrite hostility, etc." — then on the scenario script,
+/// whose result is the sole return value. Always failsafe ("~" prefix);
+/// callee errors still pass through (fPassErrors=true).
 fn game_call_ex(args: &[Value]) -> Result<Value, RuntimeError> {
-    // Validate we have at least a function name
-    if args.is_empty() {
-        return Err(RuntimeError::new(
-            "GameCallEx requires at least a function name",
-        ));
+    let Some(Value::String(name)) = args.first() else {
+        return Ok(Value::Nil); // !szFunction → C4VNull (C4Script.cpp:3491)
+    };
+    let name = strip_failsafe(name).to_string();
+    if name.is_empty() {
+        return Ok(Value::Nil);
+    }
+    let pars: Vec<Value> = args.iter().skip(1).take(9).cloned().collect();
+
+    // C4D_Goal | C4D_Environment | C4D_Rule (definition.rs:1608-1622)
+    const BROADCAST_MASK: i32 = (1 << 5) | (1 << 6) | (1 << 19);
+    let targets: Vec<ObjectId> = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| {
+                context
+                    .world_object_ids()
+                    .into_iter()
+                    .filter(|id| {
+                        context
+                            .get_world_object(*id)
+                            .map(|object| {
+                                object.status().is_active()
+                                    && object.category() & BROADCAST_MASK != 0
+                            })
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    for target in targets {
+        // The C++ loop re-checks Status against the live list — skip
+        // objects an earlier broadcast call removed.
+        let destroyed = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|context| context.nested_object_destroyed(target))
+                .unwrap_or(false)
+        });
+        if destroyed {
+            continue;
+        }
+        if let Some(result) = call_world_object_script_function(target, &name, &pars) {
+            result?;
+        }
     }
 
-    let _function_name = match &args[0] {
-        Value::String(s) => s.as_str(),
-        other => {
-            return Err(RuntimeError::new(format!(
-                "GameCallEx function name must be string, got {}",
-                other.type_name()
-            )))
+    let script = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.world.scenario_script().cloned())
+    });
+    match script {
+        Some(script) => {
+            call_scoped_script_function(script, &name, &pars).unwrap_or(Ok(Value::Nil))
         }
-    };
-
-    // C++ implementation prefixes function name with ~ for failsafe calling,
-    // then broadcasts to Goal/Rule/Environment objects and scenario script.
-    //
-    // For now, return nil. The ~ prefix means the call is optional - if no
-    // handlers exist, it's not an error.
-    //
-    // Full implementation would require architectural changes to allow
-    // host functions to iterate objects and call script functions on them.
-
-    Ok(Value::Nil)
+        None => Ok(Value::Nil),
+    }
 }
 
 pub fn register_host_functions(script: &mut ScriptEngine) {
@@ -2536,6 +2706,12 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Log", log_message);
     script.register_host_function("DebugLog", debug_log_message);
     script.register_host_function("GameOver", game_over);
+    script.register_host_function("Call", call_self);
+    script.register_host_function("ObjectCall", object_call);
+    script.register_host_function("ProtectedCall", object_call);
+    script.register_host_function("PrivateCall", object_call);
+    script.register_host_function("DefinitionCall", definition_call);
+    script.register_host_function("GameCall", game_call);
     script.register_host_function("GameCallEx", game_call_ex);
     script.register_host_function("Format", format_string);
     script.register_host_function("GetType", get_type);
@@ -11756,10 +11932,31 @@ pub(crate) fn call_world_object_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
+    call_world_object_function_with(target, function, args, true)
+}
+
+/// Like [`call_world_object_function`], but resolves SCRIPT functions only —
+/// the owner-scoped `GetSFunc` lookup the Call family uses (C4Aul.cpp:
+/// 295-298, 562-576): engine (host) functions are never found, unlike
+/// Find_Func's `FindSameNameFunc` engine fallback.
+pub(crate) fn call_world_object_script_function(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    call_world_object_function_with(target, function, args, false)
+}
+
+fn call_world_object_function_with(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+    host_fallback: bool,
+) -> Option<Result<Value, RuntimeError>> {
     let prep = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
             .as_mut()
-            .and_then(|context| context.prepare_nested_call(target, function))
+            .and_then(|context| context.prepare_nested_call(target, function, host_fallback))
     })?;
     let NestedCallPrep {
         script,
@@ -12004,13 +12201,20 @@ impl EffectHostContext {
     /// `FindSameNameFunc` (C4Aul.cpp:130-148): the target def's own script
     /// function wins, engine (host) functions are the fallback, anything
     /// else is a silent miss (`None`).
-    fn prepare_nested_call(&mut self, target: ObjectId, function: &str) -> Option<NestedCallPrep> {
+    fn prepare_nested_call(
+        &mut self,
+        target: ObjectId,
+        function: &str,
+        host_fallback: bool,
+    ) -> Option<NestedCallPrep> {
         let world_object = self.get_world_object(target)?;
         let script = self
             .world
             .definition_script(world_object.definition_id())?
             .clone();
-        if !script.has_function(function) && !script.has_host_function(function) {
+        let resolvable = script.has_function(function)
+            || (host_fallback && script.has_host_function(function));
+        if !resolvable {
             return None;
         }
         // VM sessions own their locals, so a call onto an in-flight scope
@@ -13273,6 +13477,7 @@ mod tests {
         "AppendCommand",
         "BlastFree",
         "BoundBy",
+        "Call",
         "CastBackParticles",
         "CastParticles",
         "ClearParticles",
@@ -13286,6 +13491,7 @@ mod tests {
         "CreateParticle",
         "CustomMessage",
         "DebugLog",
+        "DefinitionCall",
         "DigFree",
         "DigFreeRect",
         "DoCon",
@@ -13304,6 +13510,7 @@ mod tests {
         "GBackSemiSolid",
         "GBackSky",
         "GBackSolid",
+        "GameCall",
         "GameCallEx",
         "GameOver",
         "GetActTime",
@@ -13368,6 +13575,7 @@ mod tests {
         "Max",
         "Message",
         "Min",
+        "ObjectCall",
         "ObjectCount",
         "ObjectCount2",
         "ObjectDistance",
@@ -13375,6 +13583,8 @@ mod tests {
         "PlayerMessage",
         "PlrMessage",
         "Pow",
+        "PrivateCall",
+        "ProtectedCall",
         "PushParticles",
         "Random",
         "RemoveEffect",

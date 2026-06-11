@@ -25810,6 +25810,331 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
     }
 
     #[test]
+    fn call_runs_own_def_script_function_like_cpp() {
+        // FnCall (C4Script.cpp:3424-3432): Call(name, p0..p8) runs `name` on
+        // the calling object itself (C4Object::Call → own def script,
+        // AA_PRIVATE, C4Object.cpp:2197-2201). Resolution is owner-scoped
+        // script functions ONLY — engine (host) functions are never found
+        // (GetSFunc → FuncLookUp.GetFunc(name, owner), C4Aul.cpp:295-298,
+        // 562-576) — and a missing function returns C4VNull either way ('~'
+        // only silences the log, C4Aul.cpp:314-330). Runtime errors in the
+        // callee propagate (fPassErrors=true, C4Script.cpp:3431).
+        let script = r#"
+        func Helper(a, b) {
+            DoEnergy(0 - a);
+            return a * b;
+        }
+        global func Run() { return Call("Helper", 6, 7); }
+        global func RunMissing() { return Call("NoSuchHelper"); }
+        global func RunFailsafe() { return Call("~NoSuchHelper"); }
+        global func RunEngineFn() { return Call("GetWind"); }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLLR", "Caller", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("CLLR").with_energy(50))
+            .expect("object spawns");
+        engine.tick().expect("tick succeeds");
+
+        let idx = engine.find_object_index(id).expect("object exists");
+        let energy_before = engine.objects[idx].state.energy;
+        let result = engine
+            .call_object_function(idx, "Run", Vec::new())
+            .expect("Run succeeds");
+        assert_eq!(result, Value::Int(42), "callee return value verbatim");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert!(
+            engine.objects[idx].state.energy < energy_before,
+            "the callee's DoEnergy on `this` committed (live scope, in-place path)"
+        );
+
+        for function in ["RunMissing", "RunFailsafe", "RunEngineFn"] {
+            let result = engine
+                .call_object_function(idx, function, Vec::new())
+                .expect("call-family misses are not errors");
+            assert_eq!(
+                result,
+                Value::Nil,
+                "{function}: missing/engine-only functions return C4VNull"
+            );
+        }
+    }
+
+    #[test]
+    fn object_call_family_runs_target_def_script_function_like_cpp() {
+        // FnObjectCall/FnProtectedCall/FnPrivateCall (C4Script.cpp:3434-3449,
+        // 3502-3534): all three resolve in the TARGET object's def script
+        // with failsafe=true (silent C4VNull on a miss). The access-level
+        // difference (AA_PUBLIC vs AA_PROTECTED vs AA_PRIVATE) only LOGS on
+        // violation — the call still executes ("don't even break in strict
+        // execution", C4Aul.cpp:332-342) — so behavior is identical, and
+        // even a `private func` runs via plain ObjectCall. Nil target →
+        // C4VNull; script pars[2..=9] shift to callee Par(0..=7).
+        let caller_script = r#"
+        global func Poke(target) { return ObjectCall(target, "Secret", 21); }
+        global func PokeProtected(target) { return ProtectedCall(target, "Secret", 5); }
+        global func PokePrivate(target) { return PrivateCall(target, "Secret", 7); }
+        global func PokeNil() { return ObjectCall(0, "Secret"); }
+        global func PokeMissing(target) { return ObjectCall(target, "NoSuch"); }
+        "#;
+        let probe_script = r#"
+        local tag;
+        private func Secret(v) {
+            tag = tag + v;
+            return v * 2;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLLR", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("PROB", "Probe", probe_script).expect("probe compiles"),
+            )
+            .expect("probe registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CLLR"))
+            .expect("caller spawns");
+        let probe = engine
+            .spawn_object(SpawnConfig::new("PROB"))
+            .expect("probe spawns");
+        engine.tick().expect("tick succeeds");
+
+        let caller_idx = engine.find_object_index(caller).expect("caller exists");
+        let target_arg = vec![Value::Object(probe.as_u64())];
+        for (function, expected) in [
+            ("Poke", Value::Int(42)),
+            ("PokeProtected", Value::Int(10)),
+            ("PokePrivate", Value::Int(14)),
+        ] {
+            let result = engine
+                .call_object_function(caller_idx, function, target_arg.clone())
+                .expect("call succeeds");
+            assert_eq!(result, expected, "{function}: callee return verbatim");
+        }
+        let probe_idx = engine.find_object_index(probe).expect("probe exists");
+        assert_eq!(
+            engine.objects[probe_idx].state.local_vars.get("tag"),
+            Some(&Value::Int(33)),
+            "the target's local-var writes committed (21 + 5 + 7)"
+        );
+
+        let result = engine
+            .call_object_function(caller_idx, "PokeNil", Vec::new())
+            .expect("nil target is not an error");
+        assert_eq!(result, Value::Nil, "nil target → C4VNull");
+        let result = engine
+            .call_object_function(caller_idx, "PokeMissing", target_arg)
+            .expect("missing function is not an error");
+        assert_eq!(result, Value::Nil, "failsafe miss → C4VNull");
+    }
+
+    #[test]
+    fn definition_call_runs_def_script_without_object_context_like_cpp() {
+        // FnDefinitionCall (C4Script.cpp:3451-3468): DefinitionCall(id, name,
+        // p0..p7) runs `name` on the DEFINITION's script with Obj=nullptr —
+        // always failsafe (the "~" prefix, :3457-3459), so a miss or an
+        // unknown id is a silent C4VNull. The callee has no object context.
+        let caller_script = r#"
+        global func Spawn(targetdef) { return DefinitionCall(targetdef, "Factory", 4); }
+        global func SpawnMissing(targetdef) { return DefinitionCall(targetdef, "NoSuch"); }
+        global func SpawnBadId() { return DefinitionCall("XXXX", "Factory"); }
+        "#;
+        let factory_script = r#"
+        func Factory(n) {
+            if (this()) { return 0 - 1; }
+            return n * 11;
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLLR", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("FCTY", "Factory", factory_script)
+                    .expect("factory compiles"),
+            )
+            .expect("factory registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CLLR"))
+            .expect("caller spawns");
+        engine.tick().expect("tick succeeds");
+
+        let caller_idx = engine.find_object_index(caller).expect("caller exists");
+        let result = engine
+            .call_object_function(caller_idx, "Spawn", vec![Value::C4Id("FCTY".into())])
+            .expect("Spawn succeeds");
+        assert_eq!(
+            result,
+            Value::Int(44),
+            "the def-script function ran with no object context (this() nil)"
+        );
+        let result = engine
+            .call_object_function(caller_idx, "SpawnMissing", vec![Value::C4Id("FCTY".into())])
+            .expect("missing function is not an error");
+        assert_eq!(result, Value::Nil);
+        let result = engine
+            .call_object_function(caller_idx, "SpawnBadId", Vec::new())
+            .expect("unknown id is not an error");
+        assert_eq!(result, Value::Nil, "C4Id2Def failure → C4VNull");
+    }
+
+    #[test]
+    fn game_call_runs_scenario_script_function_like_cpp() {
+        // FnGameCall (C4Script.cpp:3470-3484): scenario script host ONLY,
+        // always failsafe, Obj=nullptr. The lookup is owner-scoped — a
+        // `global func` in a definition's script is NOT found
+        // (C4Aul.cpp:295-298,562-576).
+        let caller_script = r#"
+        global func CallerGlobal() { return 99; }
+        global func Ping() { return GameCall("Answer", 6); }
+        global func PingMissing() { return GameCall("NoSuch"); }
+        global func PingDefGlobal() { return GameCall("CallerGlobal"); }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLLR", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .install_scenario_script(
+                "Scenario",
+                r#"
+                global func Answer(n) { return n * 7; }
+                "#,
+            )
+            .expect("scenario installs");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CLLR"))
+            .expect("caller spawns");
+        engine.tick().expect("tick succeeds");
+
+        let caller_idx = engine.find_object_index(caller).expect("caller exists");
+        let result = engine
+            .call_object_function(caller_idx, "Ping", Vec::new())
+            .expect("Ping succeeds");
+        assert_eq!(result, Value::Int(42));
+        let result = engine
+            .call_object_function(caller_idx, "PingMissing", Vec::new())
+            .expect("missing is not an error");
+        assert_eq!(result, Value::Nil);
+        let result = engine
+            .call_object_function(caller_idx, "PingDefGlobal", Vec::new())
+            .expect("def-script global is not visible to GameCall");
+        assert_eq!(
+            result,
+            Value::Nil,
+            "owner-scoped lookup: definition globals are not in the scenario host"
+        );
+    }
+
+    #[test]
+    fn game_call_ex_broadcasts_to_goal_rule_environment_objects_like_cpp() {
+        // FnGameCallEx (C4Script.cpp:3486-3500) → GRBroadcast
+        // (C4ScriptHost.cpp:234-248): every LIVE object whose Category has
+        // a C4D_Goal|C4D_Rule|C4D_Environment bit is called first (list
+        // order, results DISCARDED — fRejectTest=false), then the scenario
+        // script; only the scenario result is returned. Plain-category
+        // objects are never called.
+        let caller_script = r#"
+        global func Shout() { return GameCallEx("Roll", 5); }
+        "#;
+        let listener_script = r#"
+        local hits;
+        func Roll(n) {
+            hits = hits + n;
+            return 1000; // discarded by the broadcast
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLLR", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let mut goal_def =
+            Definition::from_script("GOAL", "Goal", listener_script).expect("goal compiles");
+        goal_def.set_category(1 << 5); // C4D_Goal
+        engine.register_definition(goal_def).expect("goal registers");
+        let mut rule_def =
+            Definition::from_script("RULE", "Rule", listener_script).expect("rule compiles");
+        rule_def.set_category(1 << 19); // C4D_Rule
+        engine.register_definition(rule_def).expect("rule registers");
+        engine
+            .register_definition(
+                Definition::from_script("PLAI", "Plain", listener_script)
+                    .expect("plain compiles"),
+            )
+            .expect("plain registers");
+        engine
+            .install_scenario_script(
+                "Scenario",
+                r#"
+                global func Roll(n) { return n * 3; }
+                "#,
+            )
+            .expect("scenario installs");
+
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CLLR"))
+            .expect("caller spawns");
+        let goal = engine
+            .spawn_object(SpawnConfig::new("GOAL"))
+            .expect("goal spawns");
+        let rule = engine
+            .spawn_object(SpawnConfig::new("RULE"))
+            .expect("rule spawns");
+        let plain = engine
+            .spawn_object(SpawnConfig::new("PLAI"))
+            .expect("plain spawns");
+        engine.tick().expect("tick succeeds");
+
+        let caller_idx = engine.find_object_index(caller).expect("caller exists");
+        let result = engine
+            .call_object_function(caller_idx, "Shout", Vec::new())
+            .expect("Shout succeeds");
+        assert_eq!(
+            result,
+            Value::Int(15),
+            "only the scenario script's result returns (goal/rule results discarded)"
+        );
+        for (id, expected) in [(goal, Some(&Value::Int(5))), (rule, Some(&Value::Int(5)))] {
+            let idx = engine.find_object_index(id).expect("listener exists");
+            assert_eq!(
+                engine.objects[idx].state.local_vars.get("hits"),
+                expected,
+                "goal/rule objects were each called once"
+            );
+        }
+        let plain_idx = engine.find_object_index(plain).expect("plain exists");
+        assert_eq!(
+            engine.objects[plain_idx].state.local_vars.get("hits"),
+            None,
+            "plain-category objects are not part of the broadcast"
+        );
+    }
+
+    #[test]
     fn do_damage_asks_effects_for_non_living_and_fires_callback() {
         // C4Object::DoDamage (C4Object.cpp:1330-1343): NON-living things ask
         // their effects first (the inverse of DoEnergy's Alive gate), the
