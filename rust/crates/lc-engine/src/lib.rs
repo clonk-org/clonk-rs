@@ -4607,6 +4607,22 @@ pub struct Definition {
     /// (C4Object.cpp:4154-4182) — while synthetic command-DSL fixtures keep
     /// the additive (state, action) convention.
     c4_callback_args: bool,
+    /// SolidMask alpha pixels extracted from the sprite once at set time —
+    /// the movement loop reads them per masked object per moving object per
+    /// tick, and re-scanning the sprite there dominated the loop.
+    solid_mask_pixels: SolidMaskPixels,
+}
+
+/// Precomputed solid-mask pixel data for `solid_masks_for_movement`.
+#[derive(Debug, Clone, Default)]
+enum SolidMaskPixels {
+    /// No sprite image: the whole mask rect is solid.
+    #[default]
+    Rectangle,
+    /// Per-pixel alpha mask (1 = solid).
+    Alpha(Rc<Vec<u8>>),
+    /// Mask rect out of the sprite bounds: ignore the mask entirely.
+    OutOfBounds,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4699,6 +4715,7 @@ impl Definition {
             incomplete_activity: false,
             physical: PhysicalInfo::default(),
             c4_callback_args: false,
+            solid_mask_pixels: SolidMaskPixels::default(),
         })
     }
 
@@ -5090,6 +5107,7 @@ impl Definition {
 
     pub fn set_sprite_image(&mut self, image: Option<DefinitionSpriteImage>) {
         self.sprite_image = image;
+        self.rebuild_solid_mask_pixels();
     }
 
     pub fn sprite_image_variant(
@@ -5127,6 +5145,42 @@ impl Definition {
 
     pub fn set_solid_mask(&mut self, rect: Option<DefinitionTargetRect>) {
         self.solid_mask = rect.filter(DefinitionTargetRect::is_positive);
+        self.rebuild_solid_mask_pixels();
+    }
+
+    /// Extract the SolidMask alpha pixels from the sprite (alpha != 0 =
+    /// solid), mirroring the per-tick scan this replaces.
+    fn rebuild_solid_mask_pixels(&mut self) {
+        let Some(mask) = self.solid_mask else {
+            self.solid_mask_pixels = SolidMaskPixels::default();
+            return;
+        };
+        let Some(image) = self.sprite_image.as_ref() else {
+            self.solid_mask_pixels = SolidMaskPixels::Rectangle;
+            return;
+        };
+        let image_width = image.width as i32;
+        let image_height = image.height as i32;
+        if mask.x < 0
+            || mask.y < 0
+            || mask.x.saturating_add(mask.width) > image_width
+            || mask.y.saturating_add(mask.height) > image_height
+        {
+            self.solid_mask_pixels = SolidMaskPixels::OutOfBounds;
+            return;
+        }
+        let source = image.pixels.as_ref();
+        let stride = image.width as usize * 4;
+        let mut pixels = Vec::with_capacity((mask.width * mask.height) as usize);
+        for y in 0..mask.height {
+            let source_y = (mask.y + y) as usize;
+            for x in 0..mask.width {
+                let source_x = (mask.x + x) as usize;
+                let alpha_index = source_y * stride + source_x * 4 + 3;
+                pixels.push(u8::from(source.get(alpha_index).copied().unwrap_or(0) != 0));
+            }
+        }
+        self.solid_mask_pixels = SolidMaskPixels::Alpha(Rc::new(pixels));
     }
 
     pub fn shape_vertices(&self) -> &[ObjectVertex] {
@@ -7385,6 +7439,14 @@ struct ScenarioBatch {
 
 pub struct Engine {
     definitions: HashMap<DefinitionId, Definition>,
+    /// Bumped whenever `objects` changes SHAPE (push/retain/clear) so the
+    /// id->index cache below can trust its entries; indices are stable
+    /// between bumps (destruction only flags, removal happens in the
+    /// end-of-tick retain).
+    objects_generation: std::cell::Cell<u64>,
+    /// Generation-stamped id->index map: CrossCheck resolves object ids per
+    /// candidate pair and the former linear scan dominated tick time.
+    object_index_cache: std::cell::RefCell<(u64, HashMap<ObjectId, usize>)>,
     /// Shared metadata view of `definitions` for host contexts; definitions
     /// only change while loading, so this is built once and dropped on any
     /// definition mutation (host contexts are built per script callback and
@@ -7589,7 +7651,7 @@ struct SolidMaskRect {
     y: i32,
     width: i32,
     height: i32,
-    pixels: Option<Vec<u8>>,
+    pixels: Option<Rc<Vec<u8>>>,
 }
 
 impl SolidMaskRect {
@@ -8620,6 +8682,8 @@ impl Engine {
     pub fn with_seed(seed: u64) -> Self {
         let mut engine = Self {
             definitions: HashMap::new(),
+            objects_generation: std::cell::Cell::new(1),
+            object_index_cache: std::cell::RefCell::new((0, HashMap::new())),
             definition_metadata_cache: std::cell::RefCell::new(None),
             materials: MaterialSet::default(),
             objects: Vec::new(),
@@ -11023,6 +11087,22 @@ impl Engine {
             })
             .collect();
 
+        // Solid-mask carriers: the per-object obstacle scan below only needs
+        // to visit objects whose DEFINITION has a SolidMask; the state checks
+        // (destroyed/contained/CON/rotation) and positions stay live inside
+        // the scan, so mid-loop movement is still seen.
+        let solid_mask_indices: Vec<usize> = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, object)| {
+                self.definitions
+                    .get(&object.definition_id)
+                    .is_some_and(|definition| definition.solid_mask().is_some())
+            })
+            .map(|(index, _)| index)
+            .collect();
+
         for idx in 0..self.objects.len() {
             let definition_id = self.objects[idx].definition_id.clone();
             let previous_action_state = self.objects[idx].state.action.clone();
@@ -11329,7 +11409,7 @@ impl Engine {
             let rotation_base_vertices = self.objects[idx].unrotated_shape_vertices();
             let shape_rect = self.objects[idx].current_shape_rect();
             let layer_bounds = self.layer_movement_bounds_for(idx);
-            let solid_masks = self.solid_masks_for_movement();
+            let solid_masks = self.solid_masks_for_movement(&solid_mask_indices);
             let object_id = self.objects[idx].id;
             let movement = MovementContactConfig {
                 definition_vertices: &rotation_base_vertices,
@@ -11344,12 +11424,22 @@ impl Engine {
                 solid_masks: &solid_masks,
                 object_id,
             };
-            let definition_for_contact = self.definitions.get(&definition_id).cloned();
+            // The contact-callback closure below early-outs unless the def
+            // sets ContactCalls=1 (rare) — don't pay a definition clone and
+            // a world snapshot per object for a closure that won't run.
+            let definition_for_contact = movement
+                .contact_function_calls
+                .then(|| self.definitions.get(&definition_id).cloned())
+                .flatten();
             let mut contact_rng = self.rng.clone();
             let mut contact_audio = self.audio_registry.clone();
             let mut contact_next_object_id = self.next_object_id;
             let contact_global_effects = self.global_effects.clone();
-            let contact_world = self.host_world_context();
+            let contact_world = if movement.contact_function_calls {
+                self.host_world_context()
+            } else {
+                HostWorldContext::default()
+            };
             let contact_physics = self.physics;
             let contact_environment = self.environment;
             let contact_frame = self.frame;
@@ -11518,33 +11608,46 @@ impl Engine {
             self.exec_object_life(idx, frame);
 
             let object_id = self.objects[idx].id;
-            let state_snapshot = self.objects[idx].state.clone();
-            let random = self.next_random_i32();
+            // Step is the command-DSL fixture callback; real content has no
+            // Step function (call_step would return an empty batch) — skip
+            // the world snapshot, the state clone and the random draw it
+            // would never consume.
+            let definition_has_step = self
+                .definitions
+                .get(&definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?
+                .has_step;
+            let command = if definition_has_step {
+                let state_snapshot = self.objects[idx].state.clone();
+                let random = self.next_random_i32();
 
-            let rng_state = self.rng.clone();
-            let (command, audio_state, new_rng, next_object_id) = {
-                let definition = self
-                    .definitions
-                    .get(&definition_id)
-                    .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-                    let definitions_ref = &self.definitions;
-                definition.call_step(
-                    &state_snapshot,
-                    object_id,
-                    frame,
-                    random,
-                    rng_state,
-                    &self.global_effects,
-                    self.physics,
-                    self.environment,
-                    self.host_world_context(),
-                    self.game_over_triggered,
-                    self.audio_registry.clone(),
-                )?
+                let rng_state = self.rng.clone();
+                let (command, audio_state, new_rng, next_object_id) = {
+                    let definition = self
+                        .definitions
+                        .get(&definition_id)
+                        .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    definition.call_step(
+                        &state_snapshot,
+                        object_id,
+                        frame,
+                        random,
+                        rng_state,
+                        &self.global_effects,
+                        self.physics,
+                        self.environment,
+                        self.host_world_context(),
+                        self.game_over_triggered,
+                        self.audio_registry.clone(),
+                    )?
+                };
+                self.rng = new_rng;
+                self.next_object_id = next_object_id;
+                self.audio_registry = audio_state;
+                command
+            } else {
+                CommandBatch::default()
             };
-            self.rng = new_rng;
-            self.next_object_id = next_object_id;
-            self.audio_registry = audio_state;
 
             let CommandBatch {
                 delta,
@@ -11784,6 +11887,7 @@ impl Engine {
 
         self.detach_destroyed_objects()?;
         self.objects.retain(|object| !object.destroyed);
+        self.note_objects_changed();
         self.rebuild_sectors();
         let alive: HashSet<_> = self.objects.iter().map(|object| object.id).collect();
         self.messages.tick(&alive);
@@ -12916,6 +13020,7 @@ impl Engine {
         }
         self.rng = state.rng.clone();
         self.objects.clear();
+        self.note_objects_changed();
         self.global_effects = state.global_effects.clone();
         self.particles.clear();
         self.pxs_system.clear();
@@ -13054,6 +13159,7 @@ impl Engine {
             object                .commands
                 .restore_from_snapshot(&persisted.command_stack);
             self.objects.push(object);
+            self.note_objects_changed();
             if let Some(container) = snapshot.container {
                 container_assignments.push((snapshot.id, container));
             }
@@ -16502,7 +16608,34 @@ impl Engine {
     }
 
     fn find_object_index(&self, id: ObjectId) -> Option<usize> {
-        self.objects.iter().position(|object| object.id == id)
+        let generation = self.objects_generation.get();
+        {
+            let cache = self.object_index_cache.borrow();
+            if cache.0 == generation {
+                match cache.1.get(&id).copied() {
+                    // Identity-checked: a stale hit (missed generation bump)
+                    // falls through to the rebuild instead of resolving the
+                    // wrong object.
+                    Some(index) if self.objects.get(index).map(|object| object.id) == Some(id) => {
+                        return Some(index)
+                    }
+                    Some(_) => {}
+                    None => return None,
+                }
+            }
+        }
+        let mut cache = self.object_index_cache.borrow_mut();
+        cache.0 = generation;
+        cache.1.clear();
+        cache
+            .1
+            .extend(self.objects.iter().enumerate().map(|(i, object)| (object.id, i)));
+        cache.1.get(&id).copied()
+    }
+
+    fn note_objects_changed(&self) {
+        self.objects_generation
+            .set(self.objects_generation.get().wrapping_add(1));
     }
 
     fn layer_movement_bounds_for(&self, index: usize) -> Option<LayerMovementBounds> {
@@ -16516,9 +16649,12 @@ impl Engine {
         })
     }
 
-    fn solid_masks_for_movement(&self) -> Vec<SolidMaskRect> {
+    fn solid_masks_for_movement(&self, candidate_indices: &[usize]) -> Vec<SolidMaskRect> {
         let mut masks = Vec::new();
-        for object in &self.objects {
+        for &index in candidate_indices {
+            let Some(object) = self.objects.get(index) else {
+                continue;
+            };
             if object.destroyed
                 || matches!(object.state.status, ObjectStatus::Deleted)
                 || object.state.container.is_some()
@@ -16533,30 +16669,10 @@ impl Engine {
             let Some(mask) = definition.solid_mask() else {
                 continue;
             };
-            let mask_pixels = if let Some(image) = definition.sprite_image.as_ref() {
-                let image_width = image.width as i32;
-                let image_height = image.height as i32;
-                if mask.x < 0
-                    || mask.y < 0
-                    || mask.x.saturating_add(mask.width) > image_width
-                    || mask.y.saturating_add(mask.height) > image_height
-                {
-                    continue;
-                }
-                let source = image.pixels.as_ref();
-                let stride = image.width as usize * 4;
-                let mut pixels = Vec::with_capacity((mask.width * mask.height) as usize);
-                for y in 0..mask.height {
-                    let source_y = (mask.y + y) as usize;
-                    for x in 0..mask.width {
-                        let source_x = (mask.x + x) as usize;
-                        let alpha_index = source_y * stride + source_x * 4 + 3;
-                        pixels.push(u8::from(source.get(alpha_index).copied().unwrap_or(0) != 0));
-                    }
-                }
-                Some(pixels)
-            } else {
-                None
+            let mask_pixels = match &definition.solid_mask_pixels {
+                SolidMaskPixels::OutOfBounds => continue,
+                SolidMaskPixels::Rectangle => None,
+                SolidMaskPixels::Alpha(pixels) => Some(Rc::clone(pixels)),
             };
             let shape_offset = definition
                 .shape_rect()
@@ -18756,6 +18872,7 @@ impl Engine {
 
         self.apply_landscape(&mut object);
         self.objects.push(object);
+        self.note_objects_changed();
         let index = self.objects.len() - 1;
         self.update_sector_for_index(index);
         for (previous, new) in container_changes {

@@ -334,7 +334,9 @@ impl SectorMap {
     }
 
     fn sort_ids_by_rank(&self, ids: &mut [ObjectId]) {
-        ids.sort_by_key(|id| self.rank(*id));
+        // One rank lookup per element: the comparator-per-compare version
+        // dominated CrossCheck area queries.
+        ids.sort_by_cached_key(|id| self.rank(*id));
     }
 }
 
