@@ -1040,9 +1040,11 @@ fn run_integration_test(
     app.start_scenario(scenario)
         .context("failed to start scenario")?;
 
-    // Wait for running state (reuses test helper pattern)
+    // Wait for running state (reuses test helper pattern). Real packed
+    // scenarios take several seconds to load (350 defs from Objects.c4d),
+    // so allow up to ~30s.
     let mut waited_frames = 0;
-    for _ in 0..480 {
+    for _ in 0..15_000 {
         if matches!(app.mode, AppMode::Running) {
             println!(
                 "Scenario reached Running state after {} update cycles",
@@ -1057,7 +1059,7 @@ fn run_integration_test(
     }
 
     if !matches!(app.mode, AppMode::Running) {
-        anyhow::bail!("Scenario did not enter Running mode after 480 update cycles");
+        anyhow::bail!("Scenario did not enter Running mode after 15000 update cycles");
     }
 
     // Run test frames
