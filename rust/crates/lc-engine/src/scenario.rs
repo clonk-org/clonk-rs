@@ -157,6 +157,10 @@ pub struct Scenario {
     base_buy_enabled: bool,
     base_sell_enabled: bool,
     landscape_insert_thrust: bool,
+    /// The scenario's own System.c4g script sources: C++ loads them into
+    /// the global script engine (C4Game::LoadScenarioScripts,
+    /// C4Game.cpp:3317-3343).
+    system_scripts: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -384,6 +388,7 @@ impl Scenario {
             base_buy_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_BUY) != 0,
             base_sell_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_SELL) != 0,
             landscape_insert_thrust: manifest.core.game.realism.landscape_insert_thrust != 0,
+            system_scripts: load_scenario_system_scripts(group)?,
         })
     }
 
@@ -436,6 +441,12 @@ impl Scenario {
 
     pub fn apply(&self, engine: &mut Engine) -> Result<Vec<ObjectId>, ScenarioError> {
         engine.clear_scenario_script();
+        // The scenario's own System.c4g joins the global script engine
+        // before any definition code runs (C4Game::LoadScenarioScripts,
+        // C4Game.cpp:3317-3343).
+        if !self.system_scripts.is_empty() {
+            engine.install_additional_global_scripts(&self.system_scripts);
+        }
         engine.configure_objectives(self.objectives.clone());
         if let Some(landscape) = &self.landscape {
             engine.set_landscape(landscape.clone());
@@ -477,6 +488,9 @@ impl Scenario {
                     Definition::from_script(&definition.id, name, "")?
                 }
             };
+            // Real content gets the C++ callback arguments (no parameters;
+            // AbortCall gets the last phase — C4Object.cpp:4154-4182).
+            compiled.set_c4_callback_convention(true);
             if let Some(actions) = &definition.actions {
                 compiled.configure_actions(actions.default_action.clone(), actions.specs.clone());
                 compiled.configure_action_graphics(actions.graphics.clone());
@@ -916,6 +930,7 @@ impl Scenario {
             base_buy_enabled: false,
             base_sell_enabled: false,
             landscape_insert_thrust: false,
+            system_scripts: Vec::new(),
         })
     }
 }
@@ -2429,6 +2444,17 @@ pub fn load_system_scripts(group: &Group) -> Result<Vec<(String, String)>, Scena
     }
     sources.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(sources)
+}
+
+/// The scenario's own System.c4g scripts, empty when the group has none
+/// (C4Game::LoadScenarioScripts opens C4CFN_System as a child and loads
+/// every C4CFN_ScriptFiles entry, C4Game.cpp:3317-3343).
+fn load_scenario_system_scripts(group: &Group) -> Result<Vec<(String, String)>, ScenarioError> {
+    group
+        .open_child(Path::new("System.c4g"))
+        .ok()
+        .map(|system| load_system_scripts(&system))
+        .unwrap_or_else(|| Ok(Vec::new()))
 }
 
 /// `[Landscape] MapZoom` with the C4S default `C4SVal(10, 0, 5, 15)`
@@ -5303,6 +5329,7 @@ global func Step(state, frame, random)
             base_buy_enabled: true,
             base_sell_enabled: true,
             landscape_insert_thrust: false,
+            system_scripts: Vec::new(),
         };
 
         let mut engine = Engine::with_seed(11);
@@ -5384,6 +5411,7 @@ global func Step(state, frame, random)
             base_buy_enabled: true,
             base_sell_enabled: true,
             landscape_insert_thrust: false,
+            system_scripts: Vec::new(),
         };
 
         let mut engine = Engine::with_seed(7);
@@ -5667,6 +5695,50 @@ global func Step(state, frame, random)
             "the folder-local definition resolved for Objects.txt"
         );
     }
+    #[test]
+    fn scenario_local_system_c4g_installs_global_scripts() {
+        // C4Game::LoadScenarioScripts (C4Game.cpp:3317-3343) loads every
+        // script in the scenario's own System.c4g into the global script
+        // engine — GoldRush's 31 dialogue/helper scripts live there.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = dir.path().join("Local.c4s");
+        let system = scenario_dir.join("System.c4g");
+        std::fs::create_dir_all(&system).expect("system dir");
+        std::fs::write(
+            system.join("Helpers.c"),
+            "global func ScenarioLocalHelper() { return 42; }\n",
+        )
+        .expect("write helper script");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=LocalSystem\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write scenario core");
+        let good = dir.path().join("Defs.c4d").join("Good.c4d");
+        std::fs::create_dir_all(&good).expect("definition dir");
+        std::fs::write(
+            good.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write defcore");
+        std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        assert!(
+            engine
+                .global_script_functions
+                .as_ref()
+                .is_some_and(|table| table.contains_key("ScenarioLocalHelper")),
+            "scenario System.c4g functions reach the global script engine"
+        );
+    }
+
 
     #[test]
     fn initialize_may_remove_its_own_object_like_cpp() {

@@ -4583,6 +4583,11 @@ pub struct Definition {
     incomplete_activity: bool,
     /// The [Physical] DefCore section (C4Def::Physical).
     physical: PhysicalInfo,
+    /// Real C4Script content gets the C++ callback arguments — no parameters
+    /// for StartCall/EndCall/PhaseCall, the last phase for AbortCall
+    /// (C4Object.cpp:4154-4182) — while synthetic command-DSL fixtures keep
+    /// the additive (state, action) convention.
+    c4_callback_args: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4674,6 +4679,7 @@ impl Definition {
             burn_turn_to: None,
             incomplete_activity: false,
             physical: PhysicalInfo::default(),
+            c4_callback_args: false,
         })
     }
 
@@ -4716,6 +4722,9 @@ impl Definition {
             .unwrap_or_else(|| resource.core.id.clone());
         let mut definition =
             Definition::from_script(resource.core.id.clone(), name, resource.script.combined())?;
+        // Real content gets the C++ callback arguments (no parameters;
+        // AbortCall gets the last phase — C4Object.cpp:4154-4182).
+        definition.set_c4_callback_convention(true);
 
         if let Some(action_map) = &resource.action_map {
             let mut specs = HashMap::new();
@@ -4873,6 +4882,13 @@ impl Definition {
 
     pub fn set_debugger_hooks(&mut self, hooks: DebuggerHooks) {
         Arc::make_mut(&mut self.script).set_debugger_hooks(hooks);
+    }
+
+    /// Switch this definition's engine callbacks to the C++ argument
+    /// convention (C4Object.cpp:4154-4182). Real content loaded from
+    /// resources runs this way; synthetic command-DSL fixtures do not.
+    pub fn set_c4_callback_convention(&mut self, enabled: bool) {
+        self.c4_callback_args = enabled;
     }
 
     /// Shared handle to the compiled script for nested script calls
@@ -5278,10 +5294,16 @@ impl Definition {
         if !self.has_initialize {
             return Ok((CommandBatch::default(), audio, rng, world.next_object_id()));
         }
-        let args = [
-            build_state_value(&self.id, object_id, state, &self.action_library),
-            Value::Int(random),
-        ];
+        // C++ Initialize runs with no parameters (PSF_Initialize broadcast);
+        // (state, random) is the synthetic command-DSL convention.
+        let args = if self.c4_callback_args {
+            Vec::new()
+        } else {
+            vec![
+                build_state_value(&self.id, object_id, state, &self.action_library),
+                Value::Int(random),
+            ]
+        };
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
@@ -5780,10 +5802,20 @@ impl Definition {
         // Scripts can inherit callbacks from parent scripts (e.g., TRPR inherits Throwing
         // from COWB). The VM will naturally handle truly missing functions when called.
 
-        let args = [
-            build_state_value(&self.id, object_id, state, &self.action_library),
-            Value::String(action_name.to_string()),
-        ];
+        // C++ ActMap callbacks pass no parameters, except AbortCall which
+        // gets the last phase (C4Object.cpp:4154,4168,4182). The (state,
+        // action) pair is the synthetic command-DSL convention.
+        let args = if self.c4_callback_args {
+            match kind {
+                ActionCallbackKind::Abort => vec![Value::Int(state.action.phase)],
+                _ => Vec::new(),
+            }
+        } else {
+            vec![
+                build_state_value(&self.id, object_id, state, &self.action_library),
+                Value::String(action_name.to_string()),
+            ]
+        };
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
@@ -8674,12 +8706,12 @@ impl Engine {
         self.sync_player_cursor(id);
         self.sync_team_home_base_for(id);
 
-        if let Err(error) =
-            self.broadcast_scenario_function("PreInitializePlayer", vec![Value::Int(id)])
-        {
-            self.players.remove(&id);
-            return Err(error);
-        }
+        // Player-init broadcasts run with the default fPassError=false
+        // (C4Player.cpp:769, C4ScriptHost.h:91): a script error is logged by
+        // the fail-safe exec and the join continues.
+        tolerate_script_error(
+            self.broadcast_scenario_function("PreInitializePlayer", vec![Value::Int(id)]),
+        )?;
 
         let position = self
             .objects
@@ -8715,10 +8747,7 @@ impl Engine {
         init_args.push(team_value);
         init_args.push(Value::Nil);
 
-        if let Err(error) = self.broadcast_scenario_function("InitializePlayer", init_args) {
-            self.players.remove(&id);
-            return Err(error);
-        }
+        tolerate_script_error(self.broadcast_scenario_function("InitializePlayer", init_args))?;
 
         self.refresh_elimination_state();
         self.check_game_over()?;
@@ -10335,13 +10364,29 @@ impl Engine {
     /// are skipped like C++. The table is shared into every registered
     /// (and future) script host.
     pub fn install_global_scripts(&mut self, sources: &[(String, String)]) -> usize {
-        let mut functions: HashMap<String, lc_script::Function> = HashMap::new();
+        self.global_script_functions = None;
+        self.install_additional_global_scripts(sources)
+    }
+
+    /// Adds global scripts ON TOP of the installed table: later definitions
+    /// overload earlier ones and `inherited` reaches them (C++ link order —
+    /// the scenario's System.c4g joins the engine's, C4Game.cpp:3317-3343).
+    pub fn install_additional_global_scripts(&mut self, sources: &[(String, String)]) -> usize {
+        let mut functions: HashMap<String, lc_script::Function> = self
+            .global_script_functions
+            .as_deref()
+            .cloned()
+            .unwrap_or_default();
         let mut loaded = 0usize;
         for (name, source) in sources {
             match lc_script::Script::compile(source) {
                 Ok(script) => {
                     for (function_name, function) in script.functions() {
-                        functions.insert(function_name.clone(), function.clone());
+                        let mut function = function.clone();
+                        if let Some(previous) = functions.remove(function_name) {
+                            function.push_overload(previous);
+                        }
+                        functions.insert(function_name.clone(), function);
                     }
                     loaded += 1;
                 }
@@ -22902,6 +22947,79 @@ global func MenuCommand(state, kind, selection)
     }
 
     #[test]
+    fn real_content_action_callbacks_use_cpp_argument_convention() {
+        // C++ ActMap callbacks: StartCall/EndCall run with no parameters
+        // (C4Object.cpp:4154,4168); AbortCall receives the last phase as its
+        // only parameter, `Exec(this, {C4VInt(iLastPhase)})`
+        // (C4Object.cpp:4182). Content like COWB's AbortJumpDrawGun(int
+        // iPhase) feeds that straight into SetPhase.
+        use std::sync::{Arc, Mutex};
+
+        let script = r#"
+        global func OnIdleStart(a) { return nil; }
+        global func OnIdleAbort(iPhase) { return nil; }
+        "#;
+
+        let call_log: Arc<Mutex<Vec<(String, Vec<lc_script::Value>)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let call_log = Arc::clone(&call_log);
+            hooks.set_on_call(move |name, args| {
+                call_log.lock().unwrap().push((name.to_string(), args.to_vec()));
+            });
+        }
+
+        let mut definition =
+            Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_debugger_hooks(hooks);
+
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Idle".to_string(),
+            ActionSpec::default()
+                .with_length(20)
+                .with_start_call("OnIdleStart")
+                .with_abort_call("OnIdleAbort"),
+        );
+        actions.insert("Run".to_string(), ActionSpec::default());
+        definition.configure_actions(Some("Idle".to_string()), actions);
+
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+        engine
+            .apply_object_update(id, ObjectUpdate::new().with_action("Run"))
+            .expect("update succeeds");
+
+        let calls = call_log.lock().unwrap().clone();
+        let start_args = calls
+            .iter()
+            .find(|(name, _)| name == "OnIdleStart")
+            .map(|(_, args)| args.clone())
+            .expect("start callback ran");
+        assert!(
+            start_args.iter().all(|arg| matches!(arg, lc_script::Value::Nil)),
+            "StartCall passes no parameters, got {start_args:?}"
+        );
+        let abort_args = calls
+            .iter()
+            .find(|(name, _)| name == "OnIdleAbort")
+            .map(|(_, args)| args.clone())
+            .expect("abort callback ran");
+        assert_eq!(
+            abort_args.first(),
+            Some(&lc_script::Value::Int(0)),
+            "AbortCall passes the last phase as an int, got {abort_args:?}"
+        );
+    }
+
+    #[test]
     fn non_forced_action_update_respects_no_other_action() {
         let script = r#"
         global func Initialize(state, random) { return nil; }
@@ -31199,6 +31317,26 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(flag_snapshot.owner, 1);
         assert_eq!(flag_snapshot.position, Vector2::new(100, 200));
 
+        Ok(())
+    }
+
+    #[test]
+    fn register_player_survives_initialize_player_script_error() -> Result<(), EngineError> {
+        // C4Player.cpp:769 calls Game.Script.GRBroadcast(PSF_InitializePlayer,
+        // ...) with the default fPassError=false: a script error is logged by
+        // the fail-safe exec (C4AulExec.cpp:1318-1342) and the join continues.
+        const SCRIPT: &str = r#"
+        global func PreInitializePlayer(state, player) { return ThisFunctionDoesNotExist(); }
+        global func InitializePlayer(state, player, x, y, base, team, extra)
+        {
+            return ThisFunctionDoesNotExist();
+        }
+        "#;
+
+        let mut engine = Engine::with_seed(5);
+        engine.install_scenario_script("Scenario", SCRIPT)?;
+        engine.register_player(PlayerConfig::new(1, "Player"))?;
+        assert!(engine.players().any(|player| player.id() == 1));
         Ok(())
     }
 
