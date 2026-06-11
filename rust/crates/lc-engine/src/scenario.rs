@@ -2280,6 +2280,21 @@ impl LegacyC4SVal {
         self.std.clamp(min, max)
     }
 
+    /// `C4SVal::Evaluate` (C4Scenario.cpp:43-46): one synced game-RNG draw,
+    /// `BoundBy(Std + Random(2 * Rnd + 1) - Rnd, Min, Max)`. BoundBy makes no
+    /// ordered-bounds assumption (Standard.h), so this avoids `clamp`'s
+    /// min<=max panic.
+    fn evaluate(self, rng: &mut crate::rng::LcgRng) -> i32 {
+        let value = self.std + rng.random(2 * self.rnd + 1) - self.rnd;
+        if value < self.min {
+            self.min
+        } else if value > self.max {
+            self.max
+        } else {
+            value
+        }
+    }
+
     fn variation_extent(self) -> i32 {
         let base = self.base();
         let (min, max) = ordered_bounds(self.min, self.max);
@@ -4322,6 +4337,26 @@ global func Step(state, frame, random)
     return nil;
 }
 "#;
+
+    #[test]
+    fn legacy_c4sval_evaluate_draws_via_the_game_rng_like_cpp() {
+        // C4SVal::Evaluate (C4Scenario.cpp:43-46):
+        //   return BoundBy(Std + Random(2 * Rnd + 1) - Rnd, Min, Max);
+        // One Random draw per Evaluate — even Rnd == 0 calls Random(1),
+        // which advances the LCG stream (C4Random.h:40-61).
+        let mut reference = crate::rng::LcgRng::new(42);
+        let expected = (10 + reference.random(2 * 3 + 1) - 3).clamp(0, 250);
+
+        let mut rng = crate::rng::LcgRng::new(42);
+        assert_eq!(LegacyC4SVal::new(10, 3, 0, 250).evaluate(&mut rng), expected);
+        assert_eq!(rng, reference);
+
+        // Rnd == 0 still draws: Random(1) returns 0 but advances hold/count.
+        let before = rng.clone();
+        assert_eq!(LegacyC4SVal::new(5, 0, 0, 250).evaluate(&mut rng), 5);
+        assert_ne!(rng.hold, before.hold);
+        assert_eq!(rng.count, before.count + 1);
+    }
 
     #[test]
     fn legacy_scenario_core_parses_all_fields() {
