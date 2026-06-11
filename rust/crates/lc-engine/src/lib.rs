@@ -3968,6 +3968,12 @@ pub struct SpawnConfig {
     pub alive: Option<bool>,
     #[serde(default)]
     pub category: Option<i32>,
+    /// The object is LOADED (Objects.txt / savegame), not created:
+    /// C4GameObjects::Load (C4GameObjects.cpp:535-618) only compiles and
+    /// denumerates — Construction/Initialize fire for new objects only
+    /// (C4Object::Init).
+    #[serde(default)]
+    pub loaded: bool,
 }
 
 impl SpawnConfig {
@@ -3992,7 +3998,13 @@ impl SpawnConfig {
             layer: None,
             alive: None,
             category: None,
+            loaded: false,
         }
+    }
+
+    pub fn with_loaded(mut self, loaded: bool) -> Self {
+        self.loaded = loaded;
+        self
     }
 
     pub fn with_position(mut self, position: Vector2) -> Self {
@@ -19838,6 +19850,7 @@ impl Engine {
             layer,
             alive,
             category,
+            loaded,
         } = config;
 
         let (
@@ -19992,11 +20005,14 @@ impl Engine {
 
         // Call Construction() before Initialize()
         // Construction() initializes local variables that may be used in Initialize() or action callbacks
-        if self
-            .definitions
-            .get(&definition_id)
-            .map(|definition| definition.has_construction)
-            .unwrap_or(false)
+        // Loaded objects (Objects.txt / savegame) skip both: C4GameObjects::Load
+        // (C4GameObjects.cpp:535-618) never fires construction callbacks.
+        if !loaded
+            && self
+                .definitions
+                .get(&definition_id)
+                .map(|definition| definition.has_construction)
+                .unwrap_or(false)
         {
             let rng_state = self.rng.clone();
             let (
@@ -20107,11 +20123,12 @@ impl Engine {
             }
         }
 
-        if self
-            .definitions
-            .get(&definition_id)
-            .map(|definition| definition.has_initialize)
-            .unwrap_or(false)
+        if !loaded
+            && self
+                .definitions
+                .get(&definition_id)
+                .map(|definition| definition.has_initialize)
+                .unwrap_or(false)
         {
             let random = self.next_random_i32();
             let rng_state = self.rng.clone();

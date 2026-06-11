@@ -3171,7 +3171,11 @@ impl LegacyObjectRecord {
             return Ok(None);
         }
 
-        let mut config = SpawnConfig::new(id.clone()).with_id(ObjectId::new(number));
+        let mut config = SpawnConfig::new(id.clone())
+            .with_id(ObjectId::new(number))
+            // Objects.txt entries are LOADED, not created: no
+            // Construction/Initialize (C4GameObjects.cpp:535-618).
+            .with_loaded(true);
         config = config.with_position(Vector2::new(x.unwrap_or(0), y.unwrap_or(0)));
 
         if xdir.is_some() || ydir.is_some() {
@@ -7140,6 +7144,85 @@ global func Step(state, frame, random)
         assert_eq!(gem_snapshot.action.phase, 2);
         assert_eq!(gem_snapshot.action.data, 5);
         assert_eq!(gem_snapshot.action.target, Some(ObjectId::new(100)));
+    }
+
+    #[test]
+    fn objects_txt_placements_do_not_fire_construction_callbacks_like_cpp() {
+        // C4GameObjects::Load (C4GameObjects.cpp:535-618) only compiles the
+        // entries and denumerates pointers — Construction/Initialize fire
+        // for NEW objects only (C4Object::Init). GoldRush depends on this:
+        // its placed Cauldrons would otherwise create fresh CampFires and
+        // its placed Bubbles would Remove() themselves at load.
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let box_core = defs_root.join("Box.c4d");
+        std::fs::create_dir_all(&box_core).expect("box definition dir");
+        std::fs::write(
+            box_core.join("DefCore.txt"),
+            "[DefCore]\nid=BOX1\nName=Box\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write box defcore");
+        std::fs::write(
+            box_core.join("Script.c"),
+            "#strict\nlocal iMark;\n\
+             protected func Construction() { iMark = 1; }\n\
+             protected func Initialize() { iMark = 2; CreateObject(GEM1, 5, 5, -1); }\n",
+        )
+        .expect("box script");
+
+        let gem_core = defs_root.join("Gem.c4d");
+        std::fs::create_dir_all(&gem_core).expect("gem definition dir");
+        std::fs::write(
+            gem_core.join("DefCore.txt"),
+            "[DefCore]\nid=GEM1\nName=Gem\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write gem defcore");
+        std::fs::write(gem_core.join("Script.c"), "// gem script\n").expect("gem script");
+
+        let scenario_dir = dir.path().join("LegacyObjects.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Legacy Objects\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=BOX1\nNumber=100\nStatus=1\nCategory=0\nX=10\nY=20\n",
+        )
+        .expect("write objects");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("legacy scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("legacy scenario applies");
+
+        let snapshot = engine.snapshot();
+        let placed = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "BOX1")
+            .expect("placed object exists");
+        assert!(
+            matches!(
+                placed.local_vars.get("iMark"),
+                None | Some(&lc_script::Value::Nil)
+            ),
+            "neither Construction nor Initialize ran for the loaded object \
+             (got {:?})",
+            placed.local_vars.get("iMark")
+        );
+        assert!(
+            !snapshot
+                .objects
+                .iter()
+                .any(|object| object.definition_id == "GEM1"),
+            "Initialize side effects (CreateObject) must not happen at load"
+        );
     }
 
     #[test]
