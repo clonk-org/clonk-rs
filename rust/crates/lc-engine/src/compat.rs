@@ -394,6 +394,11 @@ pub(crate) struct HostWorldContext {
     /// functions can run script functions on other objects mid-VM-call
     /// (Find_Func/Sort_Func, GameCall). Empty in legacy fixture contexts.
     definition_scripts: Rc<HashMap<DefinitionId, Arc<ScriptEngine>>>,
+    /// The scenario script, shared from `Engine.scenario_script`, for
+    /// GameCall/GameCallEx mid-VM-call resolution (C++ resolves on
+    /// `Game.Script`, C4Script.cpp:3483). `None` when no scenario script is
+    /// installed (and in fixture contexts).
+    scenario_script: Option<Arc<ScriptEngine>>,
 }
 
 impl Default for HostWorldContext {
@@ -412,6 +417,7 @@ impl Default for HostWorldContext {
             team_home_base_rule: false,
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
+            scenario_script: None,
         }
     }
 }
@@ -498,7 +504,21 @@ impl HostWorldContext {
             team_home_base_rule,
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
+            scenario_script: None,
         }
+    }
+
+    /// Attach the scenario script for GameCall/GameCallEx resolution.
+    pub(crate) fn with_scenario_script(
+        mut self,
+        script: Option<Arc<ScriptEngine>>,
+    ) -> Self {
+        self.scenario_script = script;
+        self
+    }
+
+    pub(crate) fn scenario_script(&self) -> Option<&Arc<ScriptEngine>> {
+        self.scenario_script.as_ref()
     }
 
     /// Attach the engine's compiled definition scripts for nested script

@@ -6897,7 +6897,10 @@ impl Definition {
 
 struct ScenarioScript {
     name: String,
-    script: ScriptEngine,
+    /// Shared like `Definition.script`: `host_world_context()` hands `Arc`
+    /// clones to host functions so GameCall/GameCallEx can run scenario
+    /// functions mid-VM-call.
+    script: Arc<ScriptEngine>,
     has_initialize: bool,
     has_step: bool,
 }
@@ -6918,10 +6921,15 @@ impl ScenarioScript {
         let has_step = script.has_function("Step");
         Ok(Self {
             name,
-            script,
+            script: Arc::new(script),
             has_initialize,
             has_step,
         })
+    }
+
+    /// Shared handle for the world context (GameCall resolution).
+    fn script_arc(&self) -> Arc<ScriptEngine> {
+        Arc::clone(&self.script)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -9249,6 +9257,11 @@ impl Engine {
                 .iter()
                 .map(|(id, definition)| (id.clone(), definition.script_arc()))
                 .collect(),
+        )
+        .with_scenario_script(
+            self.scenario_script
+                .as_ref()
+                .map(ScenarioScript::script_arc),
         )
     }
 
