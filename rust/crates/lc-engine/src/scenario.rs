@@ -299,6 +299,10 @@ impl Scenario {
 
         let mut collected = Vec::new();
         let mut seen_ids = HashSet::new();
+        // System.c4g scripts found inside definition packs join the global
+        // engine BEFORE the scenario's own (C++ registers them during def
+        // loading; LoadScenarioScripts runs later).
+        let mut pack_system_scripts: Vec<(String, String)> = Vec::new();
 
         // The scenario group itself is a definition source: every .c4d
         // child is a scenario-local definition, loaded with override
@@ -314,7 +318,12 @@ impl Scenario {
                 continue;
             }
             let child = group.open_child(&entry.relative_path)?;
-            collect_definitions_from_group(&child, &mut seen_ids, &mut collected)?;
+            collect_definitions_from_group(
+                &child,
+                &mut seen_ids,
+                &mut collected,
+                &mut pack_system_scripts,
+            )?;
         }
 
         // The parent folder chain is a definition source too: every .c4d
@@ -343,7 +352,12 @@ impl Scenario {
                         continue;
                     }
                     let child = folder_group.open_child(&entry.relative_path)?;
-                    collect_definitions_from_group(&child, &mut seen_ids, &mut collected)?;
+                    collect_definitions_from_group(
+                &child,
+                &mut seen_ids,
+                &mut collected,
+                &mut pack_system_scripts,
+            )?;
                 }
             }
             ancestor = folder.parent();
@@ -355,7 +369,12 @@ impl Scenario {
                 return Err(ScenarioError::LegacyDefinitionNotFound { path: spec.clone() });
             }
             for definition_group in groups {
-                collect_definitions_from_group(&definition_group, &mut seen_ids, &mut collected)?;
+                collect_definitions_from_group(
+                    &definition_group,
+                    &mut seen_ids,
+                    &mut collected,
+                    &mut pack_system_scripts,
+                )?;
             }
         }
 
@@ -404,7 +423,11 @@ impl Scenario {
             base_buy_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_BUY) != 0,
             base_sell_enabled: (manifest.core.game.realism.base_functionality & BASEFUNC_SELL) != 0,
             landscape_insert_thrust: manifest.core.game.realism.landscape_insert_thrust != 0,
-            system_scripts: load_scenario_system_scripts(group)?,
+            system_scripts: {
+                let mut scripts = pack_system_scripts;
+                scripts.extend(load_scenario_system_scripts(group)?);
+                scripts
+            },
             player_starts: PlayerStart::slots_from_legacy(&manifest.core.players),
             standard_names: group
                 .read_file("Names.txt")
@@ -3437,6 +3460,7 @@ fn collect_definitions_from_group(
     group: &Group,
     seen_ids: &mut HashSet<String>,
     output: &mut Vec<ScenarioDefinition>,
+    system_scripts: &mut Vec<(String, String)>,
 ) -> Result<(), ScenarioError> {
     if group.exists("DefCore.txt") {
         let resource = ResourceDefinitionData::load(group)?;
@@ -3449,12 +3473,25 @@ fn collect_definitions_from_group(
         }
     }
 
+    // Definition groups carry their own System.c4g: C4DefList::Load
+    // registers its scripts with Game.ScriptEngine
+    // (C4Def.cpp:956-977) — Western.c4d/System.c4g et al.
+    if let Ok(system) = group.open_child(Path::new("System.c4g")) {
+        if let Ok(mut sources) = load_system_scripts(&system) {
+            system_scripts.append(&mut sources);
+        }
+    }
+
     for entry in group.entries()? {
         if !entry.is_directory {
             continue;
         }
+        let name = entry.relative_path.to_string_lossy().to_ascii_lowercase();
+        if name == "system.c4g" {
+            continue; // handled above; never a definition source
+        }
         let child = group.open_child(&entry.relative_path)?;
-        collect_definitions_from_group(&child, seen_ids, output)?;
+        collect_definitions_from_group(&child, seen_ids, output, system_scripts)?;
     }
     Ok(())
 }
@@ -6100,6 +6137,39 @@ global func Step(state, frame, random)
                 .map(|cell| cell.borrow().clone()),
             Some(lc_script::Value::Int(0)),
             "InitializePlayer's first argument is the player NUMBER"
+        );
+    }
+
+    #[test]
+    fn definition_pack_system_groups_load_into_the_global_engine() {
+        // C4DefList::Load opens C4CFN_System inside every definition
+        // group and registers its scripts with Game.ScriptEngine
+        // (C4Def.cpp:956-977) — Western.c4d/System.c4g carries Find_Clan
+        // and friends. They must be callable like any global script.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static probed;\n\
+             global func Initialize() { probed = PackHelper(); return nil; }\n",
+        );
+        let system = dir.path().join("Defs.c4d/System.c4g");
+        std::fs::create_dir_all(&system).expect("system dir");
+        std::fs::write(
+            system.join("Helpers.c"),
+            "#strict\nglobal func PackHelper() { return 6; }\n",
+        )
+        .expect("write pack script");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("probed")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(6)),
+            "the pack's System.c4g global resolved from the scenario script"
         );
     }
 

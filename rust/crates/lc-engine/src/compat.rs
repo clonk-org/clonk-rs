@@ -1714,7 +1714,111 @@ fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnSetComponent (C4Script.cpp:2659-2663): sets the component count on
+/// pObj or the scope object (C4IDList::SetIDCount with fAddNewID — the
+/// entry persists even at zero). Foreign subjects route through the seam.
+fn set_component(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(component) = parse_definition_argument(args.first(), "SetComponent")? else {
+        return Ok(Value::Bool(false));
+    };
+    let count = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "SetComponent", "count")?;
+    let target =
+        parse_object_reference_argument(args.get(2).unwrap_or(&Value::Nil), "SetComponent", "obj")?;
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    if let Some(target) = target {
+        if Some(target) != active {
+            return match call_world_object_function(target, "SetComponent", &args[..2.min(args.len())]) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(self_id) = context.object_context().map(|object| object.id()) else {
+            return Ok(Value::Bool(false));
+        };
+        // Read-modify-write: the update replaces the whole map, so seed
+        // from pending writes or the object's current components.
+        let current = context
+            .object_context()
+            .and_then(|object| object.pending_update.components.clone())
+            .or_else(|| {
+                context
+                    .get_world_object(self_id)
+                    .and_then(|object| object.full_state().map(|state| state.components.clone()))
+            })
+            .unwrap_or_default();
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let mut map = current;
+        map.insert(DefinitionId::from(component.as_str()), count.max(0) as u32);
+        object.pending_update.components = Some(map);
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnGetDefCoreVal (C4Script.cpp:4170-4180): DefCore reflection. The hot
+/// entries real content reads resolve from the definition metadata
+/// (Width/Height/Offset from the Shape rect, Value, Mass); anything else
+/// is nil with a debug note (PORT_STATUS).
+fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(entry) = parse_optional_string(args.first(), "GetDefCoreVal", "entry")? else {
+        return Ok(Value::Nil);
+    };
+    let _section = parse_optional_string(args.get(1), "GetDefCoreVal", "section")?;
+    let requested = parse_definition_argument(args.get(2), "GetDefCoreVal")?;
+    let entry_index =
+        parse_optional_i32(args.get(3), "GetDefCoreVal", "entry_nr")?.unwrap_or(0);
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let definition_id = match requested {
+            Some(id) => Some(id),
+            // `if (!idDef && cthr->Def) idDef = cthr->Def->id` — the
+            // executing object's definition.
+            None => context
+                .object_context()
+                .map(|object| object.id())
+                .and_then(|id| context.get_world_object(id))
+                .map(|object| object.definition_id().to_string()),
+        };
+        let Some(definition_id) = definition_id else {
+            return Ok(Value::Nil);
+        };
+        let Some(metadata) = context
+            .world
+            .definition_metadata(&DefinitionId::from(definition_id.as_str()))
+        else {
+            return Ok(Value::Nil);
+        };
+        let shape = metadata.shape.unwrap_or(DefinitionRect::new(0, 0, 0, 0));
+        Ok(match entry.as_str() {
+            "Width" => Value::Int(shape.width),
+            "Height" => Value::Int(shape.height),
+            "Offset" => Value::Int(if entry_index == 0 { shape.x } else { shape.y }),
+            "Value" => Value::Int(metadata.value),
+            "Mass" => Value::Int(metadata.mass),
+            other => {
+                tracing::debug!(entry = other, "GetDefCoreVal entry not modeled; nil");
+                Value::Nil
+            }
+        })
+    })
+}
+
 fn get_hi_rank(args: &[Value]) -> Result<Value, RuntimeError> {
+
 
 
     // FnGetHiRank (C4Script.cpp:2792-2796) ->
@@ -3148,6 +3252,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlrKnowledge", get_plr_knowledge);
     script.register_host_function("GetCrew", get_crew);
     script.register_host_function("GetHiRank", get_hi_rank);
+    script.register_host_function("SetComponent", set_component);
+    script.register_host_function("GetDefCoreVal", get_def_core_val);
     script.register_host_function("Enter", enter);
     script.register_host_function("Exit", exit_container);
     script.register_host_function("GetComponent", get_component);
@@ -14753,6 +14859,7 @@ mod tests {
         "GetCrew",
         "GetCrewCount",
         "GetCursor",
+        "GetDefCoreVal",
         "GetDir",
         "GetEffect",
         "GetEffectCount",
@@ -14835,6 +14942,7 @@ mod tests {
         "SetColorDw",
         "SetComDir",
         "SetCommand",
+        "SetComponent",
         "SetDir",
         "SetEntrance",
         "SetGraphics",
