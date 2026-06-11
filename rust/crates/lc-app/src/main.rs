@@ -212,6 +212,8 @@ const STARTUP_DIALOG_IMAGES: &[&str] = &[
     "GUIIcons.png",
     "GUIIcons2.png",
     "GUIScroll.png",
+    "StartupContext.png",
+    "Player.png",
 ];
 
 struct RuntimeConfig {
@@ -338,6 +340,10 @@ struct FrontendAssets {
     startup_dialog_images: HashMap<String, ImageData>,
     /// Shadowless startup "book" fonts (C4StartupGraphics::InitFonts).
     book_fonts: Option<Arc<lc_frontend::startup_scensel::BookFontSet>>,
+    /// Book + book-small shadowless fonts for the options paper sheet.
+    options_book_fonts: Option<Arc<lc_frontend::startup_options_dlg::BookFonts>>,
+    /// The player-selection dialog's own shadowless book fonts.
+    plrsel_book_fonts: Option<Arc<lc_frontend::startup_plrsel::BookFontSet>>,
     base_sprites: HashMap<String, DefinitionSprite>,
     cursor_atlas: Arc<CursorAtlas>,
     hud_graphics: Arc<HudGraphics>,
@@ -348,6 +354,8 @@ impl FrontendAssets {
         let font = Self::load_font(paths);
         let clonk_fonts = Self::load_clonk_fonts(paths);
         let book_fonts = Self::load_book_fonts(paths);
+        let options_book_fonts = Self::load_options_book_fonts(paths);
+        let plrsel_book_fonts = Self::load_plrsel_book_fonts(paths);
         let mut startup_dialog_images = HashMap::new();
         let mut menu_background = None;
         let mut scenario_browser_background = None;
@@ -436,6 +444,8 @@ impl FrontendAssets {
             button_highlight,
             startup_dialog_images,
             book_fonts,
+            options_book_fonts,
+            plrsel_book_fonts,
             base_sprites: sprites,
             cursor_atlas: Arc::new(cursor_atlas),
             hud_graphics: Arc::new(hud_graphics),
@@ -471,6 +481,61 @@ impl FrontendAssets {
                 None
             }
         }
+    }
+
+    /// Builds the options paper-sheet book fonts (C4Startup.cpp:92-116).
+    fn load_options_book_fonts(
+        paths: Option<&AppPaths>,
+    ) -> Option<Arc<lc_frontend::startup_options_dlg::BookFonts>> {
+        let paths = paths?;
+        let group = Group::open(paths.system_group_path()).ok()?;
+        let resource = load_endeavour_font(&group).ok()?;
+        match lc_frontend::startup_options_dlg::build_book_fonts(resource.bytes()) {
+            Ok(set) => Some(Arc::new(set)),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to build options book fonts");
+                None
+            }
+        }
+    }
+
+    /// Builds the player-selection book fonts (C4Startup.cpp:92-116).
+    fn load_plrsel_book_fonts(
+        paths: Option<&AppPaths>,
+    ) -> Option<Arc<lc_frontend::startup_plrsel::BookFontSet>> {
+        let paths = paths?;
+        let group = Group::open(paths.system_group_path()).ok()?;
+        let resource = load_endeavour_font(&group).ok()?;
+        match lc_frontend::startup_plrsel::build_book_font_set(resource.bytes()) {
+            Ok(set) => Some(Arc::new(set)),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to build plrsel book fonts");
+                None
+            }
+        }
+    }
+
+    fn options_dlg_assets(&self) -> Option<lc_frontend::startup_options_dlg::OptionsDlgAssets> {
+        Some(lc_frontend::startup_options_dlg::OptionsDlgAssets {
+            background: self.menu_background()?,
+            paper: self.dialog_image("StartupDlgPaper.png")?,
+            tab_clip: self.dialog_image("StartupTabClip.png")?,
+            option_icons: self.dialog_image("StartupOptionIcons.png")?,
+            book_scroll: self.dialog_image("StartupBookScroll.png")?,
+            context_arrow: self.dialog_image("StartupContext.png")?,
+            checkbox: self.dialog_image("GUICheckbox.png")?,
+            button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
+            button: self.dialog_image("GUIButton.png")?,
+        })
+    }
+
+    fn plrsel_assets(&self) -> Option<lc_frontend::startup_plrsel::PlrSelAssets> {
+        Some(lc_frontend::startup_plrsel::PlrSelAssets {
+            background: self.dialog_image("StartupPlrSelBG.png")?,
+            checkbox: self.dialog_image("GUICheckbox.png")?,
+            button: self.dialog_image("GUIButton.png")?,
+            player: self.dialog_image("Player.png")?,
+        })
     }
 
     fn dialog_image(&self, name: &str) -> Option<ImageData> {
@@ -8776,6 +8841,45 @@ fn render_startup_frame(
                     _ => false,
                 }
             }
+            StartupView::Options => match (
+                assets.options_dlg_assets(),
+                assets.clonk_fonts.as_ref(),
+                assets.options_book_fonts.as_ref(),
+            ) {
+                (Some(dlg_assets), Some(fonts), Some(book)) => {
+                    lc_frontend::startup_options_dlg::OptionsDlgScreen::render(
+                        surface,
+                        &dlg_assets,
+                        fonts,
+                        book,
+                        &lc_frontend::startup_options_dlg::ProgramSheetState::default(),
+                        Some(startup_gamma()),
+                    );
+                    true
+                }
+                _ => false,
+            },
+            StartupView::PlayerSelection => match (
+                assets.plrsel_assets(),
+                assets.clonk_fonts.as_ref(),
+                assets.plrsel_book_fonts.as_ref(),
+            ) {
+                (Some(dlg_assets), Some(fonts), Some(book)) => {
+                    // Player discovery from packed .c4p files is not wired
+                    // yet; the dialog shows its empty first-shown state.
+                    lc_frontend::startup_plrsel::PlrSelScreen::render(
+                        surface,
+                        &dlg_assets,
+                        fonts,
+                        book.as_ref(),
+                        &[],
+                        None,
+                        Some(startup_gamma()),
+                    );
+                    true
+                }
+                _ => false,
+            },
             _ => false,
         };
         if parity_rendered {
