@@ -1903,6 +1903,12 @@ pub struct ObjectState {
     /// None means the definition shape applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape_override: Option<DefinitionRect>,
+    /// The CACHED object character flags, like C++ `obj->OCF`: refreshed by
+    /// the SetOCF events (spawn Init, updates, container changes, fire) and
+    /// once per frame at Execute-start (C4Object.cpp:215,1058; C4Object.h:361)
+    /// — readers consume this field, never a fresh compute.
+    #[serde(default)]
+    pub ocf: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -5422,7 +5428,7 @@ impl Definition {
                     state.physical_changes.clone(),
                     *self.physical(),
                 )
-                .with_ocf(self.compute_ocf(state)),
+                .with_ocf(state.ocf),
             ),
             global_effects,
             world,
@@ -5590,7 +5596,7 @@ impl Definition {
                     state.physical_changes.clone(),
                     *self.physical(),
                 )
-                .with_ocf(self.compute_ocf(state)),
+                .with_ocf(state.ocf),
             ),
             global_effects,
             world,
@@ -5750,7 +5756,7 @@ impl Definition {
                     state.physical_changes.clone(),
                     *self.physical(),
                 )
-                .with_ocf(self.compute_ocf(state)),
+                .with_ocf(state.ocf),
             ),
             global_effects,
             world,
@@ -5934,7 +5940,7 @@ impl Definition {
                     state.physical_changes.clone(),
                     *self.physical(),
                 )
-                .with_ocf(self.compute_ocf(state)),
+                .with_ocf(state.ocf),
             ),
             global_effects,
             world,
@@ -6049,7 +6055,7 @@ impl Definition {
             *self.physical(),
         )
         .with_base_graphics(state.base_graphics.clone())
-        .with_ocf(self.compute_ocf(state));
+        .with_ocf(state.ocf);
         let (result, outcome) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,
@@ -6180,7 +6186,7 @@ impl Definition {
             *self.physical(),
         )
         .with_base_graphics(state.base_graphics.clone())
-        .with_ocf(self.compute_ocf(state));
+        .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,
@@ -6303,7 +6309,7 @@ impl Definition {
             state.physical_changes.clone(),
             *self.physical(),
         )
-        .with_ocf(self.compute_ocf(state));
+        .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,
@@ -6430,7 +6436,7 @@ impl Definition {
             state.physical_changes.clone(),
             *self.physical(),
         )
-        .with_ocf(self.compute_ocf(state));
+        .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,
@@ -6553,7 +6559,7 @@ impl Definition {
             *self.physical(),
         )
         .with_base_graphics(state.base_graphics.clone())
-        .with_ocf(self.compute_ocf(state));
+        .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
             Some(object_context),
             global_effects,
@@ -7002,7 +7008,7 @@ impl Definition {
                     *self.physical(),
                 )
                 .with_base_graphics(state.base_graphics.clone())
-                .with_ocf(self.compute_ocf(state)),
+                .with_ocf(state.ocf),
             ),
             global_effects,
             world,
@@ -9377,18 +9383,9 @@ impl Engine {
                             .procedure_name_for_action(&object.state.action.name)
                     })
                     .map(|name| name.to_string());
-                let ocf = definition
-                    .map(|definition| definition.compute_ocf(&object.state))
-                    .unwrap_or_else(|| {
-                        crate::ocf::compute(
-                            OCF_NORMAL,
-                            false,
-                            object.state.alive,
-                            object.state.status,
-                            object.state.container.is_some(),
-                            object.state.construction,
-                        )
-                    });
+                // World objects expose the cached mask like C++ obj->OCF
+                // (FindObject criteria, host functions).
+                let ocf = object.state.ocf;
                 HostWorldObject::with_category(
                     object.id,
                     object.definition_id.clone(),
@@ -11104,6 +11101,8 @@ impl Engine {
             .collect();
 
         for idx in 0..self.objects.len() {
+            // UpdateOCF runs first in C4Object::Execute (C4Object.cpp:1058).
+            self.refresh_object_ocf(idx);
             let definition_id = self.objects[idx].definition_id.clone();
             let previous_action_state = self.objects[idx].state.action.clone();
             let previous_action_name = previous_action_state.name.clone();
@@ -12101,6 +12100,9 @@ impl Engine {
         if let Some((previous_container, new_container)) = container_change {
             self.apply_container_change(object_id, previous_container, new_container)?;
         }
+        // Host-driven changes are SetOCF events (SetAlive C4Object.h:361,
+        // DoCon C4Object.cpp:1417, status C4Object.cpp:4139).
+        self.refresh_object_ocf(index);
         self.trigger_action_callbacks(index, Some(previous_action_name))?;
         self.update_sector_for_index(index);
         if self.objects[index].destroyed
@@ -12476,6 +12478,11 @@ impl Engine {
         }
 
         self.apply_nested_object_outcomes(other_objects)?;
+
+        // The C++ host functions behind these outcomes run SetOCF
+        // immediately (SetAlive C4Object.h:361, death C4Object.cpp:1177,
+        // DoCon C4Object.cpp:1417).
+        self.refresh_object_ocf(index);
 
         Ok(())
     }
@@ -13133,6 +13140,7 @@ impl Engine {
                     entrance_status: false,
                     color: 0,
                     shape_override: None,
+                    ocf: OCF_NORMAL,
                 },
                 shape_template,
                 snapshot.own_vertices.clone(),
@@ -13168,6 +13176,12 @@ impl Engine {
 
         for (object_id, container) in container_assignments {
             self.apply_container_change(object_id, None, Some(container))?;
+        }
+
+        // C++ recomputes OCF on load rather than persisting it
+        // (C4Object.cpp:2863, savegame SetOCF).
+        for index in 0..self.objects.len() {
+            self.refresh_object_ocf(index);
         }
 
         self.crew_roles = state
@@ -15996,6 +16010,20 @@ impl Engine {
         blasted: bool,
         _incinerating: Option<ObjectId>,
     ) -> Result<bool, EngineError> {
+        // OnFire/Inflammable are SetOCF-owned bits; C++ Incinerate updates
+        // them through SetOCF on the spot.
+        let result = self.incinerate_object_inner(idx, caused_by, blasted, _incinerating);
+        self.refresh_object_ocf(idx);
+        result
+    }
+
+    fn incinerate_object_inner(
+        &mut self,
+        idx: usize,
+        caused_by: i32,
+        blasted: bool,
+        _incinerating: Option<ObjectId>,
+    ) -> Result<bool, EngineError> {
         {
             let state = &self.objects[idx].state;
             // Already on fire (C4Object.cpp:1233)
@@ -16708,7 +16736,19 @@ impl Engine {
         false
     }
 
+    /// The cached mask, like every C++ reader (CrossCheck, FindObject
+    /// criteria, host functions all consume `obj->OCF`).
     fn object_ocf_at_index(&self, index: usize) -> u32 {
+        self.objects[index].state.ocf
+    }
+
+    /// The SetOCF/UpdateOCF analogue: recompute and store the cache.
+    fn refresh_object_ocf(&mut self, index: usize) {
+        let ocf = self.compute_object_ocf(index);
+        self.objects[index].state.ocf = ocf;
+    }
+
+    fn compute_object_ocf(&self, index: usize) -> u32 {
         let object = &self.objects[index];
         let ocf = self
             .definitions
@@ -16783,6 +16823,9 @@ impl Engine {
             if let Some(prev_index) = self.find_object_index(prev_id) {
                 let contents = &mut self.objects[prev_index].state.contents;
                 contents.retain(|&child| child != object_id);
+                // Exit refreshes the old container's OCF (Collection limit,
+                // C4Object.cpp:1597).
+                self.refresh_object_ocf(prev_index);
             }
         }
 
@@ -16823,11 +16866,15 @@ impl Engine {
                 }
 
                 self.objects[object_index].state.container = Some(container_id);
+                // Enter refreshes the new container too (C4Object.cpp:1518).
+                self.refresh_object_ocf(container_index);
             }
             None => {
                 self.objects[object_index].state.container = None;
             }
         }
+        // The moved object's own SetOCF (C4Object.cpp:1531,1570).
+        self.refresh_object_ocf(object_index);
 
         Ok(())
     }
@@ -18539,6 +18586,7 @@ impl Engine {
                 entrance_status: false,
                 color: 0,
                 shape_override: None,
+                ocf: OCF_NORMAL,
             },
             shape_template,
             own_shape_vertices,
@@ -18566,6 +18614,13 @@ impl Engine {
         object.clamp_velocity(&self.physics);
 
         let mut additional_spawns = Vec::new();
+        // C++ Init runs SetOCF before any script callback
+        // (C4Object.cpp:215): Construction/Initialize read a live mask.
+        object.state.ocf = self
+            .definitions
+            .get(&definition_id)
+            .map(|definition| definition.compute_ocf(&object.state))
+            .unwrap_or(OCF_NORMAL);
         // Initialize/Construction may legally remove the object
         // (RemoveObject in a placer script, e.g. the grass distributor):
         // the object spawns and immediately ends Deleted like C++.
@@ -18883,6 +18938,7 @@ impl Engine {
         if destroy_requested {
             self.objects[index].mark_destroyed();
         }
+        self.refresh_object_ocf(index);
         self.trigger_action_callbacks(index, None)?;
         self.update_sector_for_index(index);
         Ok((id, additional_spawns))
@@ -31142,6 +31198,53 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let idx = engine.find_object_index(id).expect("object exists");
         assert_eq!(engine.objects[idx].fixed_rotation, itofix(4));
         assert_eq!(engine.objects[idx].rotation_velocity, C4Fixed::ZERO);
+    }
+
+    #[test]
+    fn ocf_reads_use_the_cached_field_refreshed_at_events_like_cpp() {
+        // C++ readers consume the CACHED obj->OCF: it refreshes at specific
+        // events (SetAlive -> SetOCF, C4Object.h:361; death,
+        // C4Object.cpp:1177; Init, C4Object.cpp:215) and once per frame at
+        // Execute-start (UpdateOCF, C4Object.cpp:1058). A raw field poke
+        // with no event keeps the stale mask until the next frame.
+        let mut engine = Engine::with_seed(4);
+        let mut definition = simple_definition("Crew");
+        definition.set_crew_member(true);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(0, 0, 0));
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Crew").with_position(Vector2::new(0, 0)))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+
+        engine
+            .apply_object_update(id, ObjectUpdate::new().with_alive(true))
+            .expect("update succeeds");
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::ALIVE,
+            0,
+            "SetAlive-style updates refresh the cache (C4Object.h:361)"
+        );
+
+        // A raw poke is no event: the cache stays stale like C++.
+        engine.objects[idx].state.alive = false;
+        assert_ne!(
+            engine.object_ocf_at_index(idx) & ocf::ALIVE,
+            0,
+            "no event, no refresh — readers see the stale mask"
+        );
+
+        // The next frame's Execute-start refresh picks it up.
+        engine.tick().expect("tick succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(
+            engine.object_ocf_at_index(idx) & ocf::ALIVE,
+            0,
+            "UpdateOCF at Execute-start sees the new state"
+        );
     }
 
     #[test]
