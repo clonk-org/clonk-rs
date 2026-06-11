@@ -397,6 +397,10 @@ pub(crate) struct HostWorldContext {
     /// functions can run script functions on other objects mid-VM-call
     /// (Find_Func/Sort_Func, GameCall). Empty in legacy fixture contexts.
     definition_scripts: Rc<HashMap<DefinitionId, Arc<ScriptEngine>>>,
+    /// Crew object ranks from the engine's crew infos (`pObj->Info->Rank`;
+    /// GetHiRank reads them, C4Player.cpp:1012). Objects without an entry
+    /// behave like info-less crew (rank -1).
+    crew_ranks: Rc<HashMap<u64, i32>>,
     /// The scenario script, shared from `Engine.scenario_script`, for
     /// GameCall/GameCallEx mid-VM-call resolution (C++ resolves on
     /// `Game.Script`, C4Script.cpp:3483). `None` when no scenario script is
@@ -421,6 +425,7 @@ impl Default for HostWorldContext {
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
             scenario_script: None,
+            crew_ranks: Rc::new(HashMap::new()),
         }
     }
 }
@@ -534,6 +539,7 @@ impl HostWorldContext {
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
             scenario_script: None,
+            crew_ranks: Rc::new(HashMap::new()),
         }
     }
 
@@ -583,6 +589,17 @@ impl HostWorldContext {
     ) -> Self {
         self.particle_defs = Some(Rc::new(defs));
         self
+    }
+
+    /// Attach the engine's crew-info rank table (see `crew_ranks` docs).
+    pub(crate) fn with_crew_ranks(mut self, ranks: Rc<HashMap<u64, i32>>) -> Self {
+        self.crew_ranks = ranks;
+        self
+    }
+
+    /// The crew object's Info rank; `None` for info-less objects.
+    pub(crate) fn crew_rank(&self, object: u64) -> Option<i32> {
+        self.crew_ranks.get(&object).copied()
     }
 
     /// `Some(known?)` when a registry is attached, `None` otherwise.
@@ -1388,6 +1405,35 @@ fn get_plr_value_gain(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         };
         Ok(Value::Int(player.value_gain))
+    })
+}
+
+fn get_hi_rank(args: &[Value]) -> Result<Value, RuntimeError> {
+    // FnGetHiRank (C4Script.cpp:2792-2796) ->
+    // C4Player::GetHiRankActiveCrew(false) (C4Player.cpp:1003-1020): walk
+    // the crew in order, rank from the linked Info (no info = -1); only a
+    // strictly higher rank replaces, so the first of equal ranks wins.
+    // CrewDisabled is not tracked yet; the crew list holds active objects.
+    let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetHiRank", "player")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        let mut best: Option<(u64, i32)> = None;
+        for crew_id in &player.crew {
+            let rank = context.world.crew_rank(crew_id.as_u64()).unwrap_or(-1);
+            match best {
+                Some((_, best_rank)) if best_rank >= rank => {}
+                _ => best = Some((crew_id.as_u64(), rank)),
+            }
+        }
+        Ok(best
+            .map(|(id, _)| object_reference_value(ObjectId::new(id)))
+            .unwrap_or(Value::Nil))
     })
 }
 
@@ -2745,6 +2791,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPlrValueGain", get_plr_value_gain);
     script.register_host_function("GetPlrKnowledge", get_plr_knowledge);
     script.register_host_function("GetCrew", get_crew);
+    script.register_host_function("GetHiRank", get_hi_rank);
     script.register_host_function("GetCrewCount", get_crew_count);
     script.register_host_function("GetCursor", get_cursor_host);
     script.register_host_function("GetViewCursor", get_view_cursor);
@@ -14111,6 +14158,7 @@ mod tests {
         "GetEffectCount",
         "GetEnergy",
         "GetGravity",
+        "GetHiRank",
         "GetHomebaseMaterial",
         "GetHomebaseProduction",
         "GetID",
@@ -15564,6 +15612,66 @@ mod tests {
             }
             other => panic!("unexpected player command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn get_hi_rank_prefers_higher_rank_then_crew_order() {
+        // FnGetHiRank (C4Script.cpp:2792-2796) ->
+        // C4Player::GetHiRankActiveCrew(false) (C4Player.cpp:1003-1020):
+        // walk the crew in order, rank from the linked Info (no info =
+        // -1); only a STRICTLY higher rank replaces, so the first of equal
+        // ranks wins.
+        let crew_ids = [11_u64, 22_u64, 33_u64];
+        let objects: Vec<HostWorldObject> = crew_ids
+            .iter()
+            .map(|&id| {
+                HostWorldObject::new(
+                    ObjectId::new(id),
+                    "Clonk",
+                    ObjectStatus::Normal,
+                    "Idle",
+                    None,
+                    None,
+                    None,
+                    1,
+                    100,
+                    crate::FULL_CON,
+                    Vector2::ZERO,
+                    Vector2::ZERO,
+                    Vec::new(),
+                    0,
+                    0,
+                    None,
+                )
+            })
+            .collect();
+        let mut player = PlayerState::default();
+        player.id = 1;
+        player.crew = crew_ids.iter().map(|&id| ObjectId::new(id)).collect();
+
+        let world = HostWorldContext::with_landscape(
+            objects,
+            None,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::from([(1, player)]),
+            HashMap::new(),
+            1,
+            false,
+        )
+        .with_crew_ranks(std::rc::Rc::new(HashMap::from([
+            (11_u64, 0),
+            (22_u64, 3),
+            (33_u64, 3),
+        ])));
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            get_hi_rank(&[Value::Int(1)])
+        });
+        assert_eq!(
+            result.expect("GetHiRank succeeds"),
+            object_reference_value(ObjectId::new(22)),
+            "rank 3 beats rank 0; the FIRST rank-3 member wins the tie"
+        );
     }
 
     #[test]

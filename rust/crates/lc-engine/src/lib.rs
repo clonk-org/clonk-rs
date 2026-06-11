@@ -7584,6 +7584,9 @@ pub struct Engine {
     /// Crew object -> its C4ObjectInfo data (name/rank/experience), the
     /// `pObj->Info` link of CreateInfoObject (C4Game.cpp:1156-1170).
     crew_object_infos: HashMap<ObjectId, CrewObjectInfo>,
+    /// Shared rank view of `crew_object_infos` for host contexts
+    /// (GetHiRank); rebuilt when crew infos change (joins are rare).
+    crew_ranks: Rc<HashMap<u64, i32>>,
     team_home_base_rule: bool,
     construction_needs_material: bool,
     structures_need_energy: bool,
@@ -8817,6 +8820,7 @@ impl Engine {
             map_zoom: scenario::LegacyC4SVal::new(10, 0, 5, 15),
             crew_rosters: HashMap::new(),
             crew_object_infos: HashMap::new(),
+            crew_ranks: Rc::new(HashMap::new()),
             team_home_base_rule: false,
             construction_needs_material: false,
             structures_need_energy: false,
@@ -8955,6 +8959,12 @@ impl Engine {
 
         let joined = self.scenario_init_for_player(number, &config)?;
 
+        self.crew_ranks = Rc::new(
+            self.crew_object_infos
+                .iter()
+                .map(|(id, info)| (id.as_u64(), info.rank))
+                .collect(),
+        );
         self.sync_player_cursor(number);
         self.refresh_elimination_state();
         self.check_game_over()?;
@@ -10256,6 +10266,7 @@ impl Engine {
             self.team_home_base_rule,
         )
         .with_particle_defs(self.particle_system.def_names())
+        .with_crew_ranks(Rc::clone(&self.crew_ranks))
         .with_definition_scripts(
             self.definitions
                 .iter()
