@@ -41,6 +41,8 @@ public:
 	void Init(C4Facet &cgo, C4Facet &messageBoardCgo);
 	void Execute();
 	static int Height();
+	// Read-only view for the Rust validation bridge (surface capture).
+	const C4Facet &GetOutputFacet() const { return Output; }
 
 protected:
 	void Draw(C4Facet &cgo);

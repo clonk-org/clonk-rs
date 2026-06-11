@@ -743,6 +743,9 @@ void C4Config::Default()
 
 bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
 {
+	// Read after the try block by the ConfigFilename post-init.
+	StdStrBuf filename;
+	bool explicitConfig = false;
 	try
 	{
 #ifdef USE_RUST_CONFIG
@@ -750,8 +753,6 @@ bool C4Config::Load(bool forceWorkingDirectory, const char *szConfigFile)
 		rustConfigActive = false;
 		RustConfigBridge::Unload();
 #endif
-		StdStrBuf filename;
-		bool explicitConfig = false;
 #ifdef _WIN32
 		// Windows: Default load from registry, if no explicit config file is specified
 		if (!szConfigFile)

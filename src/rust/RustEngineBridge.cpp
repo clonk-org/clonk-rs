@@ -38,6 +38,7 @@
 #include <map>
 #include <set>
 #include <utility>
+#include <format>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -78,6 +79,19 @@ using RecorderPtr = std::unique_ptr<LcEngineRecorderHandle, RecorderDeleter>;
 using PlaybackPtr = std::unique_ptr<LcEnginePlaybackHandle, PlaybackDeleter>;
 using RuntimePtr = std::unique_ptr<LcEngineRuntimeHandle, RuntimeDeleter>;
 using RustStringPtr = std::unique_ptr<char, decltype(&lc_engine_string_free)>;
+
+// Defined later in this namespace; declared here for the helpers above them.
+void LogWarning(const std::string &message);
+void ResetAuthoritativeLandscapeCache();
+int32_t DetermineSurfaceHeight(C4Game &game, int32_t x);
+bool AdjustLandscapeColumn(C4Game &game, int32_t x, int32_t current_height, int32_t target_height);
+RustStringPtr MakeString(char *raw);
+extern uint64_t g_last_missing_warning_frame;
+extern uint64_t g_last_container_warning_frame;
+extern std::vector<int32_t> g_authoritative_landscape_heights;
+extern RuntimePtr g_runtime;
+extern bool g_runtime_disabled;
+
 
 class SurfaceLock {
 public:
@@ -246,24 +260,20 @@ C4Object *CreateRuntimeObject(
 
     C4Def *definition = FindDefinitionForRuntimeIdentifier(state.definition_id);
     if (!definition) {
-        StdStrBuf message;
-        message.Format(
-            "Rust runtime could not resolve definition \"%s\" for object %llu on frame %llu",
+        LogWarning(std::format(
+            "Rust runtime could not resolve definition \"{}\" for object {} on frame {}",
             state.definition_id ? state.definition_id : "<unknown>",
-            static_cast<unsigned long long>(state.id),
-            static_cast<unsigned long long>(frame));
-        LogWarning(message.getData());
+            state.id,
+            frame));
         return nullptr;
     }
 
     const int32_t number = RuntimeObjectNumber(state.id);
     if (number <= 0) {
-        StdStrBuf message;
-        message.Format(
-            "Rust runtime reported unsupported object id %llu on frame %llu",
-            static_cast<unsigned long long>(state.id),
-            static_cast<unsigned long long>(frame));
-        LogWarning(message.getData());
+        LogWarning(std::format(
+            "Rust runtime reported unsupported object id {} on frame {}",
+            state.id,
+            frame));
         return nullptr;
     }
 
@@ -284,13 +294,11 @@ C4Object *CreateRuntimeObject(
             C4FixedFromRaw(state.fixed_velocity_y),
             C4FixedFromRaw(state.rotation_velocity),
             state.owner)) {
-        StdStrBuf message;
-        message.Format(
-            "Rust runtime mirror failed to initialise object \"%s\" (%llu) on frame %llu",
+        LogWarning(std::format(
+            "Rust runtime mirror failed to initialise object \"{}\" ({}) on frame {}",
             state.definition_id ? state.definition_id : "<unknown>",
-            static_cast<unsigned long long>(state.id),
-            static_cast<unsigned long long>(frame));
-        LogWarning(message.getData());
+            state.id,
+            frame));
         return nullptr;
     }
 
@@ -304,7 +312,8 @@ C4Object *CreateRuntimeObject(
     object->ydir = C4FixedFromRaw(state.fixed_velocity_y);
     object->rdir = C4FixedFromRaw(state.rotation_velocity);
 
-    object->Con = std::clamp(state.construction, 0, FullCon);
+    object->DoCon(
+        std::clamp(state.construction, 0, FullCon) - object->GetCon(), true, true);
     object->UpdateMass();
     object->UpdateFace(true);
     object->SetOCF();
@@ -317,13 +326,11 @@ C4Object *CreateRuntimeObject(
 
     C4Object *raw = object.get();
     if (!game.Objects.Add(raw)) {
-        StdStrBuf message;
-        message.Format(
-            "Rust runtime mirror could not attach object \"%s\" (%llu) to game state on frame %llu",
+        LogWarning(std::format(
+            "Rust runtime mirror could not attach object \"{}\" ({}) to game state on frame {}",
             state.definition_id ? state.definition_id : "<unknown>",
-            static_cast<unsigned long long>(state.id),
-            static_cast<unsigned long long>(frame));
-        LogWarning(message.getData());
+            state.id,
+            frame));
         return nullptr;
     }
 
@@ -364,7 +371,8 @@ void ApplyRuntimeObjectStateToC4Object(
     if (object.Owner != state.owner) {
         object.SetOwner(state.owner);
     }
-    object.Con = std::clamp(state.construction, 0, FullCon);
+    object.DoCon(
+        std::clamp(state.construction, 0, FullCon) - object.GetCon(), true, true);
     object.UpdateMass();
     object.UpdateFace(true);
     object.SetOCF();
@@ -574,14 +582,12 @@ void SynchronizeRuntimeContainers(
     if (!unresolved_container_ids.empty() || missing_content_targets > 0 || reorder_failures > 0) {
         if (slice.frame != g_last_container_warning_frame) {
             g_last_container_warning_frame = slice.frame;
-            StdStrBuf warning;
-            warning.Format(
-                "Rust runtime container sync: %zu missing parents, %zu missing contents, %zu ordering fixes on frame %llu",
+            LogWarning(std::format(
+                "Rust runtime container sync: {} missing parents, {} missing contents, {} ordering fixes on frame {}",
                 unresolved_container_ids.size(),
                 missing_content_targets,
                 reorder_failures,
-                static_cast<unsigned long long>(slice.frame));
-            LogWarning(warning.getData());
+                slice.frame));
         }
     } else {
         g_last_container_warning_frame = std::numeric_limits<uint64_t>::max();
@@ -665,12 +671,10 @@ void ApplyRuntimeObjectStatesToGame(
     if (!failures.empty()) {
         if (slice.frame != g_last_missing_warning_frame) {
             g_last_missing_warning_frame = slice.frame;
-            StdStrBuf warning;
-            warning.Format(
-                "Rust runtime could not mirror %zu objects on frame %llu",
+            LogWarning(std::format(
+                "Rust runtime could not mirror {} objects on frame {}",
                 failures.size(),
-                static_cast<unsigned long long>(slice.frame));
-            LogWarning(warning.getData());
+                slice.frame));
         }
     } else {
         g_last_missing_warning_frame = std::numeric_limits<uint64_t>::max();
@@ -875,7 +879,7 @@ void ResetAuthoritativeLandscapeCache() {
     g_authoritative_landscape_heights.clear();
 }
 
-int32_t DetermineSurfaceHeight(const C4Game &game, int32_t x) {
+int32_t DetermineSurfaceHeight(C4Game &game, int32_t x) {
     const int32_t width = game.Landscape.Width;
     const int32_t height = game.Landscape.Height;
     if (x < 0 || x >= width) {
@@ -1155,7 +1159,7 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
         entry.snapshot.owner = static_cast<int32_t>(object->Owner);
         entry.snapshot.category = object->Category;
         entry.snapshot.crew_member = (object->OCF & OCF_CrewMember) != 0;
-        entry.snapshot.alive = object->Alive != 0;
+        entry.snapshot.alive = object->GetAlive();
         entry.action = object->Action.Name;
         entry.snapshot.action_name = entry.action.c_str();
         entry.snapshot.action_phase = object->Action.Phase;
@@ -1508,7 +1512,8 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
                         if (!viewport_ptr) {
                             continue;
                         }
-                        const C4Viewport *viewport = viewport_ptr.get();
+                        C4Viewport *viewport =
+                            const_cast<C4Viewport *>(viewport_ptr.get());
                         const C4Rect rect = viewport->GetOutputRect();
                         std::string label = "viewport#" + std::to_string(viewport_index);
                         label += ":player=";
@@ -1522,7 +1527,7 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
                         ++viewport_index;
                     }
 
-                    const C4Facet &upper_output = Game.GraphicsSystem.UpperBoard.Output;
+                    const C4Facet &upper_output = Game.GraphicsSystem.UpperBoard.GetOutputFacet();
                     if (upper_output.Surface == surface &&
                         upper_output.Wdt > 0 &&
                         upper_output.Hgt > 0) {

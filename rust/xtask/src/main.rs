@@ -699,11 +699,34 @@ fn build_ffi_crate(krate: &FfiCrate, profile: BuildProfile, paths: &WorkspacePat
         bail!("cargo build failed for crate `{}`", krate.name);
     }
 
-    let profile_dir = paths.profile_dir(profile);
-    let static_lib = find_artifact(&profile_dir, krate.name, ArtifactKind::Static)
+    let output_dir = paths.cargo_output_dir(profile);
+    let mut static_lib = find_artifact(&output_dir, krate.name, ArtifactKind::Static)
         .with_context(|| format!("crate `{}` did not emit a static library", krate.name))?;
-    let dynamic_lib = find_artifact(&profile_dir, krate.name, ArtifactKind::Dynamic)
+    let mut dynamic_lib = find_artifact(&output_dir, krate.name, ArtifactKind::Dynamic)
         .with_context(|| format!("crate `{}` did not emit a dynamic library", krate.name))?;
+
+    // Cross-compiled artifacts also land in the plain profile dir — the
+    // canonical import path CMake reads (CMakeLists.txt:73-107).
+    let canonical_dir = paths.profile_dir(profile);
+    if output_dir != canonical_dir {
+        fs::create_dir_all(&canonical_dir).with_context(|| {
+            format!("creating canonical artifact dir {}", canonical_dir.display())
+        })?;
+        for artifact in [&mut static_lib, &mut dynamic_lib] {
+            let file_name = artifact
+                .file_name()
+                .context("artifact path is missing a file name")?;
+            let destination = canonical_dir.join(file_name);
+            fs::copy(&*artifact, &destination).with_context(|| {
+                format!(
+                    "copying {} to {}",
+                    artifact.display(),
+                    destination.display()
+                )
+            })?;
+            *artifact = destination;
+        }
+    }
 
     tracing::info!(
         crate = krate.name,
@@ -1067,5 +1090,20 @@ impl WorkspacePaths {
 
     fn profile_dir(&self, profile: BuildProfile) -> PathBuf {
         self.workspace_dir.join("target").join(profile.dir_name())
+    }
+
+    /// Where cargo actually emits artifacts: `target/<triple>/<profile>`
+    /// when CARGO_BUILD_TARGET cross-compiles (e.g. x86_64-apple-darwin for
+    /// the Rosetta C++ engine whose prebuilt deps/ tree is x86_64-only),
+    /// `target/<profile>` otherwise.
+    fn cargo_output_dir(&self, profile: BuildProfile) -> PathBuf {
+        match env::var("CARGO_BUILD_TARGET") {
+            Ok(triple) if !triple.is_empty() => self
+                .workspace_dir
+                .join("target")
+                .join(triple)
+                .join(profile.dir_name()),
+            _ => self.profile_dir(profile),
+        }
     }
 }

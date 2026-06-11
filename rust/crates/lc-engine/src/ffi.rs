@@ -1405,14 +1405,83 @@ pub extern "C" fn lc_engine_runtime_free(handle: *mut RuntimeHandle) {
     }
 }
 
+/// Definition search for runtime-loaded REAL content: the scenario's
+/// ancestor directories, nearest first (the C++ engine resolves
+/// `[Definitions]` entries against its search path the same way; mirrors
+/// the xtask sweep resolver).
+struct RuntimeDefinitionResolver {
+    roots: Vec<PathBuf>,
+}
+
+impl crate::scenario::LegacyDefinitionResolver for RuntimeDefinitionResolver {
+    fn resolve_definition_groups(
+        &self,
+        scenario: &lc_resources::Group,
+        identifier: &str,
+    ) -> Result<Vec<lc_resources::Group>, crate::ScenarioError> {
+        let normalized = identifier.replace('\\', "/");
+        let relative = std::path::Path::new(&normalized);
+        let mut groups = Vec::new();
+        if let Ok(child) = scenario.open_child(relative) {
+            groups.push(child);
+        }
+        for root in &self.roots {
+            let candidate = root.join(relative);
+            if !candidate.exists() {
+                continue;
+            }
+            let group = lc_resources::Group::open(&candidate)?;
+            if groups
+                .iter()
+                .all(|existing| existing.root() != group.root())
+            {
+                groups.push(group);
+            }
+        }
+        if groups.is_empty() {
+            return Err(crate::ScenarioError::LegacyDefinitionNotFound {
+                path: identifier.to_string(),
+            });
+        }
+        Ok(groups)
+    }
+}
+
 fn load_scenario_into_runtime(
     runtime: &mut RuntimeHandle,
     path: &PathBuf,
     seed: u64,
 ) -> Result<(), String> {
-    let scenario = Scenario::load_from_path(path)
+    let resolver = RuntimeDefinitionResolver {
+        roots: path.ancestors().skip(1).map(std::path::Path::to_path_buf).collect(),
+    };
+    let scenario = Scenario::load_from_path_with(path, &resolver)
         .map_err(|error| format!("failed to load scenario: {error}"))?;
     runtime.engine = Engine::with_seed(seed);
+    // The lc-app boot sequence: materials, then the engine-global
+    // System.c4g scripts, then the scenario (which adds its own System.c4g).
+    if let Some(material_root) = path
+        .ancestors()
+        .find(|ancestor| ancestor.join("Material.c4g").exists())
+    {
+        let library = lc_resources::Group::open(material_root.join("Material.c4g"))
+            .map_err(|error| format!("failed to open Material.c4g: {error}"))
+            .and_then(|group| {
+                lc_resources::MaterialLibrary::from_group(&group)
+                    .map_err(|error| format!("failed to load material library: {error}"))
+            })?;
+        runtime.engine.configure_materials_from_library(&library);
+    }
+    if let Some(planet_root) = path
+        .ancestors()
+        .find(|ancestor| ancestor.join("planet/System.c4g").exists())
+    {
+        if let Ok(group) = lc_resources::Group::open(planet_root.join("planet/System.c4g")) {
+            if let Ok(sources) = crate::scenario::load_system_scripts(&group) {
+                runtime.engine.install_global_scripts(&sources);
+            }
+        }
+    }
     scenario
         .apply(&mut runtime.engine)
         .map_err(|error| format!("failed to apply scenario: {error}"))?;

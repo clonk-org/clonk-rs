@@ -241,11 +241,14 @@ protected:
 
 	void UpdatePixCnt(const class C4Rect &Rect, bool fCheck = false);
 	void UpdateMatCnt(C4Rect Rect, bool fPlus);
-	void PrepareChange(C4Rect BoundingBox, bool updateMatCnt = true);
-	void FinishChange(C4Rect BoundingBox, bool updateMatAndPixCnt = true);
+
 	static bool DrawLineLandscape(int32_t iX, int32_t iY, int32_t iGrade);
 
 public:
+	// Public for the Rust validation bridge's authoritative landscape sync
+	// (RustEngineBridge.cpp AdjustLandscapeColumn) — visibility only.
+	void PrepareChange(C4Rect BoundingBox, bool updateMatCnt = true);
+	void FinishChange(C4Rect BoundingBox, bool updateMatAndPixCnt = true);
 	void CompileFunc(StdCompiler *pComp); // without landscape bitmaps and sky
 };
 
