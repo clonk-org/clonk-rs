@@ -372,6 +372,7 @@ impl FrontendAssets {
             let graphics_path = paths.planet_dir().join("Graphics.c4g");
             match GraphicsResource::open(&graphics_path) {
                 Ok(graphics) => {
+                    Self::prewarm_startup_images(&graphics);
                     menu_background = graphics
                         .load_image("LoaderGoldmine1.png")
                         .ok()
@@ -450,6 +451,73 @@ impl FrontendAssets {
             cursor_atlas: Arc::new(cursor_atlas),
             hud_graphics: Arc::new(hud_graphics),
         }
+    }
+
+    /// Decodes the startup images into the resource's cache from a worker
+    /// pool, so the sequential loads in `load` become cache hits. PNG
+    /// decoding dominates boot time and every image is independent.
+    fn prewarm_startup_images(graphics: &GraphicsResource) {
+        let names: Vec<&str> = [
+            "LoaderGoldmine1.png",
+            "Logo.png",
+            "StartupBigButton.png",
+            "StartupBigButtonDown.png",
+            // Cursor atlas (`load_cursor_atlas`).
+            "CursorXXXXXLarge.png",
+            "CursorXXXXLarge.png",
+            "CursorXXXLarge.png",
+            "CursorXXLarge.png",
+            "CursorXLarge.png",
+            "CursorLarge.png",
+            "CursorMedium.png",
+            "CursorSmall.png",
+            // HUD graphics (`load_hud_graphics`).
+            "Player.png",
+            "Flag.png",
+            "Crew.png",
+            "Score.png",
+            "Wealth.png",
+            "Rank.png",
+            "Captain.png",
+            "Fire.png",
+            "Menu.png",
+            "UpperBoard.png",
+            "Construction.png",
+            "Energy.png",
+            "Magic.png",
+            "Arrow.png",
+            "Exit.png",
+            "Hand.png",
+            "Build.png",
+            "EnergyBars.png",
+            "SelectMark.png",
+        ]
+        .into_iter()
+        .chain(STARTUP_DIALOG_IMAGES.iter().copied())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+        let workers = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(4)
+            .min(names.len())
+            .max(1);
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Failures surface (with logging) on the cache-miss
+                    // retry in `load`.
+                    match names.get(index) {
+                        Some(name) => {
+                            let _ = graphics.load_image(name);
+                        }
+                        None => break,
+                    }
+                });
+            }
+        });
     }
 
     /// Builds the CStdFont-faithful GUI fonts (FreeType + baked shadows) used
@@ -2470,6 +2538,62 @@ struct GameApp {
     exit_requested: bool,
     game_over_dialog: Option<GameOverState>,
     game_over_handled: bool,
+    /// Monotonic counter bumped by every event that can change what the
+    /// startup menu shows; `menu_frame_cache` is only replayed while it
+    /// still matches the version it was rendered at.
+    menu_render_version: u64,
+    menu_frame_cache: Option<MenuFrameCache>,
+    menu_backdrop_cache: StartupBackdropCache,
+}
+
+/// The last composed startup-menu frame. Menu mode is fully event-driven
+/// (`update()` does no work there), so until an input/network event bumps
+/// `menu_render_version` the frame is replayed as a copy instead of
+/// re-running the expensive software composition.
+struct MenuFrameCache {
+    view: StartupView,
+    version: u64,
+    width: u32,
+    height: u32,
+    frame: Vec<u8>,
+}
+
+/// The static layer of a startup view — the full-screen bilinear background
+/// blit, or a whole parity-rendered screen — which is identical from frame
+/// to frame. Re-renders restore it with a copy and draw only the dynamic
+/// widgets on top, instead of re-running the per-pixel software blit.
+#[derive(Default)]
+struct StartupBackdropCache {
+    key: Option<StartupBackdropKey>,
+    pixels: Vec<u8>,
+}
+
+/// Everything the static layer's pixels depend on.
+#[derive(Clone, Copy, PartialEq)]
+struct StartupBackdropKey {
+    view: StartupView,
+    width: u32,
+    height: u32,
+    fair_crew: bool,
+    record: bool,
+}
+
+/// Restores the cached static layer for `key` into `surface`, or renders it
+/// through `render` and caches the result.
+fn restore_or_render_backdrop(
+    cache: &mut StartupBackdropCache,
+    key: StartupBackdropKey,
+    surface: &mut Surface,
+    render: impl FnOnce(&mut Surface),
+) {
+    if cache.key == Some(key) && cache.pixels.len() == surface.pixels().len() {
+        surface.pixels_mut().copy_from_slice(&cache.pixels);
+        return;
+    }
+    render(surface);
+    cache.key = Some(key);
+    cache.pixels.clear();
+    cache.pixels.extend_from_slice(surface.pixels());
 }
 
 struct RecordingSession {
@@ -4651,6 +4775,9 @@ impl GameApp {
             )),
             _ => None,
         };
+        // Scenario discovery only walks directories and reads scenario
+        // groups; run it concurrently with the asset load.
+        let scenario_discovery = std::thread::spawn(load_frontend_scenarios);
         let assets = Arc::new(FrontendAssets::load(paths));
         let system_scripts = paths
             .map(AppPaths::system_group_path)
@@ -4677,7 +4804,9 @@ impl GameApp {
         let engine = Engine::new();
         let snapshot = engine.snapshot();
 
-        let scenarios = load_frontend_scenarios();
+        let scenarios = scenario_discovery
+            .join()
+            .map_err(|_| anyhow!("scenario discovery thread panicked"))?;
         let button_textures = assets.button_textures();
         let menu_entries = build_menu_entries(&scenarios, false);
         let mut menu = StartupMenu::new(menu_entries, assets.font_arc(), button_textures.clone())
@@ -4768,6 +4897,9 @@ impl GameApp {
             exit_requested: false,
             game_over_dialog: None,
             game_over_handled: false,
+            menu_render_version: 0,
+            menu_frame_cache: None,
+            menu_backdrop_cache: StartupBackdropCache::default(),
         };
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);
@@ -4778,6 +4910,7 @@ impl GameApp {
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+        self.mark_menu_dirty();
         let mut graphics = GraphicsSystem::new(
             width,
             height,
@@ -4975,6 +5108,7 @@ impl GameApp {
     }
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
+        self.mark_menu_dirty();
         if state == ElementState::Pressed {
             match key {
                 VirtualKeyCode::F5 => {
@@ -5847,8 +5981,16 @@ impl GameApp {
     }
 
     fn process_network_events(&mut self) -> Result<(), EngineError> {
-        if let Some(network) = self.network.as_mut() {
-            for event in network.poll_events() {
+        let events = self
+            .network
+            .as_mut()
+            .map(NetworkManager::poll_events)
+            .unwrap_or_default();
+        if !events.is_empty() {
+            self.mark_menu_dirty();
+        }
+        {
+            for event in events {
                 match event {
                     NetworkEvent::Control { owner, event } => {
                         if self.mode == AppMode::Running {
@@ -5932,6 +6074,9 @@ impl GameApp {
 
     fn process_gamepad_events(&mut self) -> Result<(), EngineError> {
         let events = self.gamepads.poll();
+        if !events.is_empty() {
+            self.mark_menu_dirty();
+        }
         for event in events {
             self.handle_gamepad_event(event)?;
         }
@@ -6190,6 +6335,7 @@ impl GameApp {
     }
 
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
+        self.mark_menu_dirty();
         let point = gui_point_from_position(position);
         match self.mode {
             AppMode::Menu => {
@@ -6374,6 +6520,7 @@ impl GameApp {
     }
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
+        self.mark_menu_dirty();
         match self.mode {
             AppMode::Menu => {
                 if self.game_over_dialog.is_some() {
@@ -6493,6 +6640,7 @@ impl GameApp {
         if self.mode != AppMode::Menu {
             return Ok(());
         }
+        self.mark_menu_dirty();
         if self.game_over_dialog.is_some() {
             if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                 self.dismiss_game_over_dialog();
@@ -6642,6 +6790,7 @@ impl GameApp {
     }
 
     fn pointer_left(&mut self) {
+        self.mark_menu_dirty();
         match self.mode {
             AppMode::Menu => match self.startup_view {
                 StartupView::NetworkGame | StartupView::PlayerSelection => {}
@@ -7194,6 +7343,13 @@ impl GameApp {
 
     fn update(&mut self) -> Result<(), EngineError> {
         self.process_network_events()?;
+        if !matches!(self.mode, AppMode::Menu) {
+            // Whatever happens while loading or in-game (game over, return
+            // to menu) must not replay a stale pre-game menu frame; dropping
+            // the backdrop also frees its full-screen buffer during play.
+            self.menu_frame_cache = None;
+            self.menu_backdrop_cache = StartupBackdropCache::default();
+        }
         match self.mode {
             AppMode::Running => {
                 if let Some(network) = self.network.as_ref() {
@@ -7530,9 +7686,31 @@ impl GameApp {
         }
     }
 
+    /// Invalidates the cached startup-menu frame; called by every event
+    /// source that can change what the menu shows.
+    fn mark_menu_dirty(&mut self) {
+        self.menu_render_version = self.menu_render_version.wrapping_add(1);
+    }
+
     fn render(&mut self, frame: &mut [u8]) -> Result<()> {
         match self.mode {
             AppMode::Menu => {
+                let (width, height) = {
+                    let surface = self.graphics.surface();
+                    (surface.width(), surface.height())
+                };
+                if let Some(cache) = self.menu_frame_cache.as_ref() {
+                    if cache.view == self.startup_view
+                        && cache.version == self.menu_render_version
+                        && cache.width == width
+                        && cache.height == height
+                        && cache.frame.len() == frame.len()
+                    {
+                        frame.copy_from_slice(&cache.frame);
+                        return Ok(());
+                    }
+                }
+                let version = self.menu_render_version;
                 let control_options = self.control_options.as_mut();
                 let network_lobby = self.network_lobby.as_mut();
                 let game_over_dialog = self.game_over_dialog.as_ref();
@@ -7548,8 +7726,16 @@ impl GameApp {
                     game_over_dialog,
                     about_dialog,
                     self.startup_view_flags,
+                    &mut self.menu_backdrop_cache,
                     frame,
                 );
+                self.menu_frame_cache = Some(MenuFrameCache {
+                    view: self.startup_view,
+                    version,
+                    width,
+                    height,
+                    frame: frame.to_vec(),
+                });
                 Ok(())
             }
             AppMode::Loading => self.render_loading(frame),
@@ -8809,21 +8995,31 @@ fn render_startup_frame(
     game_over: Option<&GameOverState>,
     about_dialog: Option<&mut AboutDialogState>,
     flags: StartupViewFlags,
+    backdrop: &mut StartupBackdropCache,
     frame: &mut [u8],
 ) {
     {
         let surface = graphics.surface_mut();
+        let backdrop_key = StartupBackdropKey {
+            view,
+            width: surface.width(),
+            height: surface.height(),
+            fair_crew: flags.fair_crew,
+            record: flags.record,
+        };
 
         // C++-faithful parity renderers draw their own backgrounds.
         let parity_rendered = match view {
             StartupView::About => match (assets.about_dlg_assets(), assets.clonk_fonts.as_ref()) {
                 (Some(dlg_assets), Some(fonts)) => {
-                    lc_frontend::startup_about_dlg::AboutDlgScreen::render(
-                        surface,
-                        &dlg_assets,
-                        fonts,
-                        Some(startup_gamma()),
-                    );
+                    restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
+                        lc_frontend::startup_about_dlg::AboutDlgScreen::render(
+                            surface,
+                            &dlg_assets,
+                            fonts,
+                            Some(startup_gamma()),
+                        );
+                    });
                     true
                 }
                 _ => false,
@@ -8834,15 +9030,17 @@ fn render_startup_frame(
                 assets.book_fonts.as_ref(),
             ) {
                 (Some(dlg_assets), Some(fonts), Some(book_fonts)) => {
-                    lc_frontend::startup_scensel::ScenSelScreen::render(
-                        surface,
-                        &dlg_assets,
-                        fonts,
-                        book_fonts,
-                        Some(startup_gamma()),
-                        flags.fair_crew,
-                        flags.record,
-                    );
+                    restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
+                        lc_frontend::startup_scensel::ScenSelScreen::render(
+                            surface,
+                            &dlg_assets,
+                            fonts,
+                            book_fonts,
+                            Some(startup_gamma()),
+                            flags.fair_crew,
+                            flags.record,
+                        );
+                    });
                     draw_scensel_entries(
                         surface,
                         scenario_menu,
@@ -8858,17 +9056,19 @@ fn render_startup_frame(
             StartupView::NetworkGame => {
                 match (assets.netdlg_assets(), assets.clonk_fonts.as_ref()) {
                     (Some(dlg_assets), Some(fonts)) => {
-                        lc_frontend::startup_netdlg::NetDlgScreen::render(
-                            surface,
-                            &dlg_assets,
-                            fonts,
-                            Some(startup_gamma()),
-                            lc_frontend::startup_netdlg::NetDlgConfig {
-                                masterserver_signup: true,
-                                record: flags.record,
-                            },
-                            0,
-                        );
+                        restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
+                            lc_frontend::startup_netdlg::NetDlgScreen::render(
+                                surface,
+                                &dlg_assets,
+                                fonts,
+                                Some(startup_gamma()),
+                                lc_frontend::startup_netdlg::NetDlgConfig {
+                                    masterserver_signup: true,
+                                    record: flags.record,
+                                },
+                                0,
+                            );
+                        });
                         true
                     }
                     _ => false,
@@ -8880,14 +9080,16 @@ fn render_startup_frame(
                 assets.options_book_fonts.as_ref(),
             ) {
                 (Some(dlg_assets), Some(fonts), Some(book)) => {
-                    lc_frontend::startup_options_dlg::OptionsDlgScreen::render(
-                        surface,
-                        &dlg_assets,
-                        fonts,
-                        book,
-                        &lc_frontend::startup_options_dlg::ProgramSheetState::default(),
-                        Some(startup_gamma()),
-                    );
+                    restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
+                        lc_frontend::startup_options_dlg::OptionsDlgScreen::render(
+                            surface,
+                            &dlg_assets,
+                            fonts,
+                            book,
+                            &lc_frontend::startup_options_dlg::ProgramSheetState::default(),
+                            Some(startup_gamma()),
+                        );
+                    });
                     true
                 }
                 _ => false,
@@ -8898,17 +9100,19 @@ fn render_startup_frame(
                 assets.plrsel_book_fonts.as_ref(),
             ) {
                 (Some(dlg_assets), Some(fonts), Some(book)) => {
-                    // Player discovery from packed .c4p files is not wired
-                    // yet; the dialog shows its empty first-shown state.
-                    lc_frontend::startup_plrsel::PlrSelScreen::render(
-                        surface,
-                        &dlg_assets,
-                        fonts,
-                        book.as_ref(),
-                        &[],
-                        None,
-                        Some(startup_gamma()),
-                    );
+                    restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
+                        // Player discovery from packed .c4p files is not wired
+                        // yet; the dialog shows its empty first-shown state.
+                        lc_frontend::startup_plrsel::PlrSelScreen::render(
+                            surface,
+                            &dlg_assets,
+                            fonts,
+                            book.as_ref(),
+                            &[],
+                            None,
+                            Some(startup_gamma()),
+                        );
+                    });
                     true
                 }
                 _ => false,
@@ -8934,17 +9138,24 @@ fn render_startup_frame(
             StartupView::About => assets.about_background(),
             _ => assets.menu_background(),
         };
-        if let Some(background) = background {
-            // C++ stretches the loader fullscreen with GL_LINEAR filtering
-            // (C4Facet::DrawFullScreen, C4Facet.cpp:130-140; StdGL.cpp:528-532).
-            let rect = lc_gui::Rect::from_origin_size(
-                GuiPoint::new(0.0, 0.0),
-                lc_gui::Size::new(surface.width() as f32, surface.height() as f32),
-            );
-            lc_frontend::draw_image_bilinear(surface, &rect, &background, Some(startup_gamma()));
-        } else {
-            surface.fill(Color::opaque(16, 28, 52));
-        }
+        restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
+            if let Some(background) = background {
+                // C++ stretches the loader fullscreen with GL_LINEAR filtering
+                // (C4Facet::DrawFullScreen, C4Facet.cpp:130-140; StdGL.cpp:528-532).
+                let rect = lc_gui::Rect::from_origin_size(
+                    GuiPoint::new(0.0, 0.0),
+                    lc_gui::Size::new(surface.width() as f32, surface.height() as f32),
+                );
+                lc_frontend::draw_image_bilinear(
+                    surface,
+                    &rect,
+                    &background,
+                    Some(startup_gamma()),
+                );
+            } else {
+                surface.fill(Color::opaque(16, 28, 52));
+            }
+        });
         match view {
             // Renderers land per-dialog; until wired these views show the
             // bare background.
@@ -10816,6 +11027,119 @@ mod tests {
                 .map(|audio| audio.music_is_playing())
                 .unwrap_or(false),
             "menu music should resume after returning to the menu"
+        );
+    }
+
+    fn new_menu_app(width: u32, height: u32) -> GameApp {
+        let mut app = GameApp::new(
+            width,
+            height,
+            AudioOptions::default(),
+            None,
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app
+    }
+
+    #[test]
+    fn menu_render_replays_cached_frame_for_unchanged_state() {
+        lc_core::logging::init();
+
+        let mut app = new_menu_app(320, 200);
+        let len = 320 * 200 * 4;
+        let mut fresh = vec![0u8; len];
+        app.render(&mut fresh).expect("first render");
+        assert!(
+            app.menu_frame_cache.is_some(),
+            "menu render should populate the frame cache"
+        );
+
+        let mut replay = vec![0u8; len];
+        app.render(&mut replay).expect("cached render");
+        assert_eq!(fresh, replay, "cached replay must match the first render");
+
+        // The replay must be pixel-identical to a full recomposition.
+        app.menu_frame_cache = None;
+        let mut recomposed = vec![0u8; len];
+        app.render(&mut recomposed).expect("recomposed render");
+        assert_eq!(
+            fresh, recomposed,
+            "cached replay must match a fresh recomposition"
+        );
+    }
+
+    #[test]
+    fn menu_input_invalidates_cached_frame() {
+        lc_core::logging::init();
+
+        let mut app = new_menu_app(320, 200);
+        let mut frame = vec![0u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("render");
+        let cached_version = app
+            .menu_frame_cache
+            .as_ref()
+            .expect("cache populated")
+            .version;
+        app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect("key input");
+        assert_ne!(
+            app.menu_render_version, cached_version,
+            "input events must invalidate the cached menu frame"
+        );
+    }
+
+    #[test]
+    fn menu_backdrop_restore_matches_full_recomposition() {
+        lc_core::logging::init();
+
+        let mut app = new_menu_app(320, 200);
+        let len = 320 * 200 * 4;
+        let mut first = vec![0u8; len];
+        app.render(&mut first).expect("cold render");
+
+        // A recomposition that restores the cached static backdrop...
+        app.mark_menu_dirty();
+        let mut restored = vec![0u8; len];
+        app.render(&mut restored).expect("backdrop-restored render");
+
+        // ...must match one composed from scratch.
+        app.mark_menu_dirty();
+        app.menu_backdrop_cache = StartupBackdropCache::default();
+        let mut recomposed = vec![0u8; len];
+        app.render(&mut recomposed).expect("full recomposition");
+
+        assert_eq!(
+            restored, recomposed,
+            "backdrop restore must be pixel-identical to a full recomposition"
+        );
+        assert_eq!(
+            first, restored,
+            "unchanged menu state must keep rendering identical frames"
+        );
+    }
+
+    #[test]
+    fn menu_resize_renders_at_new_dimensions() {
+        lc_core::logging::init();
+
+        let mut app = new_menu_app(320, 200);
+        let mut frame = vec![0u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("render");
+        app.resize(400, 300).expect("resize");
+        let mut larger = vec![0u8; 400 * 300 * 4];
+        app.render(&mut larger).expect("render after resize");
+        let cache = app.menu_frame_cache.as_ref().expect("cache after resize");
+        assert_eq!(
+            (cache.width, cache.height),
+            (400, 300),
+            "cache must track the resized surface"
         );
     }
 
