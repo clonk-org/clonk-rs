@@ -2018,6 +2018,11 @@ fn parse_optional_string(
     match value {
         None => Ok(None),
         Some(Value::Nil) => Ok(None),
+        // Falsy parameters reset to nil before the typecheck
+        // (C4AulExec.cpp:1364-1396): a literal 0/false in a string slot is
+        // a null string, not a conversion error (GoldRush passes 0 for the
+        // FindObjectOwner action).
+        Some(Value::Int(0)) | Some(Value::Bool(false)) => Ok(None),
         Some(Value::String(text)) => Ok(Some(text.clone())),
         Some(other) => Err(RuntimeError::new(format!(
             "{}: expected string for {}, got {}",
@@ -2060,6 +2065,10 @@ fn parse_definition_argument(
         None => Ok(None),
         Some(Value::Nil) => Ok(None),
         Some(Value::String(text)) => Ok(Some(text.clone())),
+        // Definition constants are C4ID-typed (C4V_C4ID): FnFindObject and
+        // friends declare C4ID parameters, so `FindObject(NOPC)` arrives
+        // here as a C4Id value.
+        Some(Value::C4Id(id)) => Ok(Some(id.clone())),
         Some(Value::Int(id)) => Ok(c4id_to_definition(*id)),
         Some(other) => Err(RuntimeError::new(format!(
             "{}: expected definition identifier, got {}",
@@ -2840,6 +2849,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetRDir", set_r_dir);
     script.register_host_function("GetRDir", get_r_dir);
     script.register_host_function("FindObject", find_object);
+    script.register_host_function("FindObjectOwner", find_object_owner);
     script.register_host_function("FindObject2", find_object2);
     script.register_host_function("FindObjects", find_objects_dispatch);
     script.register_host_function("ObjectCount2", object_count2);
@@ -8583,6 +8593,43 @@ fn find_object(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+fn find_object_owner(args: &[Value]) -> Result<Value, RuntimeError> {
+    // FnFindObjectOwner (C4Script.cpp:2137-2161): FindObject with the
+    // owner filter as the SECOND parameter; an owner that is neither a
+    // valid player nor NO_OWNER returns nil before any search. The
+    // remaining arguments shift by one; exclude/container are not
+    // script-settable here (C++ passes caller-exclusion and null).
+    if args.len() > 10 {
+        return Err(RuntimeError::new(
+            "FindObjectOwner: expected at most 10 arguments",
+        ));
+    }
+    let owner = parse_optional_i32(args.get(1), "FindObjectOwner", "owner")?.unwrap_or(0);
+    let owner_valid = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        borrow
+            .as_ref()
+            .map(|context| owner == OWNER_NONE || context.player_state(owner).is_some())
+            .unwrap_or(false)
+    });
+    if !owner_valid {
+        return Ok(Value::Nil);
+    }
+    let mut remapped: Vec<Value> = Vec::with_capacity(12);
+    remapped.push(args.first().cloned().unwrap_or(Value::Nil)); // id
+    for slot in 2..=5 {
+        remapped.push(args.get(slot).cloned().unwrap_or(Value::Nil)); // x y wdt hgt
+    }
+    remapped.push(args.get(6).cloned().unwrap_or(Value::Nil)); // ocf
+    remapped.push(args.get(7).cloned().unwrap_or(Value::Nil)); // action
+    remapped.push(args.get(8).cloned().unwrap_or(Value::Nil)); // action target
+    remapped.push(Value::Nil); // exclude (caller exclusion is context-based)
+    remapped.push(Value::Nil); // container
+    remapped.push(Value::Int(owner));
+    remapped.push(args.get(9).cloned().unwrap_or(Value::Nil)); // find next
+    find_object(&remapped)
+}
+
 fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
     let mut skip_until = params.find_next;
     for object_id in params.candidate_ids(world) {
@@ -14129,6 +14176,7 @@ mod tests {
         "FindContents",
         "FindObject",
         "FindObject2",
+        "FindObjectOwner",
         "FindObjects",
         "FindOtherContents",
         "Format",
@@ -15612,6 +15660,17 @@ mod tests {
             }
             other => panic!("unexpected player command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn definition_arguments_accept_c4id_values_like_cpp() {
+        // FnFindObject and friends take a C4ID-typed first parameter
+        // (C4Script.cpp FindObject: C4ID id): definition constants reach
+        // host functions as C4Id values and must resolve — GoldRush's
+        // DoInitialize probes `FindObject(NOPC)` with them.
+        let parsed = parse_definition_argument(Some(&Value::C4Id("NOPC".into())), "FindObject")
+            .expect("C4Id accepted");
+        assert_eq!(parsed.as_deref(), Some("NOPC"));
     }
 
     #[test]

@@ -379,17 +379,60 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
     let mut engine = lc_engine::Engine::new();
     engine.configure_materials_from_library(&material_library);
     engine.install_global_scripts(&system_scripts);
+    // Game.Names: the standard clonk names live next to the System.c4g
+    // scripts (C4Game::InitScriptEngine, C4Game.cpp:2772).
+    engine.set_standard_names(
+        lc_resources::Group::open(repo_root.join("planet/System.c4g"))
+            .ok()
+            .and_then(|group| group.read_file("Names.txt").ok())
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+    );
     scenario
         .apply(&mut engine)
         .map_err(|error| anyhow!("apply failed: {error}"))?;
 
-    engine
-        .register_player(lc_engine::PlayerConfig::new(0, "Tester"))
-        .map_err(|error| anyhow!("register_player failed: {error}"))?;
-
     tracing::info!(
         objects = engine.snapshot().objects.len(),
         "scenario-errors: applied"
+    );
+
+    // Join like the real game does (CID_JoinPlr -> C4Game::JoinPlayer ->
+    // ScenarioInit): crew and player-owned objects arrive here, then
+    // InitializePlayer runs. Tries build/Tyler.c4p for the crew roster.
+    let player_file = repo_root.join("build/Tyler.c4p");
+    let (name, color_dw, pref_color, pref_position, crew) = match player_file.exists() {
+        true => match lc_engine::player_file::PlayerFile::load_from_path(&player_file) {
+            Ok(file) => (
+                file.name,
+                file.pref_color_dw & 0xffffff,
+                file.pref_color,
+                file.pref_position,
+                file.crew,
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "Tyler.c4p failed to load; joining a default player");
+                ("Tester".to_string(), 0xff0000, 0, 0, Vec::new())
+            }
+        },
+        false => ("Tester".to_string(), 0xff0000, 0, 0, Vec::new()),
+    };
+    let joined = engine
+        .join_player(lc_engine::JoinPlayerConfig {
+            name,
+            team: None,
+            color_dw,
+            pref_color,
+            pref_position,
+            crew,
+            startup_player_count: 1,
+        })
+        .map_err(|error| anyhow!("join_player failed: {error}"))?;
+    tracing::info!(
+        objects = engine.snapshot().objects.len(),
+        number = joined.number,
+        start_x = joined.start_x,
+        start_y = joined.start_y,
+        "scenario-errors: player joined"
     );
     for frame in 0..ticks {
         let started = std::time::Instant::now();
