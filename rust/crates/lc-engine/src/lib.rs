@@ -18347,6 +18347,10 @@ impl Engine {
         object.clamp_velocity(&self.physics);
 
         let mut additional_spawns = Vec::new();
+        // Initialize/Construction may legally remove the object
+        // (RemoveObject in a placer script, e.g. the grass distributor):
+        // the object spawns and immediately ends Deleted like C++.
+        let mut destroy_requested = false;
 
         // Call Construction() before Initialize()
         // Construction() initializes local variables that may be used in Initialize() or action callbacks
@@ -18428,11 +18432,7 @@ impl Engine {
                 self.apply_player_commands(player_commands)?;
             }
             if destroy {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition_id.clone(),
-                    function: "Construction",
-                    detail: "Construction may not destroy the object".into(),
-                });
+                destroy_requested = true;
             }
             let outcome = object.apply_delta(&delta, &action_library);
             if let Some(change) = outcome.action_change {
@@ -18549,11 +18549,7 @@ impl Engine {
                 self.apply_player_commands(player_commands)?;
             }
             if destroy {
-                return Err(EngineError::InvalidScriptOutput {
-                    definition: definition_id.clone(),
-                    function: "Initialize",
-                    detail: "Initialize may not destroy the object".into(),
-                });
+                destroy_requested = true;
             }
             let outcome = object.apply_delta(&delta, &action_library);
             if let Some(change) = outcome.action_change {
@@ -18664,6 +18660,9 @@ impl Engine {
         for (previous, new) in container_changes {
             self.apply_container_change(id, previous, new)?;
         }
+        if destroy_requested {
+            self.objects[index].mark_destroyed();
+        }
         self.trigger_action_callbacks(index, None)?;
         self.update_sector_for_index(index);
         Ok((id, additional_spawns))
@@ -18676,7 +18675,17 @@ impl Engine {
         let mut pending: VecDeque<_> = queue.into_iter().collect();
         let mut created = Vec::new();
         while let Some(config) = pending.pop_front() {
-            let (id, additional) = self.spawn_single(config)?;
+            // C++ CreateObject with an unknown id is C4Id2Def -> nullptr
+            // (C4Script.cpp FnCreateObject): the call yields nil, never an
+            // error, so unknown spawns are skipped rather than fatal.
+            let (id, additional) = match self.spawn_single(config) {
+                Ok(result) => result,
+                Err(EngineError::UnknownDefinition(definition)) => {
+                    tracing::warn!(definition, "skipping spawn of unknown definition like C++ CreateObject");
+                    continue;
+                }
+                Err(other) => return Err(other),
+            };
             created.push(id);
             for spawn in additional {
                 pending.push_back(spawn);

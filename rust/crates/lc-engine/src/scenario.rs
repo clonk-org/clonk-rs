@@ -298,6 +298,38 @@ impl Scenario {
             collect_definitions_from_group(&child, &mut seen_ids, &mut collected)?;
         }
 
+        // The parent folder chain is a definition source too: every .c4d
+        // child of a .c4f ancestor serves the scenarios inside it (C++
+        // folder definitions — e.g. Hazard.c4f/ScenObjects.c4d).
+        let mut ancestor = group.root().parent();
+        while let Some(folder) = ancestor {
+            let is_folder_group = folder
+                .file_name()
+                .map(|name| {
+                    name.to_string_lossy()
+                        .to_ascii_lowercase()
+                        .ends_with(".c4f")
+                })
+                .unwrap_or(false);
+            if !is_folder_group {
+                break;
+            }
+            if let Ok(folder_group) = Group::open(folder) {
+                for entry in folder_group.entries()? {
+                    if !entry.is_directory {
+                        continue;
+                    }
+                    let name = entry.relative_path.to_string_lossy().to_ascii_lowercase();
+                    if !(name.ends_with(".c4d") || name.ends_with(".ocd")) {
+                        continue;
+                    }
+                    let child = folder_group.open_child(&entry.relative_path)?;
+                    collect_definitions_from_group(&child, &mut seen_ids, &mut collected)?;
+                }
+            }
+            ancestor = folder.parent();
+        }
+
         for spec in &manifest.definition_specs {
             let groups = resolver.resolve_definition_groups(group, spec)?;
             if groups.is_empty() {
@@ -5582,6 +5614,96 @@ global func Step(state, frame, random)
             Some("LocalGood".to_string()),
             "the scenario-local definition overrides the pack's (fOverload)"
         );
+    }
+
+    #[test]
+    fn folder_local_definitions_resolve_for_scenarios_like_cpp() {
+        // C++ loads the parent folder chain as definition sources: a .c4d
+        // inside the .c4f serves every scenario in the folder (Hazard.c4f/
+        // ScenObjects.c4d provides _DIA to Tutorial.c4s).
+        let dir = tempdir().expect("tempdir");
+        let folder = dir.path().join("Pack.c4f");
+        let shared = folder.join("Shared.c4d");
+        std::fs::create_dir_all(&shared).expect("shared def dir");
+        std::fs::write(
+            shared.join("DefCore.txt"),
+            "[DefCore]\nid=SHRD\nName=Shared\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write shared defcore");
+        std::fs::write(shared.join("Script.c"), "// shared\n").expect("write shared script");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let good = defs_root.join("Good.c4d");
+        std::fs::create_dir_all(&good).expect("definition dir");
+        std::fs::write(
+            good.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write defcore");
+        std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+
+        let scenario_dir = folder.join("Inner.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=FolderLocal\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Good=1\nPosition=10,10\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=SHRD\nNumber=10\nStatus=1\nCategory=0\nX=10\nY=20\n",
+        )
+        .expect("write objects");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        assert!(
+            engine.object_snapshot(ObjectId::new(10)).is_some(),
+            "the folder-local definition resolved for Objects.txt"
+        );
+    }
+
+    #[test]
+    fn initialize_may_remove_its_own_object_like_cpp() {
+        // Placer objects legitimately self-remove in Initialize (the
+        // Environment Grass distributor calls RemoveObject() after placing,
+        // Objects.c4d/Environment.c4d/Grass.c4d). C++ has no restriction;
+        // the object simply ends removed.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "func Initialize() { RemoveObject(); return 1; }\n",
+        )
+        .expect("write self-removing script");
+        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(created.len(), 1, "the spawn itself succeeds");
+        let gone = engine
+            .object_snapshot(created[0])
+            .map(|snapshot| snapshot.status != ObjectStatus::Normal)
+            .unwrap_or(true);
+        assert!(gone, "the object ends removed like C++");
+    }
+
+    #[test]
+    fn create_object_of_unknown_definition_is_nil_not_fatal() {
+        // C++ CreateObject resolves the id with C4Id2Def and returns
+        // nullptr when it is unknown — never an engine error.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "func Initialize() { CreateObject(\"XXXX\", 0, 0, -1); return 1; }\n",
+        )
+        .expect("write spawning script");
+        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(created.len(), 1);
+        assert!(engine.object_snapshot(created[0]).is_some());
     }
 
     #[test]

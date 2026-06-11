@@ -1193,9 +1193,17 @@ fn main() -> Result<()> {
                 let mut did_update = false;
                 while accumulator >= FRAME_INTERVAL {
                     if let Err(err) = app.update() {
-                        tracing::error!(error = ?err, "tick failed");
-                        control_flow.set_exit();
-                        return;
+                        // Script errors during the simulation tick show in
+                        // the log and the game keeps running, like the C++
+                        // fail-safe exec; only engine-internal errors are
+                        // fatal.
+                        if matches!(err, lc_engine::EngineError::Script { .. }) {
+                            tracing::warn!(error = %err, "script error during tick; continuing like C++");
+                        } else {
+                            tracing::error!(error = ?err, "tick failed");
+                            control_flow.set_exit();
+                            return;
+                        }
                     }
                     accumulator -= FRAME_INTERVAL;
                     did_update = true;
@@ -2409,6 +2417,9 @@ struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
     sky: Option<SkyRenderState>,
+    /// System.c4g global script sources, loaded once at boot for every
+    /// fresh game engine (the C++ `Game.ScriptEngine` scripts).
+    system_scripts: Vec<(String, String)>,
     input: InputDispatcher,
     bindings: KeyboardBindings,
     gamepads: GamepadManager,
@@ -4641,6 +4652,14 @@ impl GameApp {
             _ => None,
         };
         let assets = Arc::new(FrontendAssets::load(paths));
+        let system_scripts = paths
+            .map(AppPaths::system_group_path)
+            .and_then(|path| Group::open(path).ok())
+            .and_then(|group| lc_engine::scenario::load_system_scripts(&group).ok())
+            .unwrap_or_default();
+        if system_scripts.is_empty() {
+            tracing::warn!("no System.c4g scripts found; global script functions unavailable");
+        }
 
         // Start async material loading
         let (tx, rx) = std::sync::mpsc::channel();
@@ -4698,6 +4717,7 @@ impl GameApp {
             engine,
             graphics,
             sky: None,
+            system_scripts,
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
             gamepads: GamepadManager::new(),
@@ -4809,6 +4829,17 @@ impl GameApp {
         } else {
             engine.set_materials(MaterialSet::default());
         }
+        self.install_global_scripts_to(engine);
+    }
+
+    /// Installs the System.c4g global scripts (the C++ `Game.ScriptEngine`
+    /// scripts) into a fresh game engine.
+    fn install_global_scripts_to(&self, engine: &mut Engine) {
+        if self.system_scripts.is_empty() {
+            return;
+        }
+        let loaded = engine.install_global_scripts(&self.system_scripts);
+        tracing::debug!(scripts = loaded, "installed System.c4g global scripts");
     }
 
     fn update_sprite_cache(&mut self) {
