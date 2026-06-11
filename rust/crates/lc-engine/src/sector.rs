@@ -220,17 +220,20 @@ impl SectorMap {
         self.object_ids(self.sector_at(x, y))
     }
 
+    /// Candidates in C++ area-enumeration order: sectors row-major with the
+    /// outside-sector last (C4LArea::Next, C4Sector.cpp:264-277), each
+    /// sector's list in master-list rank order, duplicates dropped at their
+    /// first encounter (the Marker, C4GameObjects.cpp:155-165,
+    /// C4FindObject.cpp:325-353). NOT globally rank-sorted — pair order
+    /// feeds the RNG, so this is lockstep order.
     pub(crate) fn object_ids_in_area(&self, area: &SectorArea) -> Vec<ObjectId> {
-        let mut seen = HashSet::new();
+        // No dedup needed: an object's center point is in exactly one sector,
+        // so the point lists are disjoint (C++ pass 2 keeps a Marker anyway,
+        // but it can never fire for point lists).
         let mut ids = Vec::new();
         for key in area.iter() {
-            for &id in self.object_ids(key) {
-                if seen.insert(id) {
-                    ids.push(id);
-                }
-            }
+            ids.extend_from_slice(self.object_ids(key));
         }
-        self.sort_ids_by_rank(&mut ids);
         ids
     }
 
@@ -238,6 +241,8 @@ impl SectorMap {
         &self.sector(key).object_shapes
     }
 
+    /// Same C++ enumeration order as `object_ids_in_area`, over the
+    /// per-sector shape lists (`FirstObjectShapes`/`NextObjectShapes`).
     pub(crate) fn shape_ids_in_area(&self, area: &SectorArea) -> Vec<ObjectId> {
         let mut seen = HashSet::new();
         let mut ids = Vec::new();
@@ -248,7 +253,6 @@ impl SectorMap {
                 }
             }
         }
-        self.sort_ids_by_rank(&mut ids);
         ids
     }
 
@@ -333,11 +337,6 @@ impl SectorMap {
         }
     }
 
-    fn sort_ids_by_rank(&self, ids: &mut [ObjectId]) {
-        // One rank lookup per element: the comparator-per-compare version
-        // dominated CrossCheck area queries.
-        ids.sort_by_cached_key(|id| self.rank(*id));
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -605,6 +604,49 @@ mod tests {
 
     fn keys(area: &SectorArea) -> Vec<SectorKey> {
         area.iter().collect()
+    }
+
+    #[test]
+    fn area_queries_enumerate_sector_major_like_cpp() {
+        // C++ area enumeration is NEVER a global rank sort: C4LArea::Next
+        // walks sectors row-major with the outside-sector last
+        // (C4Sector.cpp:264-277), each sector's list is in master-list
+        // (rank) order, and the Marker only dedups repeat encounters
+        // (C4GameObjects.cpp:155-165, C4FindObject.cpp:325-353). An object
+        // in an earlier sector is visited before a lower-ranked object in a
+        // later sector — pair order feeds the RNG, so this is lockstep
+        // order.
+        let mut sectors = SectorMap::new(150, 100);
+        // Rank order: 1, 2, 3 — but 2 sits in the SECOND sector while 1 and
+        // 3 share the first.
+        sectors.rebuild(vec![
+            SectorObject {
+                id: ObjectId::new(1),
+                position: Vector2::new(10, 10),
+                shape_rect: DefinitionRect::new(8, 8, 4, 4),
+            },
+            SectorObject {
+                id: ObjectId::new(2),
+                position: Vector2::new(80, 10),
+                shape_rect: DefinitionRect::new(78, 8, 4, 4),
+            },
+            SectorObject {
+                id: ObjectId::new(3),
+                position: Vector2::new(20, 20),
+                shape_rect: DefinitionRect::new(18, 18, 4, 4),
+            },
+        ]);
+        let area = sectors.area(DefinitionRect::new(0, 0, 120, 40));
+        assert_eq!(
+            sectors.object_ids_in_area(&area),
+            vec![ObjectId::new(1), ObjectId::new(3), ObjectId::new(2)],
+            "point lists concatenate in sector order, rank-ordered within"
+        );
+        assert_eq!(
+            sectors.shape_ids_in_area(&area),
+            vec![ObjectId::new(1), ObjectId::new(3), ObjectId::new(2)],
+            "shape lists concatenate in sector order with first-encounter dedup"
+        );
     }
 
     #[test]

@@ -20503,7 +20503,12 @@ mod tests {
     }
 
     #[test]
-    fn find_objects_sector_range_preserves_world_order() {
+    fn find_objects_sector_range_uses_cpp_sector_enumeration_order() {
+        // C4FindObject::FindMany with bounds and no sort pushes results in
+        // AREA-ENUMERATION order — sector by sector (C4FindObject.cpp:
+        // 344-353 via C4LArea::Next, C4Sector.cpp:264-277), NOT master-list
+        // order. `first` ranks earlier but sits in sector 1 (x=70); `second`
+        // sits in sector 0 (x=10) and is therefore encountered first.
         let first = ObjectId::new(71);
         let second = ObjectId::new(72);
         let world = HostWorldContext::with_landscape(
@@ -20567,8 +20572,8 @@ mod tests {
                 assert_eq!(
                     entries,
                     vec![
-                        object_reference_value(first),
-                        object_reference_value(second)
+                        object_reference_value(second),
+                        object_reference_value(first)
                     ]
                 );
             }

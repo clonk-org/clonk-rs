@@ -15575,9 +15575,10 @@ impl Engine {
                 if obj2_id == obj1_id {
                     continue;
                 }
-                let Some(idx) = self.find_object_index(obj1_id) else {
-                    continue 'outer;
-                };
+                // Object indices are stable mid-tick (the Vec only appends
+                // until the end-of-tick retain), so obj1'"'"'s index from the
+                // outer loop stays valid; C++ re-checks the FLAGS after
+                // callbacks, not the identity (C4GameObjects.cpp:186-192).
                 let Some(obj2_idx) = self.find_object_index(obj2_id) else {
                     continue;
                 };
@@ -15832,9 +15833,10 @@ impl Engine {
             // handle collision only once (Marker, C4GameObjects.cpp:163-165)
             let mut marker: HashSet<ObjectId> = HashSet::new();
             for candidate_id in candidate_ids {
-                let Some(idx) = self.find_object_index(obj1_id) else {
-                    continue 'outer;
-                };
+                // Object indices are stable mid-tick (the Vec only appends
+                // until the end-of-tick retain), so obj1'"'"'s index from the
+                // outer loop stays valid; C++ re-checks the FLAGS after
+                // callbacks, not the identity (C4GameObjects.cpp:186-192).
                 let Some(candidate_idx) = self.find_object_index(candidate_id) else {
                     continue;
                 };
