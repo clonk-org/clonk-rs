@@ -1883,6 +1883,15 @@ void OnControlFrame(const C4Control &control, uint64_t frame) {
     control_log.push_back(std::move(serialised));
     const std::string &stored_control = control_log.back();
 
+    // Env-gated diagnostics: dump every serialised control frame so the
+    // Rust-side INI parser can be checked against the real wire format.
+    if (const char *dump_path = std::getenv("LC_RUST_ENGINE_CONTROL_DUMP"); dump_path && *dump_path) {
+        std::ofstream dump{dump_path, std::ios::app};
+        if (dump) {
+            dump << "=== frame " << frame << " ===\n" << stored_control << "\n";
+        }
+    }
+
     if (!g_runtime_requested || g_runtime_disabled || !g_runtime) {
         return;
     }

@@ -405,6 +405,7 @@ impl RuntimeHandle {
             Some(packets) => packets,
             None => return Ok(()),
         };
+        tracing::debug!(frame, count = packets.len(), "applying control packets");
         for packet in packets {
             match packet {
                 ControlPacket::PlayerControl(data) => {
@@ -431,20 +432,23 @@ impl RuntimeHandle {
     /// branch: resolve the info, load the player file (the local filename
     /// first, the embedded PlrData bytes otherwise) and run the join.
     fn handle_join_player(&mut self, join: &JoinPlayerControlData) -> Result<(), String> {
-        let Some(info) = self.player_infos.get(&join.info_id).cloned() else {
-            // "Ghost player join: No info" (C4Control.cpp:719-722) — C++
-            // logs and skips.
-            tracing::warn!(info_id = join.info_id, "join without player info; skipped");
-            return Ok(());
-        };
-        if info.script_player || info.no_scenario_init {
-            // Script players skip ScenarioInit (C4Player.cpp:327-343); not
-            // ported yet.
-            tracing::warn!(
-                info_id = join.info_id,
-                "script-player / NoScenarioInit join not supported yet; skipped"
-            );
-            return Ok(());
+        // Local games install the INITIAL player infos directly during
+        // InitPlayers (LocalJoinUnjoinedPlayersInQueue queues only
+        // CID_JoinPlr, C4PlayerInfo.cpp:1292-1323), so the shadow runtime
+        // may legitimately see a join without a control-delivered info: it
+        // then joins from the player file core (the same data the C++ info
+        // was built from, C4PlayerInfo::SetAsUserPlayer).
+        let info = self.player_infos.get(&join.info_id).cloned();
+        if let Some(info) = info.as_ref() {
+            if info.script_player || info.no_scenario_init {
+                // Script players skip ScenarioInit (C4Player.cpp:327-343);
+                // not ported yet.
+                tracing::warn!(
+                    info_id = join.info_id,
+                    "script-player / NoScenarioInit join not supported yet; skipped"
+                );
+                return Ok(());
+            }
         }
 
         let file = {
@@ -471,15 +475,31 @@ impl RuntimeHandle {
                 None
             }
         };
-        let (file_name, pref_color, pref_position, crew) = file
-            .map(|file| (file.name, file.pref_color, file.pref_position, file.crew))
-            .unwrap_or_else(|| ("Neuling".to_string(), 0, 0, Vec::new()));
+        let (file_name, file_color_dw, pref_color, pref_position, crew) = file
+            .map(|file| {
+                (
+                    file.name,
+                    file.pref_color_dw & 0xffffff,
+                    file.pref_color,
+                    file.pref_position,
+                    file.crew,
+                )
+            })
+            .unwrap_or_else(|| ("Neuling".to_string(), 0xff, 0, 0, Vec::new()));
 
-        let name = if info.name.is_empty() {
-            file_name
-        } else {
-            info.name.clone()
-        };
+        let name = info
+            .as_ref()
+            .map(|info| info.name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(file_name);
+        let color_dw = info
+            .as_ref()
+            .map(|info| info.color & 0xffffff)
+            .unwrap_or(file_color_dw);
+        let team = info
+            .as_ref()
+            .map(|info| info.team)
+            .filter(|&team| team != 0);
         // StartupPlayerCount: the number of players at game start
         // (C4GameParameters); approximated by the infos seen so far.
         let startup_player_count = self.player_infos.len().max(1) as i32;
@@ -487,8 +507,8 @@ impl RuntimeHandle {
             .engine
             .join_player(crate::JoinPlayerConfig {
                 name,
-                team: (info.team != 0).then_some(info.team),
-                color_dw: info.color & 0xffffff,
+                team,
+                color_dw,
                 pref_color,
                 pref_position,
                 crew,
@@ -561,6 +581,7 @@ impl RuntimeHandle {
 
     fn advance_to_frame(&mut self, frame: u64) -> Result<(), String> {
         let current = self.engine.frame();
+        tracing::debug!(frame, current, pending = self.control_packets.len(), "advance_to_frame");
         if frame < current {
             return Err(format!(
                 "target frame {} precedes current engine frame {}",
@@ -574,8 +595,12 @@ impl RuntimeHandle {
         }
 
         while self.engine.frame() < frame {
-            let next_frame = self.engine.frame().saturating_add(1);
-            self.apply_control_packets_for_frame(next_frame)?;
+            // Control recorded under FrameCounter N executes at the START
+            // of frame N, before that frame's object tick
+            // (C4Game::Execute: Control.Execute precedes ExecObjects,
+            // C4Game.cpp:776-854) — the tick below moves N to N+1.
+            let executing = self.engine.frame();
+            self.apply_control_packets_for_frame(executing)?;
             self.engine
                 .tick()
                 .map_err(|error| format!("engine tick failed: {error}"))?;
@@ -1485,8 +1510,27 @@ fn runtime_snapshot_mismatch(
     }
 }
 
+/// Env-gated diagnostics for the embedded runtime: `LC_RUST_ENGINE_LOG`
+/// installs a stderr tracing subscriber (filter syntax like
+/// `LC_RUST_ENGINE_LOG=info`). The host process has no other way to see
+/// the runtime's warnings.
+fn init_runtime_tracing() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Ok(filter) = std::env::var("LC_RUST_ENGINE_LOG") {
+            if !filter.is_empty() {
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(std::io::stderr)
+                    .try_init();
+            }
+        }
+    });
+}
+
 #[no_mangle]
 pub extern "C" fn lc_engine_runtime_new() -> *mut RuntimeHandle {
+    init_runtime_tracing();
     Box::into_raw(Box::new(RuntimeHandle::new()))
 }
 
@@ -1680,6 +1724,21 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
 
     match parse_control_ini(&ini_string) {
         Ok(packets) => {
+            tracing::debug!(
+                frame,
+                count = packets.len(),
+                kinds = ?packets
+                    .iter()
+                    .map(|packet| match packet {
+                        ControlPacket::PlayerControl(_) => "PlayerControl",
+                        ControlPacket::SyncCheck(_) => "SyncCheck",
+                        ControlPacket::JoinPlayer(_) => "JoinPlayer",
+                        ControlPacket::PlayerInfo(_) => "PlayerInfo",
+                        ControlPacket::Unknown { .. } => "Unknown",
+                    })
+                    .collect::<Vec<_>>(),
+                "control packets recorded"
+            );
             runtime
                 .control_packets
                 .entry(frame)
@@ -3886,6 +3945,128 @@ global func Step(state, frame, random)
             .filter(|object| object.owner == 0 && object.crew_member)
             .count();
         assert_eq!(crew_count, 2, "ready crew placed by the join");
+    }
+
+    #[test]
+    fn control_recorded_at_frame_n_executes_before_that_frames_tick() {
+        // C4Game::Execute runs Control.Execute BEFORE ExecObjects within
+        // the same FrameCounter (C4Game.cpp:776-854), and the bridge
+        // records control under that FrameCounter. Advancing past frame N
+        // must therefore apply frame-N packets before the tick that moves
+        // N -> N+1 — the first OnFrame compare arrives at FrameCounter 1,
+        // and frame-0 control (the player join!) must not be skipped.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d/Good.c4d");
+        std::fs::create_dir_all(&defs).expect("def dir");
+        std::fs::write(
+            defs.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=1\n",
+        )
+        .expect("defcore");
+        std::fs::write(defs.join("Script.c"), "// crew\n").expect("script");
+        let scenario_dir = dir.path().join("Join.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Join\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=64\nMapHeight=40\nMapZoom=10\n\n\
+             [Player1]\nCrew=GOOD=1\n",
+        )
+        .expect("scenario core");
+        let player_dir = dir.path().join("Tester.c4p");
+        std::fs::create_dir_all(&player_dir).expect("player dir");
+        std::fs::write(
+            player_dir.join("Player.txt"),
+            "[Player]\nName=Tyler\n\n[Preferences]\nColorDw=255\n",
+        )
+        .expect("player core");
+
+        let mut runtime = RuntimeHandle::new();
+        load_scenario_into_runtime(&mut runtime, &scenario_dir.to_path_buf(), 7)
+            .expect("scenario loads");
+        let control = format!(
+            "[Control]\n\
+              [IDPacket]\n\
+                ID=145\n\
+                [Join Player]\n\
+                  Filename=\"{}\"\n\
+                  InfoID=1\n",
+            player_dir.display()
+        );
+        let mut error_ptr: *mut c_char = ptr::null_mut();
+        let ok = lc_engine_runtime_record_control_ini(
+            &mut runtime,
+            0,
+            std::ffi::CString::new(control).expect("cstring").as_ptr(),
+            &mut error_ptr,
+        );
+        assert!(ok, "control records");
+
+        // The first compare in a live run advances straight to frame 1.
+        runtime.advance_to_frame(1).expect("advance succeeds");
+        assert!(
+            runtime.engine.player(0).is_some(),
+            "frame-0 join executed before the 0 -> 1 tick"
+        );
+    }
+
+    #[test]
+    fn join_without_info_falls_back_to_the_player_file() {
+        // Local games install the INITIAL player's C4PlayerInfo directly
+        // during InitPlayers (C4PlayerInfoList::LocalJoinUnjoinedPlayersInQueue
+        // only queues CID_JoinPlr, C4PlayerInfo.cpp:1292-1323) — the info
+        // never traverses the control queue, so the shadow runtime joins
+        // from the player file core instead of dropping the join.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d/Good.c4d");
+        std::fs::create_dir_all(&defs).expect("def dir");
+        std::fs::write(
+            defs.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=1\n",
+        )
+        .expect("defcore");
+        std::fs::write(defs.join("Script.c"), "// crew\n").expect("script");
+        let scenario_dir = dir.path().join("Join.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Join\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=64\nMapHeight=40\nMapZoom=10\n\n\
+             [Player1]\nCrew=GOOD=1\n",
+        )
+        .expect("scenario core");
+        let player_dir = dir.path().join("Tester.c4p");
+        std::fs::create_dir_all(&player_dir).expect("player dir");
+        std::fs::write(
+            player_dir.join("Player.txt"),
+            "[Player]\nName=Tyler\n\n[Preferences]\nColorDw=15997440\n",
+        )
+        .expect("player core");
+
+        let mut runtime = RuntimeHandle::new();
+        load_scenario_into_runtime(&mut runtime, &scenario_dir.to_path_buf(), 7)
+            .expect("scenario loads");
+
+        let control = format!(
+            "[Control]\n\
+              [IDPacket]\n\
+                ID=145\n\
+                [Join Player]\n\
+                  Filename=\"{}\"\n\
+                  AtClient=-1\n\
+                  InfoID=1\n\
+                  ByRes=false\n\
+                  ByClient=0\n",
+            player_dir.display()
+        );
+        let packets = parse_control_ini(&control).expect("control parses");
+        runtime.control_packets.insert(0, packets);
+        runtime
+            .apply_control_packets_for_frame(0)
+            .expect("join control applies");
+
+        let player = runtime.engine.player(0).expect("player joined");
+        assert_eq!(player.name(), "Tyler");
     }
 
     #[test]

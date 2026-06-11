@@ -427,10 +427,14 @@ impl RawPacket {
         }
 
         if id == CID_PLR_CONTROL {
-            let player = parse_int_field(&self.fields, "Player")?;
-            let command = parse_int_field(&self.fields, "Com")?;
-            let data = parse_int_field(&self.fields, "Data")?;
-            let by_client = parse_int_field(&self.fields, "ByClient")?;
+            // The writer omits default-valued fields (StdCompilerINIWrite):
+            // defaults per C4ControlPlayerControl::CompileFunc
+            // (C4Control.cpp:397-403) and C4ControlPacket::CompileFunc
+            // (ByClient -1, C4Control.cpp:53-57).
+            let player = parse_int_field_or(&self.fields, "Player", -1)?;
+            let command = parse_int_field_or(&self.fields, "Com", 0)?;
+            let data = parse_int_field_or(&self.fields, "Data", 0)?;
+            let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
             Ok(Some(ControlPacket::PlayerControl(PlayerControlData {
                 player,
                 command,
@@ -637,6 +641,24 @@ fn unescape_value_bytes(value: &str) -> Vec<u8> {
     bytes
 }
 
+/// Missing fields take their CompileFunc default (the INI writer omits
+/// default-valued entries); present-but-malformed fields still error.
+fn parse_int_field_or(
+    fields: &HashMap<String, String>,
+    name: &str,
+    default: i32,
+) -> Result<i32, ControlParseError> {
+    match fields.get(name) {
+        None => Ok(default),
+        Some(raw) => raw
+            .parse::<i32>()
+            .map_err(|_| ControlParseError::InvalidIntegerField {
+                field: name.to_string(),
+                value: raw.clone(),
+            }),
+    }
+}
+
 #[allow(dead_code)]
 fn parse_int_field(fields: &HashMap<String, String>, name: &str) -> Result<i32, ControlParseError> {
     let Some(raw) = fields.get(name) else {
@@ -729,6 +751,32 @@ mod tests {
                 command: 1,
                 data: 0,
                 by_client: 1
+            })]
+        );
+    }
+
+    #[test]
+    fn player_control_omits_default_fields_like_the_real_writer() {
+        // StdCompilerINIWrite skips values that equal their CompileFunc
+        // default: real CID_PlrControl packets omit Data (default 0) and
+        // ByClient (default -1) — C4Control.cpp:397-403, 53-57. A live
+        // GoldRush record drops whole control frames if these are treated
+        // as required.
+        let input = "\
+[Control]\n\
+  [IDPacket]\n\
+    ID=161\n\
+    [Player Control]\n\
+      Player=0\n\
+      Com=24\n";
+        let packets = parse_control_ini(input).expect("parse control log");
+        assert_eq!(
+            packets,
+            vec![ControlPacket::PlayerControl(PlayerControlData {
+                player: 0,
+                command: 24,
+                data: 0,
+                by_client: -1,
             })]
         );
     }
@@ -888,3 +936,4 @@ mod tests {
         assert!(interpret_player_control_command(41).is_none());
     }
 }
+

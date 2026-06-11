@@ -6320,6 +6320,22 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn scenario_initialize_may_return_an_int_like_real_content() {
+        // C++ discards scenario-callback return values (Game.Script calls
+        // run as bare statements): real scenarios `return(1)` from
+        // Initialize, which must not abort the apply (two sweep scenarios
+        // regressed on this once their Initialize ran to completion).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "global func Initialize(state, random) { return 1; }\n",
+        );
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert!(engine.scenario_script.is_some());
+    }
+
+    #[test]
     fn scenario_script_parse_errors_are_logged_not_fatal_like_cpp() {
         // A scenario Script.c that fails to compile logs the parse error and
         // the scenario runs without a script (C4ScriptHost load behavior).

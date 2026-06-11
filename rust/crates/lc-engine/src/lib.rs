@@ -10605,8 +10605,17 @@ impl Engine {
 
         let mut created = Vec::with_capacity(spawns.len());
         for spawn in spawns {
-            let id = self.spawn_object(spawn)?;
-            created.push(id);
+            match self.spawn_object(spawn) {
+                Ok(id) => created.push(id),
+                // CreateObject resolves the id with C4Id2Def and yields
+                // nullptr for unknown definitions — never an error
+                // (Drachenfels' Initialize creates `_EAI` before its def
+                // loads). Mirrors the process_spawn_queue tolerance.
+                Err(EngineError::UnknownDefinition(definition)) => {
+                    tracing::warn!(%definition, "scenario spawn names an unknown definition; skipped");
+                }
+                Err(error) => return Err(error),
+            }
         }
         if trigger_game_over {
             self.request_game_over()?;
@@ -20228,6 +20237,12 @@ fn parse_scenario_command(
 ) -> Result<ScenarioBatch, EngineError> {
     match value {
         Value::Nil => Ok(ScenarioBatch::default()),
+        // C++ parity: the engine discards scenario-callback return values
+        // (Game.Script.Call/GRBroadcast run as bare statements); real
+        // scenario scripts routinely `return(1)` from Initialize. The
+        // command proplist stays an additive Rust-fixture convenience —
+        // any other type is ignored, never an error. (Mirrors
+        // parse_command below.)
         Value::Proplist(map) => {
             let mut batch = ScenarioBatch::default();
             for (key, value) in map.into_iter() {
@@ -20268,11 +20283,7 @@ fn parse_scenario_command(
             }
             Ok(batch)
         }
-        other => Err(EngineError::InvalidScriptOutput {
-            definition: definition.to_string(),
-            function,
-            detail: format!("expected proplist or nil, got {}", other.type_name()),
-        }),
+        _ => Ok(ScenarioBatch::default()),
     }
 }
 
