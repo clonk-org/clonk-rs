@@ -376,7 +376,10 @@ pub(crate) struct HostWorldContext {
     order: Rc<Vec<ObjectId>>,
     landscape: Option<Rc<Landscape>>,
     definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
-    sectors: Option<Rc<SectorMap>>,
+    /// Lazily built on the first sector query: most callbacks never run
+    /// one, and an eager build per host context made every tick quadratic
+    /// in the object count.
+    sectors: RefCell<Option<Rc<SectorMap>>>,
     transfer_zones: Rc<Vec<TransferZoneState>>,
     players: Rc<HashMap<i32, PlayerState>>,
     player_order: Rc<Vec<i32>>,
@@ -408,7 +411,7 @@ impl Default for HostWorldContext {
             order: Rc::new(Vec::new()),
             landscape: None,
             definitions: Rc::new(HashMap::new()),
-            sectors: None,
+            sectors: RefCell::new(None),
             transfer_zones: Rc::new(Vec::new()),
             players: Rc::new(HashMap::new()),
             player_order: Rc::new(Vec::new()),
@@ -475,10 +478,36 @@ impl HostWorldContext {
     where
         I: IntoIterator<Item = HostWorldObject>,
     {
+        Self::with_landscape_shared(
+            objects,
+            landscape,
+            Rc::new(definitions),
+            transfer_zones,
+            players,
+            crew_selection,
+            next_object_id,
+            team_home_base_rule,
+        )
+    }
+
+    /// `with_landscape` with an already-shared metadata table: definitions
+    /// are immutable during play, so the engine caches the table instead of
+    /// re-cloning every ActionLibrary per host context.
+    pub(crate) fn with_landscape_shared<I>(
+        objects: I,
+        landscape: Option<Landscape>,
+        definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
+        transfer_zones: Vec<TransferZoneState>,
+        players: HashMap<i32, PlayerState>,
+        crew_selection: HashMap<i32, CrewSelectionState>,
+        next_object_id: u64,
+        team_home_base_rule: bool,
+    ) -> Self
+    where
+        I: IntoIterator<Item = HostWorldObject>,
+    {
         let map = objects.into_iter().collect::<Vec<HostWorldObject>>();
-        let sectors = landscape
-            .as_ref()
-            .map(|landscape| Rc::new(build_host_sector_map(&map, &definitions, landscape)));
+        let sectors = RefCell::new(None);
         let mut order = Vec::with_capacity(map.len());
         let mut lookup = HashMap::with_capacity(map.len());
         for object in map {
@@ -490,7 +519,7 @@ impl HostWorldContext {
             objects: Rc::new(lookup),
             order: Rc::new(order),
             landscape: landscape.map(Rc::new),
-            definitions: Rc::new(definitions),
+            definitions,
             sectors,
             transfer_zones: Rc::new(transfer_zones),
             player_order: Rc::new({
@@ -602,15 +631,29 @@ impl HostWorldContext {
         host_object_shape_rect(object, &self.definitions)
     }
 
+    /// The sector map over this context's objects, built on first use.
+    fn sector_map(&self) -> Option<Rc<SectorMap>> {
+        let landscape = self.landscape.as_ref()?;
+        let mut cache = self.sectors.borrow_mut();
+        if cache.is_none() {
+            *cache = Some(Rc::new(build_host_sector_map(
+                self.order.iter().filter_map(|id| self.objects.get(id)),
+                &self.definitions,
+                landscape,
+            )));
+        }
+        cache.clone()
+    }
+
     fn object_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
-        self.sectors.as_ref().map(|sectors| {
+        self.sector_map().map(|sectors| {
             let area = sectors.area(rect);
             sectors.object_ids_in_area(&area)
         })
     }
 
     fn shape_sector_ids_in_rect(&self, rect: DefinitionRect) -> Option<Vec<ObjectId>> {
-        self.sectors.as_ref().map(|sectors| {
+        self.sector_map().map(|sectors| {
             let area = sectors.area(rect);
             sectors.shape_ids_in_area(&area)
         })
@@ -629,17 +672,20 @@ impl HostWorldContext {
     }
 }
 
-fn build_host_sector_map(
-    objects: &[HostWorldObject],
+fn build_host_sector_map<'a, I>(
+    objects: I,
     definitions: &HashMap<DefinitionId, DefinitionMetadata>,
     landscape: &Landscape,
-) -> SectorMap {
+) -> SectorMap
+where
+    I: IntoIterator<Item = &'a HostWorldObject>,
+{
     let width = i32::try_from(landscape.width()).unwrap_or(i32::MAX);
     let height = landscape.estimated_height();
     let mut sectors = SectorMap::new(width, height);
     sectors.rebuild(
         objects
-            .iter()
+            .into_iter()
             .filter_map(|object| host_sector_record(object, definitions)),
     );
     sectors

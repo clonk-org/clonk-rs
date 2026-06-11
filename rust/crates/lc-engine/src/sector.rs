@@ -90,8 +90,35 @@ impl SectorMap {
         self.memberships.clear();
         self.order.clear();
         self.ranks.clear();
+        // Records arrive in object order, so every id gets a rank above all
+        // ids already present and the rank-ordered insert position is always
+        // the tail — push directly instead of paying `add`'s O(len) scans
+        // per sector list (rebuild runs per host-context build; the scans
+        // made it quadratic in the object count).
         for record in records {
-            self.add(record);
+            if self.memberships.contains_key(&record.id) {
+                self.remove(record.id);
+            }
+            if !self.ranks.contains_key(&record.id) {
+                let rank = self.order.len();
+                self.order.push(record.id);
+                self.ranks.insert(record.id, rank);
+            }
+
+            let point_sector = self.sector_at(record.position.x, record.position.y);
+            self.sector_mut(point_sector).objects.push(record.id);
+
+            let area = self.area(record.shape_rect);
+            for key in area.iter() {
+                self.sector_mut(key).object_shapes.push(record.id);
+            }
+            self.memberships.insert(
+                record.id,
+                SectorMembership {
+                    position: record.position,
+                    area,
+                },
+            );
         }
     }
 

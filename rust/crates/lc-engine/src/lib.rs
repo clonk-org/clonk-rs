@@ -7385,6 +7385,11 @@ struct ScenarioBatch {
 
 pub struct Engine {
     definitions: HashMap<DefinitionId, Definition>,
+    /// Shared metadata view of `definitions` for host contexts; definitions
+    /// only change while loading, so this is built once and dropped on any
+    /// definition mutation (host contexts are built per script callback and
+    /// re-cloning every ActionLibrary there dominated tick time).
+    definition_metadata_cache: std::cell::RefCell<Option<Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>>>,
     materials: MaterialSet,
     objects: Vec<Object>,
     next_object_id: u64,
@@ -8615,6 +8620,7 @@ impl Engine {
     pub fn with_seed(seed: u64) -> Self {
         let mut engine = Self {
             definitions: HashMap::new(),
+            definition_metadata_cache: std::cell::RefCell::new(None),
             materials: MaterialSet::default(),
             objects: Vec::new(),
             next_object_id: 1,
@@ -9251,30 +9257,41 @@ impl Engine {
         }
     }
 
+    fn definition_metadata_table(&self) -> Rc<HashMap<DefinitionId, DefinitionMetadata>> {
+        let mut cache = self.definition_metadata_cache.borrow_mut();
+        if let Some(table) = cache.as_ref() {
+            return Rc::clone(table);
+        }
+        let table: Rc<HashMap<DefinitionId, DefinitionMetadata>> = Rc::new(
+            self.definitions
+                .iter()
+                .map(|(id, definition)| {
+                    (
+                        id.clone(),
+                        DefinitionMetadata {
+                            category: definition.category(),
+                            ocf_base: definition.ocf_base(),
+                            crew_member: definition.is_crew(),
+                            action_library: definition.action_library().clone(),
+                            value: definition.value(),
+                            mass: definition.mass(),
+                            constructable: definition.is_constructable(),
+                            shape: definition.shape_rect(),
+                            construction_offset: definition.construction_offset(),
+                            basement: definition.basement(),
+                            physical: *definition.physical(),
+                        },
+                    )
+                })
+                .collect(),
+        );
+        *cache = Some(Rc::clone(&table));
+        table
+    }
+
     fn host_world_context(&self) -> HostWorldContext {
         let landscape = self.landscape.clone();
-        let definition_metadata: HashMap<DefinitionId, DefinitionMetadata> = self
-            .definitions
-            .iter()
-            .map(|(id, definition)| {
-                (
-                    id.clone(),
-                    DefinitionMetadata {
-                        category: definition.category(),
-                        ocf_base: definition.ocf_base(),
-                        crew_member: definition.is_crew(),
-                        action_library: definition.action_library().clone(),
-                        value: definition.value(),
-                        mass: definition.mass(),
-                        constructable: definition.is_constructable(),
-                        shape: definition.shape_rect(),
-                        construction_offset: definition.construction_offset(),
-                        basement: definition.basement(),
-                        physical: *definition.physical(),
-                    },
-                )
-            })
-            .collect();
+        let definition_metadata = self.definition_metadata_table();
         let transfer_zones = self.transfer_zones.states();
         let players: HashMap<i32, PlayerState> = self
             .players
@@ -9286,7 +9303,7 @@ impl Engine {
             .iter()
             .map(|(&owner, selection)| (owner, CrewSelectionState::from(selection)))
             .collect();
-        HostWorldContext::with_landscape(
+        HostWorldContext::with_landscape_shared(
             self.objects.iter().map(|object| {
                 let definition = self.definitions.get(&object.definition_id);
                 let procedure = definition
@@ -10373,6 +10390,7 @@ impl Engine {
         let mut definition = definition;
         definition.set_global_functions(self.global_script_functions.clone());
         self.definitions.insert(id, definition);
+        self.definition_metadata_cache.borrow_mut().take();
         Ok(())
     }
 
@@ -10430,6 +10448,7 @@ impl Engine {
     }
 
     pub fn resolve_includes(&mut self) -> Result<(), EngineError> {
+        self.definition_metadata_cache.borrow_mut().take();
         // Iteratively merge includes until no more changes occur
         // This ensures transitive dependencies are fully resolved
         // (e.g., TRE2 -> TRE1 -> TREE means TRE2 gets functions from TREE)

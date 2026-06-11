@@ -387,10 +387,27 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         .register_player(lc_engine::PlayerConfig::new(0, "Tester"))
         .map_err(|error| anyhow!("register_player failed: {error}"))?;
 
+    tracing::info!(
+        objects = engine.snapshot().objects.len(),
+        "scenario-errors: applied"
+    );
     for frame in 0..ticks {
-        if let Err(error) = engine.tick() {
-            tracing::error!(frame, %error, "tick failed");
-            break;
+        let started = std::time::Instant::now();
+        match engine.tick() {
+            Ok(snapshot) => {
+                if frame % 10 == 0 || started.elapsed().as_millis() > 500 {
+                    tracing::info!(
+                        frame,
+                        objects = snapshot.objects.len(),
+                        ms = started.elapsed().as_millis(),
+                        "tick"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::error!(frame, %error, "tick failed");
+                break;
+            }
         }
     }
     tracing::info!("scenario-errors: done ({ticks} ticks)");
