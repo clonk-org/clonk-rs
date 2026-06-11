@@ -169,7 +169,13 @@ full-scenario shadow-diff (see Parity harnesses).
   `cargo xtask parity record`. See `parity/README.md`.
 - **`cargo xtask engine-snapshots verify`** — Rust-vs-Rust determinism
   *regression* check only (NOT a parity check).
-- **Phase 2 (recon done 2026-06-11; end-to-end run OPEN, task #22)** — the
+- **Phase 2 LIVE (2026-06-11, commit 4b5ee060)** — the shadow-diff runs
+  end-to-end: `LC_RUST_ENGINE_RUNTIME=1 build-x86/.../clonk <scenario>
+  <player.c4p>` shadows a live Rust runtime per frame and logs the first
+  divergence to Clonk.log. FIRST HARVEST (GoldRush): 'object count
+  mismatch (expected 737, got 810)' — the runtime lacks the player-join
+  pipeline (task #23). Build runbook in the commit message. Previous recon
+  (now superseded) — the
   bridge ALREADY implements live shadow execution AND divergence reporting:
   `LC_RUST_ENGINE_RUNTIME=1` advances a Rust engine per frame and
   `lc_engine_runtime_compare_snapshot` diffs every snapshot field, logging
