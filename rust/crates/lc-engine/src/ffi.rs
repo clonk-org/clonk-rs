@@ -899,6 +899,17 @@ unsafe fn make_snapshot(
             command_queue: Vec::new(),
             command_stack: CommandStackSnapshot::default(),
             local_vars: HashMap::new(),
+            // Not carried by the C ABI snapshot yet — extend
+            // LcEngineObjectSnapshot + the bridge's CollectSnapshotBuffer
+            // before the shadow-diff compares these fields (task #22).
+            on_fire: false,
+            fire_phase: 0,
+            fire_caused_by: crate::OWNER_NONE,
+            info_physical: None,
+            temporary_physical: None,
+            physical_changes: Vec::new(),
+            breath: 0,
+            last_energy_loss_cause: crate::OWNER_NONE,
             fixed_position: optional_fixed_vec(
                 entry.fixed_position_x,
                 entry.fixed_position_y,
@@ -948,6 +959,8 @@ unsafe fn make_snapshot(
             life: entry.life,
             parameter_a: entry.parameter_a,
             parameter_b: entry.parameter_b,
+            // Not carried by the C ABI snapshot yet (task #22).
+            pxs_fixed: None,
             layer,
         });
     }
