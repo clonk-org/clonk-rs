@@ -10524,6 +10524,50 @@ impl Engine {
         function: &'static str,
         mut extra_args: Vec<Value>,
     ) -> Result<(), EngineError> {
+        // C4GameScriptHost::GRBroadcast (C4ScriptHost.cpp:234-249): every
+        // live object with a C4D_Goal|C4D_Rule|C4D_Environment category bit
+        // is called FIRST ("call objects first - scenario script might
+        // overwrite hostility, etc."), results discarded; the scenario
+        // script runs after. Object-call errors log-and-continue
+        // (fPassError defaults false).
+        const BROADCAST_MASK: i32 = (1 << 5) | (1 << 6) | (1 << 19);
+        let broadcast_targets: Vec<usize> = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, object)| {
+                !object.destroyed
+                    && object.state.status.is_active()
+                    && object.state.category & BROADCAST_MASK != 0
+            })
+            .map(|(index, _)| index)
+            .collect();
+        for index in broadcast_targets {
+            // The C++ loop re-checks Status against the live list — an
+            // earlier broadcast call may have removed the object.
+            if self.objects[index].destroyed || !self.objects[index].state.status.is_active() {
+                continue;
+            }
+            let definition_id = self.objects[index].definition_id.clone();
+            // A missing function is no error (GetSFunc miss → C4Value()).
+            let has_function = self
+                .definitions
+                .get(&definition_id)
+                .map(|definition| definition.has_function(function))
+                .unwrap_or(false);
+            if !has_function {
+                continue;
+            }
+            if let Err(error) = self.call_object_function(index, function, extra_args.clone()) {
+                tracing::warn!(
+                    definition = %definition_id,
+                    function,
+                    %error,
+                    "script error in engine callback; continuing like the C++ fail-safe exec"
+                );
+            }
+        }
+
         if self.scenario_script.is_none() {
             return Ok(());
         }

@@ -6043,6 +6043,65 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn join_broadcasts_initialize_player_to_rule_objects_like_cpp() {
+        // C4GameScriptHost::GRBroadcast (C4ScriptHost.cpp:234-249): every
+        // live object with a C4D_Goal|C4D_Rule|C4D_Environment category bit
+        // is called BEFORE the scenario script. The join path broadcasts
+        // PSF_InitializePlayer this way (C4Player.cpp:769-775) — GoldRush's
+        // TeamAccount rule creates the per-player ACNT from it
+        // (TeamAccount.c4d/Script.c InitializePlayer).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "global func Initialize() {\n\
+                 CreateObject(RULZ, 0, 0, -1);\n\
+                 return 1;\n\
+             }\n",
+        );
+        let rule = dir.path().join("Defs.c4d/Rule.c4d");
+        std::fs::create_dir_all(&rule).expect("rule dir");
+        std::fs::write(
+            rule.join("DefCore.txt"),
+            "[DefCore]\nid=RULZ\nName=Rule\nCategory=524288\nCrewMember=0\n",
+        )
+        .expect("write rule defcore");
+        std::fs::write(
+            rule.join("Script.c"),
+            "#strict\nlocal iJoined;\n\
+             public func InitializePlayer(iPlr) {\n\
+                 iJoined = iPlr + 1;\n\
+                 CreateObject(GOOD, 60, 60, iPlr);\n\
+                 return 1;\n\
+             }\n",
+        )
+        .expect("write rule script");
+
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        join_test_player(&mut engine);
+        let snapshot = engine.snapshot();
+        let rule_object = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "RULZ")
+            .expect("rule object created");
+        assert_eq!(
+            rule_object.local_vars.get("iJoined"),
+            Some(&lc_script::Value::Int(1)),
+            "the rule object's InitializePlayer ran for the joining player \
+             (GRBroadcast, C4ScriptHost.cpp:234-249)"
+        );
+        assert!(
+            snapshot
+                .objects
+                .iter()
+                .any(|object| object.definition_id == "GOOD" && object.owner == 0),
+            "the rule's InitializePlayer created its per-player object \
+             (the TeamAccount ACNT pattern)"
+        );
+    }
+
+    #[test]
     fn effect_callbacks_run_in_the_command_targets_object_context_like_cpp() {
         // Every effect callback executes with the effect's command target
         // as object context: pFn->Exec(pCommandTarget, ...)
