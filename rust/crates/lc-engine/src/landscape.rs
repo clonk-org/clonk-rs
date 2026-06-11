@@ -586,6 +586,13 @@ impl Landscape {
         if x < 0 || x as u32 >= self.width {
             return C4M_VEHICLE;
         }
+        // BottomOpen defaults to false (C4SLandscape::Default): below the
+        // landscape the border reads vehicle-solid like the closed sides
+        // (the C++ GetPix border rules, C4Landscape.h:144-161). Without
+        // this, content loops that walk downward until solid never end.
+        if y >= self.estimated_height() {
+            return C4M_VEHICLE;
+        }
         match self.material_at(x, y) {
             Some(material_id) => materials
                 .get_by_id(material_id)
@@ -897,6 +904,19 @@ impl Landscape {
     }
 
     pub fn is_solid_at(&self, x: i32, y: i32) -> bool {
+        // The C++ GetPix border rules (C4Landscape.h:144-161, defaults from
+        // C4SLandscape::Default): the top is open, the sides and bottom are
+        // closed (MCVehic — solid). Without these, script loops that walk
+        // until solid never terminate outside the landscape.
+        if y < 0 {
+            return false;
+        }
+        if x < 0 || x as u32 >= self.width {
+            return true;
+        }
+        if y >= self.estimated_height() {
+            return true;
+        }
         match self.surface_height(x) {
             Some(surface_y) => y >= surface_y,
             None => false,

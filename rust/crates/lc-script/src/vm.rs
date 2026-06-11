@@ -919,6 +919,24 @@ impl<'a> Vm<'a> {
                     // Extract function name from callee expression
                     match callee.as_ref() {
                         Expr::Variable(name) => {
+                            // Old-style constant calls: below #strict 2, a
+                            // global constant used as `OCF_Chop()` yields the
+                            // constant with the call parens ignored
+                            // (C4AulParse.cpp:2838-2860, "old-style usage").
+                            if env.strict_level.unwrap_or(0) < 2
+                                && !self.functions.contains_key(name)
+                                && !self
+                                    .global_functions
+                                    .map(|functions| functions.contains_key(name))
+                                    .unwrap_or(false)
+                                && !self.host_functions.contains_key(name)
+                            {
+                                if let Some(value) =
+                                    self.constants.and_then(|constants| constants.get(name))
+                                {
+                                    return Ok(value.clone());
+                                }
+                            }
                             let function = self.functions.get(name);
                             let evaluated_args =
                                 self.build_call_args(function, args, env, depth + 1)?;

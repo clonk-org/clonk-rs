@@ -281,6 +281,23 @@ impl Scenario {
         let mut collected = Vec::new();
         let mut seen_ids = HashSet::new();
 
+        // The scenario group itself is a definition source: every .c4d
+        // child is a scenario-local definition, loaded with override
+        // priority over the packs (C4Game::InitDefs loads the scenario
+        // last with fOverload; first-wins dedup here gives the same
+        // outcome by collecting locals first).
+        for entry in group.entries()? {
+            if !entry.is_directory {
+                continue;
+            }
+            let name = entry.relative_path.to_string_lossy().to_ascii_lowercase();
+            if !(name.ends_with(".c4d") || name.ends_with(".ocd") || name.ends_with(".ocg")) {
+                continue;
+            }
+            let child = group.open_child(&entry.relative_path)?;
+            collect_definitions_from_group(&child, &mut seen_ids, &mut collected)?;
+        }
+
         for spec in &manifest.definition_specs {
             let groups = resolver.resolve_definition_groups(group, spec)?;
             if groups.is_empty() {
@@ -307,22 +324,6 @@ impl Scenario {
 
         if collected.is_empty() {
             return Err(ScenarioError::NoDefinitions);
-        }
-
-        // Load scenario-local definitions from Locals.c4d (or Locals.ocd/Locals.ocg)
-        // Support case-insensitive matching for the folder name
-        for locals_name in &[
-            "Locals.c4d",
-            "Locals.ocd",
-            "Locals.ocg",
-            "locals.c4d",
-            "locals.ocd",
-            "locals.ocg",
-        ] {
-            if let Ok(locals_group) = group.open_child(locals_name) {
-                collect_definitions_from_group(&locals_group, &mut seen_ids, &mut collected)?;
-                break; // Only process the first matching Locals folder
-            }
         }
 
         let script = load_legacy_scenario_script(group)?;
@@ -539,12 +540,47 @@ impl Scenario {
             }
 
             if !progress {
-                let culprit = pending
-                    .first()
-                    .and_then(|spawn| spawn.container_handle.clone())
-                    .or_else(|| pending.first().and_then(|spawn| spawn.handle.clone()))
-                    .unwrap_or_default();
-                return Err(ScenarioError::ContainerDependencyCycle(culprit));
+                // C++ creates every object first and resolves Contained by
+                // number afterwards (denumeration): a container that never
+                // materializes — e.g. its definition was skipped — leaves
+                // the contents uncontained, never a failure.
+                let producible: HashSet<String> = pending
+                    .iter()
+                    .filter_map(|spawn| spawn.handle.clone())
+                    .collect();
+                let mut cleared = false;
+                for spawn in pending.iter_mut() {
+                    let orphaned = spawn
+                        .container_handle
+                        .as_deref()
+                        .map(|handle| !producible.contains(handle))
+                        .unwrap_or(false);
+                    if orphaned {
+                        tracing::warn!(
+                            container = spawn.container_handle.as_deref().unwrap_or_default(),
+                            "container never materialized; placing the object uncontained \
+                             (C++ denumerates missing containers to null)"
+                        );
+                        spawn.container_handle = None;
+                        cleared = true;
+                    }
+                }
+                if !cleared {
+                    // A genuine containment cycle: C++'s two-phase
+                    // denumeration would keep the mutual containment; the
+                    // sequential spawn model breaks one edge instead
+                    // (documented divergence).
+                    if let Some(spawn) = pending.first_mut() {
+                        tracing::warn!(
+                            container = spawn.container_handle.as_deref().unwrap_or_default(),
+                            "containment cycle broken by placing one object uncontained \
+                             (C++ keeps mutual containment via denumeration)"
+                        );
+                        spawn.container_handle = None;
+                    } else {
+                        break;
+                    }
+                }
             }
         }
 
@@ -2394,11 +2430,25 @@ fn load_legacy_landscape(
         .and_then(|value| parse_legacy_bool(&value))
         .unwrap_or(false);
 
-    let map_bytes = match group.read_file("Map.bmp") {
-        Ok(bytes) => Some(bytes),
-        Err(GroupError::EntryNotFound(_)) => None,
-        Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(ScenarioError::Resources(error)),
+    let read_optional = |name: &str| match group.read_file(name) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(GroupError::EntryNotFound(_)) => Ok(None),
+        Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ScenarioError::Resources(error)),
+    };
+
+    // ExactLandscape: Landscape.bmp IS the landscape — C++ reads it
+    // straight into the pixel surface (GroupReadSurface8), so it decodes
+    // at pixel scale (zoom 1) here. Returning no landscape would leave
+    // GBackSolid answering "never solid" and hang placement loops in real
+    // content (Grass.c4d Initialize).
+    let (map_bytes, map_zoom_u32) = if exact_landscape {
+        match read_optional("Landscape.bmp")? {
+            Some(bytes) => (Some(bytes), 1),
+            None => (read_optional("Map.bmp")?, map_zoom_u32),
+        }
+    } else {
+        (read_optional("Map.bmp")?, map_zoom_u32)
     };
 
     if let Some(bytes) = map_bytes {
@@ -2413,41 +2463,37 @@ fn load_legacy_landscape(
 
         let map_zoom_i32 = map_zoom_u32 as i32;
         let sky_pixel = rgba.get_pixel(0, 0).0;
+        let world_height = (height as i32).saturating_mul(map_zoom_i32).max(0);
         let capacity = (width as usize).saturating_mul(map_zoom_u32 as usize);
-        let mut heights = Vec::with_capacity(capacity);
+        let mut surfaces = Vec::with_capacity(capacity);
 
         for x in 0..width {
-            let mut column_height_world: Option<i32> = None;
-            for y in 0..height {
-                if rgba.get_pixel(x, y).0 != sky_pixel {
-                    let pixels = (height - y) as i32;
-                    column_height_world = Some(pixels.saturating_mul(map_zoom_i32));
-                    break;
-                }
-            }
-
-            let world_height = column_height_world
-                .or_else(|| manifest.ground_height_hint.map(|hint| hint.max(0)))
-                .or_else(|| map_height_hint.map(|value| value.saturating_mul(map_zoom_i32).max(0)))
-                .unwrap_or_else(|| (height as i32).saturating_mul(map_zoom_i32).max(0));
+            // The landscape column model stores the SURFACE Y coordinate
+            // (solid from `y >= surface`): the first non-sky map row, zoomed.
+            // An all-sky column has no solid (surface at the world bottom).
+            let surface_world = (0..height)
+                .find(|&y| rgba.get_pixel(x, y).0 != sky_pixel)
+                .map(|y| (y as i32).saturating_mul(map_zoom_i32))
+                .unwrap_or(world_height);
 
             for _ in 0..map_zoom_u32 {
-                heights.push(world_height);
+                surfaces.push(surface_world);
             }
         }
 
-        if heights.iter().all(|&value| value <= 0) {
-            let fallback = manifest
+        if surfaces.iter().all(|&surface| surface >= world_height) {
+            // No solid anywhere (the whole map read as sky): fall back to a
+            // ground level from the hints so the world has a floor.
+            let ground_height = manifest
                 .ground_height_hint
-                .or_else(|| map_height_hint.map(|value| value.saturating_mul(map_zoom_i32).max(0)))
-                .unwrap_or((height as i32).saturating_mul(map_zoom_i32).max(0));
-            if fallback > 0 {
-                heights.fill(fallback);
-            }
+                .map(|hint| hint.max(0))
+                .unwrap_or(0);
+            let surface = (world_height - ground_height).max(0);
+            surfaces.fill(surface);
         }
 
         let final_width = width.saturating_mul(map_zoom_u32);
-        let landscape = Landscape::new(final_width, heights)
+        let landscape = Landscape::new(final_width, surfaces)
             .map_err(|error| ScenarioError::InvalidLandscape(error.to_string()))?;
         return Ok(Some(landscape));
     }
@@ -4725,7 +4771,11 @@ Objects=STNE=1;TREE=1
     }
 
     #[test]
-    fn container_cycles_error_when_applying() {
+    fn container_cycles_degrade_to_partial_containment() {
+        // C++ resolves Contained by two-phase denumeration, so mutual
+        // containment loads without error. The sequential spawn model
+        // breaks ONE edge (documented divergence) — both objects must
+        // exist, with one containment intact.
         let dir = tempdir().expect("tempdir");
         let manifest = r#"
         {
@@ -4747,13 +4797,16 @@ Objects=STNE=1;TREE=1
 
         let scenario = Scenario::load_from_path(dir.path()).expect("scenario loads");
         let mut engine = Engine::with_seed(0);
-        let error = scenario.apply(&mut engine).expect_err("apply fails");
-        match error {
-            ScenarioError::ContainerDependencyCycle(handle) => {
-                assert!(handle == "crate" || handle == "barrel")
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        let created = scenario
+            .apply(&mut engine)
+            .expect("apply degrades the cycle");
+        assert_eq!(created.len(), 2, "both cycle members spawn");
+        let contained_count = created
+            .iter()
+            .filter_map(|id| engine.object_snapshot(*id))
+            .filter(|snapshot| snapshot.container.is_some())
+            .count();
+        assert_eq!(contained_count, 1, "one containment edge survives");
     }
 
     #[test]
@@ -5483,6 +5536,78 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn scenario_local_definition_children_load_and_override_packs() {
+        // C++ loads the scenario group itself as the LAST definition source
+        // with fOverload (C4Game::InitDefs): any .c4d child of the .c4s is
+        // a definition, and it overrides same-id pack definitions
+        // (Drachenfels.c4s carries Chest.c4d/_CST and friends directly).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        // A local def new to the scenario...
+        let local = scenario_dir.join("Thing.c4d");
+        std::fs::create_dir_all(&local).expect("local def dir");
+        std::fs::write(
+            local.join("DefCore.txt"),
+            "[DefCore]\nid=THNG\nName=Thing\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write local defcore");
+        std::fs::write(local.join("Script.c"), "func Tag() { return 5; }\n")
+            .expect("write local script");
+        // ...and a local override of the pack's GOOD definition.
+        let shadow = scenario_dir.join("Good.c4d");
+        std::fs::create_dir_all(&shadow).expect("shadow def dir");
+        std::fs::write(
+            shadow.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=LocalGood\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write shadow defcore");
+        std::fs::write(shadow.join("Script.c"), "// local override\n")
+            .expect("write shadow script");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=THNG\nNumber=10\nStatus=1\nCategory=0\nX=10\nY=20\n",
+        )
+        .expect("write objects");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert!(
+            engine.object_snapshot(ObjectId::new(10)).is_some(),
+            "the local-child definition resolved for Objects.txt"
+        );
+        assert_eq!(
+            engine
+                .definitions
+                .get("GOOD")
+                .map(|definition| definition.name().to_string()),
+            Some("LocalGood".to_string()),
+            "the scenario-local definition overrides the pack's (fOverload)"
+        );
+    }
+
+    #[test]
+    fn orphan_container_references_spawn_uncontained_like_cpp() {
+        // C++ creates all Objects.txt objects first and resolves Contained
+        // by number afterwards (denumeration): a missing container leaves
+        // the object uncontained — never a load failure. Drachenfels/
+        // Hammerfest hit this when a container's definition is skipped.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=GOOD\nNumber=10\nStatus=1\nCategory=0\nX=10\nY=20\nContained=999\n",
+        )
+        .expect("write objects");
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let snapshot = engine
+            .object_snapshot(ObjectId::new(10))
+            .expect("the object spawned");
+        assert_eq!(
+            snapshot.container, None,
+            "missing container resolves to uncontained (nullptr denumeration)"
+        );
+    }
+
+    #[test]
     fn objects_txt_unknown_definitions_are_skipped_like_cpp() {
         // C++ creates Objects.txt objects via C4Id2Def per entry; an unknown
         // id simply produces no object (logged), the rest of the scenario
@@ -5834,6 +5959,47 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn exact_landscape_bmp_loads_at_pixel_scale() {
+        // ExactLandscape=1: Landscape.bmp IS the landscape — C++ reads it
+        // straight into the pixel surface (GroupReadSurface8, no MapZoom).
+        // The heightfield model reduces it to the column profile at zoom 1;
+        // returning NO landscape here left GBackSolid answering "never
+        // solid" and hung content like the grass placement loop
+        // (Knights.c4f/Dunkelfels.c4s + Grass.c4d Initialize).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Exact\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Good=1\nPosition=4,2\n\n[Landscape]\nExactLandscape=1\n",
+        )
+        .expect("write scenario core");
+        let mut bitmap = RgbaImage::from_pixel(8, 6, Rgba([0, 0, 255, 255]));
+        for y in 2..6 {
+            for x in 0..8 {
+                bitmap.put_pixel(x, y, Rgba([128, 64, 32, 255]));
+            }
+        }
+        let raw = bitmap.into_raw();
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = BmpEncoder::new(&mut encoded);
+            encoder
+                .encode(&raw, 8, 6, ColorType::Rgba8)
+                .expect("encode landscape bmp");
+        }
+        std::fs::write(scenario_dir.join("Landscape.bmp"), encoded).expect("write landscape");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let landscape = engine.landscape().expect("exact landscape loads");
+        assert_eq!(landscape.width(), 8, "pixel scale: no MapZoom applied");
+        assert_eq!(
+            landscape.surface(),
+            vec![2; 8].as_slice(),
+            "the surface Y coordinate is the first ground row"
+        );
+    }
+
+    #[test]
     fn legacy_map_bmp_creates_landscape_height_profile() {
         let dir = tempdir().expect("tempdir");
 
@@ -5882,12 +6048,13 @@ global func Step(state, frame, random)
 
         let landscape = engine.landscape().expect("landscape present");
         // MapZoom=2 clamps to the C4SVal Min of 5 (C4Scenario.cpp:307,353):
-        // 4 map columns × zoom 5 = 20 landscape columns.
+        // 4 map columns × zoom 5 = 20 landscape columns; ground starts at
+        // map row 1 → surface Y = 5.
         assert_eq!(landscape.width(), 20);
         assert_eq!(
             landscape.surface(),
-            vec![15; 20].as_slice(),
-            "expected map zoom to scale surface heights"
+            vec![5; 20].as_slice(),
+            "the surface Y coordinate scales with the zoom"
         );
     }
 
