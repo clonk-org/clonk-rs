@@ -59,21 +59,25 @@ Facet/Directions/FlipDir); tick performance (see below); full-fidelity
 definition apply (from_resource path) + DefCore key fixes (#15); #appendto
 linking (#16).
 
-### Tick performance (task #18 DONE; follow-up #19)
+### Tick performance (tasks #18, #19 DONE; follow-up #20)
 
-GoldRush ticks: 37s → 2.2s (commit 8168a0cb: tail-push sector rebuild,
-lazy host sector map, cached definition-metadata table) → **0.20s**
-(commit 50775f1d: contact-callback snapshots and Step calls gated on
-ContactCalls=1/has_step, generation-stamped id→index map for
-find_object_index, per-definition SolidMask pixel extraction shared via
-Rc, cached-key rank sorts). Remaining ~90% of the 200ms is
-cross_check_reverse_area_pass area queries — and a PARITY question
-discovered there: C++ CrossCheck pass 2 enumerates area sectors
-sector-by-sector with a Marker (C4GameObjects.cpp:163-165) while our
-object_ids_in_area sorts globally by rank; if the orders differ, pair
-order → RNG order → lockstep divergence. Task #19 pins the C++ order
-with a differential test first — the faithful fix (walk sector lists
-directly, no per-query sort) is also the perf win.
+GoldRush ticks: 37s → 2.2s (8168a0cb) → 0.20s (50775f1d) → **~0.12s**
+(c0d81626). The #19 finding was a real LOCKSTEP fix, not just perf: area
+queries returned candidates in an invented GLOBAL rank sort, while C++
+enumerates area sectors row-major with the outside-sector last
+(C4LArea::Next, C4Sector.cpp:264-277), each list rank-ordered within,
+first-encounter Marker dedup (C4GameObjects.cpp:155-165,
+C4FindObject.cpp:325-353) — affecting CrossCheck pair order (→ RNG
+stream) AND script-visible FindObjects result arrays. Fixed + pinned by
+tests (one old test had enshrined the invented order and was re-pinned
+to C++). CrossCheck inner loops also reuse obj1*s stable index instead
+of re-resolving per candidate.
+
+OPEN (task #20): OCF timing parity — C4Object::UpdateOCF runs once at
+Execute-start (C4Object.cpp:1058, plus the FnCollect refresh,
+C4Script.cpp:395-400) and ALL C++ readers use the cached obj->OCF; we
+recompute at read time (timing divergence + ~15% of the remaining
+tick).
 
 ## State: broadly scaffolded, not yet lockstep-parity-capable
 
