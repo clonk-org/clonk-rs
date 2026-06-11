@@ -7513,7 +7513,9 @@ fn evaluate_landscape_query(
     match landscape {
         Some(landscape) => match query {
             LandscapeQuery::Solid => landscape.is_solid_at(x, y),
-            LandscapeQuery::SemiSolid => landscape.is_solid_at(x, y),
+            // GBackSemiSolid = density >= C4M_SemiSolid(25), which liquids
+            // satisfy (C4Wrappers.h:73-76, C4Material.h:202).
+            LandscapeQuery::SemiSolid => landscape.is_semi_solid_at(x, y),
             LandscapeQuery::Liquid => landscape.is_liquid_at(x, y),
             LandscapeQuery::Sky => !landscape.is_solid_at(x, y),
         },
@@ -14752,6 +14754,50 @@ mod tests {
         });
         let value = result.expect("GBackSolid without landscape succeeds");
         assert_eq!(value, Value::Bool(false));
+    }
+
+    #[test]
+    fn g_back_semi_solid_counts_liquids_like_cpp() {
+        // GBackSemiSolid = DensitySemiSolid(GBackDensity) = density >=
+        // C4M_SemiSolid(25) (C4Wrappers.h:73-76, C4Material.h:202): water
+        // is semi-solid but NOT solid.
+        let mut landscape = Landscape::flat(32, 20);
+        landscape.set_liquid_column(
+            5,
+            vec![crate::landscape::LiquidSegment {
+                top: 10,
+                bottom: 19,
+                material: None,
+            }],
+        );
+        let world = || {
+            HostWorldContext::with_landscape(
+                Vec::<HostWorldObject>::new(),
+                Some(landscape.clone()),
+                HashMap::new(),
+                Vec::new(),
+                HashMap::new(),
+                HashMap::new(),
+                1,
+                false,
+            )
+        };
+        let (semi, _) = with_effect_context(None, &[], world(), 1, || {
+            g_back_semi_solid(&[Value::Int(5), Value::Int(15)])
+        });
+        assert_eq!(
+            semi.expect("GBackSemiSolid succeeds"),
+            Value::Bool(true),
+            "water is semi-solid"
+        );
+        let (solid, _) = with_effect_context(None, &[], world(), 1, || {
+            g_back_solid(&[Value::Int(5), Value::Int(15)])
+        });
+        assert_eq!(
+            solid.expect("GBackSolid succeeds"),
+            Value::Bool(false),
+            "water is not solid"
+        );
     }
 
     #[test]
