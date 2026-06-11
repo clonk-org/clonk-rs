@@ -74,8 +74,10 @@ fn legacy_scenario_loads_map_objects_and_definitions() -> Result<(), Box<dyn std
     scenario.apply(&mut engine)?;
 
     let landscape = engine.landscape().expect("legacy Map.bmp should load");
-    assert_eq!(landscape.width(), 4);
-    assert_eq!(landscape.surface_height(0), Some(3));
+    // No MapZoom key → the C4S default of 10 (C4Scenario.cpp:307,353):
+    // 4 map columns × 10, surface heights scale with the zoom.
+    assert_eq!(landscape.width(), 40);
+    assert_eq!(landscape.surface_height(0), Some(30));
 
     assert!(engine.definition_ids().any(|id| id == "TEST"));
     let snapshot = engine.snapshot();

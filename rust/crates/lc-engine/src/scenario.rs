@@ -2272,9 +2272,54 @@ fn collect_initial_spawns(
             }
         });
 
-        for (_, value) in entries.iter().filter(|(key, _)| {
-            key.eq_ignore_ascii_case("Crew") || key.eq_ignore_ascii_case("Clonks")
-        }) {
+        // `StandardCrew=` names the native crew def and `Clonks=` is its
+        // C4SVal COUNT (C4SPlrStart: NativeCrew + Crew C4SVal(1,0,1,10),
+        // C4Scenario.cpp:261,278-279) — NOT a crew-ID list. The count uses
+        // Std bounded to [Min,Max]; the synced Evaluate draw waits on the
+        // player-join port.
+        let standard_crew = entries
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("StandardCrew"))
+            .map(|(_, value)| value.trim())
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("None"));
+        if let Some(token) = standard_crew {
+            let count = entries
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("Clonks"))
+                .and_then(|(key, value)| {
+                    parse_legacy_c4s_value(key, value, LegacyC4SVal::new(1, 0, 1, 10)).ok()
+                })
+                .unwrap_or(LegacyC4SVal::new(1, 0, 1, 10))
+                .base()
+                .max(0);
+            match find_definition_by_token(definitions, token) {
+                Some(definition) => {
+                    for _ in 0..count {
+                        let mut config = SpawnConfig::new(&definition.id)
+                            .with_owner(owner)
+                            .with_crew_member(true);
+                        if let Some(position) = position {
+                            config = config.with_position(position);
+                        }
+                        spawns.push(ScenarioSpawn {
+                            handle: None,
+                            container_handle: None,
+                            config,
+                        });
+                    }
+                }
+                None => tracing::warn!(
+                    section = section_name,
+                    definition = token,
+                    "StandardCrew names an unknown definition; no native crew placed"
+                ),
+            }
+        }
+
+        for (_, value) in entries
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("Crew"))
+        {
             for (token, count) in parse_crew_entries(value) {
                 let definition = find_definition_by_token(definitions, &token)
                     .ok_or_else(|| ScenarioError::UnknownDefinition(token.clone()))?;
@@ -2298,17 +2343,24 @@ fn collect_initial_spawns(
     Ok(spawns)
 }
 
+/// `[Landscape] MapZoom` with the C4S default `C4SVal(10, 0, 5, 15)`
+/// (C4Scenario.cpp:307,353), Std bounded to [Min, Max] like Evaluate.
+fn legacy_map_zoom(section: Option<&Vec<(String, String)>>) -> u32 {
+    let default = LegacyC4SVal::new(10, 0, 5, 15);
+    section
+        .and_then(|entries| find_entry(entries, "mapzoom"))
+        .and_then(|raw| parse_legacy_c4s_value("MapZoom", &raw, default).ok())
+        .unwrap_or(default)
+        .base()
+        .max(1) as u32
+}
+
 fn load_legacy_landscape(
     group: &Group,
     manifest: &LegacyScenarioManifest,
 ) -> Result<Option<Landscape>, ScenarioError> {
     let landscape_section = manifest.sections.get("landscape");
-    let map_zoom_value = landscape_section
-        .and_then(|entries| find_entry(entries, "mapzoom"))
-        .and_then(|value| parse_c4sval_std(&value))
-        .unwrap_or(1)
-        .max(1);
-    let map_zoom_u32 = map_zoom_value as u32;
+    let map_zoom_u32 = legacy_map_zoom(landscape_section);
     let map_width_hint = landscape_section
         .and_then(|entries| find_entry(entries, "mapwidth"))
         .and_then(|value| parse_c4sval_std(&value))
@@ -2339,7 +2391,7 @@ fn load_legacy_landscape(
             return Err(ScenarioError::LegacyMapEmpty);
         }
 
-        let map_zoom_i32 = map_zoom_value;
+        let map_zoom_i32 = map_zoom_u32 as i32;
         let sky_pixel = rgba.get_pixel(0, 0).0;
         let capacity = (width as usize).saturating_mul(map_zoom_u32 as usize);
         let mut heights = Vec::with_capacity(capacity);
@@ -2387,13 +2439,13 @@ fn load_legacy_landscape(
     let fallback_map_width = map_width_hint.unwrap_or(96);
     let fallback_map_height = map_height_hint.unwrap_or(50);
     let width_product =
-        i64::from(fallback_map_width).saturating_mul(i64::from(map_zoom_value.max(1)));
+        i64::from(fallback_map_width).saturating_mul(i64::from(map_zoom_u32));
     let width_u32 = width_product
         .clamp(1, i64::from(u32::MAX))
         .try_into()
         .unwrap_or(u32::MAX);
     let fallback_height = fallback_map_height
-        .saturating_mul(map_zoom_value.max(1))
+        .saturating_mul(map_zoom_u32 as i32)
         .max(1);
     let landscape = Landscape::flat(width_u32, fallback_height);
     Ok(Some(landscape))
@@ -2526,7 +2578,15 @@ fn collect_legacy_objects(
         Err(error) => return Err(ScenarioError::Resources(error)),
     };
 
-    let text = String::from_utf8(bytes).map_err(|_| ScenarioError::LegacyObjectsEncoding)?;
+    // C++ reads Objects.txt as raw bytes in the config charset; fall back to
+    // a Latin-1 decode so Windows-1252 umlauts survive (Drachenfels.c4s).
+    let text = String::from_utf8(bytes).unwrap_or_else(|error| {
+        error
+            .into_bytes()
+            .iter()
+            .map(|&byte| byte as char)
+            .collect()
+    });
     let mut records = parse_legacy_objects(&text)?;
     if records.is_empty() {
         return Ok(Vec::new());
@@ -2730,12 +2790,17 @@ impl LegacyObjectRecord {
                         self.line, trimmed_value, err
                     ))
                 })?;
-                self.direction = Some(Direction::from_script_value(raw).ok_or_else(|| {
-                    ScenarioError::LegacyObjectsParse(format!(
-                        "Objects.txt line {}: unsupported Dir value {}",
-                        self.line, raw
-                    ))
-                })?);
+                // C4Object Dir is a plain int — multi-directional defs use
+                // 0..Directions-1 (Dir=8 in Knights Camp.c4s). The two-way
+                // engine model keeps its default for now (PORT_STATUS).
+                match Direction::from_script_value(raw) {
+                    Some(direction) => self.direction = Some(direction),
+                    None => tracing::warn!(
+                        line = self.line,
+                        value = raw,
+                        "Objects.txt Dir exceeds the two-way direction model; keeping default"
+                    ),
+                }
             }
             "comdir" => {
                 let raw = parse_i32(trimmed_value).map_err(|err| {
@@ -2744,13 +2809,16 @@ impl LegacyObjectRecord {
                         self.line, trimmed_value, err
                     ))
                 })?;
-                self.command_direction =
-                    Some(CommandDirection::from_script_value(raw).ok_or_else(|| {
-                        ScenarioError::LegacyObjectsParse(format!(
-                            "Objects.txt line {}: unsupported ComDir value {}",
-                            self.line, raw
-                        ))
-                    })?);
+                match CommandDirection::from_script_value(raw) {
+                    Some(command_direction) => {
+                        self.command_direction = Some(command_direction)
+                    }
+                    None => tracing::warn!(
+                        line = self.line,
+                        value = raw,
+                        "Objects.txt ComDir outside the COMD_* range; keeping default"
+                    ),
+                }
             }
             "action" => {
                 self.action_name = Some(trimmed_value.to_string());
@@ -3042,7 +3110,19 @@ fn parse_i64(value: &str) -> Result<i64, std::num::ParseIntError> {
     {
         i64::from_str_radix(rest, 16)
     } else {
-        trimmed.parse::<i64>()
+        // StdCompilerINIRead reads numbers strtol-style: optional sign +
+        // leading digits, trailing junk ignored (real content carries
+        // trailing `;`, e.g. `Position=22,28;` in LastWill.c4s). No digits
+        // at all stays an error (the empty-slice parse).
+        let (sign, digits) = match trimmed.as_bytes().first() {
+            Some(b'-') => (-1i64, &trimmed[1..]),
+            Some(b'+') => (1, &trimmed[1..]),
+            _ => (1, trimmed),
+        };
+        let end = digits
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(digits.len());
+        digits[..end].parse::<i64>().map(|value| sign * value)
     }
 }
 
@@ -5303,6 +5383,93 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn legacy_numbers_tolerate_trailing_junk_like_cpp() {
+        // StdCompilerINIRead reads numbers strtol-style: the leading integer
+        // parses, trailing junk is ignored. Real content relies on it —
+        // `Position=22,28;` (Missions.c4f/LastWill.c4s/Scenario.txt:21).
+        assert_eq!(
+            parse_position("Position", "22,28;").expect("position parses"),
+            [22, 28]
+        );
+        assert_eq!(parse_i32("7663;").expect("parses"), 7663);
+        assert_eq!(parse_i32("-15x").expect("parses"), -15);
+        assert_eq!(parse_i32(" 42 trailing words").expect("parses"), 42);
+        assert!(parse_i32("junk").is_err(), "no digits is still an error");
+    }
+
+    #[test]
+    fn map_zoom_defaults_to_ten_and_clamps_like_cpp() {
+        // C4SLandscape::Default: MapZoom = C4SVal(10, 0, 5, 15)
+        // (C4Scenario.cpp:307,353); Evaluate stays within [Min, Max].
+        assert_eq!(legacy_map_zoom(None), 10, "absent key uses the C4S default");
+        let entries = vec![("MapZoom".to_string(), "8".to_string())];
+        assert_eq!(legacy_map_zoom(Some(&entries)), 8);
+        let entries = vec![("MapZoom".to_string(), "1".to_string())];
+        assert_eq!(legacy_map_zoom(Some(&entries)), 5, "clamped to Min=5");
+        let entries = vec![("MapZoom".to_string(), "99".to_string())];
+        assert_eq!(legacy_map_zoom(Some(&entries)), 15, "clamped to Max=15");
+    }
+
+    #[test]
+    fn objects_dir_values_beyond_the_two_way_enum_do_not_abort_load() {
+        // C4Object::CompileFunc reads Dir as a plain int — multi-directional
+        // defs legitimately store Dir=8 (Knights.c4f/Camp.c4s/Objects.txt:
+        // 1098). The two-direction engine model keeps its default until the
+        // Dir model widens (PORT_STATUS); loading must not abort.
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=GOOD\nNumber=10\nStatus=1\nCategory=0\nX=10\nY=20\nAction=Float\nDir=8\nComDir=5\n",
+        )
+        .expect("write objects");
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert!(
+            engine
+                .object_snapshot(ObjectId::new(10))
+                .is_some(),
+            "the Dir=8 object loaded"
+        );
+    }
+
+    #[test]
+    fn standard_crew_with_clonks_count_spawns_native_crew_like_cpp() {
+        // [PlayerN] `Clonks=` is the C4SVal crew COUNT — `Crew` in
+        // C4SPlrStart, default C4SVal(1,0,1,10) (C4Scenario.cpp:261,279) —
+        // and `StandardCrew=` names the native crew def (NativeCrew, :278).
+        // It is NOT a crew-ID list ('Clonks=5,0,1,10' must not become
+        // "unknown definition `5,0,1,10`"). The count uses Std (the synced
+        // Evaluate draw waits on the player-join port).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=NativeCrew\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nStandardCrew=GOOD\nClonks=2,0,1,10\nPosition=120,160\n",
+        )
+        .expect("write scenario core");
+        let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert_eq!(created.len(), 2, "Clonks Std=2 native crew spawn");
+        for id in &created {
+            let object = engine.object_snapshot(*id).expect("crew exists");
+            assert_eq!(object.definition_id, "GOOD");
+        }
+    }
+
+    #[test]
+    fn objects_txt_tolerates_windows_1252_like_cpp() {
+        // C++ reads Objects.txt as raw bytes (the config charset); a
+        // Windows-1252 umlaut must not abort the load
+        // (Fantasy.c4f/Drachenfels.c4s fails strict UTF-8 today).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
+        let mut objects = Vec::new();
+        objects.extend_from_slice(b"# M\xe4dchen\n[Object]\nid=GOOD\nNumber=10\nStatus=1\nCategory=0\nX=10\nY=20\n");
+        std::fs::write(scenario_dir.join("Objects.txt"), objects).expect("write objects");
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        assert!(engine.object_snapshot(ObjectId::new(10)).is_some());
+    }
+
+    #[test]
     fn definition_script_parse_errors_are_logged_not_fatal_like_cpp() {
         // C4Def::Load ignores the Script.Load result (C4Def.cpp:632): a
         // definition whose Script.c fails to parse still loads — script-less
@@ -5663,10 +5830,12 @@ global func Step(state, frame, random)
         scenario.apply(&mut engine).expect("scenario applies");
 
         let landscape = engine.landscape().expect("landscape present");
-        assert_eq!(landscape.width(), 8);
+        // MapZoom=2 clamps to the C4SVal Min of 5 (C4Scenario.cpp:307,353):
+        // 4 map columns × zoom 5 = 20 landscape columns.
+        assert_eq!(landscape.width(), 20);
         assert_eq!(
             landscape.surface(),
-            vec![6; 8].as_slice(),
+            vec![15; 20].as_slice(),
             "expected map zoom to scale surface heights"
         );
     }
