@@ -6043,6 +6043,62 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn effect_callbacks_run_in_the_command_targets_object_context_like_cpp() {
+        // Every effect callback executes with the effect's command target
+        // as object context: pFn->Exec(pCommandTarget, ...)
+        // (C4Effect.cpp:129,345,392,456) — `this()` is the command target
+        // and its object locals are live. GoldRush's bandit AI depends on
+        // both: FxAIBanditNoMoveStart does `this()->~ContextDefend()`,
+        // equips via CreateContents, and writes the appended local
+        // `iOwner=-2` (Goldrush.c4s/Locals.c4d/AI.c4d/Script.c:96-106).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "global func Initialize(state, random) {\n\
+                 var obj = CreateObject(GOOD, 50, 50, -1);\n\
+                 obj->Boot();\n\
+                 return nil;\n\
+             }\n",
+        );
+        std::fs::write(
+            dir.path().join("Defs.c4d/Good.c4d/Script.c"),
+            "#strict\nlocal iSelf;\n\
+             public func Boot() { AddEffect(\"Probe\", this(), 1, 0, this()); return 1; }\n\
+             public func Tag() { return 1; }\n\
+             func FxProbeStart(pThis, iNumber, fTmp) {\n\
+                 if (fTmp) return();\n\
+                 this()->~Tag();\n\
+                 if (this()) iSelf = 1;\n\
+                 CreateContents(GOOD);\n\
+             }\n",
+        )
+        .expect("write target script");
+
+        let (engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let snapshot = engine.snapshot();
+        let object = snapshot
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "GOOD" && object.container.is_none())
+            .expect("object created");
+        assert_eq!(
+            object.local_vars.get("iSelf"),
+            Some(&lc_script::Value::Int(1)),
+            "this() inside the Start callback is the command target \
+             (C4Effect.cpp:129), and its direct local write persists"
+        );
+        assert!(
+            snapshot
+                .objects
+                .iter()
+                .any(|candidate| candidate.container == Some(object.id)),
+            "CreateContents from the Start callback equips the command \
+             target (the GoldRush bandit pattern)"
+        );
+    }
+
+    #[test]
     fn namespaced_object_calls_run_the_named_defs_function_on_the_target() {
         // `obj->ID::Func(...)` (AB_CALLNS, C4AulParse.cpp:3160-3245):
         // the function resolves in def ID's script at parse time and runs

@@ -4983,6 +4983,11 @@ pub(crate) struct EffectContextOutcome {
     pub audio: AudioOutcome,
     pub trigger_game_over: bool,
     pub next_object_id: u64,
+    /// VM-final locals of an effect callback that ran in its command
+    /// target's own context (pFn->Exec(pCommandTarget, ...),
+    /// C4Effect.cpp:129): the dispatch layer records them, the effect
+    /// event loop persists them onto the object.
+    pub context_locals: Option<HashMap<String, Value>>,
 }
 
 impl EffectContextOutcome {
@@ -5023,6 +5028,7 @@ impl EffectContextOutcome {
             audio,
             trigger_game_over,
             next_object_id,
+            context_locals: None,
         }
     }
 
@@ -5049,6 +5055,7 @@ impl EffectContextOutcome {
             },
             trigger_game_over: false,
             next_object_id,
+            context_locals: None,
         }
     }
 }

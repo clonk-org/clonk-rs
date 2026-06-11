@@ -431,6 +431,31 @@ impl Engine {
         self.call(&function_name, args).map(Some)
     }
 
+    /// Like [`call_effect_callback`], but with the C++ execution context:
+    /// effect callbacks run on the effect's command target
+    /// (`pFn->Exec(pCommandTarget, ...)`, C4Effect.cpp:129,345,392,456),
+    /// so `this` and the target's object locals are live. Returns the
+    /// result and the final local values.
+    #[allow(clippy::type_complexity)]
+    pub fn call_effect_callback_in_context(
+        &self,
+        effect_name: &str,
+        event: &str,
+        args: &[Value],
+        local_vars: &std::collections::HashMap<String, Value>,
+        this: Value,
+    ) -> Result<Option<(Value, std::collections::HashMap<String, Value>)>, ScriptError> {
+        let mut function_name = String::with_capacity(effect_name.len() + event.len() + 2);
+        function_name.push_str("Fx");
+        function_name.push_str(effect_name);
+        function_name.push_str(event);
+        if !self.has_function(&function_name) {
+            return Ok(None);
+        }
+        self.call_with_locals_and_this(&function_name, args, local_vars, this)
+            .map(Some)
+    }
+
     pub fn has_effect_callback(&self, effect_name: &str, event: &str) -> bool {
         let mut function_name = String::with_capacity(effect_name.len() + event.len() + 2);
         function_name.push_str("Fx");

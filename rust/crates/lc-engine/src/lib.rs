@@ -5619,6 +5619,7 @@ impl Definition {
             trigger_game_over: host_trigger_game_over,
             next_object_id,
             other_objects,
+            context_locals: _,
         } = host_effects;
         batch.other_objects.extend(other_objects);
         batch.audio.extend(host_audio.events);
@@ -5790,6 +5791,7 @@ impl Definition {
             trigger_game_over: host_trigger_game_over,
             next_object_id,
             other_objects,
+            context_locals: _,
         } = host_effects;
         batch.other_objects.extend(other_objects);
         batch.audio.extend(host_audio.events);
@@ -5946,6 +5948,7 @@ impl Definition {
             trigger_game_over: host_trigger_game_over,
             next_object_id,
             other_objects,
+            context_locals: _,
         } = host_effects;
         batch.other_objects.extend(other_objects);
         batch.audio.extend(host_audio.events);
@@ -7111,6 +7114,23 @@ impl Definition {
         args.push(build_effect_value(effect));
         args.append(&mut extras);
 
+        // Effect callbacks execute on the effect's command target
+        // (pFn->Exec(pCommandTarget, ...), C4Effect.cpp:129,345,392,456):
+        // `this()` is the command target and its object locals are live.
+        // Foreign command targets get `this()` only — their locals are not
+        // modeled in this dispatch (the nested-call divergence noted in
+        // PORT_STATUS applies).
+        let context_object = effect
+            .command_target
+            .map(|number| ObjectId::new(number as u64));
+        let context_is_self = context_object == Some(object_id);
+        let context_this = context_object
+            .map(compat::object_reference_value)
+            .unwrap_or(Value::Nil);
+        let context_locals = context_is_self
+            .then(|| state.local_vars.clone())
+            .unwrap_or_default();
+
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
@@ -7160,7 +7180,15 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.script.call_effect_callback(&effect.name, event, &args),
+            || {
+                self.script.call_effect_callback_in_context(
+                    &effect.name,
+                    event,
+                    &args,
+                    &context_locals,
+                    context_this,
+                )
+            },
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -7175,6 +7203,12 @@ impl Definition {
                 if !physics_delta.is_empty() {
                     commands.physics = Some(physics_delta);
                 }
+                let callback_result = callback_result.map(|(value, updated_locals)| {
+                    if context_is_self {
+                        commands.context_locals = Some(updated_locals);
+                    }
+                    value
+                });
                 (commands, audio_state, rng, callback_result)
             })
             .map_err(|source| EngineError::Script {
@@ -7380,6 +7414,7 @@ impl ScenarioScript {
             trigger_game_over: host_trigger_game_over,
             next_object_id: _,
             other_objects,
+            context_locals: _,
         } = host_effects;
 
         if !host_object_effects.is_empty()
@@ -7512,6 +7547,7 @@ impl ScenarioScript {
             trigger_game_over: host_trigger_game_over,
             next_object_id: _,
             other_objects,
+            context_locals: _,
         } = host_effects;
 
         let mut batch = ScenarioBatch {
@@ -12383,6 +12419,8 @@ impl Engine {
                     event_messages,
                     player_commands,
                     landscape_ops,
+                    effect_spawns,
+                    effect_next_object_id,
                     triggered_game_over,
                     audio_state,
                     new_rng,
@@ -12411,6 +12449,10 @@ impl Engine {
                 };
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
+                self.next_object_id = effect_next_object_id;
+                if !effect_spawns.is_empty() {
+                    self.process_spawn_queue(effect_spawns)?;
+                }
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);
                 }
@@ -12467,6 +12509,8 @@ impl Engine {
                     event_messages,
                     player_commands,
                     landscape_ops,
+                    effect_spawns,
+                    effect_next_object_id,
                     triggered_game_over,
                     audio_state,
                     new_rng,
@@ -12495,6 +12539,10 @@ impl Engine {
                 };
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
+                self.next_object_id = effect_next_object_id;
+                if !effect_spawns.is_empty() {
+                    self.process_spawn_queue(effect_spawns)?;
+                }
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);
                 }
@@ -12943,6 +12991,8 @@ impl Engine {
                     event_messages,
                     player_commands,
                     landscape_ops,
+                    effect_spawns,
+                    effect_next_object_id,
                     triggered_game_over,
                     audio_state,
                     new_rng,
@@ -12973,6 +13023,10 @@ impl Engine {
                 };
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
+                self.next_object_id = effect_next_object_id;
+                if !effect_spawns.is_empty() {
+                    self.process_spawn_queue(effect_spawns)?;
+                }
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
                 }
@@ -13486,6 +13540,7 @@ impl Engine {
             audio: outcome_audio,
             trigger_game_over,
             next_object_id,
+            context_locals,
         } = outcome;
 
         if !host_landscape_ops.is_empty() {
@@ -13537,6 +13592,13 @@ impl Engine {
 
         {
             let object = &mut self.objects[index];
+
+            // Effect-callback VM finals (C4Effect.cpp:129: the callback ran
+            // in this object's own context) apply first; host-command
+            // updates below may override.
+            if let Some(locals) = context_locals {
+                object.state.local_vars = locals;
+            }
 
             if let Some(update) = object_update {
                 let delta: ObjectDelta = update.into();
@@ -13612,6 +13674,8 @@ impl Engine {
                 event_messages,
                 player_commands,
                 landscape_ops,
+                effect_spawns,
+                effect_next_object_id,
                 triggered_game_over,
                 audio_state,
                 new_rng,
@@ -13632,6 +13696,10 @@ impl Engine {
             )?;
             self.rng = new_rng;
             self.audio_registry = audio_state;
+            self.next_object_id = effect_next_object_id;
+            if !effect_spawns.is_empty() {
+                self.process_spawn_queue(effect_spawns)?;
+            }
             if !landscape_ops.is_empty() {
                 self.apply_landscape_operations(landscape_ops);
             }
@@ -13764,6 +13832,8 @@ impl Engine {
                     event_messages,
                     player_commands,
                     landscape_ops,
+                    effect_spawns,
+                    effect_next_object_id,
                     triggered_game_over,
                     audio_state,
                     new_rng,
@@ -13784,6 +13854,10 @@ impl Engine {
                 )?;
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
+                self.next_object_id = effect_next_object_id;
+                if !effect_spawns.is_empty() {
+                    self.process_spawn_queue(effect_spawns)?;
+                }
                 if !landscape_ops.is_empty() {
                     self.apply_landscape_operations(landscape_ops);
                 }
@@ -14463,6 +14537,8 @@ impl Engine {
             Vec<MessageCommand>,
             Vec<PlayerCommand>,
             Vec<LandscapeOperation>,
+            Vec<SpawnConfig>,
+            u64,
             bool,
             AudioRegistry,
             LcgRng,
@@ -14470,6 +14546,7 @@ impl Engine {
         EngineError,
     > {
         if events.is_empty() {
+            let next_object_id = world.next_object_id();
             return Ok((
                 Vec::new(),
                 Vec::new(),
@@ -14478,12 +14555,19 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
+                next_object_id,
                 false,
                 audio,
                 rng,
             ));
         }
 
+        // Spawns from one callback (CreateContents in an FxStart, the
+        // GoldRush bandit equip) must not collide with the next callback's
+        // ids: thread the allocator through the loop.
+        let mut world = world;
+        let mut pending_spawns: Vec<SpawnConfig> = Vec::new();
         let mut queue: VecDeque<EffectEvent> = VecDeque::from(events);
         let mut state_snapshot = object.state.clone();
         let mut global_commands = Vec::new();
@@ -14662,8 +14746,24 @@ impl Engine {
                 player_commands: effect_player_commands,
                 audio: outcome_audio,
                 trigger_game_over,
+                context_locals,
+                spawns,
+                next_object_id,
                 ..
             } = outcome;
+
+            // The callback ran in this object's own context
+            // (C4Effect.cpp:129) — persist its local writes. VM finals
+            // apply first; host-command updates below may override.
+            if let Some(locals) = context_locals {
+                object.state.local_vars = locals;
+                state_snapshot = object.state.clone();
+            }
+
+            if !spawns.is_empty() {
+                pending_spawns.extend(spawns);
+            }
+            world = world.with_next_object_id(next_object_id);
 
             if !host_landscape_ops.is_empty() {
                 pending_landscape_ops.extend(host_landscape_ops);
@@ -14737,6 +14837,7 @@ impl Engine {
 
         *environment = current_environment;
 
+        let next_object_id = world.next_object_id();
         Ok((
             global_commands,
             pending_particles,
@@ -14745,6 +14846,8 @@ impl Engine {
             pending_messages,
             pending_player_commands,
             pending_landscape_ops,
+            pending_spawns,
+            next_object_id,
             game_over_requested,
             current_audio,
             rng,
@@ -20095,6 +20198,8 @@ impl Engine {
                 event_messages,
                 player_commands,
                 landscape_ops,
+                effect_spawns,
+                effect_next_object_id,
                 triggered_game_over,
                 audio_state,
                 new_rng,
@@ -20115,6 +20220,10 @@ impl Engine {
             )?;
             self.rng = new_rng;
             self.audio_registry = audio_state;
+            self.next_object_id = effect_next_object_id;
+            if !effect_spawns.is_empty() {
+                self.process_spawn_queue(effect_spawns)?;
+            }
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
