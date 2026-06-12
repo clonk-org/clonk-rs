@@ -46,6 +46,14 @@ pub struct MusicHandle {
 }
 
 impl SoundHandle {
+    pub(crate) fn new(mixer: Arc<AudioMixer>, id: SoundId) -> Self {
+        Self {
+            mixer,
+            id,
+            released: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     pub fn release(&self) {
         if !self.released.swap(true, Ordering::AcqRel) {
             self.mixer.unload_sound(self.id);
@@ -68,6 +76,14 @@ impl Drop for SoundHandle {
 }
 
 impl MusicHandle {
+    pub(crate) fn new(mixer: Arc<AudioMixer>, id: MusicId) -> Self {
+        Self {
+            mixer,
+            id,
+            released: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     pub fn release(&self) {
         if !self.released.swap(true, Ordering::AcqRel) {
             self.mixer.unload_music(self.id);
@@ -117,20 +133,12 @@ impl AudioSystem {
 
     pub fn load_sound(&self, data: &[u8]) -> Result<SoundHandle, AudioError> {
         let id = self.mixer.load_sound(data)?;
-        Ok(SoundHandle {
-            mixer: self.mixer.clone(),
-            id,
-            released: Arc::new(AtomicBool::new(false)),
-        })
+        Ok(SoundHandle::new(self.mixer.clone(), id))
     }
 
     pub fn load_music(&self, data: &[u8]) -> Result<MusicHandle, AudioError> {
         let id = self.mixer.load_music(data)?;
-        Ok(MusicHandle {
-            mixer: self.mixer.clone(),
-            id,
-            released: Arc::new(AtomicBool::new(false)),
-        })
+        Ok(MusicHandle::new(self.mixer.clone(), id))
     }
 
     pub fn play_sound(&self, sound: &SoundHandle, looped: bool) -> Result<ChannelId, AudioError> {
