@@ -493,6 +493,16 @@ impl Material {
         &self.definition
     }
 
+    /// Raw `[Material]` core entry by compile name and value index
+    /// (GetValByStdCompiler over C4MaterialCore — FnGetMaterialVal,
+    /// C4Script.cpp:4282-4300).
+    pub fn core_entry(&self, entry: &str, index: usize) -> Option<&str> {
+        self.definition
+            .values(entry)
+            .and_then(|values| values.get(index))
+            .map(|value| value.as_str())
+    }
+
     pub fn density(&self) -> i32 {
         self.properties.density
     }

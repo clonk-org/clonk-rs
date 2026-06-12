@@ -985,6 +985,33 @@ impl<'a> Vm<'a> {
                             };
                             return self.get_target_value(env, &target);
                         }
+                        // FnSetLocal (C4Script.cpp:3408-3414): writes the
+                        // numbered Local slot, returns the value; the object
+                        // defaults to the caller. An explicit FOREIGN target
+                        // still writes the caller's slot (numbered locals are
+                        // not on the cross-object cell hook yet — PORT_STATUS).
+                        if name == "SetLocal"
+                            && (1..=3).contains(&args.len())
+                            && !self.functions.contains_key(name)
+                            && !self.host_functions.contains_key(name)
+                        {
+                            let index_expr = Box::new(
+                                args.first()
+                                    .cloned()
+                                    .unwrap_or(Expr::Literal(Literal::Int(0))),
+                            );
+                            let value = args
+                                .get(1)
+                                .map(|arg| self.evaluate(arg, env, depth + 1))
+                                .transpose()?
+                                .unwrap_or(Value::Nil);
+                            let index =
+                                self.evaluate_slot_index("SetLocal()", &index_expr, env, depth)?;
+                            if let LValueRef::Cell(cell) = env.local_slot_lvalue(index) {
+                                *cell.borrow_mut() = value.clone();
+                            }
+                            return Ok(value);
+                        }
                         // `LocalN("name")` is a reference to the executing
                         // object's named local (FnLocalN, C4Script.cpp:4591-4605,
                         // pObj defaulting to cthr->Obj). The two-argument

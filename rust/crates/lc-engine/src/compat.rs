@@ -1562,6 +1562,42 @@ fn material(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetMaterialVal (C4Script.cpp:4282-4300): a [Material] core entry by
+/// compile name; the section must be "Material", the material is an
+/// index into the loaded map, out-of-range or unknown entries are nil.
+fn get_material_val(args: &[Value]) -> Result<Value, RuntimeError> {
+    let entry = parse_optional_string(args.first(), "GetMaterialVal", "entry")?;
+    let section = parse_optional_string(args.get(1), "GetMaterialVal", "section")?;
+    let material = parse_optional_i32(args.get(2), "GetMaterialVal", "material")?.unwrap_or(0);
+    let entry_index =
+        parse_optional_i32(args.get(3), "GetMaterialVal", "entry_nr")?.unwrap_or(0);
+    // The material core implies section "Material" (C4Script.cpp:4296).
+    if section.as_deref() != Some("Material") {
+        return Ok(Value::Nil);
+    }
+    let (Some(entry), Ok(index)) = (entry, usize::try_from(material)) else {
+        return Ok(Value::Nil);
+    };
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        Ok(borrow
+            .as_ref()
+            .and_then(|context| context.world.materials())
+            .and_then(|materials| {
+                let id = crate::material::MaterialId::new(index)?;
+                materials.get_by_id(id)
+            })
+            .and_then(|material| {
+                material.core_entry(&entry, entry_index.max(0) as usize)
+            })
+            .map(|value| match value.parse::<i32>() {
+                Ok(number) => Value::Int(number),
+                Err(_) => Value::String(value.to_string()),
+            })
+            .unwrap_or(Value::Nil))
+    })
+}
+
 /// FnObjectSetAction (C4Script.cpp:782-789): SetActionByName on ANOTHER
 /// object (with start/abort calls). Routed through the reentrancy seam so
 /// the target's SetAction host fn runs in the target's scope.
@@ -3342,6 +3378,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetComponent", get_component);
     script.register_host_function("InLiquid", in_liquid);
     script.register_host_function("Material", material);
+    script.register_host_function("GetMaterialVal", get_material_val);
     script.register_host_function("ObjectSetAction", object_set_action);
     script.register_host_function("Smoke", smoke);
     script.register_host_function("SetPortrait", set_portrait);
@@ -3490,6 +3527,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Sqrt", sqrt_func);
     script.register_host_function("Mod", modulo);
     script.register_host_function("GetMass", get_mass);
+    script.register_host_function("SetMass", set_mass);
+    script.register_host_function("MakeCrewMember", make_crew_member);
     script.register_host_function("C4Id", c4_id);
     script.register_host_function("Pow", pow_func);
     script.register_host_function("BoundBy", bound_by_func);
@@ -4513,6 +4552,8 @@ pub(crate) struct HostObjectContext<'a> {
     pub alive: bool,
     /// C4Object::InLiquid (the cached flag FnInLiquid reads).
     pub in_liquid: bool,
+    /// C4Object::OwnMass (SetMass leftovers).
+    pub own_mass: i32,
     pub owner: i32,
     pub category: i32,
     pub ocf: u32,
@@ -4635,6 +4676,7 @@ impl<'a> HostObjectContext<'a> {
             construction: construction.clamp(0, FULL_CON),
             alive: true,
             in_liquid: false,
+            own_mass: 0,
             owner,
             category,
             ocf: ocf::NORMAL,
@@ -4672,6 +4714,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_in_liquid(mut self, in_liquid: bool) -> Self {
         self.in_liquid = in_liquid;
+        self
+    }
+
+    pub fn with_own_mass(mut self, own_mass: i32) -> Self {
+        self.own_mass = own_mass;
         self
     }
 
@@ -6273,19 +6320,145 @@ fn get_mass(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(id) = id else {
             return Ok(Value::Nil);
         };
+        // UpdateMass: Mass = max((Def->Mass + OwnMass) * Con / FullCon, 1)
+        // (C4Object.cpp:497-500); the active scope has the freshest OwnMass.
+        let scope_own_mass = context
+            .object_context()
+            .filter(|object| object.id() == id)
+            .map(|object| object.own_mass());
         Ok(context
             .get_world_object(id)
             .and_then(|object| {
                 let metadata = context.world.definition_metadata(object.definition_id())?;
-                let construction = object
-                    .full_state()
+                let state = object.full_state();
+                let construction = state
                     .map(|state| state.construction)
                     .unwrap_or(crate::FULL_CON);
+                let own_mass = scope_own_mass
+                    .or_else(|| state.map(|state| state.own_mass))
+                    .unwrap_or(0);
                 Some(Value::Int(
-                    (metadata.mass.saturating_mul(construction) / crate::FULL_CON).max(1),
+                    ((metadata.mass.saturating_add(own_mass))
+                        .saturating_mul(construction)
+                        / crate::FULL_CON)
+                        .max(1),
                 ))
             })
             .unwrap_or(Value::Nil))
+    })
+}
+
+/// FnMakeCrewMember (C4Script.cpp:2164-2168) -> C4Player::MakeCrewMember
+/// (C4Player.cpp:1167-1215): valid player + CrewMember def required; adds
+/// to the crew and fires OnJoinCrew(player). NOT modeled (PORT_STATUS):
+/// the crew-info GetIdle/New assignment (a ClonkNames RNG draw in C++),
+/// PlrViewRange, and Controller — the port keys crew off Owner, so the
+/// owner is set to the player instead.
+fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "MakeCrewMember",
+        "obj",
+    )?;
+    let player = parse_optional_i32(args.get(1), "MakeCrewMember", "player")?.unwrap_or(0);
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    if let Some(target) = target {
+        if Some(target) != active {
+            return match call_world_object_function(
+                target,
+                "MakeCrewMember",
+                &[Value::Nil, Value::Int(player)],
+            ) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+    let joined = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(false);
+        };
+        if context.player_state(player).is_none() {
+            return Ok(false); // ValidPlr (C4Script.cpp:2166)
+        }
+        let Some(id) = context.object_context().map(|object| object.id()) else {
+            return Ok(false);
+        };
+        let crew_def = context
+            .get_world_object(id)
+            .and_then(|object| context.world.definition_metadata(object.definition_id()))
+            .map(|metadata| metadata.crew_member)
+            .unwrap_or(false);
+        if !crew_def {
+            return Ok(false); // Def->CrewMember required (C4Player.cpp:1170)
+        }
+        let Some(object) = context.object_context_mut() else {
+            return Ok(false);
+        };
+        object.set_crew_member(true);
+        object.set_owner(player);
+        Ok(true)
+    })?;
+    if joined {
+        // OnJoinCrew(player) fires inside MakeCrewMember
+        // (C4Player.cpp:1206-1209); errors pass like any script call.
+        if let Some(active) = active {
+            if let Some(result) =
+                call_world_object_script_function(active, "OnJoinCrew", &[Value::Int(player)])
+            {
+                result?;
+            }
+        }
+    }
+    Ok(Value::Bool(joined))
+}
+
+/// FnSetMass (C4Script.cpp:3620-3626): OwnMass = value - Def->Mass, then
+/// UpdateMass; foreign targets mutate in their own scope.
+fn set_mass(args: &[Value]) -> Result<Value, RuntimeError> {
+    let value = parse_optional_i32(args.first(), "SetMass", "mass")?.unwrap_or(0);
+    let target =
+        parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "SetMass", "obj")?;
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    if let Some(target) = target {
+        if Some(target) != active {
+            return match call_world_object_function(
+                target,
+                "SetMass",
+                &[Value::Int(value)],
+            ) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(id) = context.object_context().map(|object| object.id()) else {
+            return Ok(Value::Bool(false));
+        };
+        let def_mass = context
+            .get_world_object(id)
+            .and_then(|object| context.world.definition_metadata(object.definition_id()))
+            .map(|metadata| metadata.mass)
+            .unwrap_or(0);
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        object.set_own_mass(value - def_mass);
+        Ok(Value::Bool(true))
     })
 }
 
@@ -13466,6 +13639,7 @@ impl EffectHostContext {
                 construction,
                 alive,
                 in_liquid,
+                own_mass,
                 owner,
                 position,
                 velocity,
@@ -13503,6 +13677,7 @@ impl EffectHostContext {
                 construction,
                 alive,
                 in_liquid,
+                own_mass,
                 owner,
                 category,
                 position,
@@ -13771,6 +13946,7 @@ impl EffectHostContext {
             state.construction,
             state.alive,
             state.in_liquid,
+            state.own_mass,
             state.owner,
             state.category,
             state.position,
@@ -14193,6 +14369,7 @@ struct ObjectScopeContext {
     current_construction: i32,
     current_alive: bool,
     current_in_liquid: bool,
+    current_own_mass: i32,
     max_energy: i32,
     current_owner: i32,
     current_category: i32,
@@ -14228,6 +14405,7 @@ impl ObjectScopeContext {
         construction: i32,
         alive: bool,
         in_liquid: bool,
+        own_mass: i32,
         owner: i32,
         category: i32,
         position: Vector2,
@@ -14282,6 +14460,7 @@ impl ObjectScopeContext {
             current_construction: clamped_construction,
             current_alive: alive,
             current_in_liquid: in_liquid,
+            current_own_mass: own_mass,
             max_energy,
             current_owner: owner,
             current_category: category,
@@ -14502,6 +14681,14 @@ impl ObjectScopeContext {
         self.pending_update.owner = Some(owner);
     }
 
+    /// C4Player::MakeCrewMember adds the object to the crew
+    /// (C4Player.cpp:1195-1196); the port keys crew off Owner +
+    /// crew_member.
+    fn set_crew_member(&mut self, crew_member: bool) {
+        self.crew_member = crew_member;
+        self.pending_update.crew_member = Some(crew_member);
+    }
+
     fn alive(&self) -> bool {
         self.pending_update.alive.unwrap_or(self.current_alive)
     }
@@ -14510,6 +14697,16 @@ impl ObjectScopeContext {
     /// FnSetPosition re-derives it, C4Script.cpp:475).
     fn in_liquid(&self) -> bool {
         self.current_in_liquid
+    }
+
+    fn own_mass(&self) -> i32 {
+        self.current_own_mass
+    }
+
+    /// SetMass (C4Script.cpp:3620-3626): OwnMass = value - Def->Mass.
+    fn set_own_mass(&mut self, own_mass: i32) {
+        self.current_own_mass = own_mass;
+        self.pending_update.own_mass = Some(own_mass);
     }
 
     fn set_alive(&mut self, alive: bool) {
@@ -15111,6 +15308,7 @@ mod tests {
         "GetLength",
         "GetMass",
         "GetMaterial",
+        "GetMaterialVal",
         "GetOCF",
         "GetObjectStatus",
         "GetObjectVal",
@@ -15147,6 +15345,7 @@ mod tests {
         "GetYDir",
         "InLiquid",
         "Log",
+        "MakeCrewMember",
         "Material",
         "Max",
         "Message",
@@ -15186,6 +15385,7 @@ mod tests {
         "SetEntrance",
         "SetGraphics",
         "SetGravity",
+        "SetMass",
         "SetObjDrawTransform",
         "SetObjDrawTransform2",
         "SetObjectStatus",

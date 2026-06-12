@@ -1916,6 +1916,11 @@ pub struct ObjectState {
     /// landscape (C4Script.cpp:1864-1868).
     #[serde(default)]
     pub in_liquid: bool,
+    /// Script-set extra mass (C4Object::OwnMass, C4Object.cpp:94): SetMass
+    /// stores iValue - Def->Mass here; Mass = max((Def->Mass + OwnMass) *
+    /// Con / FullCon, 1) (UpdateMass, C4Object.cpp:497-500).
+    #[serde(default)]
+    pub own_mass: i32,
     /// Burning state (C4Object::OnFire, C4Object.h:205). Set by Incinerate
     /// via the fire effect start (C4Effect.cpp:633); drives OCF_OnFire and
     /// the per-frame ExecFire burning.
@@ -2024,6 +2029,7 @@ pub(crate) fn preview_spawn_state(
         draw_transform: None,
         local_vars: HashMap::new(),
         in_liquid: false,
+        own_mass: 0,
         on_fire: false,
         fire_phase: 0,
         fire_caused_by: OWNER_NONE,
@@ -2104,6 +2110,9 @@ impl ObjectState {
         if let Some(category) = delta.category {
             self.category = category;
         }
+        if let Some(own_mass) = delta.own_mass {
+            self.own_mass = own_mass;
+        }
         if let Some(crew_member) = delta.crew_member {
             self.crew_member = crew_member;
         }
@@ -2169,6 +2178,7 @@ struct ObjectDelta {
     status: Option<ObjectStatus>,
     owner: Option<i32>,
     category: Option<i32>,
+    own_mass: Option<i32>,
     crew_member: Option<bool>,
     alive: Option<bool>,
     container: Option<Option<ObjectId>>,
@@ -2185,6 +2195,9 @@ impl ObjectDelta {
     fn merge_update(&mut self, update: ObjectUpdate) {
         if let Some(position) = update.position {
             self.position = Some(position);
+        }
+        if let Some(own_mass) = update.own_mass {
+            self.own_mass = Some(own_mass);
         }
         if let Some(velocity) = update.velocity {
             self.velocity = Some(velocity);
@@ -2268,6 +2281,7 @@ impl From<ObjectUpdate> for ObjectDelta {
     fn from(update: ObjectUpdate) -> Self {
         Self {
             position: update.position,
+            own_mass: update.own_mass,
             velocity: update.velocity,
             fixed_velocity: update.fixed_velocity,
             rotation: update.rotation,
@@ -2331,6 +2345,9 @@ pub struct ObjectUpdate {
     pub owner: Option<i32>,
     #[serde(default)]
     pub category: Option<i32>,
+    /// SetMass (C4Script.cpp:3620-3626): OwnMass = value - Def->Mass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_mass: Option<i32>,
     #[serde(default)]
     pub crew_member: Option<bool>,
     #[serde(default)]
@@ -3613,6 +3630,7 @@ impl Object {
             command_stack: self.commands.snapshot(),
             local_vars: self.state.local_vars.clone(),
             in_liquid: self.state.in_liquid,
+            own_mass: self.state.own_mass,
             on_fire: self.state.on_fire,
             fire_phase: self.state.fire_phase,
             fire_caused_by: self.state.fire_caused_by,
@@ -4189,6 +4207,9 @@ pub struct ObjectSnapshot {
     /// savegame `InLiquid` field, C4Object.cpp:2775).
     #[serde(default)]
     pub in_liquid: bool,
+    /// C4Object::OwnMass (SetMass leftovers; persisted like the savegame).
+    #[serde(default)]
+    pub own_mass: i32,
     /// Burning state (C4Object::OnFire) with its animation phase and the
     /// causing player (the fire effect's CausedBy var).
     #[serde(default)]
@@ -5613,6 +5634,7 @@ impl Definition {
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
+                .with_own_mass(state.own_mass)
                 .with_physicals(
                     state.info_physical,
                     state.temporary_physical,
@@ -5783,6 +5805,7 @@ impl Definition {
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
+                .with_own_mass(state.own_mass)
                 .with_physicals(
                     state.info_physical,
                     state.temporary_physical,
@@ -5945,6 +5968,7 @@ impl Definition {
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
+                .with_own_mass(state.own_mass)
                 .with_physicals(
                     state.info_physical,
                     state.temporary_physical,
@@ -6131,6 +6155,7 @@ impl Definition {
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
+                .with_own_mass(state.own_mass)
                 .with_physicals(
                     state.info_physical,
                     state.temporary_physical,
@@ -6246,6 +6271,7 @@ impl Definition {
         )
         .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
+                .with_own_mass(state.own_mass)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -6378,6 +6404,7 @@ impl Definition {
         )
         .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
+                .with_own_mass(state.own_mass)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -6503,6 +6530,7 @@ impl Definition {
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
+                .with_own_mass(state.own_mass)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -6631,6 +6659,7 @@ impl Definition {
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
+                .with_own_mass(state.own_mass)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -6754,6 +6783,7 @@ impl Definition {
         )
         .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
+                .with_own_mass(state.own_mass)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -7221,6 +7251,7 @@ impl Definition {
                 )
                 .with_alive(state.alive)
                 .with_in_liquid(state.in_liquid)
+                .with_own_mass(state.own_mass)
                 .with_physicals(
                     state.info_physical,
                     state.temporary_physical,
@@ -14532,6 +14563,7 @@ impl Engine {
                     draw_transform: snapshot.draw_transform,
                     local_vars: snapshot.local_vars.clone(),
                     in_liquid: snapshot.in_liquid,
+                    own_mass: snapshot.own_mass,
                     on_fire: snapshot.on_fire,
                     fire_phase: snapshot.fire_phase,
                     fire_caused_by: snapshot.fire_caused_by,
@@ -20043,6 +20075,7 @@ impl Engine {
                 draw_transform: None,
                 local_vars: HashMap::new(),
                 in_liquid: in_liquid.unwrap_or(false),
+                own_mass: 0,
                 on_fire: false,
                 fire_phase: 0,
                 fire_caused_by: OWNER_NONE,
@@ -20694,6 +20727,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         draw_transform: snapshot.draw_transform,
         local_vars: snapshot.local_vars.clone(),
         in_liquid: snapshot.in_liquid,
+        own_mass: snapshot.own_mass,
         on_fire: snapshot.on_fire,
         fire_phase: snapshot.fire_phase,
         fire_caused_by: snapshot.fire_caused_by,

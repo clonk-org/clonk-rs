@@ -1032,6 +1032,7 @@ unsafe fn make_snapshot(
             // LcEngineObjectSnapshot + the bridge's CollectSnapshotBuffer
             // before the shadow-diff compares these fields (task #22).
             in_liquid: false,
+            own_mass: 0,
             on_fire: false,
             fire_phase: 0,
             fire_caused_by: crate::OWNER_NONE,
