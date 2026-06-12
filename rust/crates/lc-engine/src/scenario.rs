@@ -2580,6 +2580,9 @@ fn legacy_map_zoom(section: Option<&Vec<(String, String)>>) -> u32 {
 /// and unknown materials are sky (MNone, density 0).
 pub(crate) struct MapPixelClassifier {
     densities: [i32; 128],
+    /// Material NAME per texmap index — the pixel grid resolves these
+    /// into engine MaterialIds once the MaterialSet exists.
+    names: Vec<Option<String>>,
 }
 
 impl MapPixelClassifier {
@@ -2636,7 +2639,11 @@ pub(crate) fn build_map_pixel_classifier(
         .flatten();
 
     let mut densities = [0i32; 128];
+    let mut names: Vec<Option<String>> = vec![None; 128];
     for (index, slot) in densities.iter_mut().enumerate() {
+        names[index] = texmap
+            .entry(index as u8)
+            .map(|entry| entry.material.clone());
         *slot = texmap
             .entry(index as u8)
             .and_then(|entry| {
@@ -2652,7 +2659,7 @@ pub(crate) fn build_map_pixel_classifier(
             .and_then(|material| material.int("Density"))
             .unwrap_or(0);
     }
-    Some(MapPixelClassifier { densities })
+    Some(MapPixelClassifier { densities, names })
 }
 
 /// Build the column landscape from a classified 8-bit map: per column the
@@ -2730,6 +2737,34 @@ fn classified_landscape(
             }
         }
     }
+
+    // The Surface8 pixel plane: every zoom×zoom world block carries its
+    // map cell's raw byte, IFT bit included (MapToSurface zooms map cells
+    // into pixels, C4Landscape.cpp:732-789; the chunky DrawChunk rim
+    // jitter is not modeled — borders are block-aligned).
+    let plane_width = final_width as usize;
+    let plane_height = world_height.max(0) as usize;
+    let mut bytes = vec![0u8; plane_width * plane_height];
+    for map_y in 0..map_height {
+        for map_x in 0..map_width {
+            let byte = bitmap.indices[map_y * map_width + map_x];
+            if byte == 0 {
+                continue;
+            }
+            for world_y in map_y * zoom as usize..(map_y + 1) * zoom as usize {
+                let row = world_y * plane_width;
+                bytes[row + map_x * zoom as usize..row + (map_x + 1) * zoom as usize]
+                    .fill(byte);
+            }
+        }
+    }
+    landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+        final_width,
+        world_height.max(0) as u32,
+        bytes,
+        classifier.densities.to_vec(),
+        classifier.names.clone(),
+    ));
 
     // Loaded water is at rest: C4MassMoverSet starts empty and movers are
     // created only by landscape CHANGES, never at load — consuming the
@@ -7876,6 +7911,61 @@ global func Step(state, frame, random)
         assert!(!landscape.is_liquid_at(5, 25));
         // Map column 3: all sky.
         assert!(!landscape.is_solid_at(35, 38), "sky column has no ground");
+    }
+
+    #[test]
+    fn classified_static_map_builds_the_per_pixel_plane_like_cpp() {
+        // MapToLandscape blits each map cell at MapZoom scale into the
+        // Surface8 pixel plane (C4Landscape::MapToSurface via
+        // ChunkOZoom, C4Landscape.cpp:732-789); GBackSolid then reads
+        // Pix2Dens per PIXEL (C4Wrappers.h:174-177), so cave water below
+        // the column surface is liquid — never solid — while the earth
+        // roof above it stays solid. The column approximation calls
+        // everything below the first solid row "solid", which sheds
+        // cave-roof objects (GoldRush's stalactites fell and shattered).
+        let bitmap = lc_resources::bitmap::IndexedBitmap {
+            width: 4,
+            height: 4,
+            indices: vec![
+                0, 30, 30, 0, //
+                0, 20, 20, 0, //
+                30, 20, 20, 0, //
+                30, 30, 30, 0,
+            ],
+        };
+        let mut densities = [0i32; 128];
+        densities[20] = 25; // Water
+        densities[30] = 100; // Earth
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[20] = Some("Water".into());
+        names[30] = Some("Earth".into());
+        let classifier = MapPixelClassifier { densities, names };
+
+        let landscape =
+            classified_landscape(&bitmap, &classifier, 10).expect("landscape builds");
+
+        let grid = landscape.pixel_grid().expect("classified maps build Surface8");
+        assert_eq!(
+            grid.byte_at(15, 15),
+            Some(20),
+            "world pixels carry the raw map byte of their zoom block"
+        );
+        assert_eq!(grid.byte_at(15, 5), Some(30), "roof block is earth");
+        assert_eq!(grid.byte_at(35, 35), Some(0), "sky column stays sky");
+
+        // Map column 1 (world x 10..20): earth roof row 0, water rows 1-2,
+        // earth bed row 3. Pixel truth: the water interior is NOT solid.
+        assert!(
+            !landscape.is_solid_at(15, 15),
+            "GBackSolid is false in water (density 25 < C4M_Solid)"
+        );
+        assert!(landscape.is_liquid_at(15, 15), "river interior is liquid");
+        assert!(landscape.is_solid_at(15, 5), "earth roof is solid");
+        assert!(landscape.is_solid_at(15, 35), "earth bed is solid");
+        assert!(
+            !landscape.is_solid_at(35, 25),
+            "sky below roof level in an open column is not solid"
+        );
     }
 
     #[test]

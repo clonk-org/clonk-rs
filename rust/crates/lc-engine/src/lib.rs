@@ -10190,6 +10190,10 @@ impl Engine {
         if default.is_some() {
             landscape.set_default_solid_material(default);
         }
+        // UpdatePixMaps (C4Landscape.cpp:2832-2839): resolve the grid's
+        // texmap material names into engine ids now that both exist.
+        let materials = &self.materials;
+        landscape.resolve_grid_materials(|name| materials.id_of(name));
         self.landscape = Some(landscape);
         self.reset_sectors_from_landscape();
     }
@@ -22213,6 +22217,58 @@ mod tests {
         assert_eq!(snapshot.particles[0].definition_id, "material/pxs/earth");
         assert_eq!(snapshot.particles[0].parameter_b, earth.index() as i32);
         Ok(())
+    }
+
+    #[test]
+    fn set_landscape_resolves_pixel_grid_materials_like_update_pix_maps() {
+        // UpdatePixMaps fills Pix2Mat by resolving each texmap entry's
+        // material NAME against the loaded material map
+        // (C4Landscape.cpp:2832-2839 + C4TextureMap::GetEntry) — the grid
+        // carries names from TexMap.txt until the engine MaterialSet
+        // exists; set_landscape is where ids resolve so GBackMat
+        // (C4Wrappers.h:120-129) answers per pixel.
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+
+            [Material Water]
+            Name=Water
+            Density=25
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(3);
+        engine.set_materials(materials);
+
+        let mut densities = vec![0i32; 128];
+        densities[20] = 25;
+        densities[30] = 100;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[20] = Some("Water".into());
+        names[30] = Some("Earth".into());
+        // 2x2 world: water in the left column, earth in the right.
+        let grid =
+            landscape::PixelGrid::new(2, 2, vec![20, 30, 20, 30], densities, names);
+        let mut landscape = Landscape::new(2, vec![0, 0]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+        engine.set_landscape(landscape);
+
+        let landscape = engine.landscape().expect("landscape set");
+        assert_eq!(
+            landscape.material_at(0, 0),
+            Some(water),
+            "Pix2Mat resolves liquid pixels to the engine material id"
+        );
+        assert_eq!(
+            landscape.material_at(1, 1),
+            Some(earth),
+            "Pix2Mat resolves solid pixels to the engine material id"
+        );
     }
 
     #[test]

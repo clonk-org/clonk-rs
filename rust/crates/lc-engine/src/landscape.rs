@@ -10,6 +10,168 @@ use thiserror::Error;
 
 const C4M_VEHICLE: i32 = 100;
 const C4M_BACKGROUND: i32 = 0;
+/// DensitySolid threshold (C4M_Solid, C4Material.h:200).
+const C4M_SOLID: i32 = 50;
+/// DensityLiquid lower bound (C4M_Liquid, C4Material.h:203).
+const C4M_LIQUID: i32 = 25;
+
+/// Hex-string serde for the pixel byte plane (a JSON number array would be
+/// ~10MB for a real map; hex keeps state exports tractable).
+mod hex_bytes {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        let mut text = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            text.push(char::from_digit((byte >> 4) as u32, 16).expect("nibble"));
+            text.push(char::from_digit((byte & 0xf) as u32, 16).expect("nibble"));
+        }
+        serializer.serialize_str(&text)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        if text.len() % 2 != 0 {
+            return Err(D::Error::custom("odd hex length"));
+        }
+        text.as_bytes()
+            .chunks(2)
+            .map(|pair| {
+                let high = (pair[0] as char).to_digit(16);
+                let low = (pair[1] as char).to_digit(16);
+                match (high, low) {
+                    (Some(high), Some(low)) => Ok(((high << 4) | low) as u8),
+                    _ => Err(D::Error::custom("invalid hex digit")),
+                }
+            })
+            .collect()
+    }
+}
+
+/// The per-pixel landscape plane (C4Landscape `Surface8`): each byte is a
+/// texmap index in the low 7 bits with the IFT bit 0x80
+/// (C4Landscape.h:29-32). Densities and materials resolve through the
+/// `Pix2Dens`/`Pix2Mat`-style tables (UpdatePixMaps,
+/// C4Landscape.cpp:2832-2839). Classified static/exact maps build one;
+/// column-only landscapes (fixtures) carry none and keep the surface
+/// approximation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PixelGrid {
+    width: u32,
+    height: u32,
+    /// Row-major texmap-index bytes.
+    #[serde(with = "hex_bytes")]
+    bytes: Vec<u8>,
+    /// Pix2Dens: density per texmap index (IFT stripped); index 0 and
+    /// unmapped entries are sky (density 0).
+    densities: Vec<i32>,
+    /// Material NAME per texmap index — resolved into [`Self::materials`]
+    /// once the engine's `MaterialSet` exists (`Engine::set_landscape`).
+    material_names: Vec<Option<String>>,
+    /// Pix2Mat: the engine `MaterialId` per texmap index.
+    #[serde(default)]
+    materials: Vec<Option<MaterialId>>,
+}
+
+impl PixelGrid {
+    pub fn new(
+        width: u32,
+        height: u32,
+        bytes: Vec<u8>,
+        densities: Vec<i32>,
+        material_names: Vec<Option<String>>,
+    ) -> Self {
+        debug_assert_eq!(bytes.len(), width as usize * height as usize);
+        let materials = vec![None; material_names.len()];
+        Self {
+            width,
+            height,
+            bytes,
+            densities,
+            material_names,
+            materials,
+        }
+    }
+
+    fn slot(&self, x: i32, y: i32) -> Option<usize> {
+        if x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height {
+            return None;
+        }
+        Some(y as usize * self.width as usize + x as usize)
+    }
+
+    /// The raw pixel byte (in bounds only; callers apply GetPix border
+    /// rules themselves).
+    pub fn byte_at(&self, x: i32, y: i32) -> Option<u8> {
+        self.slot(x, y).map(|slot| self.bytes[slot])
+    }
+
+    fn density_of(&self, byte: u8) -> i32 {
+        self.densities
+            .get((byte & 0x7f) as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn density_at(&self, x: i32, y: i32) -> Option<i32> {
+        self.byte_at(x, y).map(|byte| self.density_of(byte))
+    }
+
+    pub fn material_id_at(&self, x: i32, y: i32) -> Option<MaterialId> {
+        let byte = self.byte_at(x, y)?;
+        self.materials
+            .get((byte & 0x7f) as usize)
+            .copied()
+            .flatten()
+    }
+
+    /// Resolve `Pix2Mat` once the engine material ids exist.
+    pub fn resolve_materials(&mut self, mut lookup: impl FnMut(&str) -> Option<MaterialId>) {
+        self.materials = self
+            .material_names
+            .iter()
+            .map(|name| name.as_deref().and_then(&mut lookup))
+            .collect();
+    }
+
+    /// The first texmap index carrying the given material (the
+    /// Mat2PixColDefault stand-in for grid writes).
+    fn byte_for_material(&self, material: MaterialId) -> Option<u8> {
+        self.materials
+            .iter()
+            .position(|slot| *slot == Some(material))
+            .map(|index| index as u8)
+    }
+
+    /// Any solid texmap byte (fallback fill when no material is known).
+    fn any_solid_byte(&self) -> Option<u8> {
+        self.densities
+            .iter()
+            .position(|&density| density >= C4M_SOLID)
+            .map(|index| index as u8)
+    }
+
+    fn set_byte(&mut self, x: i32, y: i32, byte: u8) {
+        if let Some(slot) = self.slot(x, y) {
+            self.bytes[slot] = byte;
+        }
+    }
+
+    fn clear_pixel(&mut self, x: i32, y: i32) {
+        self.set_byte(x, y, 0);
+    }
+
+    fn fill_band(&mut self, x: i32, from_y: i32, to_y: i32, byte: u8) {
+        for y in from_y.max(0)..to_y.min(self.height as i32) {
+            self.set_byte(x, y, byte);
+        }
+    }
+
+    fn clear_band(&mut self, x: i32, from_y: i32, to_y: i32) {
+        self.fill_band(x, from_y, to_y, 0);
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum LandscapeError {
@@ -56,6 +218,11 @@ pub struct Landscape {
     /// this when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     world_height: Option<i32>,
+    /// The per-pixel plane (C4Landscape Surface8). When present it is the
+    /// TRUTH for solidity/material queries; the column model above stays
+    /// maintained as the approximation legacy helpers consume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pixels: Option<PixelGrid>,
     #[serde(skip)]
     mass_mover_dirty: bool,
 }
@@ -218,6 +385,7 @@ impl Landscape {
             default_liquid_material: None,
             tunnels: HashMap::new(),
             world_height: None,
+            pixels: None,
             mass_mover_dirty: false,
         })
     }
@@ -238,11 +406,54 @@ impl Landscape {
         &self.liquids
     }
 
+    pub fn set_pixel_grid(&mut self, grid: PixelGrid) {
+        self.pixels = Some(grid);
+    }
+
+    pub fn pixel_grid(&self) -> Option<&PixelGrid> {
+        self.pixels.as_ref()
+    }
+
+    /// Resolve the grid's Pix2Mat table once the engine materials exist
+    /// (UpdatePixMaps, C4Landscape.cpp:2832-2839).
+    pub fn resolve_grid_materials(&mut self, lookup: impl FnMut(&str) -> Option<MaterialId>) {
+        if let Some(grid) = self.pixels.as_mut() {
+            grid.resolve_materials(lookup);
+        }
+    }
+
+    /// Grid upkeep for a column-surface change: the pixel plane follows
+    /// the scalar where the scalar IS the terrain top (exposed columns);
+    /// cave interiors are untouched because surface ops act at the top.
+    /// `byte` overrides the fill material for terrain ADDED below `old`.
+    fn grid_track_surface(&mut self, x: i32, old: i32, new: i32, byte: Option<u8>) {
+        let Some(grid) = self.pixels.as_mut() else {
+            return;
+        };
+        if new > old {
+            grid.clear_band(x, old.max(0), new);
+        } else if new < old {
+            let fill = byte
+                .or_else(|| {
+                    grid.byte_at(x, old)
+                        .filter(|&byte| grid.density_of(byte) >= C4M_SOLID)
+                })
+                .or_else(|| grid.any_solid_byte());
+            if let Some(fill) = fill {
+                grid.fill_band(x, new.max(0), old, fill);
+            }
+        }
+    }
+
     pub fn set_height(&mut self, x: u32, height: i32) {
+        let old = self.surface.get(x as usize).copied();
         if let Some(slot) = self.surface.get_mut(x as usize) {
             if *slot != height {
                 *slot = height;
                 self.mark_mass_mover_dirty();
+                if let Some(old) = old {
+                    self.grid_track_surface(x as i32, old, height, None);
+                }
             }
         }
     }
@@ -456,7 +667,9 @@ impl Landscape {
                     if *strength > 0 {
                         let new_height = self.surface[index].saturating_add(*strength);
                         if new_height != self.surface[index] {
+                            let old = self.surface[index];
                             self.surface[index] = new_height;
+                            self.grid_track_surface(index as i32, old, new_height, None);
                             changed = true;
                         }
                     }
@@ -472,7 +685,9 @@ impl Landscape {
                     if *strength > 0 {
                         let new_height = self.surface[index].saturating_add(*strength);
                         if new_height != self.surface[index] {
+                            let old = self.surface[index];
                             self.surface[index] = new_height;
+                            self.grid_track_surface(index as i32, old, new_height, None);
                             changed = true;
                             removal_applied = true;
                         }
@@ -587,6 +802,19 @@ impl Landscape {
     }
 
     pub fn material_at(&self, x: i32, y: i32) -> Option<MaterialId> {
+        // Pix2Mat (C4Wrappers.h:120-129) once the grid's material table is
+        // resolved; falls back to the column model otherwise.
+        if let Some(grid) = &self.pixels {
+            if let Some(material) = grid.material_id_at(x, y) {
+                return Some(material);
+            }
+            if grid.density_at(x, y).map(|d| d > 0).unwrap_or(false) {
+                // Classified non-sky pixel whose material name did not
+                // resolve: keep the column approximation as a stand-in.
+            } else {
+                return None;
+            }
+        }
         if self.is_solid_at(x, y) {
             self.solid_material_at(x)
         } else {
@@ -607,6 +835,10 @@ impl Landscape {
         // this, content loops that walk downward until solid never end.
         if y >= self.estimated_height() {
             return C4M_VEHICLE;
+        }
+        // GBackDensity = Pix2Dens[pix] (C4Wrappers.h:169-172).
+        if let Some(grid) = &self.pixels {
+            return grid.density_at(x, y).unwrap_or(C4M_BACKGROUND);
         }
         match self.material_at(x, y) {
             Some(material_id) => materials
@@ -676,6 +908,9 @@ impl Landscape {
         let column = self.liquids.get_mut(index)?;
         if let Some(material) = column.remove_pixel(y) {
             self.mark_mass_mover_dirty();
+            if let Some(grid) = self.pixels.as_mut() {
+                grid.clear_pixel(x, y);
+            }
             material.or(self.default_liquid_material)
         } else {
             None
@@ -701,6 +936,11 @@ impl Landscape {
         let inserted = column.insert_pixel(y, desired_material);
         if inserted {
             self.mark_mass_mover_dirty();
+            if let Some(grid) = self.pixels.as_mut() {
+                if let Some(byte) = desired_material.and_then(|id| grid.byte_for_material(id)) {
+                    grid.set_byte(x, y, byte);
+                }
+            }
         }
         inserted
     }
@@ -718,10 +958,14 @@ impl Landscape {
         let target_height = height.max(0);
         let mut changed = false;
         for x in clamped_start..clamped_end {
+            let old = self.surface.get(x as usize).copied();
             if let Some(slot) = self.surface.get_mut(x as usize) {
                 if target_height > *slot {
                     *slot = target_height;
                     changed = true;
+                    if let Some(old) = old {
+                        self.grid_track_surface(x, old, target_height, None);
+                    }
                 }
             }
         }
@@ -742,10 +986,14 @@ impl Landscape {
             return;
         }
         let target_height = height.max(0);
+        let old = self.surface.get(index).copied();
         if let Some(slot) = self.surface.get_mut(index) {
             if *slot < target_height {
                 *slot = target_height;
                 self.mark_mass_mover_dirty();
+                if let Some(old) = old {
+                    self.grid_track_surface(column, old, target_height, None);
+                }
             }
         }
     }
@@ -853,7 +1101,9 @@ impl Landscape {
                 continue;
             }
 
+            let old = self.surface[index];
             self.surface[index] = target_height;
+            self.grid_track_surface(index as i32, old, target_height, None);
             result
                 .removed_by_material
                 .entry(material_id)
@@ -931,6 +1181,12 @@ impl Landscape {
         }
         if y >= self.estimated_height() {
             return true;
+        }
+        // GBackSolid = DensitySolid(Pix2Dens[pix]) (C4Wrappers.h:174-177):
+        // the pixel plane is the truth — caves are AIR below the column
+        // surface, water is never solid.
+        if let Some(grid) = &self.pixels {
+            return grid.density_at(x, y).unwrap_or(0) >= C4M_SOLID;
         }
         match self.surface_height(x) {
             Some(surface_y) => y >= surface_y,
@@ -1379,7 +1635,13 @@ impl Landscape {
             self.mark_mass_mover_dirty();
             return true;
         }
+        let old = self.surface[index];
         self.surface[index] = target;
+        let fill = self
+            .pixels
+            .as_ref()
+            .and_then(|grid| grid.byte_for_material(material));
+        self.grid_track_surface(index as i32, old, target, fill);
         self.solid_materials[index] = Some(material);
         self.mark_mass_mover_dirty();
         true
@@ -1427,6 +1689,10 @@ impl Landscape {
             let target = (*height - 1).max(0);
             *height = target;
             self.mark_mass_mover_dirty();
+            if let Some(grid) = self.pixels.as_mut() {
+                // The column op removes the TOP pixel; mirror it on the plane.
+                grid.clear_pixel(index as i32, target);
+            }
             true
         } else {
             false
@@ -1502,6 +1768,18 @@ impl Landscape {
     }
 
     pub fn resolve_collision(&self, position: Vector2, velocity: Vector2) -> CollisionResolution {
+        // With the pixel plane there is NO surface snap at all: C++ has no
+        // such mechanism — per-pixel movement contact governs motion, and
+        // embedded objects simply sit (the snap is the column model's
+        // stand-in for fixtures without real terrain).
+        if self.pixels.is_some() {
+            return CollisionResolution {
+                position,
+                velocity,
+                collided: false,
+                material: None,
+            };
+        }
         // Liquid is not ground: GBackLiquid pixels (density 25..50) never
         // eject an object to the column surface — classified maps carry
         // cave rivers BELOW the surface scalar (the surface snap itself is
@@ -1819,6 +2097,8 @@ impl<'de> Deserialize<'de> for Landscape {
             tunnels: HashMap<u32, Vec<(i32, i32)>>,
             #[serde(default)]
             world_height: Option<i32>,
+            #[serde(default)]
+            pixels: Option<PixelGrid>,
         }
 
         let mut data = LandscapeData::deserialize(deserializer)?;
@@ -1855,6 +2135,7 @@ impl<'de> Deserialize<'de> for Landscape {
         landscape.default_liquid_material = data.default_liquid_material;
         landscape.tunnels = data.tunnels;
         landscape.world_height = data.world_height;
+        landscape.pixels = data.pixels;
         landscape.mass_mover_dirty = false;
         Ok(landscape)
     }
