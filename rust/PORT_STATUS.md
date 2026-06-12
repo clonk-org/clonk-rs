@@ -314,6 +314,21 @@ full-scenario shadow-diff (see Parity harnesses).
   ... Tyler.c4p` when a display is present; expected result is count
   parity (810 == 810) with the diff moving to per-object fields
   (positions — now far closer thanks to the real terrain).
+- **810 == 810 STAMPED LIVE (2026-06-12)** — the count gate is OPEN; the
+  comparator emits per-object field diffs. First histogram (3572 lines):
+  action 1260, alive 748, vertices 731, position 694, velocity 106.
+  Commit 62e25481 closed the two largest classes (Alive follows
+  C4D_Living, C4Object.cpp:191/2756; idle actions carry no phase,
+  C4Object.cpp:4214-4215; C-ABI idle-name sentinel mapping): now
+  vertices 731, position 698, action 271, velocity 106, energy 14,
+  crew 12, alive 12. NEXT worklist: (a) vertices — the RUST side
+  reports [] for 731 objects (def shape vertex flow or the snapshot
+  field; Objects.txt VertexX/Y/Friction also unparsed); (b) position
+  698 — the cave-snap class, gated on the per-pixel solid landscape
+  epic; (c) residual action diffs (Still->Breeze trees etc.); ALSO
+  aggregate the differ output in ffi.rs (sorted, grouped by
+  definition+field, capped) instead of the unsorted 274KB wall, and
+  host-fn backlog task #26 (C4Id/Mod/SetLocal/MakeCrewMember + DYNA iX).
 
 ## Gates
 
