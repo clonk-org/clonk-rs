@@ -15,6 +15,7 @@
 )]
 
 mod action;
+mod chunky;
 mod script_constants;
 mod command;
 mod compat;

@@ -439,6 +439,25 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         tracing::info!(stage, counts = counts.join(" "), "watched defs");
         if let Some(landscape) = engine.landscape() {
             tracing::info!(liquid_750_622 = landscape.is_liquid_at(750, 622), solid_750_622 = landscape.is_solid_at(750, 622), "probe");
+            // `LC_XTASK_PROBE=x,y;x,y`: solidity/liquid at arbitrary
+            // pixels — the headless stand-in for GBackSolid spot checks.
+            for spec in std::env::var("LC_XTASK_PROBE")
+                .unwrap_or_default()
+                .split(';')
+                .filter(|spec| !spec.is_empty())
+            {
+                if let Some((x, y)) = spec.split_once(',').and_then(|(x, y)| {
+                    x.trim().parse::<i32>().ok().zip(y.trim().parse::<i32>().ok())
+                }) {
+                    tracing::info!(
+                        x,
+                        y,
+                        solid = landscape.is_solid_at(x, y),
+                        liquid = landscape.is_liquid_at(x, y),
+                        "probe"
+                    );
+                }
+            }
         }
     };
 

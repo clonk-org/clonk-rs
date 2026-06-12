@@ -2583,6 +2583,10 @@ pub(crate) struct MapPixelClassifier {
     /// Material NAME per texmap index — the pixel grid resolves these
     /// into engine MaterialIds once the MaterialSet exists.
     names: Vec<Option<String>>,
+    /// Material MapChunkType per texmap index (`Shape`,
+    /// C4Material.cpp:181); None = no material mapped, so ChunkOZoom
+    /// draws nothing for the texture (C4Landscape.cpp:342-343).
+    shapes: Vec<Option<crate::chunky::ChunkShape>>,
 }
 
 impl MapPixelClassifier {
@@ -2640,73 +2644,90 @@ pub(crate) fn build_map_pixel_classifier(
 
     let mut densities = [0i32; 128];
     let mut names: Vec<Option<String>> = vec![None; 128];
+    let mut shapes: Vec<Option<crate::chunky::ChunkShape>> = vec![None; 128];
     for (index, slot) in densities.iter_mut().enumerate() {
         names[index] = texmap
             .entry(index as u8)
             .map(|entry| entry.material.clone());
-        *slot = texmap
-            .entry(index as u8)
-            .and_then(|entry| {
-                local_library
-                    .as_ref()
-                    .and_then(|library| library.get(&entry.material))
-                    .or_else(|| {
-                        global_library
-                            .as_ref()
-                            .and_then(|library| library.get(&entry.material))
-                    })
-            })
+        let material = texmap.entry(index as u8).and_then(|entry| {
+            local_library
+                .as_ref()
+                .and_then(|library| library.get(&entry.material))
+                .or_else(|| {
+                    global_library
+                        .as_ref()
+                        .and_then(|library| library.get(&entry.material))
+                })
+        });
+        shapes[index] = material.map(|material| {
+            crate::chunky::ChunkShape::from_shape(material.int("Shape").unwrap_or(0))
+        });
+        *slot = material
             .and_then(|material| material.int("Density"))
             .unwrap_or(0);
     }
-    Some(MapPixelClassifier { densities, names })
+    Some(MapPixelClassifier {
+        densities,
+        names,
+        shapes,
+    })
 }
 
-/// Build the column landscape from a classified 8-bit map: per column the
-/// surface is the first SOLID row, liquid rows become liquid segments and
-/// IFT-bit pixels become tunnel-background ranges, each zoomed by MapZoom
-/// (C4Landscape::MapToLandscape fills map cells at zoom scale; the chunky
-/// rim jitter — DrawChunk with MapSeed — is not modeled, so material
-/// borders are block-aligned here).
+/// Build the landscape from a classified 8-bit map: the map zooms through
+/// ChunkOZoom into the Surface8 pixel plane (chunky material rims and
+/// slope smoothers, C4Landscape::MapToSurface → TexOZoom → ChunkOZoom,
+/// C4Landscape.cpp:336-480), then the column approximation — surface
+/// heights, liquid segments, IFT tunnel ranges — derives from that plane.
 fn classified_landscape(
     bitmap: &lc_resources::bitmap::IndexedBitmap,
     classifier: &MapPixelClassifier,
     zoom: i32,
+    map_seed: i32,
 ) -> Result<Landscape, ScenarioError> {
-    let map_width = bitmap.width as usize;
-    let map_height = bitmap.height as usize;
-    let world_height = (map_height as i32).saturating_mul(zoom).max(0);
+    let map_width = bitmap.width as i32;
+    let map_height = bitmap.height as i32;
+    let world_height = map_height.saturating_mul(zoom).max(0);
     let final_width = bitmap.width.saturating_mul(zoom as u32);
+    let plane_width = final_width as usize;
 
-    let mut surfaces = Vec::with_capacity(map_width * zoom as usize);
-    for x in 0..map_width {
-        let surface_world = (0..map_height)
-            .find(|&y| classifier.is_solid(bitmap.indices[y * map_width + x]))
-            .map(|y| (y as i32).saturating_mul(zoom))
+    let bytes = crate::chunky::synthesize_landscape(
+        &bitmap.indices,
+        map_width,
+        map_height,
+        zoom,
+        map_seed,
+        &classifier.shapes,
+    )
+    .into_bytes();
+    let density_of = |byte: u8| classifier.densities[(byte & 127) as usize];
+
+    let mut surfaces = Vec::with_capacity(plane_width);
+    for x in 0..plane_width {
+        let surface_world = (0..world_height)
+            .find(|&y| density_of(bytes[y as usize * plane_width + x]) >= 50)
             .unwrap_or(world_height);
-        for _ in 0..zoom {
-            surfaces.push(surface_world);
-        }
+        surfaces.push(surface_world);
     }
 
     let mut landscape = Landscape::new(final_width, surfaces)
         .map_err(|error| ScenarioError::InvalidLandscape(error.to_string()))?;
     landscape.set_world_height(world_height);
 
-    for x in 0..map_width {
+    for x in 0..plane_width {
         let mut segments = Vec::new();
         let mut tunnel_ranges = Vec::new();
-        let mut run_start: Option<usize> = None;
-        let mut tunnel_start: Option<usize> = None;
-        for y in 0..=map_height {
-            let pixel = (y < map_height).then(|| bitmap.indices[y * map_width + x]);
-            let liquid = pixel.map(|p| classifier.is_liquid(p)).unwrap_or(false);
+        let mut run_start: Option<i32> = None;
+        let mut tunnel_start: Option<i32> = None;
+        for y in 0..=world_height {
+            let pixel = (y < world_height).then(|| bytes[y as usize * plane_width + x]);
+            let density = pixel.map(density_of).unwrap_or(0);
+            let liquid = (25..50).contains(&density);
             match (liquid, run_start) {
                 (true, None) => run_start = Some(y),
                 (false, Some(start)) => {
                     segments.push(crate::landscape::LiquidSegment {
-                        top: (start as i32) * zoom,
-                        bottom: (y as i32) * zoom - 1,
+                        top: start,
+                        bottom: y - 1,
                         material: None,
                     });
                     run_start = None;
@@ -2719,45 +2740,20 @@ fn classified_landscape(
             match (tunnel, tunnel_start) {
                 (true, None) => tunnel_start = Some(y),
                 (false, Some(start)) => {
-                    tunnel_ranges.push(((start as i32) * zoom, (y as i32) * zoom - 1));
+                    tunnel_ranges.push((start, y - 1));
                     tunnel_start = None;
                 }
                 _ => {}
             }
         }
-        if segments.is_empty() && tunnel_ranges.is_empty() {
-            continue;
+        if !segments.is_empty() {
+            landscape.set_liquid_column(x as u32, segments);
         }
-        for world_x in (x as u32) * zoom as u32..(x as u32 + 1) * zoom as u32 {
-            if !segments.is_empty() {
-                landscape.set_liquid_column(world_x, segments.clone());
-            }
-            if !tunnel_ranges.is_empty() {
-                landscape.set_tunnel_column(world_x, tunnel_ranges.clone());
-            }
+        if !tunnel_ranges.is_empty() {
+            landscape.set_tunnel_column(x as u32, tunnel_ranges);
         }
     }
 
-    // The Surface8 pixel plane: every zoom×zoom world block carries its
-    // map cell's raw byte, IFT bit included (MapToSurface zooms map cells
-    // into pixels, C4Landscape.cpp:732-789; the chunky DrawChunk rim
-    // jitter is not modeled — borders are block-aligned).
-    let plane_width = final_width as usize;
-    let plane_height = world_height.max(0) as usize;
-    let mut bytes = vec![0u8; plane_width * plane_height];
-    for map_y in 0..map_height {
-        for map_x in 0..map_width {
-            let byte = bitmap.indices[map_y * map_width + map_x];
-            if byte == 0 {
-                continue;
-            }
-            for world_y in map_y * zoom as usize..(map_y + 1) * zoom as usize {
-                let row = world_y * plane_width;
-                bytes[row + map_x * zoom as usize..row + (map_x + 1) * zoom as usize]
-                    .fill(byte);
-            }
-        }
-    }
     landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
         final_width,
         world_height.max(0) as u32,
@@ -2828,7 +2824,16 @@ fn load_legacy_landscape(
         // below stands in.
         if let Some(classifier) = classifier {
             if let Ok(bitmap) = lc_resources::bitmap::IndexedBitmap::decode(&bytes) {
-                return classified_landscape(&bitmap, classifier, map_zoom_u32 as i32).map(Some);
+                // C++ draws MapSeed = Random(3133700) at landscape init
+                // (C4Landscape.cpp:563); our RNG is not the C++ LCG yet,
+                // so the shadow bridge hands the C++ seed across via env
+                // (standalone runs jitter deterministically from 0).
+                let map_seed = std::env::var("LC_RUST_ENGINE_MAP_SEED")
+                    .ok()
+                    .and_then(|value| value.trim().parse::<i32>().ok())
+                    .unwrap_or(0);
+                return classified_landscape(&bitmap, classifier, map_zoom_u32 as i32, map_seed)
+                    .map(Some);
             }
         }
         let dynamic =
@@ -7939,10 +7944,19 @@ global func Step(state, frame, random)
         let mut names: Vec<Option<String>> = vec![None; 128];
         names[20] = Some("Water".into());
         names[30] = Some("Earth".into());
-        let classifier = MapPixelClassifier { densities, names };
+        // No `Shape` in either material: MapChunkType 0 = Flat, chunks
+        // box-fill their blocks (C4Landscape.cpp:285-287).
+        let mut shapes: Vec<Option<crate::chunky::ChunkShape>> = vec![None; 128];
+        shapes[20] = Some(crate::chunky::ChunkShape::Flat);
+        shapes[30] = Some(crate::chunky::ChunkShape::Flat);
+        let classifier = MapPixelClassifier {
+            densities,
+            names,
+            shapes,
+        };
 
         let landscape =
-            classified_landscape(&bitmap, &classifier, 10).expect("landscape builds");
+            classified_landscape(&bitmap, &classifier, 10, 0).expect("landscape builds");
 
         let grid = landscape.pixel_grid().expect("classified maps build Surface8");
         assert_eq!(
@@ -7966,6 +7980,48 @@ global func Step(state, frame, random)
             !landscape.is_solid_at(35, 25),
             "sky below roof level in an open column is not solid"
         );
+    }
+
+    #[test]
+    fn classified_static_map_synthesizes_chunky_borders_like_chunk_o_zoom() {
+        // MapToLandscape zooms map cells through ChunkOZoom: Smooth/Rough
+        // materials draw jittered chunk POLYGONS, not blocks
+        // (DrawChunk, C4Landscape.cpp:280-313), so material borders
+        // bulge past the zoom grid. With MapSeed=0 the cell at map (1,1)
+        // (cro=5) reaches one pixel above its block at world columns
+        // 5..=7 (hand-stepped in chunky::tests) — cave roofs gain the
+        // overhang that keeps stalactites attached in C++.
+        let bitmap = lc_resources::bitmap::IndexedBitmap {
+            width: 3,
+            height: 2,
+            indices: vec![
+                0, 0, 0, //
+                30, 30, 30,
+            ],
+        };
+        let mut densities = [0i32; 128];
+        densities[30] = 100;
+        let mut names: Vec<Option<String>> = vec![None; 128];
+        names[30] = Some("Earth".into());
+        let mut shapes: Vec<Option<crate::chunky::ChunkShape>> = vec![None; 128];
+        shapes[30] = Some(crate::chunky::ChunkShape::Smooth);
+        let classifier = MapPixelClassifier {
+            densities,
+            names,
+            shapes,
+        };
+
+        let landscape =
+            classified_landscape(&bitmap, &classifier, 4, 0).expect("landscape builds");
+
+        assert!(landscape.is_solid_at(6, 3), "chunk bulges above its block");
+        assert!(!landscape.is_solid_at(4, 3), "bulge is jitter-shaped");
+        assert_eq!(
+            landscape.surface_height(6),
+            Some(3),
+            "surface columns derive from the synthesized plane"
+        );
+        assert_eq!(landscape.surface_height(4), Some(4));
     }
 
     #[test]

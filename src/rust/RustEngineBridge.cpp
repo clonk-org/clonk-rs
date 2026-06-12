@@ -1064,6 +1064,11 @@ bool InitialiseRuntime(C4Game &game) {
     char *error_message = nullptr;
     const uint64_t seed =
         static_cast<uint64_t>(static_cast<uint32_t>(game.Parameters.RandomSeed));
+    // The Rust runtime synthesizes the static-map landscape itself
+    // (ChunkOZoom); its chunk jitter must use the SAME MapSeed the C++
+    // landscape drew at init (C4Landscape.cpp:563), handed across here
+    // because the Rust RNG is not the C++ LCG yet.
+    setenv("LC_RUST_ENGINE_MAP_SEED", std::to_string(game.Landscape.MapSeed).c_str(), 1);
     if (!lc_engine_runtime_load_scenario(runtime.get(), scenario_path.c_str(), seed, &error_message)) {
         RustStringPtr error = MakeString(error_message);
         if (error) {
