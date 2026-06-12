@@ -269,6 +269,51 @@ full-scenario shadow-diff (see Parity harnesses).
   foreign command-target effect callbacks get `this()` but not the
   foreign locals; a scenario Initialize error discards the whole
   batch (C++ keeps pre-error mutations).
+- **Liquid landscape + InLiquid flag (task #25, 2026-06-12)** — closes
+  the last shadow-diff COUNT gap (5x FXU1). Two slices:
+  (1) TexMap-classified static maps: scenarios without Map.bmp load
+  Landscape.bmp AS the map (C4Landscape.cpp:593-601 — GoldRush had been
+  running on the FLAT FALLBACK landscape the whole time, invisible
+  because per-object compares only start once counts match). The 8-bit
+  palette INDICES (lc-resources `IndexedBitmap` — generic RGBA decoding
+  destroys them) classify via `TexMap.txt` (lc-resources `TextureMap`;
+  scenario-local Material.c4g first, OverloadMaterials admits the
+  global set, C4Texture.cpp:197-227) into densities (PixCol2Mat/
+  MatDensity, C4Wrappers.h:110-145): surface = first SOLID row
+  (density>=50), liquid rows (25..50) → LiquidColumn segments, IFT-bit
+  pixels → tunnel ranges, all ×MapZoom. The chunky rim (DrawChunk +
+  MapSeed jitter — MapSeed is drawn then FixRandom re-fixes the
+  ledger, C4Landscape.cpp:563/579) is NOT modeled: material borders
+  are block-aligned (±MapZoom px vs C++). Loaded liquid CONSUMES the
+  mass-mover dirty mark (resting water seeds no movers — they'd draw
+  per-tick RNG; C4MassMoverSet starts empty). Loaded objects keep
+  positions VERBATIM (no spawn collision resolution) and liquid pixels
+  never eject to the column surface (resolve_collision). CAVEAT: the
+  column model still calls cave AIR/water "solid" (GBackSolid wrong
+  inside caves; cave-air objects still surface-snap per tick) — the
+  full per-pixel solid model (Surface8 + solid segments + mutation-op
+  rewrite) is the next landscape-fidelity epic.
+  (2) ObjectState.in_liquid = C4Object::InLiquid (C4Object.h:156):
+  Objects.txt `InLiquid` parse (23 objects in GoldRush), update inline
+  in the movement step (C4Movement.cpp:443-460; entry clears
+  fNoAttach; probe GBackLiquid(x, y+Float*Con/FullCon-1) with the new
+  DefCore Float; contained/StaticBack skipped; the C++ Mobile gate
+  unmodeled), cleared on container exit (C4Object.cpp:1528).
+  FnInLiquid reads the FLAG (stale until first movement — pinned).
+  OCF_InLiquid (1<<24) computed iff in_liquid && uncontained with the
+  C++ one-frame lag. GAPS: liquid-entry Splash (OCF_HitSpeed2 &&
+  Mass>3, C4Movement.cpp:450-451) draws synced RNG and is SKIPPED —
+  an RNG-stream divergence at every heavy-object liquid entry;
+  DoGravity floatation (InLiquid && Def->Float) and InLiquidAction
+  redirects remain unmodeled; scope-level GetOCF and the tick command
+  snapshots use bare ocf::compute without the bit.
+  Verified headless: FXU1=5 survives ticks at their river positions;
+  93/93 sweep; all suites green. The LIVE shadow stamp was blocked by
+  a display-init crash (CStdWindow::SetDisplayMode aborts while the
+  screen is unavailable) — rerun `LC_RUST_ENGINE_RUNTIME=1 ./clonk
+  ... Tyler.c4p` when a display is present; expected result is count
+  parity (810 == 810) with the diff moving to per-object fields
+  (positions — now far closer thanks to the real terrain).
 
 ## Gates
 
