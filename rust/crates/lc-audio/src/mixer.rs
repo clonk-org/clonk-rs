@@ -31,73 +31,65 @@ pub enum AudioError {
     InvalidChannel,
 }
 
-#[derive(Clone)]
-pub struct SoundHandle {
+/// Unloads the mixer sound when the last `SoundHandle` clone drops.
+struct SoundHandleInner {
     mixer: Arc<AudioMixer>,
     id: SoundId,
-    released: Arc<AtomicBool>,
+}
+
+impl Drop for SoundHandleInner {
+    fn drop(&mut self) {
+        self.mixer.unload_sound(self.id);
+    }
+}
+
+#[derive(Clone)]
+pub struct SoundHandle {
+    inner: Arc<SoundHandleInner>,
+}
+
+/// Unloads the mixer music when the last `MusicHandle` clone drops.
+struct MusicHandleInner {
+    mixer: Arc<AudioMixer>,
+    id: MusicId,
+}
+
+impl Drop for MusicHandleInner {
+    fn drop(&mut self) {
+        self.mixer.unload_music(self.id);
+    }
 }
 
 #[derive(Clone)]
 pub struct MusicHandle {
-    mixer: Arc<AudioMixer>,
-    id: MusicId,
-    released: Arc<AtomicBool>,
+    inner: Arc<MusicHandleInner>,
 }
 
 impl SoundHandle {
     pub(crate) fn new(mixer: Arc<AudioMixer>, id: SoundId) -> Self {
         Self {
-            mixer,
-            id,
-            released: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    pub fn release(&self) {
-        if !self.released.swap(true, Ordering::AcqRel) {
-            self.mixer.unload_sound(self.id);
+            inner: Arc::new(SoundHandleInner { mixer, id }),
         }
     }
 
     pub fn duration_ms(&self) -> Option<u32> {
-        self.mixer.sound_duration_ms(self.id)
+        self.inner.mixer.sound_duration_ms(self.inner.id)
     }
 
     fn id(&self) -> SoundId {
-        self.id
-    }
-}
-
-impl Drop for SoundHandle {
-    fn drop(&mut self) {
-        self.release();
+        self.inner.id
     }
 }
 
 impl MusicHandle {
     pub(crate) fn new(mixer: Arc<AudioMixer>, id: MusicId) -> Self {
         Self {
-            mixer,
-            id,
-            released: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    pub fn release(&self) {
-        if !self.released.swap(true, Ordering::AcqRel) {
-            self.mixer.unload_music(self.id);
+            inner: Arc::new(MusicHandleInner { mixer, id }),
         }
     }
 
     fn id(&self) -> MusicId {
-        self.id
-    }
-}
-
-impl Drop for MusicHandle {
-    fn drop(&mut self) {
-        self.release();
+        self.inner.id
     }
 }
 
@@ -906,6 +898,35 @@ mod tests {
             .map(|sample| (*sample as i32).abs() as i64)
             .sum();
         assert!(right_energy > left_energy);
+    }
+
+    #[test]
+    fn dropping_transient_clone_keeps_sound_loaded() {
+        // lc-app caches one SoundHandle per effect and plays transient clones
+        // of it; C4SoundSystem keeps samples loaded until the system clears
+        // them (C4SoundSystem.cpp GetEffect/Play), so dropping a clone must
+        // not unload the shared sample.
+        let data = generate_sine_wave(60, 330.0, 44_100);
+        let mixer = Arc::new(AudioMixer::new(44_100, 2));
+        let id = mixer.load_sound(&data).unwrap();
+        let cached = SoundHandle::new(mixer.clone(), id);
+        drop(cached.clone());
+        assert!(mixer.play_sound(id, false).is_ok());
+    }
+
+    #[test]
+    fn dropping_last_handle_unloads_sound() {
+        let data = generate_sine_wave(60, 330.0, 44_100);
+        let mixer = Arc::new(AudioMixer::new(44_100, 2));
+        let id = mixer.load_sound(&data).unwrap();
+        let handle = SoundHandle::new(mixer.clone(), id);
+        let clone = handle.clone();
+        drop(handle);
+        drop(clone);
+        assert!(matches!(
+            mixer.play_sound(id, false),
+            Err(AudioError::InvalidChannel)
+        ));
     }
 
     #[test]

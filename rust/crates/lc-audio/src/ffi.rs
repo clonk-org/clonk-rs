@@ -71,8 +71,8 @@ pub extern "C" fn lc_audio_sound_free(handle: *mut AudioSoundHandle) {
         return;
     }
     unsafe {
-        let boxed = Box::from_raw(handle);
-        boxed.0.release();
+        // Dropping the handle unloads the sound once no other clone uses it.
+        drop(Box::from_raw(handle));
     }
 }
 
@@ -108,8 +108,8 @@ pub extern "C" fn lc_audio_music_free(handle: *mut AudioMusicHandle) {
         return;
     }
     unsafe {
-        let boxed = Box::from_raw(handle);
-        boxed.0.release();
+        // Dropping the handle unloads the music once no other clone uses it.
+        drop(Box::from_raw(handle));
     }
 }
 
