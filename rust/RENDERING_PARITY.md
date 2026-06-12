@@ -55,6 +55,20 @@ All done + unit-tested against the C++ formulas, 2026-05-30 (`lc-graphics`, 33 t
       lower priority (used for debug overlays + a few HUD gradients).
 
 ### R2 — GUI / menu chrome (most visible divergence; no simulation dependency)
+- [x] **`Graphics.Scale` honoured (2026-06-12).** The shared config's
+      `ResolutionX/ResolutionY/Scale` keys are read with the C++ names
+      (C4Config.cpp:440-442; the Rust app previously read nonexistent
+      `ResX/ResY` and ignored Scale at render time, so menus laid out 1:1
+      over the physical window — the wrong zoom and dialog proportions).
+      The window asks for `ResX*Scale` output pixels (C4Application.cpp:183),
+      the app renders at `ceil(pixels/scale)` logical
+      (C4Application::SetResolution), `lc-scaling::FramePresenter`
+      bilinear-upscales the finished frame, and mouse input divides by the
+      scale (C4MouseControl.cpp:185). KNOWN GAP at Scale != 100: C++
+      rasterizes fonts at `size*scale` (C4Fonts.cpp:172) and stretches each
+      texture directly to the output, so its text stays crisp; the Rust
+      frame upscale is geometrically identical but softer. Per-renderer
+      scale-aware rasterization is the follow-up if crispness matters.
 - [x] Main-menu labels match C++ (`startup_main_menu.rs`: "Start Game" /
       "Start Network Game"), verified live via screenshot 2026-05-30.
 - [x] Startup main-menu layout matches `C4StartupMainDlg` (`C4StartupMainDlg.cpp:44`):
