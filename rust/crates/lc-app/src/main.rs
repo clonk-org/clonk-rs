@@ -7693,7 +7693,10 @@ impl GameApp {
         self.menu_render_version = self.menu_render_version.wrapping_add(1);
     }
 
-    fn render(&mut self, frame: &mut [u8]) -> Result<()> {
+    /// Renders into `frame`; returns whether the frame content is new (a
+    /// replayed menu cache hit returns `false`, letting the caller skip
+    /// any output post-processing).
+    fn render(&mut self, frame: &mut [u8]) -> Result<bool> {
         match self.mode {
             AppMode::Menu => {
                 let (width, height) = {
@@ -7708,7 +7711,7 @@ impl GameApp {
                         && cache.frame.len() == frame.len()
                     {
                         frame.copy_from_slice(&cache.frame);
-                        return Ok(());
+                        return Ok(false);
                     }
                 }
                 let version = self.menu_render_version;
@@ -7737,10 +7740,10 @@ impl GameApp {
                     height,
                     frame: frame.to_vec(),
                 });
-                Ok(())
+                Ok(true)
             }
-            AppMode::Loading => self.render_loading(frame),
-            AppMode::Running => self.render_running(frame),
+            AppMode::Loading => self.render_loading(frame).map(|()| true),
+            AppMode::Running => self.render_running(frame).map(|()| true),
         }
     }
 
@@ -11062,14 +11065,16 @@ mod tests {
         let mut app = new_menu_app(320, 200);
         let len = 320 * 200 * 4;
         let mut fresh = vec![0u8; len];
-        app.render(&mut fresh).expect("first render");
+        let composed = app.render(&mut fresh).expect("first render");
+        assert!(composed, "first render must report a new frame");
         assert!(
             app.menu_frame_cache.is_some(),
             "menu render should populate the frame cache"
         );
 
         let mut replay = vec![0u8; len];
-        app.render(&mut replay).expect("cached render");
+        let replayed = app.render(&mut replay).expect("cached render");
+        assert!(!replayed, "cache replay must report an unchanged frame");
         assert_eq!(fresh, replay, "cached replay must match the first render");
 
         // The replay must be pixel-identical to a full recomposition.
