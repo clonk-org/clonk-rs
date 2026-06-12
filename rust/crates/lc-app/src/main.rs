@@ -18,6 +18,7 @@ mod menu_controls;
 mod network;
 mod object_menu;
 mod save_browser;
+mod scaling;
 mod settings;
 
 use std::cmp::Ordering;
