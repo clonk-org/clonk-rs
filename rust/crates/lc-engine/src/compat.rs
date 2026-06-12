@@ -3488,6 +3488,9 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Min", min_func);
     script.register_host_function("Max", max_func);
     script.register_host_function("Sqrt", sqrt_func);
+    script.register_host_function("Mod", modulo);
+    script.register_host_function("GetMass", get_mass);
+    script.register_host_function("C4Id", c4_id);
     script.register_host_function("Pow", pow_func);
     script.register_host_function("BoundBy", bound_by_func);
     script.register_host_function("Sin", sin_func);
@@ -6242,6 +6245,69 @@ fn sqrt_func(args: &[Value]) -> Result<Value, RuntimeError> {
     // C++ implementation does: sqrt, then adjusts for rounding
     let result = (value as f64).sqrt() as i32;
     Ok(Value::Int(result))
+}
+
+/// FnGetMass (C4Script.cpp:1148-1158): with an id, the DEF mass; else the
+/// object's Mass = max(Def->Mass * Con / FullCon, 1)
+/// (C4Object.cpp:188; OwnMass/contents mass unmodeled). Nil without both.
+fn get_mass(args: &[Value]) -> Result<Value, RuntimeError> {
+    let definition = parse_definition_argument(args.get(1), "GetMass")?;
+    if let Some(definition) = definition {
+        return HOST_CONTEXT.with(|cell| {
+            Ok(cell
+                .borrow()
+                .as_ref()
+                .and_then(|context| context.world.definition_metadata(&definition))
+                .map(|metadata| Value::Int(metadata.mass))
+                .unwrap_or(Value::Nil))
+        });
+    }
+    let target =
+        parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "GetMass", "obj")?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let id = target.or_else(|| context.object_context().map(|object| object.id()));
+        let Some(id) = id else {
+            return Ok(Value::Nil);
+        };
+        Ok(context
+            .get_world_object(id)
+            .and_then(|object| {
+                let metadata = context.world.definition_metadata(object.definition_id())?;
+                let construction = object
+                    .full_state()
+                    .map(|state| state.construction)
+                    .unwrap_or(crate::FULL_CON);
+                Some(Value::Int(
+                    (metadata.mass.saturating_mul(construction) / crate::FULL_CON).max(1),
+                ))
+            })
+            .unwrap_or(Value::Nil))
+    })
+}
+
+/// FnMod (C4Script.cpp:3219-3223): truncated `%`, zero divisor yields 0.
+fn modulo(args: &[Value]) -> Result<Value, RuntimeError> {
+    let value = parse_optional_i32(args.first(), "Mod", "value")?.unwrap_or(0);
+    let divisor = parse_optional_i32(args.get(1), "Mod", "divisor")?.unwrap_or(0);
+    Ok(Value::Int(if divisor == 0 {
+        0
+    } else {
+        value.wrapping_rem(divisor)
+    }))
+}
+
+/// FnC4Id (C4Script.cpp:2396-2399): string to C4ID; empty/nil is C4ID_None
+/// (0 — falsy, like C4Id("") in C++).
+fn c4_id(args: &[Value]) -> Result<Value, RuntimeError> {
+    let name = parse_optional_string(args.first(), "C4Id", "id")?;
+    Ok(match name {
+        Some(name) if !name.is_empty() => Value::C4Id(name),
+        _ => Value::Int(0),
+    })
 }
 
 fn pow_func(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -14973,6 +15039,7 @@ mod tests {
         "AppendCommand",
         "BlastFree",
         "BoundBy",
+        "C4Id",
         "Call",
         "CastBackParticles",
         "CastParticles",
@@ -15042,6 +15109,7 @@ mod tests {
         "GetIndexOf",
         "GetKeys",
         "GetLength",
+        "GetMass",
         "GetMaterial",
         "GetOCF",
         "GetObjectStatus",
@@ -15083,6 +15151,7 @@ mod tests {
         "Max",
         "Message",
         "Min",
+        "Mod",
         "NoContainer",
         "ObjectCall",
         "ObjectCount",

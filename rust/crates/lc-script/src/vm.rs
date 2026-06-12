@@ -604,6 +604,12 @@ impl<'a> Vm<'a> {
             env.define_object_local(&var_decl.name);
         }
 
+        // C4Aul `var` declarations are FUNCTION-scoped and hoisted: the
+        // parser builds the whole Fn->VarNamed table up front, so a var
+        // read BEFORE its `var` statement is nil, never an error
+        // (Dynamite.c4d reads iX three lines above `var iX`).
+        hoist_function_vars(&function.body, &mut env);
+
         let result =
             self.execute_statements(&function.body, &mut env, depth, function.returns_reference)?;
         let value = match result {
@@ -688,7 +694,12 @@ impl<'a> Vm<'a> {
                     Some(expr) => self.evaluate(expr, env, depth)?,
                     None => Value::Nil,
                 };
-                env.define(name, value);
+                // Vars are FUNCTION-scoped in C4Aul: the hoisted slot
+                // (declared at function entry) receives the value — a
+                // `var` inside a block must not shadow it.
+                if env.assign(name, value.clone()).is_err() {
+                    env.define(name, value);
+                }
                 Ok(ControlFlow::Normal)
             }
             Stmt::Assignment { target, value } => {
@@ -2005,6 +2016,50 @@ enum ControlFlow {
     Return(ReturnValue),
 }
 
+/// Collect every `var` name in a function body (all nesting levels) and
+/// pre-declare it nil: C4Aul vars are FUNCTION-scoped — the parser fills
+/// Fn->VarNamed before execution, so a read before the `var` statement is
+/// nil, never an "undefined variable" error.
+fn hoist_function_vars(body: &[Stmt], env: &mut Environment) {
+    for statement in body {
+        match statement {
+            Stmt::VarDecl { name, .. } => env.declare_hoisted(name),
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                hoist_function_vars(then_branch, env);
+                if let Some(else_branch) = else_branch {
+                    hoist_function_vars(else_branch, env);
+                }
+            }
+            Stmt::While { body, .. } => hoist_function_vars(body, env),
+            Stmt::For { init, body, .. } => {
+                if let Some(ForInit::VarDecls(declarations)) = init {
+                    for (name, _) in declarations {
+                        env.declare_hoisted(name);
+                    }
+                }
+                hoist_function_vars(body, env);
+            }
+            Stmt::ForIn {
+                variable,
+                declare_var,
+                body,
+                ..
+            } => {
+                if *declare_var {
+                    env.declare_hoisted(variable);
+                }
+                hoist_function_vars(body, env);
+            }
+            Stmt::Block(inner) | Stmt::Sequence(inner) => hoist_function_vars(inner, env),
+            _ => {}
+        }
+    }
+}
+
 struct Environment {
     scopes: Vec<HashMap<String, Binding>>,
     /// `#strict` level of the executing function, for level-correct `==`/`!=`.
@@ -2089,6 +2144,15 @@ impl Environment {
     fn define(&mut self, name: &str, value: Value) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), Binding::direct(value));
+        }
+    }
+
+    /// Pre-declare a hoisted `var` slot (nil) unless the name already
+    /// exists — parameters share the C4Aul var table and keep their value.
+    fn declare_hoisted(&mut self, name: &str) {
+        let exists = self.scopes.iter().any(|scope| scope.contains_key(name));
+        if !exists {
+            self.define(name, Value::Nil);
         }
     }
 
