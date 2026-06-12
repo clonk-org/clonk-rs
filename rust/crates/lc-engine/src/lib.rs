@@ -11381,14 +11381,24 @@ impl Engine {
             if hit_speed_flags & flag == 0 {
                 continue;
             }
-            self.call_movement_object_function(
+            // Engine-initiated lifecycle calls are fail-safe: a script
+            // error in Hit/Hit2/Hit3 logs and the tick continues
+            // (C4AulExec.cpp:1318-1342) — it must never kill the frame.
+            if let Err(error) = self.call_movement_object_function(
                 index,
                 function,
                 &args,
                 action_library,
                 object_id,
                 definition_id,
-            )?;
+            ) {
+                tracing::warn!(
+                    definition = %definition_id,
+                    function,
+                    %error,
+                    "script error in engine callback; continuing like the C++ fail-safe exec"
+                );
+            }
         }
         Ok(())
     }
