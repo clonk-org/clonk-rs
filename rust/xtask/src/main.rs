@@ -412,11 +412,34 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
                     .iter()
                     .filter(|object| object.definition_id == *id)
                     .count();
+                let detail: Vec<String> = snapshot
+                    .objects
+                    .iter()
+                    .filter(|object| object.definition_id == *id)
+                    .map(|object| {
+                        format!(
+                            "#{} {},{} act:{} ph{} t{}",
+                            object.id,
+                            object.position.x,
+                            object.position.y,
+                            object.action.name,
+                            object.action.phase,
+                            object.action.ticks
+                        )
+                    })
+                    .collect();
                 let known = engine.definition_ids().any(|known| known == id);
-                format!("{id}={count}{}", if known { "" } else { " (def missing)" })
+                format!(
+                    "{id}={count}{} [{}]",
+                    if known { "" } else { " (def missing)" },
+                    detail.join(" | ")
+                )
             })
             .collect();
         tracing::info!(stage, counts = counts.join(" "), "watched defs");
+        if let Some(landscape) = engine.landscape() {
+            tracing::info!(liquid_750_622 = landscape.is_liquid_at(750, 622), solid_750_622 = landscape.is_solid_at(750, 622), "probe");
+        }
     };
 
     tracing::info!(

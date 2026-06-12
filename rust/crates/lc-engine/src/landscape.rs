@@ -1502,6 +1502,18 @@ impl Landscape {
     }
 
     pub fn resolve_collision(&self, position: Vector2, velocity: Vector2) -> CollisionResolution {
+        // Liquid is not ground: GBackLiquid pixels (density 25..50) never
+        // eject an object to the column surface — classified maps carry
+        // cave rivers BELOW the surface scalar (the surface snap itself is
+        // a column-model stand-in; C++ resolves contact per pixel).
+        if self.is_liquid_at(position.x, position.y) {
+            return CollisionResolution {
+                position,
+                velocity,
+                collided: false,
+                material: None,
+            };
+        }
         match self.surface_height(position.x) {
             Some(surface_y) if position.y > surface_y => {
                 let mut new_position = position;

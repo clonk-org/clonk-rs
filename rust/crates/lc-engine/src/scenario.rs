@@ -397,7 +397,8 @@ impl Scenario {
         }
 
         let script = load_legacy_scenario_script(group)?;
-        let landscape = load_legacy_landscape(group, &manifest)?;
+        let classifier = build_map_pixel_classifier(group, resolver);
+        let landscape = load_legacy_landscape(group, &manifest, classifier.as_ref())?;
         // Crew never spawns at scenario load: C4Game::InitPlayers queues
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
         // (C4Player.cpp:481-570) — see Engine::join_player.
@@ -2548,9 +2549,175 @@ fn legacy_map_zoom(section: Option<&Vec<(String, String)>>) -> u32 {
         .max(1) as u32
 }
 
+/// Map-pixel material classification (the Pix2Mat/Pix2Dens tables,
+/// C4Wrappers.h:110-145, C4Landscape.cpp:2832-2839): a pixel byte's low 7
+/// bits are the texmap index (bit 0x80 = IFT); index 0, unmapped entries
+/// and unknown materials are sky (MNone, density 0).
+pub(crate) struct MapPixelClassifier {
+    densities: [i32; 128],
+}
+
+impl MapPixelClassifier {
+    /// DensitySolid: density >= C4M_Solid=50 (C4Wrappers.h:68-71).
+    fn is_solid(&self, pixel: u8) -> bool {
+        self.density(pixel) >= 50
+    }
+
+    /// DensityLiquid: C4M_Liquid=25 <= density < 50 (C4Wrappers.h:78-81).
+    fn is_liquid(&self, pixel: u8) -> bool {
+        (25..50).contains(&self.density(pixel))
+    }
+
+    fn density(&self, pixel: u8) -> i32 {
+        self.densities[(pixel & 0x7F) as usize]
+    }
+}
+
+/// TexMap.txt + material densities, scenario-local Material.c4g first
+/// (C4Game::InitMaterialTexture loads the scenario's group before the
+/// global one; OverloadMaterials in its TexMap.txt admits the global
+/// material set). `None` when no TexMap.txt is reachable — the loader
+/// then falls back to the sky-pixel heuristic.
+pub(crate) fn build_map_pixel_classifier(
+    group: &Group,
+    resolver: &impl LegacyDefinitionResolver,
+) -> Option<MapPixelClassifier> {
+    let local = group.open_child("Material.c4g").ok();
+    // The resolver lists the scenario-local group first — the GLOBAL one
+    // is the first hit rooted elsewhere.
+    let local_root = local.as_ref().map(|group| group.root().to_path_buf());
+    let global = resolver
+        .resolve_definition_groups(group, "Material.c4g")
+        .ok()
+        .into_iter()
+        .flatten()
+        .find(|candidate| local_root.as_deref() != Some(candidate.root()));
+    let texmap_source = [local.as_ref(), global.as_ref()]
+        .into_iter()
+        .flatten()
+        .find_map(|group| group.read_file("TexMap.txt").ok())?;
+    let texmap =
+        lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&texmap_source));
+
+    let local_library = local
+        .as_ref()
+        .and_then(|group| lc_resources::MaterialLibrary::from_group(group).ok());
+    let global_library = (local_library.is_none() || texmap.overload_materials)
+        .then(|| {
+            global
+                .as_ref()
+                .and_then(|group| lc_resources::MaterialLibrary::from_group(group).ok())
+        })
+        .flatten();
+
+    let mut densities = [0i32; 128];
+    for (index, slot) in densities.iter_mut().enumerate() {
+        *slot = texmap
+            .entry(index as u8)
+            .and_then(|entry| {
+                local_library
+                    .as_ref()
+                    .and_then(|library| library.get(&entry.material))
+                    .or_else(|| {
+                        global_library
+                            .as_ref()
+                            .and_then(|library| library.get(&entry.material))
+                    })
+            })
+            .and_then(|material| material.int("Density"))
+            .unwrap_or(0);
+    }
+    Some(MapPixelClassifier { densities })
+}
+
+/// Build the column landscape from a classified 8-bit map: per column the
+/// surface is the first SOLID row, liquid rows become liquid segments and
+/// IFT-bit pixels become tunnel-background ranges, each zoomed by MapZoom
+/// (C4Landscape::MapToLandscape fills map cells at zoom scale; the chunky
+/// rim jitter — DrawChunk with MapSeed — is not modeled, so material
+/// borders are block-aligned here).
+fn classified_landscape(
+    bitmap: &lc_resources::bitmap::IndexedBitmap,
+    classifier: &MapPixelClassifier,
+    zoom: i32,
+) -> Result<Landscape, ScenarioError> {
+    let map_width = bitmap.width as usize;
+    let map_height = bitmap.height as usize;
+    let world_height = (map_height as i32).saturating_mul(zoom).max(0);
+    let final_width = bitmap.width.saturating_mul(zoom as u32);
+
+    let mut surfaces = Vec::with_capacity(map_width * zoom as usize);
+    for x in 0..map_width {
+        let surface_world = (0..map_height)
+            .find(|&y| classifier.is_solid(bitmap.indices[y * map_width + x]))
+            .map(|y| (y as i32).saturating_mul(zoom))
+            .unwrap_or(world_height);
+        for _ in 0..zoom {
+            surfaces.push(surface_world);
+        }
+    }
+
+    let mut landscape = Landscape::new(final_width, surfaces)
+        .map_err(|error| ScenarioError::InvalidLandscape(error.to_string()))?;
+    landscape.set_world_height(world_height);
+
+    for x in 0..map_width {
+        let mut segments = Vec::new();
+        let mut tunnel_ranges = Vec::new();
+        let mut run_start: Option<usize> = None;
+        let mut tunnel_start: Option<usize> = None;
+        for y in 0..=map_height {
+            let pixel = (y < map_height).then(|| bitmap.indices[y * map_width + x]);
+            let liquid = pixel.map(|p| classifier.is_liquid(p)).unwrap_or(false);
+            match (liquid, run_start) {
+                (true, None) => run_start = Some(y),
+                (false, Some(start)) => {
+                    segments.push(crate::landscape::LiquidSegment {
+                        top: (start as i32) * zoom,
+                        bottom: (y as i32) * zoom - 1,
+                        material: None,
+                    });
+                    run_start = None;
+                }
+                _ => {}
+            }
+            let tunnel = pixel
+                .map(|p| p & lc_resources::texmap::IFT_BIT != 0)
+                .unwrap_or(false);
+            match (tunnel, tunnel_start) {
+                (true, None) => tunnel_start = Some(y),
+                (false, Some(start)) => {
+                    tunnel_ranges.push(((start as i32) * zoom, (y as i32) * zoom - 1));
+                    tunnel_start = None;
+                }
+                _ => {}
+            }
+        }
+        if segments.is_empty() && tunnel_ranges.is_empty() {
+            continue;
+        }
+        for world_x in (x as u32) * zoom as u32..(x as u32 + 1) * zoom as u32 {
+            if !segments.is_empty() {
+                landscape.set_liquid_column(world_x, segments.clone());
+            }
+            if !tunnel_ranges.is_empty() {
+                landscape.set_tunnel_column(world_x, tunnel_ranges.clone());
+            }
+        }
+    }
+
+    // Loaded water is at rest: C4MassMoverSet starts empty and movers are
+    // created only by landscape CHANGES, never at load — consuming the
+    // dirty mark here keeps resting liquid from seeding movers (and
+    // drawing their per-tick RNG, a lockstep hazard).
+    let _ = landscape.take_mass_mover_dirty();
+    Ok(landscape)
+}
+
 fn load_legacy_landscape(
     group: &Group,
     manifest: &LegacyScenarioManifest,
+    classifier: Option<&MapPixelClassifier>,
 ) -> Result<Option<Landscape>, ScenarioError> {
     let landscape_section = manifest.sections.get("landscape");
     let map_zoom_u32 = legacy_map_zoom(landscape_section);
@@ -2585,10 +2752,25 @@ fn load_legacy_landscape(
             None => (read_optional("Map.bmp")?, map_zoom_u32),
         }
     } else {
-        (read_optional("Map.bmp")?, map_zoom_u32)
+        // Static map: Map.bmp, with Landscape.bmp accepted as the map for
+        // downwards compatibility (C4Landscape.cpp:593-601) — most CR
+        // content (GoldRush included) ships only Landscape.bmp.
+        match read_optional("Map.bmp")? {
+            Some(bytes) => (Some(bytes), map_zoom_u32),
+            None => (read_optional("Landscape.bmp")?, map_zoom_u32),
+        }
     };
 
     if let Some(bytes) = map_bytes {
+        // Material-classified path: the map's 8-bit palette indices are
+        // texmap keys (GroupReadSurface8 keeps the index bytes). Without
+        // a TexMap or for non-indexed images, the sky-pixel heuristic
+        // below stands in.
+        if let Some(classifier) = classifier {
+            if let Ok(bitmap) = lc_resources::bitmap::IndexedBitmap::decode(&bytes) {
+                return classified_landscape(&bitmap, classifier, map_zoom_u32 as i32).map(Some);
+            }
+        }
         let dynamic =
             load_from_memory(&bytes).map_err(|source| ScenarioError::LegacyMapDecode { source })?;
         let rgba = dynamic.to_rgba8();
@@ -7370,6 +7552,146 @@ global func Step(state, frame, random)
                 .any(|object| object.definition_id == "GEM1"),
             "Initialize side effects (CreateObject) must not happen at load"
         );
+    }
+
+    /// A minimal uncompressed bottom-up 8-bit BMP from top-down rows.
+    fn encode_indexed_bmp(rows: &[&[u8]]) -> Vec<u8> {
+        let height = rows.len() as u32;
+        let width = rows[0].len() as u32;
+        let stride = ((width as usize) + 3) & !3;
+        let data_offset = 14 + 40 + 256 * 4;
+        let file_size = data_offset + stride * height as usize;
+        let mut bytes = Vec::with_capacity(file_size);
+        bytes.extend_from_slice(b"BM");
+        bytes.extend_from_slice(&(file_size as u32).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&(data_offset as u32).to_le_bytes());
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&(width as i32).to_le_bytes());
+        bytes.extend_from_slice(&(height as i32).to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&8u16.to_le_bytes());
+        for _ in 0..4 {
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+        }
+        bytes.extend_from_slice(&256u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.resize(data_offset, 0);
+        for row in rows.iter().rev() {
+            bytes.extend_from_slice(row);
+            bytes.resize(bytes.len() + (stride - row.len()), 0);
+        }
+        bytes
+    }
+
+    #[test]
+    fn static_map_classifies_materials_into_surface_and_liquid_columns() {
+        // A static-map scenario without Map.bmp falls back to
+        // Landscape.bmp (C4Landscape.cpp:593-601). Each map pixel byte is
+        // a texmap index (IFT bit 0x80 stripped): index 0 = sky, else
+        // TexMap.txt -> material -> density (PixCol2Mat/MatDensity,
+        // C4Wrappers.h:110-145); liquid iff 25<=density<50, solid iff
+        // density>=50 (C4Wrappers.h:68-81). The map zooms by MapZoom.
+        // GoldRush's river bubbles depend on the liquid columns: their
+        // LiquidCheck removes them when InLiquid() is false.
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let good = defs_root.join("Good.c4d");
+        std::fs::create_dir_all(&good).expect("definition dir");
+        std::fs::write(
+            good.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write defcore");
+        std::fs::write(good.join("Script.c"), "// fine\n").expect("write script");
+
+        let scenario_dir = dir.path().join("Liquid.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Liquid\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Landscape]\nMapZoom=10\nLiquid=Water-Smooth\n",
+        )
+        .expect("write scenario core");
+        // Map (4x4): the middle columns are a CAVE river — an earth roof
+        // over water over an earth bed (GoldRush's bubbles live in such an
+        // underground river, below the column surface). Column 0 is open
+        // ground, column 3 all sky.
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[
+                &[0, 30, 30, 0],
+                &[0, 20, 20, 0],
+                &[30, 20, 20, 0],
+                &[30, 30, 30, 0],
+            ]),
+        )
+        .expect("write map");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(
+            materials.join("TexMap.txt"),
+            "# table\n20=Water-Liquid\n30=Earth-Smooth\n",
+        )
+        .expect("write texmap");
+        std::fs::write(
+            materials.join("Water.c4m"),
+            "[Material]\nName=Water\nDensity=25\n",
+        )
+        .expect("write water");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write earth");
+        // A placed object INSIDE the pool: C4GameObjects::Load keeps
+        // positions verbatim — no spawn-time surface ejection (GoldRush's
+        // bubbles and fish sit in an underground river below the column
+        // surface).
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=GOOD\nNumber=77\nStatus=1\nCategory=0\nX=15\nY=15\n",
+        )
+        .expect("write objects");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let landscape = engine.landscape().expect("landscape loaded");
+
+        let placed = engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.id == ObjectId::new(77))
+            .cloned()
+            .expect("placed object exists");
+        assert_eq!(
+            placed.position,
+            Vector2::new(15, 15),
+            "loaded objects keep their Objects.txt position (no surface snap)"
+        );
+
+        // Map column 1 (world x 10..20): earth roof row 0, water rows 1-2
+        // (world y 10..30), earth bed row 3 (world y 30..40).
+        assert!(landscape.is_liquid_at(15, 15), "river interior is liquid");
+        assert!(landscape.is_liquid_at(15, 29), "river bottom edge is liquid");
+        assert!(!landscape.is_liquid_at(15, 5), "roof above the river");
+        assert!(!landscape.is_liquid_at(15, 35), "earth bed is not liquid");
+        assert!(landscape.is_solid_at(15, 35), "earth bed is solid");
+        assert!(
+            landscape.is_semi_solid_at(15, 15),
+            "liquid counts as semi-solid (GBackSemiSolid)"
+        );
+        // Map column 0: earth from row 2 (world y 20).
+        assert!(landscape.is_solid_at(5, 25));
+        assert!(!landscape.is_liquid_at(5, 25));
+        // Map column 3: all sky.
+        assert!(!landscape.is_solid_at(35, 38), "sky column has no ground");
     }
 
     #[test]

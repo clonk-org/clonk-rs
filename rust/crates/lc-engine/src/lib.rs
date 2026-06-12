@@ -20314,7 +20314,13 @@ impl Engine {
             }
         }
 
-        self.apply_landscape(&mut object);
+        // Loaded objects keep their Objects.txt position verbatim
+        // (C4GameObjects::Load compiles and denumerates only — no
+        // collision resolution); cave/interior content sits below the
+        // column surface by design.
+        if !loaded {
+            self.apply_landscape(&mut object);
+        }
         self.objects.push(object);
         self.note_objects_changed();
         let index = self.objects.len() - 1;

@@ -1,3 +1,4 @@
+pub mod bitmap;
 pub mod definition;
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -6,6 +7,7 @@ pub mod graphics;
 pub mod group;
 pub mod material;
 pub mod scenario;
+pub mod texmap;
 
 pub use definition::{
     ActionDefinition, ActionMap, ColorByOwnerMask, DefComponent, DefCore,
