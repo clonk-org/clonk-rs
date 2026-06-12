@@ -581,6 +581,14 @@ fn emit_frame_controls(
             lc_engine::ControlPacket::SyncCheck(packet) => {
                 let _ = event_tx.send(NetworkEvent::SyncCheck { packet });
             }
+            // CID_JoinPlr/CID_PlrInfo (remote player joins): the engine's
+            // join pipeline consumes these in the shadow-diff runtime;
+            // lc-app's network session has no remote-join event yet —
+            // forwarding them (a join NetworkEvent driving
+            // Engine::join_player like ffi.rs handle_join_player) is the
+            // network-multiplayer join feature, not a control input.
+            lc_engine::ControlPacket::JoinPlayer(_)
+            | lc_engine::ControlPacket::PlayerInfo(_) => {}
             lc_engine::ControlPacket::Unknown { .. } => {}
         }
     }
