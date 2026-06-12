@@ -70,6 +70,95 @@ pub fn upscale_frame(
     }
 }
 
+/// Owns the logical-resolution frame the app renders into and upscales it
+/// to the window's pixel buffer — the C++ engine's window/GUI split, where
+/// the GUI lives at `ResX x ResY` and output pixels at `ResX*Scale`.
+pub struct FramePresenter {
+    scale: f32,
+    physical: (u32, u32),
+    logical: Option<LogicalFrame>,
+    stale: bool,
+}
+
+struct LogicalFrame {
+    width: u32,
+    height: u32,
+    frame: Vec<u8>,
+}
+
+impl FramePresenter {
+    pub fn new(scale: f32, physical_width: u32, physical_height: u32) -> Self {
+        let mut presenter = Self {
+            scale,
+            physical: (physical_width, physical_height),
+            logical: None,
+            stale: true,
+        };
+        presenter.resize(physical_width, physical_height);
+        presenter
+    }
+
+    /// The size the app lays out and renders at.
+    pub fn logical_size(&self) -> (u32, u32) {
+        self.logical
+            .as_ref()
+            .map(|logical| (logical.width, logical.height))
+            .unwrap_or(self.physical)
+    }
+
+    pub fn resize(&mut self, physical_width: u32, physical_height: u32) {
+        self.physical = (physical_width, physical_height);
+        self.stale = true;
+        self.logical = (!is_identity_scale(self.scale)).then(|| {
+            let (width, height) = logical_size_for(physical_width, physical_height, self.scale);
+            LogicalFrame {
+                width,
+                height,
+                frame: vec![0; width as usize * height as usize * 4],
+            }
+        });
+    }
+
+    /// Window pixels to GUI coordinates, like the C++ mouse path divides by
+    /// the application scale (C4MouseControl.cpp:185).
+    pub fn position_to_gui(&self, x: f64, y: f64) -> (f64, f64) {
+        let scale = f64::from(self.scale.max(f32::EPSILON));
+        (x / scale, y / scale)
+    }
+
+    /// Runs `render` against the logical frame and upscales into `output`
+    /// (the window-sized pixel buffer). `render` returns whether it composed
+    /// new content; unchanged frames skip the upscale, relying on `output`
+    /// persisting between calls. At identity scale `render` draws straight
+    /// into `output`.
+    pub fn present<E>(
+        &mut self,
+        output: &mut [u8],
+        render: impl FnOnce(&mut [u8]) -> Result<bool, E>,
+    ) -> Result<(), E> {
+        match self.logical.as_mut() {
+            None => {
+                render(output)?;
+            }
+            Some(logical) => {
+                let changed = render(&mut logical.frame)?;
+                if changed || self.stale {
+                    upscale_frame(
+                        &logical.frame,
+                        logical.width,
+                        logical.height,
+                        output,
+                        self.physical.0,
+                        self.physical.1,
+                    );
+                    self.stale = false;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Source taps and 8-bit blend weight for one destination coordinate:
 /// GL texel-center mapping src = (dst + 0.5) * (src_len / dst_len) - 0.5,
 /// clamped to the source range.
@@ -147,6 +236,84 @@ mod tests {
         assert_eq!(&dst[..4], &[255, 0, 0, 255]);
         let last = dst.len() - 4;
         assert_eq!(&dst[last..], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn presenter_identity_scale_renders_into_output_directly() {
+        let mut presenter = FramePresenter::new(1.0, 4, 4);
+        assert_eq!(presenter.logical_size(), (4, 4));
+        let mut output = vec![0u8; 4 * 4 * 4];
+        presenter
+            .present::<()>(&mut output, |frame| {
+                frame.fill(7);
+                Ok(true)
+            })
+            .unwrap();
+        assert!(output.iter().all(|&value| value == 7));
+    }
+
+    #[test]
+    fn presenter_scaled_renders_logical_and_upscales() {
+        // 3x scale: the app draws at ceil(6/3)=2 logical pixels per axis,
+        // the presenter fills the 6x6 window buffer.
+        let mut presenter = FramePresenter::new(3.0, 6, 6);
+        assert_eq!(presenter.logical_size(), (2, 2));
+        let mut output = vec![0u8; 6 * 6 * 4];
+        presenter
+            .present::<()>(&mut output, |frame| {
+                assert_eq!(frame.len(), 2 * 2 * 4);
+                frame.fill(50);
+                Ok(true)
+            })
+            .unwrap();
+        assert!(output.iter().all(|&value| value == 50));
+    }
+
+    #[test]
+    fn presenter_skips_upscale_for_unchanged_frames() {
+        let mut presenter = FramePresenter::new(2.0, 4, 4);
+        let mut output = vec![0u8; 4 * 4 * 4];
+        presenter
+            .present::<()>(&mut output, |frame| {
+                frame.fill(9);
+                Ok(true)
+            })
+            .unwrap();
+        // An unchanged frame (menu cache replay) must not touch the output,
+        // even if the logical buffer were rewritten.
+        presenter
+            .present::<()>(&mut output, |frame| {
+                frame.fill(200);
+                Ok(false)
+            })
+            .unwrap();
+        assert!(output.iter().all(|&value| value == 9));
+    }
+
+    #[test]
+    fn presenter_resize_forces_upscale() {
+        let mut presenter = FramePresenter::new(2.0, 4, 4);
+        let mut output = vec![0u8; 4 * 4 * 4];
+        presenter
+            .present::<()>(&mut output, |frame| {
+                frame.fill(9);
+                Ok(true)
+            })
+            .unwrap();
+        presenter.resize(4, 4);
+        presenter
+            .present::<()>(&mut output, |frame| {
+                frame.fill(33);
+                Ok(false)
+            })
+            .unwrap();
+        assert!(output.iter().all(|&value| value == 33));
+    }
+
+    #[test]
+    fn presenter_maps_positions_to_gui_space() {
+        let presenter = FramePresenter::new(3.0, 6, 6);
+        assert_eq!(presenter.position_to_gui(300.0, 150.0), (100.0, 50.0));
     }
 
     #[test]
