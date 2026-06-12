@@ -12,6 +12,7 @@ lc-engine = { path = "../lc-engine" }
 lc-frontend = { path = "../lc-frontend" }
 lc-gui = { path = "../lc-gui" }
 lc-graphics = { path = "../lc-graphics" }
+lc-scaling = { path = "../lc-scaling" }
 lc-network = { path = "../lc-network" }
 lc-platform = { path = "../lc-platform" }
 lc-resources = { path = "../lc-resources" }

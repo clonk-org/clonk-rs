@@ -15,6 +15,7 @@ members = [
     "crates/lc-gui",
     "crates/lc-platform",
     "crates/lc-game",
+    "crates/lc-scaling",
     "xtask",
 ]
 resolver = "2"
@@ -27,4 +28,9 @@ default-members = ["crates/lc-app"]
 opt-level = 1
 
 [profile.dev.package."*"]
+opt-level = 3
+
+# Full-frame output upscaling is hot per-pixel code on the present path;
+# the crate is tiny and rarely changes, so opt 3 costs no iteration time.
+[profile.dev.package.lc-scaling]
 opt-level = 3

@@ -18,7 +18,6 @@ mod menu_controls;
 mod network;
 mod object_menu;
 mod save_browser;
-mod scaling;
 mod settings;
 
 use std::cmp::Ordering;
@@ -92,7 +91,7 @@ use serde::{
 };
 use settings::{AudioOptions, DisplayMode, DisplayOptions};
 use time::{macros::format_description, OffsetDateTime};
-use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
     ElementState, Event, KeyboardInput, MouseButton, TouchPhase, VirtualKeyCode, WindowEvent,
 };
@@ -1200,10 +1199,10 @@ fn main() -> Result<()> {
             window_builder = window_builder.with_position(PhysicalPosition::new(x, y));
         }
     }
-    window_builder = window_builder.with_inner_size(LogicalSize::new(
-        f64::from(initial_width),
-        f64::from(initial_height),
-    ));
+    // The stored resolution is in output pixels (ResX*Scale), like the C++
+    // window setup (C4Application.cpp:183).
+    window_builder =
+        window_builder.with_inner_size(PhysicalSize::new(initial_width, initial_height));
     let window = window_builder
         .build(&event_loop)
         .context("failed to create application window")?;
@@ -1219,9 +1218,15 @@ fn main() -> Result<()> {
     let mut pixels = Pixels::new(size.width, size.height, surface)
         .context("failed to create pixel framebuffer")?;
 
+    // The app lays out and renders at the GUI resolution; the presenter
+    // scales the finished frame to the window like the C++ engine scales
+    // its GUI output (C4Gui.cpp:461).
+    let mut presenter = lc_scaling::FramePresenter::new(display_options.scale, size.width, size.height);
+    let (logical_width, logical_height) = presenter.logical_size();
+
     let mut app = GameApp::new(
-        size.width,
-        size.height,
+        logical_width,
+        logical_height,
         audio_options,
         app_paths.as_deref(),
         runtime,
@@ -1239,6 +1244,7 @@ fn main() -> Result<()> {
                     &window,
                     &mut app,
                     &mut pixels,
+                    &mut presenter,
                     &mut display_options,
                     event,
                     control_flow,
@@ -1286,7 +1292,8 @@ fn main() -> Result<()> {
                 *control_flow = ControlFlow::WaitUntil(now + wait_duration);
             }
             Event::RedrawRequested(id) if id == window.id() => {
-                if let Err(err) = app.render(pixels.frame_mut()) {
+                if let Err(err) = presenter.present(pixels.frame_mut(), |frame| app.render(frame))
+                {
                     tracing::error!(error = ?err, "render failed");
                     control_flow.set_exit();
                     return;
@@ -1314,6 +1321,7 @@ fn handle_window_event(
     window: &Window,
     app: &mut GameApp,
     pixels: &mut Pixels,
+    presenter: &mut lc_scaling::FramePresenter,
     display_options: &mut DisplayOptions,
     event: WindowEvent,
     control_flow: &mut ControlFlow,
@@ -1322,7 +1330,7 @@ fn handle_window_event(
         WindowEvent::CloseRequested => {
             control_flow.set_exit();
         }
-        WindowEvent::Resized(size) => {
+        WindowEvent::Resized(size) | WindowEvent::ScaleFactorChanged { new_inner_size: &mut size, .. } => {
             let clamped = enforce_min_size(size);
             pixels
                 .resize_surface(clamped.width, clamped.height)
@@ -1330,28 +1338,17 @@ fn handle_window_event(
             pixels
                 .resize_buffer(clamped.width, clamped.height)
                 .context("failed to resize pixel buffer")?;
-            app.resize(clamped.width, clamped.height)?;
-            if display_options.mode == DisplayMode::Window {
-                display_options.record_actual_size(clamped.width, clamped.height);
-            }
-            display_options.record_maximized(window.is_maximized());
-        }
-        WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
-            let clamped = enforce_min_size(*new_inner_size);
-            pixels
-                .resize_surface(clamped.width, clamped.height)
-                .context("failed to resize pixel surface")?;
-            pixels
-                .resize_buffer(clamped.width, clamped.height)
-                .context("failed to resize pixel buffer")?;
-            app.resize(clamped.width, clamped.height)?;
+            presenter.resize(clamped.width, clamped.height);
+            let (logical_width, logical_height) = presenter.logical_size();
+            app.resize(logical_width, logical_height)?;
             if display_options.mode == DisplayMode::Window {
                 display_options.record_actual_size(clamped.width, clamped.height);
             }
             display_options.record_maximized(window.is_maximized());
         }
         WindowEvent::CursorMoved { position, .. } => {
-            app.handle_cursor_moved(position)
+            let (x, y) = presenter.position_to_gui(position.x, position.y);
+            app.handle_cursor_moved(PhysicalPosition::new(x, y))
                 .context("failed to process cursor movement")?;
         }
         WindowEvent::CursorLeft { .. } => {

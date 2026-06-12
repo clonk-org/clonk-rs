@@ -43,31 +43,80 @@ pub fn upscale_frame(
         return;
     }
 
-    // Per-axis texel-center mapping with 8-bit fractional weights,
-    // precomputed once per axis (separable bilinear).
-    let x_taps: Vec<(usize, usize, u32)> = (0..dw)
-        .map(|x| axis_tap(x, dw, sw))
-        .collect();
+    // Separable two-pass bilinear on packed RGBA words: each needed source
+    // row is scaled horizontally once and cached; every output row is then
+    // one vertical lerp of two cached rows.
+    let x_taps: Vec<(usize, usize, u32)> = (0..dw).map(|x| axis_tap(x, dw, sw)).collect();
+
+    let mut source_words = vec![0u32; sw];
+    let mut top = ScaledRow::new(dw);
+    let mut bottom = ScaledRow::new(dw);
 
     for dst_y in 0..dh {
         let (y0, y1, fy) = axis_tap(dst_y, dh, sh);
-        let row0 = &src[y0 * sw * 4..(y0 * sw + sw) * 4];
-        let row1 = &src[y1 * sw * 4..(y1 * sw + sw) * 4];
-        let out = &mut dst[dst_y * dw * 4..(dst_y * dw + dw) * 4];
-        for (dst_x, &(x0, x1, fx)) in x_taps.iter().enumerate() {
-            let out_px = &mut out[dst_x * 4..dst_x * 4 + 4];
-            for channel in 0..4 {
-                let p00 = row0[x0 * 4 + channel] as u32;
-                let p01 = row0[x1 * 4 + channel] as u32;
-                let p10 = row1[x0 * 4 + channel] as u32;
-                let p11 = row1[x1 * 4 + channel] as u32;
-                let top = p00 * (256 - fx) + p01 * fx;
-                let bottom = p10 * (256 - fx) + p11 * fx;
-                let value = (top * (256 - fy) + bottom * fy + (1 << 15)) >> 16;
-                out_px[channel] = value.min(255) as u8;
+        if top.source != y0 {
+            if bottom.source == y0 {
+                std::mem::swap(&mut top, &mut bottom);
+            } else {
+                top.build(src, y0, sw, &x_taps, &mut source_words);
             }
         }
+        if bottom.source != y1 {
+            bottom.build(src, y1, sw, &x_taps, &mut source_words);
+        }
+        let out = &mut dst[dst_y * dw * 4..(dst_y * dw + dw) * 4];
+        for ((out_px, &above), &below) in out
+            .chunks_exact_mut(4)
+            .zip(top.words.iter())
+            .zip(bottom.words.iter())
+        {
+            out_px.copy_from_slice(&lerp_word(above, below, fy).to_le_bytes());
+        }
     }
+}
+
+/// A source row scaled to the destination width, tagged with its source
+/// row index so consecutive output rows reuse it.
+struct ScaledRow {
+    source: usize,
+    words: Vec<u32>,
+}
+
+impl ScaledRow {
+    fn new(dst_width: usize) -> Self {
+        Self {
+            source: usize::MAX,
+            words: vec![0; dst_width],
+        }
+    }
+
+    fn build(
+        &mut self,
+        src: &[u8],
+        src_y: usize,
+        src_width: usize,
+        x_taps: &[(usize, usize, u32)],
+        source_words: &mut [u32],
+    ) {
+        let row = &src[src_y * src_width * 4..(src_y * src_width + src_width) * 4];
+        for (word, px) in source_words.iter_mut().zip(row.chunks_exact(4)) {
+            *word = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
+        }
+        for (out, &(x0, x1, fx)) in self.words.iter_mut().zip(x_taps) {
+            *out = lerp_word(source_words[x0], source_words[x1], fx);
+        }
+        self.source = src_y;
+    }
+}
+
+/// Blends two packed RGBA8 words with an 8-bit weight (0..=256), two
+/// channels per multiply; component products stay within 16 bits.
+#[inline]
+fn lerp_word(a: u32, b: u32, f: u32) -> u32 {
+    let g = 256 - f;
+    let rb = (((a & 0x00FF_00FF) * g + (b & 0x00FF_00FF) * f) >> 8) & 0x00FF_00FF;
+    let ag = ((((a >> 8) & 0x00FF_00FF) * g + ((b >> 8) & 0x00FF_00FF) * f) >> 8) & 0x00FF_00FF;
+    rb | (ag << 8)
 }
 
 /// Owns the logical-resolution frame the app renders into and upscales it
@@ -324,5 +373,25 @@ mod tests {
         let mut dst = vec![0u8; 8 * 8 * 4];
         upscale_frame(&src, 3, 3, &mut dst, 8, 8);
         assert!(dst.chunks(4).all(|px| px == [9, 9, 9, 255]));
+    }
+}
+
+#[cfg(test)]
+mod perf_probe {
+    use super::*;
+
+    #[test]
+    #[ignore = "manual timing probe"]
+    fn upscale_timing_probe() {
+        let (sw, sh) = (1371u32, 858u32);
+        let (dw, dh) = (4113u32, 2574u32);
+        let src = vec![128u8; sw as usize * sh as usize * 4];
+        let mut dst = vec![0u8; dw as usize * dh as usize * 4];
+        let start = std::time::Instant::now();
+        let iterations = 5;
+        for _ in 0..iterations {
+            upscale_frame(&src, sw, sh, &mut dst, dw, dh);
+        }
+        eprintln!("upscale {}x{} -> {}x{}: {:?}/frame", sw, sh, dw, dh, start.elapsed() / iterations);
     }
 }
