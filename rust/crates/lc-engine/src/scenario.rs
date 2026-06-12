@@ -885,6 +885,7 @@ impl Scenario {
                 action,
                 effects,
                 crew_member,
+                alive,
                 status,
                 handle,
                 container,
@@ -927,6 +928,9 @@ impl Scenario {
                     spawn = spawn.with_crew_member(true);
                 }
                 None => {}
+            }
+            if let Some(alive) = alive {
+                spawn = spawn.with_alive(alive);
             }
             if let Some(status) = status {
                 spawn = spawn.with_status(status.into());
@@ -4076,6 +4080,8 @@ struct ObjectManifest {
     effects: Vec<EffectManifest>,
     #[serde(default)]
     crew_member: Option<bool>,
+    #[serde(default)]
+    alive: Option<bool>,
     #[serde(default)]
     status: Option<ObjectStatusSpec>,
     #[serde(default)]
@@ -7421,8 +7427,11 @@ global func Step(state, frame, random)
         assert_eq!(gem_snapshot.direction, Direction::Right);
         assert_eq!(gem_snapshot.command_direction, CommandDirection::Right);
         assert_eq!(gem_snapshot.action.name, "Idle");
-        assert_eq!(gem_snapshot.action.ticks, 6);
-        assert_eq!(gem_snapshot.action.phase, 2);
+        // ActIdle carries no phase or time: SetActionByName("Idle") clears
+        // the action at load (C4Object.cpp:4214-4215, 2840-2849) — the
+        // saved ActionTime=6/Phase=2 do NOT survive on an idle object.
+        assert_eq!(gem_snapshot.action.ticks, 0);
+        assert_eq!(gem_snapshot.action.phase, 0);
         assert_eq!(gem_snapshot.action.data, 5);
         assert_eq!(gem_snapshot.action.target, Some(ObjectId::new(100)));
     }

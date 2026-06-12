@@ -879,6 +879,15 @@ unsafe fn make_snapshot(
                     .into_owned(),
             }
         };
+        // C++ ActIdle is the EMPTY action name; the runtime's idle
+        // sentinel is "Idle" (SetActionByName treats them identically,
+        // C4Object.cpp:4214-4215) — map the representation so idle
+        // compares as idle.
+        let action_name = if action_name.is_empty() {
+            String::from("Idle")
+        } else {
+            action_name
+        };
         let mut action = ActionState::new(action_name);
         action.phase = entry.action_phase;
         if entry.action_ticks >= 0 {

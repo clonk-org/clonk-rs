@@ -28,7 +28,7 @@
         "construction": 100000,
         "action": {
           "name": "Idle",
-          "phase": 1,
+          "phase": 0,
           "ticks": 0,
           "data": 0,
           "target": null,
@@ -46,13 +46,14 @@
         "owner": -1,
         "category": 1,
         "crew_member": false,
-        "alive": true,
+        "alive": false,
         "graphics_overlays": [],
         "command_queue": [],
         "command_stack": {
           "commands": []
         },
         "local_vars": {},
+        "in_liquid": false,
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
@@ -664,7 +665,7 @@
         "construction": 100000,
         "action": {
           "name": "Idle",
-          "phase": 2,
+          "phase": 0,
           "ticks": 0,
           "data": 0,
           "target": null,
@@ -682,13 +683,14 @@
         "owner": -1,
         "category": 1,
         "crew_member": false,
-        "alive": true,
+        "alive": false,
         "graphics_overlays": [],
         "command_queue": [],
         "command_stack": {
           "commands": []
         },
         "local_vars": {},
+        "in_liquid": false,
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
@@ -1300,7 +1302,7 @@
         "construction": 100000,
         "action": {
           "name": "Idle",
-          "phase": 3,
+          "phase": 0,
           "ticks": 0,
           "data": 0,
           "target": null,
@@ -1318,13 +1320,14 @@
         "owner": -1,
         "category": 1,
         "crew_member": false,
-        "alive": true,
+        "alive": false,
         "graphics_overlays": [],
         "command_queue": [],
         "command_stack": {
           "commands": []
         },
         "local_vars": {},
+        "in_liquid": false,
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
@@ -1372,13 +1375,14 @@
         "owner": -1,
         "category": 1,
         "crew_member": false,
-        "alive": true,
+        "alive": false,
         "graphics_overlays": [],
         "command_queue": [],
         "command_stack": {
           "commands": []
         },
         "local_vars": {},
+        "in_liquid": false,
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
@@ -1986,7 +1990,7 @@
         "construction": 100000,
         "action": {
           "name": "Idle",
-          "phase": 4,
+          "phase": 0,
           "ticks": 0,
           "data": 0,
           "target": null,
@@ -2004,13 +2008,14 @@
         "owner": -1,
         "category": 1,
         "crew_member": false,
-        "alive": true,
+        "alive": false,
         "graphics_overlays": [],
         "command_queue": [],
         "command_stack": {
           "commands": []
         },
         "local_vars": {},
+        "in_liquid": false,
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
@@ -2040,7 +2045,7 @@
         "construction": 100000,
         "action": {
           "name": "Idle",
-          "phase": 1,
+          "phase": 0,
           "ticks": 0,
           "data": 0,
           "target": null,
@@ -2058,13 +2063,14 @@
         "owner": -1,
         "category": 1,
         "crew_member": false,
-        "alive": true,
+        "alive": false,
         "graphics_overlays": [],
         "command_queue": [],
         "command_stack": {
           "commands": []
         },
         "local_vars": {},
+        "in_liquid": false,
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
@@ -2676,7 +2682,7 @@
         "construction": 100000,
         "action": {
           "name": "Idle",
-          "phase": 5,
+          "phase": 0,
           "ticks": 0,
           "data": 0,
           "target": null,
@@ -2694,13 +2700,14 @@
         "owner": -1,
         "category": 1,
         "crew_member": false,
-        "alive": true,
+        "alive": false,
         "graphics_overlays": [],
         "command_queue": [],
         "command_stack": {
           "commands": []
         },
         "local_vars": {},
+        "in_liquid": false,
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,
@@ -2730,7 +2737,7 @@
         "construction": 100000,
         "action": {
           "name": "Idle",
-          "phase": 2,
+          "phase": 0,
           "ticks": 0,
           "data": 0,
           "target": null,
@@ -2748,13 +2755,14 @@
         "owner": -1,
         "category": 1,
         "crew_member": false,
-        "alive": true,
+        "alive": false,
         "graphics_overlays": [],
         "command_queue": [],
         "command_stack": {
           "commands": []
         },
         "local_vars": {},
+        "in_liquid": false,
         "on_fire": false,
         "fire_phase": 0,
         "fire_caused_by": -1,

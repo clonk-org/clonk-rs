@@ -20033,7 +20033,11 @@ impl Engine {
                 owner,
                 category: initial_category,
                 crew_member: initial_crew_member,
-                alive: alive.unwrap_or(true),
+                // C4Object::Init sets Alive only for C4D_Living categories
+                // (C4Object.cpp:191); loaded objects compile it with default
+                // false (C4Object.cpp:2756).
+                alive: alive
+                    .unwrap_or(!loaded && initial_category & CATEGORY_LIVING != 0),
                 base_graphics: None,
                 graphics_overlays: Vec::new(),
                 draw_transform: None,
@@ -28459,7 +28463,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .register_definition(definition)
             .expect("definition registers");
         let id = engine
-            .spawn_object(SpawnConfig::new("Actor").with_energy(50))
+            .spawn_object(SpawnConfig::new("Actor").with_alive(true).with_energy(50))
             .expect("spawn succeeds");
         engine.tick().expect("tick succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
@@ -29316,6 +29320,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let id = engine
             .spawn_object(
                 SpawnConfig::new("Diver")
+                    .with_alive(true)
                     .with_position(Vector2::new(2, 26))
                     .with_vertices(vertices)
                     .with_energy(50),
@@ -29381,7 +29386,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Diver").with_energy(50))
+            .spawn_object(SpawnConfig::new("Diver").with_alive(true).with_energy(50))
             .expect("diver spawns");
         let idx = engine.find_object_index(id).expect("diver exists");
         engine.objects[idx].state.breath = 10_000;
@@ -29721,10 +29726,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let crew_owner_one = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
         let crew_owner_two = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(2))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(2))
             .expect("spawn succeeds");
         engine
             .spawn_object(
@@ -29752,10 +29757,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let first = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
         let second = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
 
         engine
@@ -29784,6 +29789,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.register_definition(definition)?;
         let crew = engine.spawn_object(
             SpawnConfig::new("Walker")
+                .with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(0, 0)),
@@ -29862,10 +29868,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let first = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
         let second = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
 
         engine
@@ -29891,10 +29897,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let first = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
         let second = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
 
         engine
@@ -29921,10 +29927,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let owned = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
         let other_owner = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(2))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(2))
             .expect("spawn succeeds");
 
         engine
@@ -29953,7 +29959,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let crew = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
 
         engine
@@ -29983,10 +29989,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let owned = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
         let other_owner = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(2))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(2))
             .expect("spawn succeeds");
 
         engine
@@ -30015,7 +30021,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let crew = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
 
         engine
@@ -30044,10 +30050,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let first = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
         let second = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
 
         engine
@@ -30115,7 +30121,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let first = engine
             .spawn_object(
-                SpawnConfig::new("Crew")
+                SpawnConfig::new("Crew").with_alive(true)
                     .with_owner(1)
                     .with_crew_member(true)
                     .with_id(ObjectId::new(200)),
@@ -30123,7 +30129,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("first spawn succeeds");
         let second = engine
             .spawn_object(
-                SpawnConfig::new("Crew")
+                SpawnConfig::new("Crew").with_alive(true)
                     .with_owner(1)
                     .with_crew_member(true)
                     .with_id(ObjectId::new(100)),
@@ -30162,7 +30168,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let crew = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
 
         engine
@@ -30366,10 +30372,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let owner_one = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
         engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(2))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(2))
             .expect("spawn succeeds");
 
         assert!(engine.eliminated_owners().is_empty());
@@ -30398,7 +30404,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let owner = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
 
         engine
@@ -30412,7 +30418,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert!(engine.is_owner_eliminated(1));
 
         engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
 
         assert!(!engine.is_owner_eliminated(1));
@@ -30429,10 +30435,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let first = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
         let second = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
 
         engine
@@ -30468,10 +30474,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let eliminated = engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
         engine
-            .spawn_object(SpawnConfig::new("Test").with_owner(2))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(2))
             .expect("spawn succeeds");
 
         engine
@@ -30499,7 +30505,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert!(!restored.is_owner_eliminated(2));
 
         restored
-            .spawn_object(SpawnConfig::new("Test").with_owner(1))
+            .spawn_object(SpawnConfig::new("Test").with_alive(true).with_owner(1))
             .expect("spawn succeeds");
 
         assert!(!restored.is_owner_eliminated(1));
@@ -31840,7 +31846,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.register_definition(item_definition)?;
 
         let crew = engine.spawn_object(
-            SpawnConfig::new("Crew")
+            SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(70, 20)),
@@ -33187,7 +33193,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.register_definition(flag_def)?;
 
         let _crew_id = engine.spawn_object(
-            SpawnConfig::new("Crew")
+            SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(100, 200)),
@@ -33352,7 +33358,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let mut engine = Engine::with_seed(7);
         engine.register_definition(simple_definition("Crew"))?;
         engine.spawn_object(
-            SpawnConfig::new("Crew")
+            SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(0)
                 .with_crew_member(true)
                 .with_position(Vector2::new(50, 50)),
@@ -33389,7 +33395,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.register_player(PlayerConfig::new(0, "Player"))?;
 
         engine.spawn_object(
-            SpawnConfig::new("Crew")
+            SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(0)
                 .with_crew_member(true)
                 .with_position(Vector2::new(10, 10)),
@@ -33434,12 +33440,12 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.register_player(PlayerConfig::new(0, "Player"))?;
 
         engine.spawn_object(
-            SpawnConfig::new("Crew")
+            SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(0)
                 .with_crew_member(true)
                 .with_position(Vector2::new(15, 20)),
         )?;
-        let rock_id = engine.spawn_object(SpawnConfig::new("ROCK").with_owner(0))?;
+        let rock_id = engine.spawn_object(SpawnConfig::new("ROCK").with_alive(true).with_owner(0))?;
 
         for _ in 0..5 {
             let snapshot = engine.tick()?;
@@ -33838,7 +33844,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.register_definition(item_definition)?;
 
         let crew = engine.spawn_object(
-            SpawnConfig::new("Crew")
+            SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(0, 0)),
@@ -33867,7 +33873,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.register_definition(item_definition)?;
 
         let crew = engine.spawn_object(
-            SpawnConfig::new("Crew")
+            SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(0, 0)),
@@ -33906,7 +33912,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.register_definition(item_definition)?;
 
         let crew = engine.spawn_object(
-            SpawnConfig::new("Crew")
+            SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(0, 0)),
@@ -33939,7 +33945,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.register_definition(item_definition)?;
 
         let crew = engine.spawn_object(
-            SpawnConfig::new("Crew")
+            SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(0, 0)),
@@ -33982,7 +33988,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.register_definition(structure_definition)?;
 
         let crew = engine.spawn_object(
-            SpawnConfig::new("Crew")
+            SpawnConfig::new("Crew").with_alive(true)
                 .with_owner(1)
                 .with_crew_member(true)
                 .with_position(Vector2::new(0, 0)),

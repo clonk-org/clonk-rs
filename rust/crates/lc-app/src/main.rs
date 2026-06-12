@@ -11243,7 +11243,8 @@ mod tests {
                         "definition": "Mover",
                         "position": [40, 48],
                         "owner": 1,
-                        "crew_member": true
+                        "crew_member": true,
+                        "alive": true
                     }
                 ]
             }

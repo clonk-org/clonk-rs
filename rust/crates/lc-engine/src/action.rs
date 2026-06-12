@@ -560,6 +560,21 @@ impl ActionState {
             self.phase = 0;
             self.ticks = 0;
         }
+        // ActIdle carries no phase or time: SetActionByName("Idle") clears
+        // the action instead of resolving it (C4Object.cpp:4214-4215) —
+        // the load-time Phase restore (C4Object.cpp:2840-2849) only
+        // applies to real ActMap actions. (Fixture libraries may define a
+        // REAL phased "Idle" stays untouched; the auto-inserted BARE default spec marks true idle.)
+        if self.name == "Idle"
+            && library
+                .specs()
+                .get("Idle")
+                .map(|spec| *spec == ActionSpec::default())
+                .unwrap_or(true)
+        {
+            self.phase = 0;
+            self.ticks = 0;
+        }
     }
 }
 
@@ -697,4 +712,26 @@ impl Default for ActionUpdate {
 pub enum ActionUpdateResult {
     Applied,
     Blocked,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_carries_no_phase_like_cpp() {
+        // SetActionByName("Idle"/"ActIdle") clears the action instead of
+        // looking it up (C4Object.cpp:4214-4215), and ActIdle execution
+        // keeps Phase/Time at zero — a loaded `Action=Idle\nPhase=1`
+        // savegame entry reads phase 0 in C++ at the first frame
+        // (the load-time restore at C4Object.cpp:2840-2849 only applies
+        // to ActMap actions).
+        let library = ActionLibrary::default();
+        let mut state = ActionState::new("Idle");
+        state.phase = 1;
+        state.ticks = 3;
+        state.reconcile_with_library(&library);
+        assert_eq!(state.phase, 0, "idle has no phase");
+        assert_eq!(state.ticks, 0, "idle has no action time");
+    }
 }
