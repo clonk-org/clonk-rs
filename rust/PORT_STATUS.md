@@ -329,6 +329,21 @@ full-scenario shadow-diff (see Parity harnesses).
   aggregate the differ output in ffi.rs (sorted, grouped by
   definition+field, capped) instead of the unsorted 274KB wall, and
   host-fn backlog task #26 (C4Id/Mod/SetLocal/MakeCrewMember + DYNA iX).
+- **Worklist round 2 (2026-06-12, commits 686673be..abbac0fa + Hit
+  fail-safe):** host-fn board 18 -> 1 (only GrabObjectInfo, the
+  C4ObjectInfo transfer — crew-info model); C4Aul var HOISTING fixed in
+  lc-script (function-scoped vars; Dynamite reads iX before its var
+  line); SetMass/OwnMass, GetMaterialVal, SetLocal, MakeCrewMember
+  landed; legacy definitions now carry their DefCore shape VERTICES
+  (the 731-strong vertices class — the legacy apply path had dropped
+  them; task #15 remains for the rest of the core); Hit/Hit2/Hit3 are
+  fail-safe (a WGTW Hit error killed the tick once contact started
+  working). NEW live picture: a gameplay divergence re-opened the count
+  gate — the runtime sheds 4x _STA (stalactites) into 12x _STP pieces:
+  cave-roof objects FALL in the column-model world and shatter via the
+  now-working Hit callbacks while C++ keeps them attached. Confirms the
+  per-pixel solid landscape as the gating epic for everything left
+  (positions, cave physics, attachment).
 
 ## Gates
 
