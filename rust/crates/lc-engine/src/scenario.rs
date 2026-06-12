@@ -111,6 +111,10 @@ struct ScenarioDefinition {
     resource_group: Option<Group>,
     components: Vec<DefinitionComponent>,
     line_connect: u32,
+    /// DefCore shape vertices + rect (the spawn shape; task #15 carries
+    /// the rest of the core).
+    vertices: Vec<lc_resources::definition::DefVertex>,
+    shape: Option<lc_resources::definition::PictureRect>,
 }
 
 #[derive(Debug, Clone)]
@@ -553,6 +557,21 @@ impl Scenario {
             }
             compiled.set_crew_member(definition.crew_member);
             compiled.set_can_be_base(definition.can_be_base);
+            // DefCore shape: the spawn vertices C++ takes from the def
+            // (C4Def Vertices/VertexX/...); without them every spawned
+            // object compared vertex-less against the C++ snapshot.
+            compiled.set_shape_rect(definition.shape.map(crate::DefinitionRect::from));
+            compiled.set_shape_vertices(
+                definition
+                    .vertices
+                    .iter()
+                    .map(|vertex| {
+                        crate::ObjectVertex::new(vertex.x, vertex.y)
+                            .with_cnat(vertex.cnat)
+                            .with_friction(vertex.friction)
+                    })
+                    .collect(),
+            );
             // ClonkNames{lang}.txt|ClonkNames.txt (C4CFN_ClonkNames,
             // C4Def.cpp:645-652): the language-suffixed list first, then
             // the plain one. Only US is consulted until the language
@@ -822,6 +841,8 @@ impl Scenario {
                     resource_group: None,
                     components: Vec::new(),
                     line_connect: 0,
+                    vertices: Vec::new(),
+                    shape: None,
                 }
             };
 
@@ -3744,6 +3765,8 @@ fn scenario_definition_from_resource(
             })
             .collect(),
         line_connect: core.line_connect,
+        vertices: core.vertices,
+        shape: core.shape,
     }
 }
 
@@ -5637,6 +5660,8 @@ global func Step(state, frame, random)
                 resource_group: None,
                 components: Vec::new(),
                 line_connect: 0,
+                vertices: Vec::new(),
+                shape: None,
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
@@ -5724,6 +5749,8 @@ global func Step(state, frame, random)
                 resource_group: None,
                 components: Vec::new(),
                 line_connect: 0,
+                vertices: Vec::new(),
+                shape: None,
             }],
             initial_spawns: vec![ScenarioSpawn {
                 handle: None,
