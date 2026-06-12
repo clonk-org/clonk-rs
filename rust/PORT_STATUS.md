@@ -344,6 +344,45 @@ full-scenario shadow-diff (see Parity harnesses).
   now-working Hit callbacks while C++ keeps them attached. Confirms the
   per-pixel solid landscape as the gating epic for everything left
   (positions, cave physics, attachment).
+- **Per-pixel solid landscape epic COMPLETE (2026-06-12, commits
+  be65a936 + a894bff2 + 2f2e22b2):** three slices.
+  (1) `PixelGrid` (Surface8): hex-serialized byte plane +
+  Pix2Dens/Pix2Mat tables; grid-first is_solid_at/density_at/
+  material_at (GBackSolid/GBackDensity/GBackMat, C4Wrappers.h:120-177);
+  resolve_collision stops surface-snapping when a grid exists; column
+  mutators dual-write the grid; Engine::set_landscape resolves grid
+  material names (UpdatePixMaps, C4Landscape.cpp:2832-2839).
+  (2) ChunkOZoom synthesis (`chunky.rs`): CSurface8 primitives, the
+  Allegro polygon rasterizer (StdSurface8.cpp:241-404, hand-stepped
+  pins), ChunkyRandom, DrawChunk octagons + DrawSmoothOChunk slope
+  quads, TexOZoom ascending-index overwrite order, IFT coloring
+  (C4Landscape.cpp:273-480). Surface/liquid/tunnel columns derive from
+  the synthesized plane. MapSeed: C++ draws Random(3133700) at init
+  (C4Landscape.cpp:563); the shadow bridge exports it via
+  LC_RUST_ENGINE_MAP_SEED before runtime init (RustEngineBridge.cpp
+  InitialiseRuntime); STANDALONE runs default to seed 0 — borders are
+  deterministic but only shadow runs match C++ until the LCG port
+  draws the seed at the same ledger point.
+  (3) The shedding root cause was ALSO an Objects.txt decode bug:
+  XDir/YDir are serialized C4Fixed — `f` prefix = FLOAT BITS
+  (Fixed.h:247-266); the loader read the bits as integer pixels, so
+  the stalactites' saved YDir=1.2 became ~10^9 px/frame and their
+  first contact shattered them in place (HitSpeed). parse_c4fixed +
+  SpawnConfig.fixed_velocity restore exact sub-pixel velocity.
+  LIVE RESULT: count parity holds (no missing/extra defs), stalactites
+  stay attached; the per-object wall is 393 objects — action 264,
+  position 227, velocity 128, vertices 98, owner 5. Drivers spotted in
+  the dump: (a) ±1 position/velocity = the unmodeled Tick10 Mobile
+  gate (C4Movement.cpp:566-587: C++ mobilizes resting objects every
+  10th frame only; Rust integrates every frame); (b) late-spawn object
+  NUMBERING SKEW (C++ object 1495 vs Rust 1495 are different objects —
+  creation order diverges mid-run); (c) vertex friction 30-vs-50
+  (material-scaled vertex friction / Objects.txt Vertex overrides
+  unparsed); (d) known residual actions (Still->Breeze trees, BBON,
+  Consolidate). OPEN follow-ups: FixX/FixY/FixR + RDir ingestion
+  (sub-pixel position/rotation for Mobile-loaded objects), the Tick10
+  Mobile gate, `LC_XTASK_PROBE=x,y;...` added to scenario-errors for
+  pixel solidity spot checks.
 
 ## Gates
 
