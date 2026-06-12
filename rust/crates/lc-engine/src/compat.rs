@@ -69,6 +69,8 @@ pub(crate) struct HostWorldObject {
     definition_id: DefinitionId,
     status: ObjectStatus,
     alive: bool,
+    /// C4Object::InLiquid (the cached flag FnInLiquid reads).
+    in_liquid: bool,
     pub action_name: String,
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
@@ -228,6 +230,7 @@ impl HostWorldObject {
             definition_id: definition_id.into(),
             status,
             alive: true,
+            in_liquid: false,
             action_name: action_name.into(),
             action_target,
             action_target2,
@@ -257,6 +260,11 @@ impl HostWorldObject {
         self
     }
 
+    pub(crate) fn with_in_liquid(mut self, in_liquid: bool) -> Self {
+        self.in_liquid = in_liquid;
+        self
+    }
+
     pub(crate) fn with_ocf(mut self, ocf: u32) -> Self {
         self.ocf = ocf;
         self
@@ -275,6 +283,10 @@ impl HostWorldObject {
 
     pub fn alive(&self) -> bool {
         self.alive
+    }
+
+    pub fn in_liquid(&self) -> bool {
+        self.in_liquid
     }
 
     pub fn definition_id(&self) -> &str {
@@ -1505,10 +1517,9 @@ fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnInLiquid (C4Script.cpp:1864-1868): C++ reads the per-frame InLiquid
-/// flag (UpdateInLiquid, C4Object.cpp:6070-6090). The flag is not modeled
-/// yet — approximated with the landscape liquid test at the object's
-/// position (PORT_STATUS).
+/// FnInLiquid (C4Script.cpp:1864-1868): reads the object's CACHED
+/// InLiquid flag (updated during movement, C4Movement.cpp:443-460) —
+/// never the landscape at call time. Nil without an object.
 fn in_liquid(args: &[Value]) -> Result<Value, RuntimeError> {
     let target =
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "InLiquid", "obj")?;
@@ -1517,21 +1528,18 @@ fn in_liquid(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Nil);
         };
-        let position = match target {
-            Some(id) => context.get_world_object(id).map(|object| object.position()),
-            None => context
-                .object_context()
-                .map(|object| object.effective_position()),
-        };
-        let Some(position) = position else {
-            return Ok(Value::Nil);
-        };
-        let wet = context
-            .world
-            .landscape_ref()
-            .map(|landscape| landscape.is_liquid_at(position.x, position.y))
-            .unwrap_or(false);
-        Ok(Value::Bool(wet))
+        if let Some(id) = target {
+            if context.object_context().map(|object| object.id()) != Some(id) {
+                return Ok(context
+                    .get_world_object(id)
+                    .map(|object| Value::Bool(object.in_liquid()))
+                    .unwrap_or(Value::Nil));
+            }
+        }
+        Ok(context
+            .object_context()
+            .map(|object| Value::Bool(object.in_liquid()))
+            .unwrap_or(Value::Nil))
     })
 }
 
@@ -4500,6 +4508,8 @@ pub(crate) struct HostObjectContext<'a> {
     pub energy: i32,
     pub damage: i32,
     pub alive: bool,
+    /// C4Object::InLiquid (the cached flag FnInLiquid reads).
+    pub in_liquid: bool,
     pub owner: i32,
     pub category: i32,
     pub ocf: u32,
@@ -4621,6 +4631,7 @@ impl<'a> HostObjectContext<'a> {
             damage,
             construction: construction.clamp(0, FULL_CON),
             alive: true,
+            in_liquid: false,
             owner,
             category,
             ocf: ocf::NORMAL,
@@ -4653,6 +4664,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_alive(mut self, alive: bool) -> Self {
         self.alive = alive;
+        self
+    }
+
+    pub fn with_in_liquid(mut self, in_liquid: bool) -> Self {
+        self.in_liquid = in_liquid;
         self
     }
 
@@ -13383,6 +13399,7 @@ impl EffectHostContext {
                 damage,
                 construction,
                 alive,
+                in_liquid,
                 owner,
                 position,
                 velocity,
@@ -13419,6 +13436,7 @@ impl EffectHostContext {
                 damage,
                 construction,
                 alive,
+                in_liquid,
                 owner,
                 category,
                 position,
@@ -13686,6 +13704,7 @@ impl EffectHostContext {
             state.damage,
             state.construction,
             state.alive,
+            state.in_liquid,
             state.owner,
             state.category,
             state.position,
@@ -14107,6 +14126,7 @@ struct ObjectScopeContext {
     current_damage: i32,
     current_construction: i32,
     current_alive: bool,
+    current_in_liquid: bool,
     max_energy: i32,
     current_owner: i32,
     current_category: i32,
@@ -14141,6 +14161,7 @@ impl ObjectScopeContext {
         damage: i32,
         construction: i32,
         alive: bool,
+        in_liquid: bool,
         owner: i32,
         category: i32,
         position: Vector2,
@@ -14194,6 +14215,7 @@ impl ObjectScopeContext {
             current_damage: clamped_damage,
             current_construction: clamped_construction,
             current_alive: alive,
+            current_in_liquid: in_liquid,
             max_energy,
             current_owner: owner,
             current_category: category,
@@ -14416,6 +14438,12 @@ impl ObjectScopeContext {
 
     fn alive(&self) -> bool {
         self.pending_update.alive.unwrap_or(self.current_alive)
+    }
+
+    /// The cached InLiquid flag (scripts cannot set it; only
+    /// FnSetPosition re-derives it, C4Script.cpp:475).
+    fn in_liquid(&self) -> bool {
+        self.current_in_liquid
     }
 
     fn set_alive(&mut self, alive: bool) {

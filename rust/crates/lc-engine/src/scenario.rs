@@ -3034,6 +3034,7 @@ struct LegacyObjectRecord {
     energy: Option<i32>,
     construction: Option<i32>,
     alive: Option<bool>,
+    in_liquid: Option<bool>,
     category: Option<i32>,
     direction: Option<Direction>,
     command_direction: Option<CommandDirection>,
@@ -3163,6 +3164,18 @@ impl LegacyObjectRecord {
                     ))
                 })?;
                 self.alive = Some(alive);
+            }
+            // C4Object::InLiquid, persisted with default false
+            // (C4Object.cpp:2775) — GoldRush carries InLiquid=1 on its
+            // underwater fish and bubbles.
+            "inliquid" => {
+                let in_liquid = parse_bool(trimmed_value).ok_or_else(|| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid InLiquid `{}`",
+                        self.line, trimmed_value
+                    ))
+                })?;
+                self.in_liquid = Some(in_liquid);
             }
             "category" => {
                 self.category = Some(parse_i32(trimmed_value).map_err(|err| {
@@ -3311,6 +3324,7 @@ impl LegacyObjectRecord {
             energy,
             construction,
             alive,
+            in_liquid,
             category,
             direction,
             command_direction,
@@ -3374,6 +3388,9 @@ impl LegacyObjectRecord {
         }
         if let Some(alive) = alive {
             config = config.with_alive(alive);
+        }
+        if let Some(in_liquid) = in_liquid {
+            config = config.with_in_liquid(in_liquid);
         }
         if let Some(category) = category {
             config = config.with_category(category);
@@ -7582,6 +7599,137 @@ global func Step(state, frame, random)
             bytes.resize(bytes.len() + (stride - row.len()), 0);
         }
         bytes
+    }
+
+    #[test]
+    fn in_liquid_is_the_cached_object_flag_like_cpp() {
+        // C4Object::InLiquid is a CACHED flag: loaded from Objects.txt
+        // (default false, C4Object.cpp:2775), updated only inside movement
+        // (DoMovement, C4Movement.cpp:443-460) — FnInLiquid reads the flag,
+        // never the landscape (C4Script.cpp:1864-1868). A freshly loaded
+        // object in water therefore reads InLiquid()==false until its
+        // first movement frame, and a stale loaded flag on dry land clears
+        // on the first frame.
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let good = defs_root.join("Good.c4d");
+        std::fs::create_dir_all(&good).expect("definition dir");
+        std::fs::write(
+            good.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write defcore");
+        std::fs::write(
+            good.join("Script.c"),
+            "#strict\nlocal iWet;\npublic func Probe() { iWet = InLiquid(); return 1; }\n",
+        )
+        .expect("write script");
+
+        let scenario_dir = dir.path().join("Liquid.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Liquid\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Landscape]\nMapZoom=10\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[
+                &[0, 30, 30, 0],
+                &[0, 20, 20, 0],
+                &[30, 20, 20, 0],
+                &[30, 30, 30, 0],
+            ]),
+        )
+        .expect("write map");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(
+            materials.join("TexMap.txt"),
+            "20=Water-Liquid\n30=Earth-Smooth\n",
+        )
+        .expect("write texmap");
+        std::fs::write(
+            materials.join("Water.c4m"),
+            "[Material]\nName=Water\nDensity=25\n",
+        )
+        .expect("write water");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write earth");
+        // A sits in the cave water without the flag; B sits in dry air
+        // above column 0 with a stale InLiquid=1. Category 16 (C4D_Object):
+        // ExecMovement skips C4D_StaticBack objects entirely
+        // (C4Movement.cpp:564), so static placements would keep their
+        // loaded flag forever.
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=GOOD\nNumber=80\nStatus=1\nCategory=16\nX=15\nY=15\n\n\
+             [Object]\nid=GOOD\nNumber=81\nStatus=1\nCategory=16\nX=5\nY=5\nInLiquid=1\n",
+        )
+        .expect("write objects");
+        std::fs::write(
+            scenario_dir.join("Script.c"),
+            "#strict\nfunc Initialize() {\n\
+                 var pWet;\n\
+                 while(pWet = FindObject(GOOD, 0,0,0,0, 0, 0, 0, 0, pWet)) pWet->Probe();\n\
+                 return 1;\n\
+             }\n",
+        )
+        .expect("write scenario script");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let flag = |engine: &Engine, number: u64| {
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| object.id == ObjectId::new(number))
+                .map(|object| object.in_liquid)
+                .expect("object exists")
+        };
+        let probed = |engine: &Engine, number: u64| {
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| object.id == ObjectId::new(number))
+                .and_then(|object| object.local_vars.get("iWet").cloned())
+                .expect("probe ran")
+        };
+
+        assert!(!flag(&engine, 80), "loaded default is false even in water");
+        assert!(flag(&engine, 81), "loaded InLiquid=1 sticks until movement");
+        assert_eq!(
+            probed(&engine, 80),
+            lc_script::Value::Bool(false),
+            "InLiquid() reads the stale flag, not the landscape"
+        );
+        assert_eq!(
+            probed(&engine, 81),
+            lc_script::Value::Bool(true),
+            "InLiquid() reads the stale loaded flag on dry land too"
+        );
+
+        engine.tick().expect("tick succeeds");
+        assert!(
+            flag(&engine, 80),
+            "movement sets the flag in liquid (C4Movement.cpp:443-460)"
+        );
+        assert!(
+            !flag(&engine, 81),
+            "movement clears the stale flag on dry land"
+        );
     }
 
     #[test]

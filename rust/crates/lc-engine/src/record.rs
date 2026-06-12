@@ -458,6 +458,7 @@ mod tests {
                 command_queue: Vec::new(),
                 command_stack: CommandStackSnapshot::default(),
                 local_vars: HashMap::new(),
+                in_liquid: false,
                 on_fire: false,
                 fire_phase: 0,
                 fire_caused_by: -1,

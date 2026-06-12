@@ -1909,6 +1909,13 @@ pub struct ObjectState {
     /// These are initialized to nil in Construction() and persist across all function calls
     #[serde(default)]
     pub local_vars: HashMap<String, Value>,
+    /// Cached liquid flag (C4Object::InLiquid, C4Object.h:156): loaded from
+    /// Objects.txt (default false, C4Object.cpp:2775), updated inside
+    /// movement (DoMovement, C4Movement.cpp:443-460), cleared on container
+    /// Exit (C4Object.cpp:1528). FnInLiquid reads THIS flag, not the
+    /// landscape (C4Script.cpp:1864-1868).
+    #[serde(default)]
+    pub in_liquid: bool,
     /// Burning state (C4Object::OnFire, C4Object.h:205). Set by Incinerate
     /// via the fire effect start (C4Effect.cpp:633); drives OCF_OnFire and
     /// the per-frame ExecFire burning.
@@ -2016,6 +2023,7 @@ pub(crate) fn preview_spawn_state(
         graphics_overlays: Vec::new(),
         draw_transform: None,
         local_vars: HashMap::new(),
+        in_liquid: false,
         on_fire: false,
         fire_phase: 0,
         fire_caused_by: OWNER_NONE,
@@ -3604,6 +3612,7 @@ impl Object {
             command_queue: self.command_queue.iter().cloned().collect(),
             command_stack: self.commands.snapshot(),
             local_vars: self.state.local_vars.clone(),
+            in_liquid: self.state.in_liquid,
             on_fire: self.state.on_fire,
             fire_phase: self.state.fire_phase,
             fire_caused_by: self.state.fire_caused_by,
@@ -3968,6 +3977,9 @@ pub struct SpawnConfig {
     pub alive: Option<bool>,
     #[serde(default)]
     pub category: Option<i32>,
+    /// `InLiquid` from Objects.txt (C4Object.cpp:2775, default false).
+    #[serde(default)]
+    pub in_liquid: Option<bool>,
     /// The object is LOADED (Objects.txt / savegame), not created:
     /// C4GameObjects::Load (C4GameObjects.cpp:535-618) only compiles and
     /// denumerates — Construction/Initialize fire for new objects only
@@ -3998,8 +4010,14 @@ impl SpawnConfig {
             layer: None,
             alive: None,
             category: None,
+            in_liquid: None,
             loaded: false,
         }
+    }
+
+    pub fn with_in_liquid(mut self, in_liquid: bool) -> Self {
+        self.in_liquid = Some(in_liquid);
+        self
     }
 
     pub fn with_loaded(mut self, loaded: bool) -> Self {
@@ -4167,6 +4185,10 @@ pub struct ObjectSnapshot {
     pub command_stack: CommandStackSnapshot,
     #[serde(default)]
     pub local_vars: HashMap<String, Value>,
+    /// Cached liquid flag (C4Object::InLiquid, persisted like the
+    /// savegame `InLiquid` field, C4Object.cpp:2775).
+    #[serde(default)]
+    pub in_liquid: bool,
     /// Burning state (C4Object::OnFire) with its animation phase and the
     /// causing player (the fire effect's CausedBy var).
     #[serde(default)]
@@ -4724,6 +4746,9 @@ pub struct Definition {
     no_burn_damage: bool,
     /// NoBreath=1: exempt from the ExecLife breathing check (C4Object.cpp:880).
     no_breath: bool,
+    /// `Float` DefCore value (C4Def.cpp:379): IsInLiquidCheck buoyancy line
+    /// offset (C4Object.cpp:5609-5612).
+    float_line: i32,
     /// Grab DefCore value: 0 none, 1 grab+push, 2 grab-only (C4Object.cpp:1763).
     grab: i32,
     burn_turn_to: Option<String>,
@@ -4845,6 +4870,7 @@ impl Definition {
             contact_incinerate: 0,
             no_burn_decay: false,
             no_breath: false,
+            float_line: 0,
             grab: 0,
             no_burn_damage: false,
             burn_turn_to: None,
@@ -4976,6 +5002,7 @@ impl Definition {
         definition.set_incomplete_activity(resource.core.incomplete_activity);
         definition.set_no_breath(resource.core.no_breath);
         definition.set_grab(resource.core.grab);
+        definition.float_line = resource.core.float_line;
         definition.set_physical(resource.core.physical);
         definition.set_collectible(resource.core.collectible);
         definition.set_constructable(resource.core.constructable);
@@ -5200,6 +5227,11 @@ impl Definition {
         // OCF_OnFire (SetOCF, C4Object.cpp:559-561)
         if state.on_fire {
             ocf |= crate::ocf::ON_FIRE;
+        }
+        // OCF_InLiquid: the cached flag, uncontained only (SetOCF
+        // C4Object.cpp:633-636, UpdateOCF :729-732).
+        if state.in_liquid && state.container.is_none() {
+            ocf |= crate::ocf::IN_LIQUID;
         }
         // OCF_Inflammable: not burning, ContactIncinerate set, not a dead
         // living (SetOCF, C4Object.cpp:562-566)
@@ -5580,6 +5612,7 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_in_liquid(state.in_liquid)
                 .with_physicals(
                     state.info_physical,
                     state.temporary_physical,
@@ -5749,6 +5782,7 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_in_liquid(state.in_liquid)
                 .with_physicals(
                     state.info_physical,
                     state.temporary_physical,
@@ -5910,6 +5944,7 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_in_liquid(state.in_liquid)
                 .with_physicals(
                     state.info_physical,
                     state.temporary_physical,
@@ -6095,6 +6130,7 @@ impl Definition {
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
                 .with_alive(state.alive)
+                .with_in_liquid(state.in_liquid)
                 .with_physicals(
                     state.info_physical,
                     state.temporary_physical,
@@ -6209,6 +6245,7 @@ impl Definition {
             state.base_graphics.clone(),
         )
         .with_alive(state.alive)
+                .with_in_liquid(state.in_liquid)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -6340,6 +6377,7 @@ impl Definition {
             state.base_graphics.clone(),
         )
         .with_alive(state.alive)
+                .with_in_liquid(state.in_liquid)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -6464,6 +6502,7 @@ impl Definition {
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
+                .with_in_liquid(state.in_liquid)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -6591,6 +6630,7 @@ impl Definition {
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
+                .with_in_liquid(state.in_liquid)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -6713,6 +6753,7 @@ impl Definition {
             state.base_graphics.clone(),
         )
         .with_alive(state.alive)
+                .with_in_liquid(state.in_liquid)
         .with_physicals(
             state.info_physical,
             state.temporary_physical,
@@ -7179,6 +7220,7 @@ impl Definition {
                     state.base_graphics.clone(),
                 )
                 .with_alive(state.alive)
+                .with_in_liquid(state.in_liquid)
                 .with_physicals(
                     state.info_physical,
                     state.temporary_physical,
@@ -10435,6 +10477,7 @@ impl Engine {
                 )
                 .with_contents(object.state.contents.clone())
                 .with_alive(object.state.alive)
+                .with_in_liquid(object.state.in_liquid)
                 .with_ocf(ocf)
                 .with_full_state(Rc::new(object.state.clone()))
             }),
@@ -12741,7 +12784,7 @@ impl Engine {
             let mut contact_container_changes = Vec::new();
             let mut contact_selection_changes = Vec::new();
             let contact_function_calls_enabled = movement.contact_function_calls;
-            let movement_outcome = {
+            let mut movement_outcome = {
                 let definition_for_contact = definition_for_contact.as_ref();
                 let mut run_contact_callback =
                     |object: &mut Object, contact_cnat: u32| -> Result<(), EngineError> {
@@ -12874,6 +12917,44 @@ impl Engine {
                 continue;
             }
             self.update_sector_for_index(idx);
+            // C4Object::InLiquid update, inline in DoMovement after
+            // integration and BEFORE ContactAction/NoAttachAction
+            // (C4Movement.cpp:443-460): IsInLiquidCheck probes
+            // GBackLiquid(x, y + Float*Con/FullCon - 1)
+            // (C4Object.cpp:5609-5612); entering liquid clears fNoAttach
+            // (:452). DoMovement never runs contained or C4D_StaticBack
+            // (C4Movement.cpp:553-575; the C++ Mobile gate is unmodeled).
+            // The entry Splash (:450-451, OCF_HitSpeed2 && Mass>3) draws
+            // synced RNG and is a documented PORT_STATUS gap.
+            if self.objects[idx].state.container.is_none()
+                && self.objects[idx].state.category & CATEGORY_STATIC_BACK == 0
+            {
+                let probe = {
+                    let state = &self.objects[idx].state;
+                    let float_line = self
+                        .definitions
+                        .get(&self.objects[idx].definition_id)
+                        .map(|definition| definition.float_line)
+                        .unwrap_or(0);
+                    let offset = float_line
+                        .saturating_mul(state.construction)
+                        .checked_div(FULL_CON)
+                        .unwrap_or(0);
+                    Vector2::new(state.position.x, state.position.y + offset - 1)
+                };
+                let wet = self
+                    .landscape
+                    .as_ref()
+                    .map(|landscape| landscape.is_liquid_at(probe.x, probe.y))
+                    .unwrap_or(false);
+                let state = &mut self.objects[idx].state;
+                if wet && !state.in_liquid {
+                    state.in_liquid = true;
+                    movement_outcome.no_attach = false;
+                } else if !wet && state.in_liquid {
+                    state.in_liquid = false;
+                }
+            }
             if movement_outcome.no_attach {
                 self.apply_no_attach_action(idx, &action_library);
             }
@@ -14450,6 +14531,7 @@ impl Engine {
                     graphics_overlays: snapshot.graphics_overlays.clone(),
                     draw_transform: snapshot.draw_transform,
                     local_vars: snapshot.local_vars.clone(),
+                    in_liquid: snapshot.in_liquid,
                     on_fire: snapshot.on_fire,
                     fire_phase: snapshot.fire_phase,
                     fire_caused_by: snapshot.fire_caused_by,
@@ -18220,6 +18302,8 @@ impl Engine {
             }
             None => {
                 self.objects[object_index].state.container = None;
+                // C4Object::Exit resets InLiquid (C4Object.cpp:1528).
+                self.objects[object_index].state.in_liquid = false;
             }
         }
         // The moved object's own SetOCF (C4Object.cpp:1531,1570).
@@ -19850,6 +19934,7 @@ impl Engine {
             layer,
             alive,
             category,
+            in_liquid,
             loaded,
         } = config;
 
@@ -19953,6 +20038,7 @@ impl Engine {
                 graphics_overlays: Vec::new(),
                 draw_transform: None,
                 local_vars: HashMap::new(),
+                in_liquid: in_liquid.unwrap_or(false),
                 on_fire: false,
                 fire_phase: 0,
                 fire_caused_by: OWNER_NONE,
@@ -20603,6 +20689,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         graphics_overlays: snapshot.graphics_overlays.clone(),
         draw_transform: snapshot.draw_transform,
         local_vars: snapshot.local_vars.clone(),
+        in_liquid: snapshot.in_liquid,
         on_fire: snapshot.on_fire,
         fire_phase: snapshot.fire_phase,
         fire_caused_by: snapshot.fire_caused_by,

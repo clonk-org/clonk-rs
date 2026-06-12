@@ -1022,6 +1022,7 @@ unsafe fn make_snapshot(
             // Not carried by the C ABI snapshot yet — extend
             // LcEngineObjectSnapshot + the bridge's CollectSnapshotBuffer
             // before the shadow-diff compares these fields (task #22).
+            in_liquid: false,
             on_fire: false,
             fire_phase: 0,
             fire_caused_by: crate::OWNER_NONE,

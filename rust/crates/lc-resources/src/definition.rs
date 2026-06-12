@@ -181,6 +181,10 @@ pub struct DefCore {
     pub contact_incinerate: i32,
     /// NoBurnDecay=1: burning does not reduce Con (C4Object.cpp:777-778).
     pub no_burn_decay: bool,
+    /// `Float` (C4Def.cpp:379, default 0): buoyancy line offset in percent
+    /// of Con — IsInLiquidCheck probes GBackLiquid(x, y + Float*Con/FullCon
+    /// - 1) (C4Object.cpp:5609-5612).
+    pub float_line: i32,
     /// `Grab` (C4Def.cpp): 0 none, 1 grab+push, 2 grab-only.
     pub grab: i32,
     /// `NoBreath` (C4Def.cpp:409): exempt from the ExecLife breathing check.
@@ -433,6 +437,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut no_burn_decay = false;
     let mut no_breath = false;
     let mut grab = 0;
+    let mut float_line = 0;
     let mut no_burn_damage = false;
     let mut burn_turn_to: Option<String> = None;
     let mut incomplete_activity = false;
@@ -557,6 +562,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "nobreath" => {
                 no_breath = parse_bool(value);
             }
+            "float" => {
+                float_line = parse_i32(value).unwrap_or(0);
+            }
             "grab" => {
                 grab = parse_i32(value).unwrap_or(0).max(0);
             }
@@ -646,6 +654,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         no_burn_decay,
         no_breath,
         grab,
+        float_line,
         no_burn_damage,
         burn_turn_to,
         incomplete_activity,
