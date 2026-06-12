@@ -3002,7 +3002,6 @@ impl Object {
         self.refresh_shape_after_state_change(previous_construction, previous_rect, true);
     }
 
-    #[cfg(test)]
     fn set_fixed_velocity(&mut self, velocity: FixedVec2) {
         self.fixed_velocity = velocity;
         self.state.velocity = self.velocity_pixels();
@@ -3969,6 +3968,11 @@ pub struct SpawnConfig {
     pub definition_id: DefinitionId,
     pub position: Vector2,
     pub velocity: Vector2,
+    /// Exact sub-pixel velocity: savegame `XDir`/`YDir` are serialized
+    /// C4Fixed values (C4Object.cpp:2765-2766), not whole pixels. Takes
+    /// precedence over `velocity` when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_velocity: Option<FixedVec2>,
     #[serde(default)]
     pub rotation: i32,
     pub energy: i32,
@@ -4014,6 +4018,7 @@ impl SpawnConfig {
             definition_id: definition_id.into(),
             position: Vector2::ZERO,
             velocity: Vector2::ZERO,
+            fixed_velocity: None,
             rotation: 0,
             energy: 0,
             construction: FULL_CON,
@@ -4041,6 +4046,11 @@ impl SpawnConfig {
 
     pub fn with_loaded(mut self, loaded: bool) -> Self {
         self.loaded = loaded;
+        self
+    }
+
+    pub fn with_fixed_velocity(mut self, velocity: FixedVec2) -> Self {
+        self.fixed_velocity = Some(velocity);
         self
     }
 
@@ -19966,6 +19976,7 @@ impl Engine {
             definition_id,
             position,
             velocity,
+            fixed_velocity,
             rotation,
             energy,
             construction,
@@ -20106,6 +20117,13 @@ impl Engine {
             shape_template,
             own_shape_vertices,
         );
+        // Saved XDir/YDir are C4Fixed, not whole pixels
+        // (C4Object.cpp:2765-2766): restore the exact sub-pixel velocity
+        // and let the int mirror follow fixtoi.
+        if let Some(fixed) = fixed_velocity {
+            object.set_fixed_velocity(fixed);
+            object.state.velocity = object.velocity_pixels();
+        }
         // Breath fills from the physicals at birth (C4Object.cpp:193).
         object.state.breath = self
             .definitions

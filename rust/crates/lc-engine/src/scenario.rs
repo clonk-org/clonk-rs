@@ -3094,8 +3094,10 @@ struct LegacyObjectRecord {
     owner: Option<i32>,
     x: Option<i32>,
     y: Option<i32>,
-    xdir: Option<i32>,
-    ydir: Option<i32>,
+    /// Saved velocity is C4Fixed (C4Object.cpp:2765-2766), float-encoded
+    /// in real content (`XDir=f...`).
+    xdir: Option<crate::math::C4Fixed>,
+    ydir: Option<crate::math::C4Fixed>,
     energy: Option<i32>,
     construction: Option<i32>,
     alive: Option<bool>,
@@ -3183,7 +3185,7 @@ impl LegacyObjectRecord {
                 })?);
             }
             "xdir" => {
-                self.xdir = Some(parse_i32(trimmed_value).map_err(|err| {
+                self.xdir = Some(parse_c4fixed(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
                         "Objects.txt line {}: invalid XDir `{}` ({})",
                         self.line, trimmed_value, err
@@ -3191,7 +3193,7 @@ impl LegacyObjectRecord {
                 })?);
             }
             "ydir" => {
-                self.ydir = Some(parse_i32(trimmed_value).map_err(|err| {
+                self.ydir = Some(parse_c4fixed(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
                         "Objects.txt line {}: invalid YDir `{}` ({})",
                         self.line, trimmed_value, err
@@ -3440,7 +3442,18 @@ impl LegacyObjectRecord {
         config = config.with_position(Vector2::new(x.unwrap_or(0), y.unwrap_or(0)));
 
         if xdir.is_some() || ydir.is_some() {
-            config = config.with_velocity(Vector2::new(xdir.unwrap_or(0), ydir.unwrap_or(0)));
+            // Exact C4Fixed velocity (C4Object.cpp:2765-2766); the pixel
+            // mirror follows fixtoi like C4Object::velocity_pixels.
+            let fixed = crate::math::FixedVec2 {
+                x: xdir.unwrap_or_default(),
+                y: ydir.unwrap_or_default(),
+            };
+            config = config
+                .with_velocity(Vector2::new(
+                    crate::math::fixtoi(fixed.x),
+                    crate::math::fixtoi(fixed.y),
+                ))
+                .with_fixed_velocity(fixed);
         }
         if let Some(owner) = owner {
             config = config.with_owner(owner);
@@ -3611,6 +3624,26 @@ fn parse_i64(value: &str) -> Result<i64, std::num::ParseIntError> {
 fn parse_i32(value: &str) -> Result<i32, String> {
     let parsed = parse_i64(value).map_err(|err| err.to_string())?;
     i32::try_from(parsed).map_err(|_| "value out of range for i32".to_string())
+}
+
+/// A serialized C4Fixed (Fixed.h:247-266): an `f` prefix means the int32
+/// is FLOAT BITS converted via ftofix (FLOAT_TO_FIXED); `F` or no prefix
+/// means the raw fixed-point value. GoldRush's hanging stalactites carry
+/// `YDir=f1067030938` = 1.2 px/frame — misread as a raw int it becomes a
+/// shattering hit speed.
+fn parse_c4fixed(value: &str) -> Result<crate::math::C4Fixed, String> {
+    let trimmed = value.trim();
+    let (float_bits, rest) = match trimmed.as_bytes().first() {
+        Some(b'f') => (true, &trimmed[1..]),
+        Some(b'F') => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+    let raw = parse_i32(rest)?;
+    if float_bits {
+        Ok(crate::math::ftofix(f32::from_bits(raw as u32)))
+    } else {
+        Ok(crate::math::C4Fixed::from_raw(raw))
+    }
 }
 
 fn parse_u64(value: &str) -> Result<u64, String> {
@@ -7401,6 +7434,24 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn parse_c4fixed_reads_the_cpp_serialization_formats() {
+        // CompileFunc(C4Fixed&) (Fixed.h:247-266): prefix 'f' = the int32
+        // is FLOAT BITS run through FLOAT_TO_FIXED (ftofix truncates);
+        // 'F' or no prefix = the raw fixed-point value. GoldRush saves
+        // YDir=f1067030938 (bits of 1.2f) on its hanging stalactites.
+        assert_eq!(
+            parse_c4fixed("f1067030938").expect("parses").val(),
+            78643, // trunc(1.2 * 65536)
+        );
+        assert_eq!(
+            parse_c4fixed("f-1063256064").expect("parses").val(),
+            -5 * 65536, // bits of -5.0f as negative int32
+        );
+        assert_eq!(parse_c4fixed("F78643").expect("parses").val(), 78643);
+        assert_eq!(parse_c4fixed("123").expect("parses").val(), 123);
+    }
+
+    #[test]
     fn loads_legacy_objects_txt_spawns_initial_objects() {
         let dir = tempdir().expect("tempdir");
 
@@ -7432,7 +7483,9 @@ global func Step(state, frame, random)
         .expect("write scenario core");
         std::fs::write(
             scenario_dir.join("Objects.txt"),
-            "[Object]\nid=BOX1\nNumber=100\nStatus=1\nCategory=0\nOwner=1\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nStatus=1\nCategory=0\nX=30\nY=40\nXDir=-5\nYDir=3\nEnergy=77\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
+            // XDir/YDir are float-bit C4Fixed like real saves write them
+            // (Fixed.h:247-266): f-1063256064 = -5.0, f1077936128 = 3.0.
+            "[Object]\nid=BOX1\nNumber=100\nStatus=1\nCategory=0\nOwner=1\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nStatus=1\nCategory=0\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
         )
         .expect("write objects");
 
