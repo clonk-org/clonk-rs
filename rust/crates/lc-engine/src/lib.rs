@@ -1917,6 +1917,15 @@ pub struct ObjectState {
     /// landscape (C4Script.cpp:1864-1868).
     #[serde(default)]
     pub in_liquid: bool,
+    /// C4Object::Mobile (C4Object.h:152): set at Init for nonzero-dir
+    /// non-StaticBack spawns (C4Object.cpp:183-185), by SetXDir/SetYDir/
+    /// SetRDir and the action procedures, cleared by ExecMovement when all
+    /// dirs reach zero (C4Movement.cpp:572) and re-set by the Tick10
+    /// gravity-mobilization pulse (:581-586). Only Mobile objects run
+    /// DoMovement or idle gravity. Loaded from Objects.txt `Mobile=`
+    /// (default false, C4Object.cpp:2772).
+    #[serde(default)]
+    pub mobile: bool,
     /// Script-set extra mass (C4Object::OwnMass, C4Object.cpp:94): SetMass
     /// stores iValue - Def->Mass here; Mass = max((Def->Mass + OwnMass) *
     /// Con / FullCon, 1) (UpdateMass, C4Object.cpp:497-500).
@@ -2030,6 +2039,7 @@ pub(crate) fn preview_spawn_state(
         draw_transform: None,
         local_vars: HashMap::new(),
         in_liquid: false,
+        mobile: false,
         own_mass: 0,
         on_fire: false,
         fire_phase: 0,
@@ -3630,6 +3640,7 @@ impl Object {
             command_stack: self.commands.snapshot(),
             local_vars: self.state.local_vars.clone(),
             in_liquid: self.state.in_liquid,
+            mobile: self.state.mobile,
             own_mass: self.state.own_mass,
             on_fire: self.state.on_fire,
             fire_phase: self.state.fire_phase,
@@ -4218,6 +4229,10 @@ pub struct ObjectSnapshot {
     /// savegame `InLiquid` field, C4Object.cpp:2775).
     #[serde(default)]
     pub in_liquid: bool,
+    /// C4Object::Mobile (persisted like the savegame `Mobile` field,
+    /// C4Object.cpp:2772).
+    #[serde(default)]
+    pub mobile: bool,
     /// C4Object::OwnMass (SetMass leftovers; persisted like the savegame).
     #[serde(default)]
     pub own_mass: i32,
@@ -14588,6 +14603,7 @@ impl Engine {
                     draw_transform: snapshot.draw_transform,
                     local_vars: snapshot.local_vars.clone(),
                     in_liquid: snapshot.in_liquid,
+                    mobile: snapshot.mobile,
                     own_mass: snapshot.own_mass,
                     on_fire: snapshot.on_fire,
                     fire_phase: snapshot.fire_phase,
@@ -20101,6 +20117,7 @@ impl Engine {
                 draw_transform: None,
                 local_vars: HashMap::new(),
                 in_liquid: in_liquid.unwrap_or(false),
+                mobile: false,
                 own_mass: 0,
                 on_fire: false,
                 fire_phase: 0,
@@ -20124,6 +20141,16 @@ impl Engine {
             object.set_fixed_velocity(fixed);
             object.state.velocity = object.velocity_pixels();
         }
+        // Initial mobility (C4Object.cpp:183-185): a fresh spawn with any
+        // nonzero dir is Mobile unless Category == C4D_StaticBack — the C++
+        // check is an EQUALITY test on the whole category, not a bitmask.
+        // Loaded objects bypass Init and keep the serialized flag
+        // (default false, C4Object.cpp:2772).
+        object.state.mobile = !loaded
+            && initial_category != CATEGORY_STATIC_BACK
+            && (object.fixed_velocity.x.is_nonzero()
+                || object.fixed_velocity.y.is_nonzero()
+                || object.rotation_velocity.is_nonzero());
         // Breath fills from the physicals at birth (C4Object.cpp:193).
         object.state.breath = self
             .definitions
@@ -20760,6 +20787,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         draw_transform: snapshot.draw_transform,
         local_vars: snapshot.local_vars.clone(),
         in_liquid: snapshot.in_liquid,
+        mobile: snapshot.mobile,
         own_mass: snapshot.own_mass,
         on_fire: snapshot.on_fire,
         fire_phase: snapshot.fire_phase,
@@ -33608,6 +33636,68 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             "#,
         )
         .expect("script compiles")
+    }
+
+    // Mirrors C4Object::Init (C4Object.cpp:183-185): a freshly created
+    // object is Mobile only when it spawns with a nonzero dir, and only
+    // when Category != C4D_StaticBack — an EQUALITY test on the whole
+    // category value, not a bitmask. Loaded objects bypass Init and keep
+    // the serialized flag (default false, C4Object.cpp:2772).
+    #[test]
+    fn initial_mobility_follows_init_velocity_rule_like_cpp() {
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(simple_definition("Rock"))
+            .expect("rock registers");
+
+        let resting = engine
+            .spawn_object(SpawnConfig::new("Rock").with_category(CATEGORY_OBJECT))
+            .expect("resting spawns");
+        let moving = engine
+            .spawn_object(
+                SpawnConfig::new("Rock")
+                    .with_velocity(Vector2::new(1, 0))
+                    .with_category(CATEGORY_OBJECT),
+            )
+            .expect("moving spawns");
+        let static_back = engine
+            .spawn_object(
+                SpawnConfig::new("Rock")
+                    .with_velocity(Vector2::new(1, 0))
+                    .with_category(CATEGORY_STATIC_BACK),
+            )
+            .expect("static spawns");
+        let loaded = engine
+            .spawn_object(
+                SpawnConfig::new("Rock")
+                    .with_velocity(Vector2::new(1, 0))
+                    .with_category(CATEGORY_OBJECT)
+                    .with_loaded(true),
+            )
+            .expect("loaded spawns");
+
+        let mobile_of = |engine: &Engine, id| {
+            engine
+                .find_object_index(id)
+                .map(|idx| engine.objects[idx].state.mobile)
+                .expect("object exists")
+        };
+        assert!(
+            !mobile_of(&engine, resting),
+            "zero-dir spawn stays immobile (C4Object.cpp:184)"
+        );
+        assert!(
+            mobile_of(&engine, moving),
+            "nonzero xdir mobilizes a fresh spawn (C4Object.cpp:185)"
+        );
+        assert!(
+            !mobile_of(&engine, static_back),
+            "Category == C4D_StaticBack skips Init mobilization (C4Object.cpp:183)"
+        );
+        assert!(
+            !mobile_of(&engine, loaded),
+            "loaded objects keep the serialized default false (C4Object.cpp:2772)"
+        );
     }
 
     #[test]
