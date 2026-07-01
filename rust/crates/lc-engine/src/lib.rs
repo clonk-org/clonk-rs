@@ -20482,19 +20482,30 @@ impl Engine {
             definition_stretch_growth,
             definition_rotateable,
         );
-        let shape_base_vertices = if owns_vertices {
-            vertices.clone()
+        // Objects.txt vertices are the CURRENT effective shape serialized
+        // by C4Shape::CompileFunc (C4Shape.cpp:495-515) — already Con/
+        // rotation-transformed, loaded VERBATIM. Future UpdateShape
+        // recomputes from the def like C++ (no vertex ownership).
+        let (initial_vertices, own_shape_vertices) = if loaded && owns_vertices {
+            (vertices.clone(), None)
         } else {
-            definition_vertices
+            let shape_base_vertices = if owns_vertices {
+                vertices.clone()
+            } else {
+                definition_vertices
+            };
+            let initial_vertices = transformed_shape_vertices(
+                &shape_base_vertices,
+                construction,
+                shape_template.stretch_growth,
+                shape_template.rotateable,
+                rotation,
+            );
+            (
+                initial_vertices,
+                owns_vertices.then_some(shape_base_vertices),
+            )
         };
-        let initial_vertices = transformed_shape_vertices(
-            &shape_base_vertices,
-            construction,
-            shape_template.stretch_growth,
-            shape_template.rotateable,
-            rotation,
-        );
-        let own_shape_vertices = owns_vertices.then_some(shape_base_vertices);
 
         let mut object = Object::new(
             id,

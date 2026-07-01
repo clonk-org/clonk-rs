@@ -3110,6 +3110,14 @@ struct LegacyObjectRecord {
     mobile: Option<bool>,
     /// Whole-degree rotation (`Rotation=`, C4Object.cpp:2744).
     rotation: Option<i32>,
+    /// The CURRENT shape's vertices, serialized by C4Shape::CompileFunc
+    /// into the [Object] section (C4Shape.cpp:495-515): the effective
+    /// post-Con/rotation shape, loaded verbatim.
+    vertex_count: Option<i32>,
+    vertex_x: Option<Vec<i32>>,
+    vertex_y: Option<Vec<i32>>,
+    vertex_cnat: Option<Vec<i32>>,
+    vertex_friction: Option<Vec<i32>>,
     energy: Option<i32>,
     construction: Option<i32>,
     alive: Option<bool>,
@@ -3260,6 +3268,27 @@ impl LegacyObjectRecord {
                         self.line, trimmed_value, err
                     ))
                 })?);
+            }
+            "vertices" => {
+                self.vertex_count = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Vertices `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "vertexx" => {
+                self.vertex_x = Some(parse_i32_list(trimmed_value, self.line, "VertexX")?);
+            }
+            "vertexy" => {
+                self.vertex_y = Some(parse_i32_list(trimmed_value, self.line, "VertexY")?);
+            }
+            "vertexcnat" => {
+                self.vertex_cnat = Some(parse_i32_list(trimmed_value, self.line, "VertexCNAT")?);
+            }
+            "vertexfriction" => {
+                self.vertex_friction =
+                    Some(parse_i32_list(trimmed_value, self.line, "VertexFriction")?);
             }
             "energy" => {
                 self.energy = Some(parse_i32(trimmed_value).map_err(|err| {
@@ -3455,6 +3484,11 @@ impl LegacyObjectRecord {
             rdir,
             mobile,
             rotation,
+            vertex_count,
+            vertex_x,
+            vertex_y,
+            vertex_cnat,
+            vertex_friction,
             energy,
             construction,
             alive,
@@ -3545,6 +3579,31 @@ impl LegacyObjectRecord {
         // false) — they bypass Init, and nothing after C4GameObjects::Load
         // rewrites the flag (C4Object.cpp:2772).
         config = config.with_mobile(mobile.unwrap_or(false));
+        // The saved shape's vertices (C4Shape::CompileFunc into [Object],
+        // C4Shape.cpp:495-515): the CURRENT effective shape, loaded
+        // verbatim (spawn_single skips the Con/rotation re-transform for
+        // loaded vertices). Missing arrays read as 0 (mkArrayAdapt).
+        if let Some(count) = vertex_count {
+            let count = count.clamp(0, 30) as usize;
+            if count > 0 {
+                let component = |list: &Option<Vec<i32>>, index: usize| {
+                    list.as_ref()
+                        .and_then(|values| values.get(index).copied())
+                        .unwrap_or(0)
+                };
+                let vertices: Vec<crate::ObjectVertex> = (0..count)
+                    .map(|index| {
+                        crate::ObjectVertex::new(
+                            component(&vertex_x, index),
+                            component(&vertex_y, index),
+                        )
+                        .with_cnat(component(&vertex_cnat, index) as u32)
+                        .with_friction(component(&vertex_friction, index))
+                    })
+                    .collect();
+                config = config.with_vertices(vertices);
+            }
+        }
         if let Some(owner) = owner {
             config = config.with_owner(owner);
         }
@@ -3721,6 +3780,24 @@ fn parse_i32(value: &str) -> Result<i32, String> {
 /// means the raw fixed-point value. GoldRush's hanging stalactites carry
 /// `YDir=f1067030938` = 1.2 px/frame — misread as a raw int it becomes a
 /// shattering hit speed.
+/// Comma-separated int array (StdCompiler mkArrayAdapt serialization,
+/// e.g. `VertexX=2,-14,14`).
+fn parse_i32_list(value: &str, line: usize, key: &str) -> Result<Vec<i32>, ScenarioError> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            parse_i32(entry).map_err(|err| {
+                ScenarioError::LegacyObjectsParse(format!(
+                    "Objects.txt line {}: invalid {} entry `{}` ({})",
+                    line, key, entry, err
+                ))
+            })
+        })
+        .collect()
+}
+
 fn parse_c4fixed(value: &str) -> Result<crate::math::C4Fixed, String> {
     let trimmed = value.trim();
     let (float_bits, rest) = match trimmed.as_bytes().first() {
@@ -7963,6 +8040,89 @@ global func Step(state, frame, random)
             !flag(&engine, 81),
             "movement clears the stale flag on dry land"
         );
+    }
+
+    // Objects.txt serializes the CURRENT shape per object (C4Shape::
+    // CompileFunc into the [Object] section, C4Shape.cpp:495-515):
+    // Vertices/VertexX/VertexY/VertexCNAT/VertexFriction load VERBATIM —
+    // they are the post-Con/rotation effective shape, not a base to
+    // re-transform. C++ keeps them until the next UpdateShape (which
+    // recomputes from the def), so resting objects keep saved overrides
+    // like VertexFriction=50 indefinitely.
+    #[test]
+    fn objects_txt_restores_saved_shape_vertices_verbatim_like_cpp() {
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let good = defs_root.join("Good.c4d");
+        std::fs::create_dir_all(&good).expect("definition dir");
+        // The def's own shape differs from the saved one: 1 vertex,
+        // friction 30 — the 30-vs-50 live-diff class.
+        std::fs::write(
+            good.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=16\nRotate=1\n\
+             Vertices=1\nVertexX=0\nVertexY=0\nVertexFriction=30\n",
+        )
+        .expect("write defcore");
+
+        let scenario_dir = dir.path().join("Verts.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Verts\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write scenario core");
+        // 90: plain saved shape (3 vertices, friction 50) — verbatim.
+        // 91: ROTATED object — the saved vertices are already rotated;
+        //     applying the spawn rotation again would double-rotate.
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=GOOD\nNumber=90\nStatus=1\nX=10\nY=10\n\
+             Vertices=3\nVertexX=2,-14,14\nVertexY=11,-4,-4\n\
+             VertexCNAT=8,1,2\nVertexFriction=50,50,50\n\n\
+             [Object]\nid=GOOD\nNumber=91\nStatus=1\nX=30\nY=10\nRotation=90\n\
+             Vertices=1\nVertexX=-11\nVertexY=2\nVertexFriction=50\n",
+        )
+        .expect("write objects");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let idx = engine
+            .find_object_index(ObjectId::new(90))
+            .expect("object 90 exists");
+        let vertices = &engine.objects[idx].state.vertices;
+        assert_eq!(vertices.len(), 3, "saved Vertices= count wins over the def");
+        assert_eq!(
+            (
+                vertices[0].x,
+                vertices[0].y,
+                vertices[0].cnat,
+                vertices[0].friction
+            ),
+            (2, 11, 8, 50),
+            "saved vertex 0 loads verbatim incl. CNAT and friction"
+        );
+        assert_eq!(
+            (vertices[1].x, vertices[1].y, vertices[1].friction),
+            (-14, -4, 50)
+        );
+
+        let idx = engine
+            .find_object_index(ObjectId::new(91))
+            .expect("object 91 exists");
+        let vertices = &engine.objects[idx].state.vertices;
+        assert_eq!(
+            (vertices[0].x, vertices[0].y),
+            (-11, 2),
+            "saved vertices are the ALREADY-rotated shape — no re-rotation at load"
+        );
+        assert_eq!(engine.objects[idx].state.rotation, 90);
     }
 
     // Objects.txt Mobile/FixX/FixY/FixR/RDir ingestion
