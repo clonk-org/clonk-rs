@@ -383,6 +383,45 @@ full-scenario shadow-diff (see Parity harnesses).
   (sub-pixel position/rotation for Mobile-loaded objects), the Tick10
   Mobile gate, `LC_XTASK_PROBE=x,y;...` added to scenario-errors for
   pixel solidity spot checks.
+- **Tick10 Mobile gate epic COMPLETE (2026-07-01, commits
+  5096ebd9..ee29ed0f):** the ±1 position/velocity wall driver is modeled.
+  ObjectState.mobile with the full C++ lifecycle: Init rule (nonzero dir
+  && Category != C4D_StaticBack — EQUALITY test, C4Object.cpp:183-185),
+  ExecMovement gates (contained CopyMotion :518-529/:556-561; StaticBack
+  mask skip :564; Mobile-only DoMovement :567; demobilize when all dirs
+  zero :572; the Tick10 pulse re-mobilizes resting objects with zeroed
+  dirs + pixel-snapped fix :576-587 — Rust `frame % 10 == 0` aligns with
+  iTick10 since Ticks() precedes ExecObjects, C4Game.cpp:1888), idle
+  DoGravity gated on Mobile (C4Object.cpp:4708-4712) and free-fall
+  skipping StaticBack (:4662), per-procedure ExecAction mobilization
+  incl. the default-Attach zero-dirs case (:4791-5437), script dir
+  writes (FnSetXDir/YDir/RDir via ObjectDelta), Fling/Jump/Exit/Push
+  (pre-zero + check :1765-1797)/Lift (:1815-1817)/NoAttachAction
+  inactive gravity (:4299-4303), UprightAttach re-arm + t_attach OR
+  (:4698-4705, transient Object.upright_t_attach), Stabilize
+  (C4Movement.cpp:488-516, ±StableRange upright snap with a contact-free
+  probe; NoStabilize DefCore parsed). Objects.txt ingestion:
+  Mobile/FixX/FixY/FixR/RDir/Rotation (C4Object.cpp:2762-2772, C4Fixed
+  encodings); loaded objects keep the serialized flag (GoldRush: 730/730
+  placements carry FixX/FixY, 38 Mobile=1 — the frozen majority now
+  freezes exactly like C++ between pulses); StaticBack loads zero
+  xdir/ydir on the RAW saved category (C4GameObjects.cpp:600-604).
+  Fixture migration: bare script defs are StaticBack (C4Def.cpp:226-232)
+  so movement tests got C4D_Object; direct fixed_velocity writes arm
+  Mobile like FnSetXDir; engine snapshots regenerated. NOT modeled
+  (noted in code): per-procedure t_attach ORs beyond UprightAttach,
+  Stabilize's Contact* dispatch (ContactCalls=1 defs), editor EMMO_Move
+  Mobile=false. ALSO LANDED: GetCommand host fn (element 0 CommandName
+  via HostWorldObject.command_names frame-start snapshot; elements 1-5
+  log-and-nil), object-first SetCommand (foreign target warns false —
+  seam gap), and fail-safe Fx* effect callbacks (C++ fPassErrors=false:
+  log, restore pre-call RNG/audio, continue — an erroring FxTimer no
+  longer kills the tick or the effect). GoldRush headless survives 120
+  ticks (was dead at frame 2 on the bandit GetCommand); new host-fn
+  backlog: ShiftContents (spammy, BNDT OrderDefend), GrabObjectInfo,
+  HORS action-start target-zero. NEXT: vertex friction 30-vs-50
+  (Objects.txt VertexFriction/VertexX/Y overrides + material scaling),
+  late-spawn numbering skew, live shadow re-measure vs the 393 wall.
 
 ## Gates
 
