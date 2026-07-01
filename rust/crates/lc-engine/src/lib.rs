@@ -12778,270 +12778,12 @@ impl Engine {
             }
 
             self.apply_physics_at_index(idx);
-            let old_movement_velocity = self.objects[idx].fixed_velocity;
-            let old_movement_hit_flags = movement_hit_speed_flags(old_movement_velocity);
-            let action_name = self.objects[idx].state.action.name.clone();
-            let (
-                contact_density,
-                contact_function_calls,
-                border_bound,
-                rotateable,
-                attach,
-                action_procedure,
-            ) = self
-                .definitions
-                .get(&self.objects[idx].definition_id)
-                .map(|definition| {
-                    (
-                        definition.contact_density(),
-                        definition.contact_function_calls(),
-                        definition.border_bound(),
-                        definition.rotateable(),
-                        action_library.attach_for_action(&action_name),
-                        definition
-                            .action_library()
-                            .procedure_for_action(&action_name),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        CONTACT_DENSITY_SOLID,
-                        false,
-                        0,
-                        0,
-                        action_library.attach_for_action(&action_name),
-                        action_library.procedure_for_action(&action_name),
-                    )
-                });
-            let rotation_base_vertices = self.objects[idx].unrotated_shape_vertices();
-            let shape_rect = self.objects[idx].current_shape_rect();
-            let layer_bounds = self.layer_movement_bounds_for(idx);
-            let solid_masks = self.solid_masks_for_movement(&solid_mask_indices);
-            let object_id = self.objects[idx].id;
-            let movement = MovementContactConfig {
-                definition_vertices: &rotation_base_vertices,
-                contact_density,
-                contact_function_calls,
-                border_bound,
-                shape_rect,
-                attach,
-                rotateable,
-                action_procedure,
-                layer_bounds,
-                solid_masks: &solid_masks,
-                object_id,
-            };
-            // The contact-callback closure below early-outs unless the def
-            // sets ContactCalls=1 (rare) — don't pay a definition clone and
-            // a world snapshot per object for a closure that won't run.
-            let definition_for_contact = movement
-                .contact_function_calls
-                .then(|| self.definitions.get(&definition_id).cloned())
-                .flatten();
-            let mut contact_rng = self.rng.clone();
-            let mut contact_audio = self.audio_registry.clone();
-            let mut contact_next_object_id = self.next_object_id;
-            let contact_global_effects = self.global_effects.clone();
-            let contact_world = if movement.contact_function_calls {
-                self.host_world_context()
-            } else {
-                HostWorldContext::default()
-            };
-            let contact_physics = self.physics;
-            let contact_environment = self.environment;
-            let contact_frame = self.frame;
-            let contact_game_over_triggered = self.game_over_triggered;
-            let mut contact_outcomes = Vec::new();
-            let mut contact_container_changes = Vec::new();
-            let mut contact_selection_changes = Vec::new();
-            let contact_function_calls_enabled = movement.contact_function_calls;
-            let mut movement_outcome = {
-                let definition_for_contact = definition_for_contact.as_ref();
-                let mut run_contact_callback =
-                    |object: &mut Object, contact_cnat: u32| -> Result<(), EngineError> {
-                        if !contact_function_calls_enabled {
-                            return Ok(());
-                        }
-                        let Some(definition) = definition_for_contact else {
-                            return Ok(());
-                        };
-                        for cnat in [CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, CNAT_BOTTOM] {
-                            if contact_cnat & cnat == 0 {
-                                continue;
-                            }
-                            let Some(function_name) = contact_callback_name(cnat) else {
-                                continue;
-                            };
-                            let state_snapshot = object.state.clone();
-                            let world = contact_world
-                                .clone()
-                                .with_next_object_id(contact_next_object_id);
-                            let (value, mut outcome, audio_state, new_rng) = definition
-                                .call_object_function(
-                                    &state_snapshot,
-                                    object.id,
-                                    function_name,
-                                    &[],
-                                    contact_rng.clone(),
-                                    &contact_global_effects,
-                                    contact_physics,
-                                    contact_environment,
-                                    contact_frame,
-                                    world,
-                                    contact_game_over_triggered,
-                                    contact_audio.clone(),
-                                )?;
-                            contact_rng = new_rng;
-                            contact_audio = audio_state;
-                            contact_next_object_id = outcome.next_object_id;
-
-                            if let Some(update) = outcome.object_update.take() {
-                                let previous_owner = object.state.owner;
-                                let previous_crew_member = object.state.crew_member;
-                                let previous_position = object.state.position;
-                                let preserves_position = update.position.is_none();
-                                let delta: ObjectDelta = update.into();
-                                let apply_outcome = object.apply_delta(&delta, &action_library);
-                                if preserves_position {
-                                    object.state.position = previous_position;
-                                }
-                                if let Some(change) = apply_outcome.action_change {
-                                    object.record_action_event(
-                                        change.previous,
-                                        ActionTransitionKind::Forced,
-                                    );
-                                }
-                                if let Some((previous, new)) = apply_outcome.container_change {
-                                    contact_container_changes.push((object.id, previous, new));
-                                }
-                                let new_owner = object.state.owner;
-                                let new_crew_member = object.state.crew_member;
-                                if previous_owner != new_owner
-                                    || previous_crew_member != new_crew_member
-                                {
-                                    contact_selection_changes.push((
-                                        object.id,
-                                        previous_owner,
-                                        new_owner,
-                                        new_crew_member,
-                                    ));
-                                }
-                            } else {
-                                object.state.action.reconcile_with_library(&action_library);
-                            }
-
-                            contact_outcomes.push(outcome);
-                            if value.as_bool() {
-                                break;
-                            }
-                        }
-                        Ok(())
-                    };
-                let landscape = self.landscape.as_ref();
-                let materials = &self.materials;
-                let object = &mut self.objects[idx];
-                let mut outcome = object.advance_fixed_position_per_pixel(
-                    landscape,
-                    materials,
-                    movement,
-                    &mut run_contact_callback,
-                )?;
-                outcome.any_contact |= object.advance_fixed_rotation(
-                    landscape,
-                    materials,
-                    movement,
-                    outcome.no_attach,
-                    outcome.solid_mask_removed,
-                    &mut run_contact_callback,
-                )?;
-                outcome
-            };
-            self.rng = contact_rng;
-            self.audio_registry = contact_audio;
-            self.next_object_id = contact_next_object_id;
-            for (changed_object_id, previous_owner, new_owner, new_crew_member) in
-                contact_selection_changes
-            {
-                self.update_selection_for_state_change(
-                    changed_object_id,
-                    previous_owner,
-                    new_owner,
-                    new_crew_member,
-                );
-            }
-            for (changed_object_id, previous, new) in contact_container_changes {
-                self.apply_container_change(changed_object_id, previous, new)?;
-            }
-            for outcome in contact_outcomes {
-                self.apply_callback_outcome(
-                    idx,
-                    outcome,
-                    &action_library,
-                    object_id,
-                    &definition_id,
-                    false,
-                )?;
-            }
-            if self.objects[idx].destroyed
-                || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
-            {
-                continue;
-            }
-            self.update_sector_for_index(idx);
-            // C4Object::InLiquid update, inline in DoMovement after
-            // integration and BEFORE ContactAction/NoAttachAction
-            // (C4Movement.cpp:443-460): IsInLiquidCheck probes
-            // GBackLiquid(x, y + Float*Con/FullCon - 1)
-            // (C4Object.cpp:5609-5612); entering liquid clears fNoAttach
-            // (:452). DoMovement never runs contained or C4D_StaticBack
-            // (C4Movement.cpp:553-575; the C++ Mobile gate is unmodeled).
-            // The entry Splash (:450-451, OCF_HitSpeed2 && Mass>3) draws
-            // synced RNG and is a documented PORT_STATUS gap.
-            if self.objects[idx].state.container.is_none()
-                && self.objects[idx].state.category & CATEGORY_STATIC_BACK == 0
-            {
-                let probe = {
-                    let state = &self.objects[idx].state;
-                    let float_line = self
-                        .definitions
-                        .get(&self.objects[idx].definition_id)
-                        .map(|definition| definition.float_line)
-                        .unwrap_or(0);
-                    let offset = float_line
-                        .saturating_mul(state.construction)
-                        .checked_div(FULL_CON)
-                        .unwrap_or(0);
-                    Vector2::new(state.position.x, state.position.y + offset - 1)
-                };
-                let wet = self
-                    .landscape
-                    .as_ref()
-                    .map(|landscape| landscape.is_liquid_at(probe.x, probe.y))
-                    .unwrap_or(false);
-                let state = &mut self.objects[idx].state;
-                if wet && !state.in_liquid {
-                    state.in_liquid = true;
-                    movement_outcome.no_attach = false;
-                } else if !wet && state.in_liquid {
-                    state.in_liquid = false;
-                }
-            }
-            if movement_outcome.no_attach {
-                self.apply_no_attach_action(idx, &action_library);
-            }
-            if movement_outcome.any_contact {
-                self.invoke_movement_hit_callbacks(
-                    idx,
-                    old_movement_velocity,
-                    old_movement_hit_flags,
-                    &action_library,
-                    object_id,
-                    &definition_id,
-                )?;
-            }
-            if self.objects[idx].destroyed
-                || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
-            {
+            if !self.exec_object_movement(
+                idx,
+                &action_library,
+                &definition_id,
+                &solid_mask_indices,
+            )? {
                 continue;
             }
 
@@ -15349,6 +15091,289 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// The Mobile leg of C4Object::ExecMovement - DoMovement plus the
+    /// tail C++ runs inside it: the InLiquid update
+    /// (C4Movement.cpp:443-460), ContactAction/NoAttachAction dispatch
+    /// (:463-470) and the Hit* calls (:472-478). Returns Ok(false) when
+    /// the object died during movement and the caller must skip the
+    /// rest of its frame (C4Object.cpp:1064-1070).
+    fn exec_object_movement(
+        &mut self,
+        idx: usize,
+        action_library: &ActionLibrary,
+        definition_id: &DefinitionId,
+        solid_mask_indices: &[usize],
+    ) -> Result<bool, EngineError> {
+        let old_movement_velocity = self.objects[idx].fixed_velocity;
+        let old_movement_hit_flags = movement_hit_speed_flags(old_movement_velocity);
+        let action_name = self.objects[idx].state.action.name.clone();
+        let (
+            contact_density,
+            contact_function_calls,
+            border_bound,
+            rotateable,
+            attach,
+            action_procedure,
+        ) = self
+            .definitions
+            .get(&self.objects[idx].definition_id)
+            .map(|definition| {
+                (
+                    definition.contact_density(),
+                    definition.contact_function_calls(),
+                    definition.border_bound(),
+                    definition.rotateable(),
+                    action_library.attach_for_action(&action_name),
+                    definition
+                        .action_library()
+                        .procedure_for_action(&action_name),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    CONTACT_DENSITY_SOLID,
+                    false,
+                    0,
+                    0,
+                    action_library.attach_for_action(&action_name),
+                    action_library.procedure_for_action(&action_name),
+                )
+            });
+        let rotation_base_vertices = self.objects[idx].unrotated_shape_vertices();
+        let shape_rect = self.objects[idx].current_shape_rect();
+        let layer_bounds = self.layer_movement_bounds_for(idx);
+        let solid_masks = self.solid_masks_for_movement(solid_mask_indices);
+        let object_id = self.objects[idx].id;
+        let movement = MovementContactConfig {
+            definition_vertices: &rotation_base_vertices,
+            contact_density,
+            contact_function_calls,
+            border_bound,
+            shape_rect,
+            attach,
+            rotateable,
+            action_procedure,
+            layer_bounds,
+            solid_masks: &solid_masks,
+            object_id,
+        };
+        // The contact-callback closure below early-outs unless the def
+        // sets ContactCalls=1 (rare) — don't pay a definition clone and
+        // a world snapshot per object for a closure that won't run.
+        let definition_for_contact = movement
+            .contact_function_calls
+            .then(|| self.definitions.get(definition_id).cloned())
+            .flatten();
+        let mut contact_rng = self.rng.clone();
+        let mut contact_audio = self.audio_registry.clone();
+        let mut contact_next_object_id = self.next_object_id;
+        let contact_global_effects = self.global_effects.clone();
+        let contact_world = if movement.contact_function_calls {
+            self.host_world_context()
+        } else {
+            HostWorldContext::default()
+        };
+        let contact_physics = self.physics;
+        let contact_environment = self.environment;
+        let contact_frame = self.frame;
+        let contact_game_over_triggered = self.game_over_triggered;
+        let mut contact_outcomes = Vec::new();
+        let mut contact_container_changes = Vec::new();
+        let mut contact_selection_changes = Vec::new();
+        let contact_function_calls_enabled = movement.contact_function_calls;
+        let mut movement_outcome = {
+            let definition_for_contact = definition_for_contact.as_ref();
+            let mut run_contact_callback =
+                |object: &mut Object, contact_cnat: u32| -> Result<(), EngineError> {
+                    if !contact_function_calls_enabled {
+                        return Ok(());
+                    }
+                    let Some(definition) = definition_for_contact else {
+                        return Ok(());
+                    };
+                    for cnat in [CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, CNAT_BOTTOM] {
+                        if contact_cnat & cnat == 0 {
+                            continue;
+                        }
+                        let Some(function_name) = contact_callback_name(cnat) else {
+                            continue;
+                        };
+                        let state_snapshot = object.state.clone();
+                        let world = contact_world
+                            .clone()
+                            .with_next_object_id(contact_next_object_id);
+                        let (value, mut outcome, audio_state, new_rng) = definition
+                            .call_object_function(
+                                &state_snapshot,
+                                object.id,
+                                function_name,
+                                &[],
+                                contact_rng.clone(),
+                                &contact_global_effects,
+                                contact_physics,
+                                contact_environment,
+                                contact_frame,
+                                world,
+                                contact_game_over_triggered,
+                                contact_audio.clone(),
+                            )?;
+                        contact_rng = new_rng;
+                        contact_audio = audio_state;
+                        contact_next_object_id = outcome.next_object_id;
+
+                        if let Some(update) = outcome.object_update.take() {
+                            let previous_owner = object.state.owner;
+                            let previous_crew_member = object.state.crew_member;
+                            let previous_position = object.state.position;
+                            let preserves_position = update.position.is_none();
+                            let delta: ObjectDelta = update.into();
+                            let apply_outcome = object.apply_delta(&delta, action_library);
+                            if preserves_position {
+                                object.state.position = previous_position;
+                            }
+                            if let Some(change) = apply_outcome.action_change {
+                                object.record_action_event(
+                                    change.previous,
+                                    ActionTransitionKind::Forced,
+                                );
+                            }
+                            if let Some((previous, new)) = apply_outcome.container_change {
+                                contact_container_changes.push((object.id, previous, new));
+                            }
+                            let new_owner = object.state.owner;
+                            let new_crew_member = object.state.crew_member;
+                            if previous_owner != new_owner
+                                || previous_crew_member != new_crew_member
+                            {
+                                contact_selection_changes.push((
+                                    object.id,
+                                    previous_owner,
+                                    new_owner,
+                                    new_crew_member,
+                                ));
+                            }
+                        } else {
+                            object.state.action.reconcile_with_library(action_library);
+                        }
+
+                        contact_outcomes.push(outcome);
+                        if value.as_bool() {
+                            break;
+                        }
+                    }
+                    Ok(())
+                };
+            let landscape = self.landscape.as_ref();
+            let materials = &self.materials;
+            let object = &mut self.objects[idx];
+            let mut outcome = object.advance_fixed_position_per_pixel(
+                landscape,
+                materials,
+                movement,
+                &mut run_contact_callback,
+            )?;
+            outcome.any_contact |= object.advance_fixed_rotation(
+                landscape,
+                materials,
+                movement,
+                outcome.no_attach,
+                outcome.solid_mask_removed,
+                &mut run_contact_callback,
+            )?;
+            outcome
+        };
+        self.rng = contact_rng;
+        self.audio_registry = contact_audio;
+        self.next_object_id = contact_next_object_id;
+        for (changed_object_id, previous_owner, new_owner, new_crew_member) in
+            contact_selection_changes
+        {
+            self.update_selection_for_state_change(
+                changed_object_id,
+                previous_owner,
+                new_owner,
+                new_crew_member,
+            );
+        }
+        for (changed_object_id, previous, new) in contact_container_changes {
+            self.apply_container_change(changed_object_id, previous, new)?;
+        }
+        for outcome in contact_outcomes {
+            self.apply_callback_outcome(
+                idx,
+                outcome,
+                action_library,
+                object_id,
+                definition_id,
+                false,
+            )?;
+        }
+        if self.objects[idx].destroyed
+            || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
+        {
+            return Ok(false);
+        }
+        self.update_sector_for_index(idx);
+        // C4Object::InLiquid update, inline in DoMovement after
+        // integration and BEFORE ContactAction/NoAttachAction
+        // (C4Movement.cpp:443-460): IsInLiquidCheck probes
+        // GBackLiquid(x, y + Float*Con/FullCon - 1)
+        // (C4Object.cpp:5609-5612); entering liquid clears fNoAttach
+        // (:452). DoMovement never runs contained or C4D_StaticBack
+        // (C4Movement.cpp:553-575; the C++ Mobile gate is unmodeled).
+        // The entry Splash (:450-451, OCF_HitSpeed2 && Mass>3) draws
+        // synced RNG and is a documented PORT_STATUS gap.
+        if self.objects[idx].state.container.is_none()
+            && self.objects[idx].state.category & CATEGORY_STATIC_BACK == 0
+        {
+            let probe = {
+                let state = &self.objects[idx].state;
+                let float_line = self
+                    .definitions
+                    .get(&self.objects[idx].definition_id)
+                    .map(|definition| definition.float_line)
+                    .unwrap_or(0);
+                let offset = float_line
+                    .saturating_mul(state.construction)
+                    .checked_div(FULL_CON)
+                    .unwrap_or(0);
+                Vector2::new(state.position.x, state.position.y + offset - 1)
+            };
+            let wet = self
+                .landscape
+                .as_ref()
+                .map(|landscape| landscape.is_liquid_at(probe.x, probe.y))
+                .unwrap_or(false);
+            let state = &mut self.objects[idx].state;
+            if wet && !state.in_liquid {
+                state.in_liquid = true;
+                movement_outcome.no_attach = false;
+            } else if !wet && state.in_liquid {
+                state.in_liquid = false;
+            }
+        }
+        if movement_outcome.no_attach {
+            self.apply_no_attach_action(idx, action_library);
+        }
+        if movement_outcome.any_contact {
+            self.invoke_movement_hit_callbacks(
+                idx,
+                old_movement_velocity,
+                old_movement_hit_flags,
+                action_library,
+                object_id,
+                definition_id,
+            )?;
+        }
+        if self.objects[idx].destroyed
+            || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
+        {
+            return Ok(false);
+        }
+
+        Ok(true)
     }
 
     fn apply_physics_at_index(&mut self, idx: usize) {
