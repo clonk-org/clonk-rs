@@ -3098,6 +3098,18 @@ struct LegacyObjectRecord {
     /// in real content (`XDir=f...`).
     xdir: Option<crate::math::C4Fixed>,
     ydir: Option<crate::math::C4Fixed>,
+    /// Saved sub-pixel position/rotation and angular velocity — the same
+    /// C4Fixed encoding (FixX/FixY/FixR/RDir, C4Object.cpp:2762-2767).
+    /// C++ reads them INDEPENDENTLY of the integer X/Y/Rotation and never
+    /// reconciles after load.
+    fix_x: Option<crate::math::C4Fixed>,
+    fix_y: Option<crate::math::C4Fixed>,
+    fix_r: Option<crate::math::C4Fixed>,
+    rdir: Option<crate::math::C4Fixed>,
+    /// C4Object::Mobile, serialized with default false (C4Object.cpp:2772).
+    mobile: Option<bool>,
+    /// Whole-degree rotation (`Rotation=`, C4Object.cpp:2744).
+    rotation: Option<i32>,
     energy: Option<i32>,
     construction: Option<i32>,
     alive: Option<bool>,
@@ -3196,6 +3208,55 @@ impl LegacyObjectRecord {
                 self.ydir = Some(parse_c4fixed(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
                         "Objects.txt line {}: invalid YDir `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "fixx" => {
+                self.fix_x = Some(parse_c4fixed(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid FixX `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "fixy" => {
+                self.fix_y = Some(parse_c4fixed(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid FixY `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "fixr" => {
+                self.fix_r = Some(parse_c4fixed(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid FixR `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "rdir" => {
+                self.rdir = Some(parse_c4fixed(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid RDir `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
+            "mobile" => {
+                let mobile = parse_bool(trimmed_value).ok_or_else(|| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Mobile `{}`",
+                        self.line, trimmed_value
+                    ))
+                })?;
+                self.mobile = Some(mobile);
+            }
+            "rotation" => {
+                self.rotation = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Rotation `{}` ({})",
                         self.line, trimmed_value, err
                     ))
                 })?);
@@ -3388,6 +3449,12 @@ impl LegacyObjectRecord {
             y,
             xdir,
             ydir,
+            fix_x,
+            fix_y,
+            fix_r,
+            rdir,
+            mobile,
+            rotation,
             energy,
             construction,
             alive,
@@ -3455,6 +3522,29 @@ impl LegacyObjectRecord {
                 ))
                 .with_fixed_velocity(fixed);
         }
+        if fix_x.is_some() || fix_y.is_some() {
+            // Exact sub-pixel position (FixX/FixY, C4Object.cpp:2762-2763).
+            // C++ keeps the integer X/Y and the fixed coords INDEPENDENT
+            // after load (no reconciliation); a missing key means Fix0 —
+            // engine-saved files always carry both for nonzero positions.
+            config = config.with_fixed_position(crate::math::FixedVec2 {
+                x: fix_x.unwrap_or_default(),
+                y: fix_y.unwrap_or_default(),
+            });
+        }
+        if let Some(rotation) = rotation {
+            config = config.with_rotation(rotation);
+        }
+        if let Some(fix_r) = fix_r {
+            config = config.with_fixed_rotation(fix_r);
+        }
+        if let Some(rdir) = rdir {
+            config = config.with_rotation_velocity(rdir);
+        }
+        // Loaded objects keep the serialized Mobile verbatim (default
+        // false) — they bypass Init, and nothing after C4GameObjects::Load
+        // rewrites the flag (C4Object.cpp:2772).
+        config = config.with_mobile(mobile.unwrap_or(false));
         if let Some(owner) = owner {
             config = config.with_owner(owner);
         }
@@ -7872,6 +7962,157 @@ global func Step(state, frame, random)
         assert!(
             !flag(&engine, 81),
             "movement clears the stale flag on dry land"
+        );
+    }
+
+    // Objects.txt Mobile/FixX/FixY/FixR/RDir ingestion
+    // (C4Object.cpp:2762-2772): loaded objects keep the serialized Mobile
+    // verbatim (default false) with the exact C4Fixed sub-pixel
+    // position/rotation state, independent of the integer X/Y/Rotation.
+    // A non-Mobile object with stale saved dirs stays frozen until the
+    // Tick10 pulse wipes the dirs and re-snaps fix (C4Movement.cpp:576-587).
+    #[test]
+    fn objects_txt_restores_mobile_and_fixed_state_like_cpp() {
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let good = defs_root.join("Good.c4d");
+        std::fs::create_dir_all(&good).expect("definition dir");
+        std::fs::write(
+            good.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=16\nRotate=1\n",
+        )
+        .expect("write defcore");
+
+        let scenario_dir = dir.path().join("Fixed.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Fixed\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Landscape]\nMapZoom=10\n",
+        )
+        .expect("write scenario core");
+        // 40x40 world: sky everywhere, earth on the bottom row — the
+        // objects at y=5 stay in free air.
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[
+                &[0, 0, 0, 0],
+                &[0, 0, 0, 0],
+                &[0, 0, 0, 0],
+                &[30, 30, 30, 30],
+            ]),
+        )
+        .expect("write map");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write earth");
+        // 80: Mobile=1 flying right at 0.7 px/frame from x=15.25 —
+        //     saved pairs keep x == fixtoi(fix_x) (round-to-nearest), so
+        //     the sub-pixel stays under half. itofix(15)+0.25 = 999424;
+        //     XDir 0.7 = F45875.
+        // 81: Mobile absent (false) with STALE saved dirs — C++ keeps the
+        //     dirs but never moves; the frame-10 pulse wipes them.
+        // 82: rotating: Rotation=90, FixR = 90.25 deg (F5914624),
+        //     RDir = raw 6554 (~0.1 deg/frame).
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=GOOD\nNumber=80\nStatus=1\nX=15\nY=5\n\
+             FixX=F999424\nFixY=F327680\nXDir=F45875\nMobile=1\n\n\
+             [Object]\nid=GOOD\nNumber=81\nStatus=1\nX=25\nY=5\n\
+             FixX=F1654784\nFixY=F327680\nXDir=F45875\n\n\
+             [Object]\nid=GOOD\nNumber=82\nStatus=1\nX=35\nY=5\n\
+             Rotation=90\nFixR=F5914624\nRDir=F6554\nMobile=1\n",
+        )
+        .expect("write objects");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let idx_of = |engine: &Engine, number: u64| {
+            engine
+                .find_object_index(ObjectId::new(number))
+                .expect("object exists")
+        };
+
+        // Ingestion snapshot before any tick.
+        let mover = idx_of(&engine, 80);
+        assert!(engine.objects[mover].state.mobile, "Mobile=1 sticks");
+        assert_eq!(
+            engine.objects[mover].fixed_position.x.val(),
+            999_424,
+            "FixX restores the exact sub-pixel position (C4Object.cpp:2762)"
+        );
+        assert_eq!(
+            engine.objects[mover].state.position,
+            Vector2::new(15, 5),
+            "the integer X/Y stay independent of FixX/FixY"
+        );
+        let frozen = idx_of(&engine, 81);
+        assert!(
+            !engine.objects[frozen].state.mobile,
+            "Mobile default false (C4Object.cpp:2772)"
+        );
+        assert_eq!(
+            engine.objects[frozen].state.position,
+            Vector2::new(25, 5),
+            "the integer X/Y stay independent of the FixX/FixY sub-pixel"
+        );
+        assert_eq!(
+            engine.objects[frozen].fixed_velocity.x.val(),
+            45_875,
+            "stale saved dirs load verbatim"
+        );
+        let spinner = idx_of(&engine, 82);
+        assert_eq!(engine.objects[spinner].state.rotation, 90);
+        assert_eq!(
+            engine.objects[spinner].fixed_rotation.val(),
+            5_914_624,
+            "FixR restores the exact rotation accumulator (C4Object.cpp:2764)"
+        );
+        assert_eq!(
+            engine.objects[spinner].rotation_velocity.val(),
+            6_554,
+            "RDir restores the angular velocity (C4Object.cpp:2767)"
+        );
+
+        // Frame 1: the Mobile mover integrates from its sub-pixel state
+        // (999424 + 45875 = 1045299 -> 15.95 -> pixel 16, fixtoi rounds to
+        // nearest); the frozen object holds position AND its stale dirs.
+        engine.tick().expect("tick succeeds");
+        let mover = idx_of(&engine, 80);
+        assert_eq!(engine.objects[mover].fixed_position.x.val(), 1_045_299);
+        assert_eq!(engine.objects[mover].state.position.x, 16);
+        let frozen = idx_of(&engine, 81);
+        assert_eq!(engine.objects[frozen].state.position.x, 25);
+        assert_eq!(engine.objects[frozen].fixed_velocity.x.val(), 45_875);
+
+        // Frames 2-9: still frozen. Frame 10: the pulse wipes the stale
+        // dirs and re-snaps fix to the integer position
+        // (C4Movement.cpp:581-586).
+        for _ in 2..=9 {
+            engine.tick().expect("tick succeeds");
+        }
+        let frozen = idx_of(&engine, 81);
+        assert_eq!(engine.objects[frozen].fixed_velocity.x.val(), 45_875);
+        engine.tick().expect("pulse tick succeeds");
+        let frozen = idx_of(&engine, 81);
+        assert!(engine.objects[frozen].state.mobile);
+        assert_eq!(engine.objects[frozen].fixed_velocity.x.val(), 0);
+        assert_eq!(
+            engine.objects[frozen].fixed_position.x.val(),
+            25 * 65536,
+            "the pulse snaps fix_x to itofix(x), discarding the stale sub-pixel"
         );
     }
 

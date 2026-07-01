@@ -4028,6 +4028,23 @@ pub struct SpawnConfig {
     /// `InLiquid` from Objects.txt (C4Object.cpp:2775, default false).
     #[serde(default)]
     pub in_liquid: Option<bool>,
+    /// Exact sub-pixel position: savegame `FixX`/`FixY` are serialized
+    /// C4Fixed values (C4Object.cpp:2762-2763). C++ never reconciles them
+    /// with the integer X/Y after load — the override leaves `position`
+    /// untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_position: Option<FixedVec2>,
+    /// Exact fixed rotation accumulator (`FixR`, C4Object.cpp:2764);
+    /// independent of the whole-degree `rotation` like FixX/FixY.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_rotation: Option<C4Fixed>,
+    /// Angular velocity (`RDir`, C4Object.cpp:2767).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_velocity: Option<C4Fixed>,
+    /// Explicit Mobile flag (Objects.txt `Mobile=`, C4Object.cpp:2772).
+    /// None = the C4Object::Init rule for fresh spawns.
+    #[serde(default)]
+    pub mobile: Option<bool>,
     /// The object is LOADED (Objects.txt / savegame), not created:
     /// C4GameObjects::Load (C4GameObjects.cpp:535-618) only compiles and
     /// denumerates — Construction/Initialize fire for new objects only
@@ -4060,12 +4077,36 @@ impl SpawnConfig {
             alive: None,
             category: None,
             in_liquid: None,
+            fixed_position: None,
+            fixed_rotation: None,
+            rotation_velocity: None,
+            mobile: None,
             loaded: false,
         }
     }
 
     pub fn with_in_liquid(mut self, in_liquid: bool) -> Self {
         self.in_liquid = Some(in_liquid);
+        self
+    }
+
+    pub fn with_fixed_position(mut self, position: FixedVec2) -> Self {
+        self.fixed_position = Some(position);
+        self
+    }
+
+    pub fn with_fixed_rotation(mut self, rotation: C4Fixed) -> Self {
+        self.fixed_rotation = Some(rotation);
+        self
+    }
+
+    pub fn with_rotation_velocity(mut self, velocity: C4Fixed) -> Self {
+        self.rotation_velocity = Some(velocity);
+        self
+    }
+
+    pub fn with_mobile(mut self, mobile: bool) -> Self {
+        self.mobile = Some(mobile);
         self
     }
 
@@ -20347,6 +20388,10 @@ impl Engine {
             alive,
             category,
             in_liquid,
+            fixed_position,
+            fixed_rotation,
+            rotation_velocity,
+            mobile,
             loaded,
         } = config;
 
@@ -20479,16 +20524,38 @@ impl Engine {
             object.set_fixed_velocity(fixed);
             object.state.velocity = object.velocity_pixels();
         }
+        // Saved sub-pixel position/rotation (FixX/FixY/FixR,
+        // C4Object.cpp:2762-2764) override the itofix seeds; C++ keeps the
+        // integer X/Y/Rotation independent — no back-projection.
+        if let Some(fixed) = fixed_position {
+            object.fixed_position = fixed;
+        }
+        if let Some(fixed) = fixed_rotation {
+            object.fixed_rotation = fixed;
+        }
+        if let Some(rdir) = rotation_velocity {
+            object.rotation_velocity = rdir;
+        }
+        // C4GameObjects::Load zeroes StaticBack motion after Objects.txt
+        // load (C4GameObjects.cpp:600-604); rdir and fix stay untouched.
+        // C++ compiles the object Category VERBATIM (no sort-bit
+        // normalization at load), so the bit test uses the raw value.
+        if loaded && category.unwrap_or(definition_category) & CATEGORY_STATIC_BACK != 0 {
+            object.fixed_velocity = FixedVec2::ZERO;
+            object.state.velocity = Vector2::ZERO;
+        }
         // Initial mobility (C4Object.cpp:183-185): a fresh spawn with any
         // nonzero dir is Mobile unless Category == C4D_StaticBack — the C++
         // check is an EQUALITY test on the whole category, not a bitmask.
         // Loaded objects bypass Init and keep the serialized flag
-        // (default false, C4Object.cpp:2772).
-        object.state.mobile = !loaded
-            && initial_category != CATEGORY_STATIC_BACK
-            && (object.fixed_velocity.x.is_nonzero()
-                || object.fixed_velocity.y.is_nonzero()
-                || object.rotation_velocity.is_nonzero());
+        // (default false, C4Object.cpp:2772) via the explicit override.
+        object.state.mobile = mobile.unwrap_or(
+            !loaded
+                && initial_category != CATEGORY_STATIC_BACK
+                && (object.fixed_velocity.x.is_nonzero()
+                    || object.fixed_velocity.y.is_nonzero()
+                    || object.rotation_velocity.is_nonzero()),
+        );
         // Breath fills from the physicals at birth (C4Object.cpp:193).
         object.state.breath = self
             .definitions
