@@ -1,6 +1,6 @@
 use lc_engine::{
     ActionSpec, ActionState, CommandDirection, Definition, Engine, MovementProfile, ObjectUpdate,
-    SpawnConfig,
+    SpawnConfig, CATEGORY_OBJECT,
 };
 use std::collections::HashMap;
 
@@ -29,6 +29,9 @@ fn swim_procedure_handles_direction_and_drift() -> Result<(), Box<dyn std::error
 
     let object_id = engine.spawn_object(
         SpawnConfig::new("Swimmer")
+            // C4D_Object: StaticBack categories skip gravity and movement
+            // (C4Object.cpp:4662, C4Movement.cpp:564).
+            .with_category(CATEGORY_OBJECT)
             .with_action(ActionState::new("Swim"))
             .with_command_direction(CommandDirection::UpRight),
     )?;

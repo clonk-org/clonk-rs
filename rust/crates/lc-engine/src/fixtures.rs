@@ -1,7 +1,7 @@
 use crate::{
     Definition, Engine, EngineError, EnvironmentSettings, FloatVector2, Landscape, ObjectStatus,
     ObjectUpdate, ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, QueuedCommand,
-    Recorder, Recording, RgbColor, SpawnConfig, Vector2,
+    Recorder, Recording, RgbColor, SpawnConfig, Vector2, CATEGORY_OBJECT,
 };
 
 #[derive(Clone, Copy)]
@@ -69,6 +69,10 @@ pub fn basic_movement_recording(frames: usize) -> Result<Recording, EngineError>
     engine.register_definition(definition)?;
     engine.spawn_object(
         SpawnConfig::new("Mover")
+            // C4D_Object: default-category (StaticBack) placements never run
+            // ExecMovement (C4Movement.cpp:564) — the fixture must keep
+            // exercising integration.
+            .with_category(CATEGORY_OBJECT)
             .with_position(Vector2::new(-10, 0))
             .with_velocity(Vector2::new(3, -4))
             .with_energy(80),
@@ -95,12 +99,14 @@ pub fn queued_command_recording(frames: usize) -> Result<Recording, EngineError>
 
     let commander_id = engine.spawn_object(
         SpawnConfig::new("Commander")
+            .with_category(CATEGORY_OBJECT)
             .with_position(Vector2::new(2, 0))
             .with_velocity(Vector2::new(1, -2))
             .with_energy(64),
     )?;
 
     let helper_spawn = SpawnConfig::new("Helper")
+        .with_category(CATEGORY_OBJECT)
         .with_position(Vector2::new(6, 0))
         .with_velocity(Vector2::new(0, -1))
         .with_energy(24)

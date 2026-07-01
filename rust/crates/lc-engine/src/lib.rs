@@ -3048,6 +3048,14 @@ impl Object {
         } else {
             self.state.velocity = self.velocity_pixels();
         }
+        // Script dir writes mobilize unconditionally: FnSetXDir/FnSetYDir/
+        // FnSetRDir all end in `pObj->Mobile = 1` (C4Script.cpp:705,718,732).
+        if delta.fixed_velocity.is_some()
+            || delta.velocity.is_some()
+            || delta.rotation_velocity.is_some()
+        {
+            self.state.mobile = true;
+        }
         if delta.rotation.is_some() {
             // An explicit rotation re-seeds the fixed accumulator, mirroring C++
             // forcing `fix_r = itofix(r)` (`C4Movement.cpp:418`).
@@ -12778,13 +12786,49 @@ impl Engine {
             }
 
             self.apply_physics_at_index(idx);
-            if !self.exec_object_movement(
-                idx,
-                &action_library,
-                &definition_id,
-                &solid_mask_indices,
-            )? {
-                continue;
+            // C4Object::ExecMovement (C4Movement.cpp:553-616): contained
+            // objects copy the container's motion (:556-561), C4D_StaticBack
+            // never moves (:564, a MASK test unlike Init's equality), only
+            // Mobile objects run DoMovement (:567), and a resting object
+            // re-mobilizes with zeroed dirs and pixel-snapped fixed coords
+            // on the Tick10 pulse (:576-587; counters advance before
+            // objects execute, C4Game.cpp:1888).
+            let exec_movement_contained = self.objects[idx].state.container.is_some();
+            let exec_movement_static_back =
+                self.objects[idx].state.category & CATEGORY_STATIC_BACK != 0;
+            if !exec_movement_contained && !exec_movement_static_back {
+                if self.objects[idx].state.mobile {
+                    if !self.exec_object_movement(
+                        idx,
+                        &action_library,
+                        &definition_id,
+                        &solid_mask_indices,
+                    )? {
+                        continue;
+                    }
+                    // Demobilization (C4Movement.cpp:572) runs after
+                    // DoMovement, so same-frame friction/contact zeroing
+                    // demobilizes immediately.
+                    let object = &mut self.objects[idx];
+                    if !object.fixed_velocity.x.is_nonzero()
+                        && !object.fixed_velocity.y.is_nonzero()
+                        && !object.rotation_velocity.is_nonzero()
+                    {
+                        object.state.mobile = false;
+                    }
+                } else if frame % 10 == 0 {
+                    // Gravity mobilization (C4Movement.cpp:581-586).
+                    let object = &mut self.objects[idx];
+                    object.fixed_velocity = FixedVec2::ZERO;
+                    object.state.velocity = Vector2::ZERO;
+                    object.rotation_velocity = C4Fixed::ZERO;
+                    object.fixed_position = FixedVec2::new(
+                        itofix(object.state.position.x),
+                        itofix(object.state.position.y),
+                    );
+                    object.fixed_rotation = itofix(object.state.rotation);
+                    object.state.mobile = true;
+                }
             }
 
             self.apply_landscape_at_index(idx);
@@ -15385,19 +15429,26 @@ impl Engine {
         let command_direction = self.objects[idx].state.command_direction;
         let action_target = self.objects[idx].state.action.target;
 
-        let (procedure, movement_profile, gravity_component) = {
+        let (procedure, movement_profile, gravity_component, is_idle, action_attach) = {
             let gravity = self.physics.gravity_as_c4fixed();
             if let Some(definition) = self.definitions.get(&definition_id) {
                 let object = &self.objects[idx];
-                let procedure = definition
-                    .action_library()
-                    .procedure_for_action(&object.state.action.name);
+                let library = definition.action_library();
+                let procedure = library.procedure_for_action(&object.state.action.name);
                 let gravity = procedure.gravity_component_fixed(gravity);
-                (procedure, definition.movement_profile(), gravity)
+                let is_idle = library.is_idle_action(&object.state.action.name);
+                let action_attach = library.attach_for_action(&object.state.action.name);
+                (
+                    procedure,
+                    definition.movement_profile(),
+                    gravity,
+                    is_idle,
+                    action_attach,
+                )
             } else {
                 let procedure = ActionProcedure::default();
                 let gravity = procedure.gravity_component_fixed(gravity);
-                (procedure, MovementProfile::default(), gravity)
+                (procedure, MovementProfile::default(), gravity, true, 0)
             }
         };
 
@@ -15482,8 +15533,54 @@ impl Engine {
                 ActionProcedure::Float => physical.float != 0,
                 _ => false,
             };
-            if !physical_skips_gravity {
+            // The C++ ExecAction default case (custom/DFA_NONE procedures,
+            // C4Object.cpp:5426-5437): with an ActMap Attach the dirs are
+            // zeroed and the object mobilized INSTEAD of gravity; without
+            // one it just falls.
+            let default_case_attach = !is_idle
+                && action_attach != 0
+                && matches!(
+                    procedure,
+                    ActionProcedure::Undefined | ActionProcedure::Other
+                );
+            // DoGravity (C4Object.cpp:4644-4664): the free-fall branch
+            // skips C4D_StaticBack categories (:4662), and idle objects
+            // only probe gravity while Mobile (C4Object.cpp:4708-4712) —
+            // the Tick10 pulse in ExecMovement is what re-arms them.
+            let gravity_gated_off = object.state.category & CATEGORY_STATIC_BACK != 0
+                || (is_idle && !object.state.mobile)
+                || default_case_attach;
+            if !physical_skips_gravity && !gravity_gated_off {
                 object.fixed_velocity.y += gravity_component;
+            }
+            if default_case_attach {
+                object.fixed_velocity = FixedVec2::ZERO;
+            }
+            // Every C++ ExecAction procedure case ends in `Mobile = 1`
+            // except DFA_LIFT (the TARGET mobilizes via Lift),
+            // DFA_ATTACH, DFA_CONNECT and the no-Attach default case
+            // (C4Object.cpp:4791-5437).
+            let procedure_mobilizes = default_case_attach
+                || matches!(
+                    procedure,
+                    ActionProcedure::Walk
+                        | ActionProcedure::Kneel
+                        | ActionProcedure::Scale
+                        | ActionProcedure::Hang
+                        | ActionProcedure::Flight
+                        | ActionProcedure::Dig
+                        | ActionProcedure::Swim
+                        | ActionProcedure::Throw
+                        | ActionProcedure::Bridge
+                        | ActionProcedure::Build
+                        | ActionProcedure::Push
+                        | ActionProcedure::Pull
+                        | ActionProcedure::Chop
+                        | ActionProcedure::Fight
+                        | ActionProcedure::Float
+                );
+            if procedure_mobilizes {
+                object.state.mobile = true;
             }
             // C++ wind reaches only PXS and particles via GBackWind
             // (C4Wrappers.h:189-192) — object motion never reads it.
@@ -15699,6 +15796,16 @@ impl Engine {
         let lift_force = itofix(lift_force);
 
         let adjust_velocity = |object: &mut Object| {
+            // C4Object::Lift pre-mobilization (C4Object.cpp:1815-1817):
+            // zero dirs, snap fix to the pixel position, mobilize.
+            if !object.state.mobile {
+                object.fixed_velocity = FixedVec2::ZERO;
+                object.fixed_position = FixedVec2::new(
+                    itofix(object.state.position.x),
+                    itofix(object.state.position.y),
+                );
+                object.state.mobile = true;
+            }
             object.fixed_velocity.y =
                 step_fixed_toward(object.fixed_velocity.y, desired_velocity, lift_force);
             physics.clamp_fixed_velocity(&mut object.fixed_velocity);
@@ -16156,6 +16263,16 @@ impl Engine {
 
         let previous = self.objects[idx].state.action.clone();
         if previous.name == library.default_action() {
+            // Inactive objects: simple mobile natural gravity
+            // (C4Object.cpp:4299-4303) — DoGravity's free-fall branch
+            // still skips StaticBack (:4662).
+            let gravity = self.physics.gravity_as_c4fixed();
+            let object = &mut self.objects[idx];
+            if object.state.category & CATEGORY_STATIC_BACK == 0 {
+                object.fixed_velocity.y += gravity;
+                object.refresh_velocity_from_fixed();
+            }
+            object.state.mobile = true;
             return;
         }
 
@@ -16182,10 +16299,14 @@ impl Engine {
         object.state.action.target = None;
         object.state.action.target2 = None;
         object.state.command_direction = CommandDirection::Stop;
-        if matches!(result, ActionUpdateResult::Applied)
-            && previous.name != object.state.action.name
-        {
-            object.record_action_event(previous, ActionTransitionKind::Forced);
+        if matches!(result, ActionUpdateResult::Applied) {
+            if next_action == "Jump" {
+                // ObjectActionJump mobilizes (C4ObjectCom.cpp:56).
+                object.state.mobile = true;
+            }
+            if previous.name != object.state.action.name {
+                object.record_action_event(previous, ActionTransitionKind::Forced);
+            }
         }
     }
 
@@ -16678,6 +16799,15 @@ impl Engine {
         // General pushing force vs. object mass (C4Object.cpp:1770).
         let dforce = dforce * 100 / mass.max(1);
         let target = &mut self.objects[target_idx];
+        // Mobilization check - pre-mobilization zero (C4Object.cpp:1765-1768):
+        // a resting target starts from clean dirs and pixel-snapped fix.
+        if !target.state.mobile {
+            target.fixed_velocity = FixedVec2::ZERO;
+            target.fixed_position = FixedVec2::new(
+                itofix(target.state.position.x),
+                itofix(target.state.position.y),
+            );
+        }
         // Set dir by the current motion (C4Object.cpp:1772-1773).
         if target.fixed_velocity.x < C4Fixed::ZERO {
             target.state.direction = Direction::Left;
@@ -16707,6 +16837,14 @@ impl Engine {
             } else if target.rotation_velocity < math::ROTATE_ACCEL {
                 target.rotation_velocity += dforce;
             }
+        }
+        // Mobilization check (C4Object.cpp:1797): any nonzero dir after the
+        // force application mobilizes the target.
+        if target.fixed_velocity.x.is_nonzero()
+            || target.fixed_velocity.y.is_nonzero()
+            || target.rotation_velocity.is_nonzero()
+        {
+            target.state.mobile = true;
         }
         target.refresh_velocity_from_fixed();
         true
@@ -16905,6 +17043,16 @@ impl Engine {
         physics: PhysicsSettings,
     ) {
         let accel = itofix(acceleration.max(0));
+        // DFA_PULL moves the target through C4Object::Push, so the same
+        // pre-mobilization zero + mobilization check apply
+        // (C4Object.cpp:1765-1768,1797).
+        if !target.state.mobile {
+            target.fixed_velocity = FixedVec2::ZERO;
+            target.fixed_position = FixedVec2::new(
+                itofix(target.state.position.x),
+                itofix(target.state.position.y),
+            );
+        }
         let new_target_velocity = step_fixed_toward(
             target.fixed_velocity.x,
             itofix(desired_target_velocity),
@@ -16912,6 +17060,12 @@ impl Engine {
         );
         target.fixed_velocity.x = clamp_fixed_to_limit(new_target_velocity, speed_limit);
         physics.clamp_fixed_velocity(&mut target.fixed_velocity);
+        if target.fixed_velocity.x.is_nonzero()
+            || target.fixed_velocity.y.is_nonzero()
+            || target.rotation_velocity.is_nonzero()
+        {
+            target.state.mobile = true;
+        }
         target.refresh_velocity_from_fixed();
 
         let new_puller_velocity = step_fixed_toward(
@@ -16936,6 +17090,14 @@ impl Engine {
     ) {
         let push_accel = push_accel.max(0);
         let push_accel_fixed = itofix(push_accel);
+        // C4Object::Push pre-mobilization zero (C4Object.cpp:1765-1768).
+        if !target.state.mobile {
+            target.fixed_velocity = FixedVec2::ZERO;
+            target.fixed_position = FixedVec2::new(
+                itofix(target.state.position.x),
+                itofix(target.state.position.y),
+            );
+        }
         let new_target_velocity = step_fixed_toward(
             target.fixed_velocity.x,
             itofix(desired_target_velocity),
@@ -16947,6 +17109,13 @@ impl Engine {
                 decelerate_fixed_toward_zero(target.fixed_velocity.y, push_accel_fixed);
         }
         physics.clamp_fixed_velocity(&mut target.fixed_velocity);
+        // Mobilization check (C4Object.cpp:1797).
+        if target.fixed_velocity.x.is_nonzero()
+            || target.fixed_velocity.y.is_nonzero()
+            || target.rotation_velocity.is_nonzero()
+        {
+            target.state.mobile = true;
+        }
         target.refresh_velocity_from_fixed();
 
         let mut desired_pusher_velocity = desired_target_velocity;
@@ -18133,6 +18302,12 @@ impl Engine {
                         } else {
                             Direction::Right
                         };
+                    } else {
+                        // ObjectActionJump mobilizes (C4ObjectCom.cpp:56);
+                        // ObjectActionTumble does NOT (:74-79 — its
+                        // DFA_FLIGHT procedure re-arms Mobile next
+                        // ExecAction).
+                        object.state.mobile = true;
                     }
                     object.fixed_velocity = FixedVec2::new(txdir, tydir);
                     object.refresh_velocity_from_fixed();
@@ -18143,6 +18318,8 @@ impl Engine {
         let object = &mut self.objects[idx];
         object.fixed_velocity = FixedVec2::new(txdir, tydir);
         object.refresh_velocity_from_fixed();
+        // The raw-velocity fallback mobilizes (C4Object.cpp:1622).
+        object.state.mobile = true;
     }
 
     fn apply_landscape_temperature_conversions(&mut self) {
@@ -18400,8 +18577,10 @@ impl Engine {
             }
             None => {
                 self.objects[object_index].state.container = None;
-                // C4Object::Exit resets InLiquid (C4Object.cpp:1528).
+                // C4Object::Exit resets InLiquid and mobilizes
+                // (C4Object.cpp:1527-1528).
                 self.objects[object_index].state.in_liquid = false;
+                self.objects[object_index].state.mobile = true;
             }
         }
         // The moved object's own SetOCF (C4Object.cpp:1531,1570).
@@ -25437,7 +25616,7 @@ global func MenuCommand(state, kind, selection)
         engine.set_environment(EnvironmentSettings::new(5));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Glider"))
+            .spawn_object(SpawnConfig::new("Glider").with_category(CATEGORY_OBJECT))
             .expect("spawn succeeds");
 
         let snapshot = engine.tick().expect("tick succeeds");
@@ -25477,7 +25656,7 @@ global func MenuCommand(state, kind, selection)
 
         let id = engine
             .spawn_object(
-                SpawnConfig::new("Glider").with_command_direction(CommandDirection::DownRight),
+                SpawnConfig::new("Glider").with_category(CATEGORY_OBJECT).with_command_direction(CommandDirection::DownRight),
             )
             .expect("spawn succeeds");
 
@@ -25518,7 +25697,7 @@ global func MenuCommand(state, kind, selection)
         engine.set_environment(EnvironmentSettings::new(0));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Balloon"))
+            .spawn_object(SpawnConfig::new("Balloon").with_category(CATEGORY_OBJECT))
             .expect("spawn succeeds");
 
         let snapshot = engine.tick().expect("tick succeeds");
@@ -25559,7 +25738,7 @@ global func MenuCommand(state, kind, selection)
 
         let id = engine
             .spawn_object(
-                SpawnConfig::new("Balloon").with_command_direction(CommandDirection::UpRight),
+                SpawnConfig::new("Balloon").with_category(CATEGORY_OBJECT).with_command_direction(CommandDirection::UpRight),
             )
             .expect("spawn succeeds");
 
@@ -25690,18 +25869,20 @@ global func MenuCommand(state, kind, selection)
         engine.set_physics(PhysicsSettings::new(0, 20, -20));
 
         let target_id = engine
-            .spawn_object(SpawnConfig::new("Crate"))
+            .spawn_object(SpawnConfig::new("Crate").with_category(CATEGORY_OBJECT))
             .expect("target spawns");
         let target_idx = engine.find_object_index(target_id).expect("target exists");
         engine.objects[target_idx]
             .set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, C4Fixed::from_raw(300)));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[target_idx].state.mobile = true;
 
         let mut lift_action = ActionState::new("Lift");
         lift_action.target = Some(target_id);
 
         let lifter_id = engine
             .spawn_object(
-                SpawnConfig::new("Lifter")
+                SpawnConfig::new("Lifter").with_category(CATEGORY_OBJECT)
                     .with_action(lift_action)
                     .with_command_direction(CommandDirection::Up),
             )
@@ -26861,7 +27042,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let id = engine
             .spawn_object(
-                SpawnConfig::new("Test")
+                SpawnConfig::new("Test").with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(0, 0))
                     .with_velocity(Vector2::new(1, 0))
                     .with_energy(50),
@@ -26974,7 +27155,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         );
 
         let target_id = engine
-            .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(10, 0)))
+            .spawn_object(SpawnConfig::new("Crate").with_category(CATEGORY_OBJECT).with_position(Vector2::new(10, 0)))
             .expect("target spawns");
         let target_initial_position = engine
             .object_snapshot(target_id)
@@ -26986,7 +27167,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let pusher_id = engine
             .spawn_object(
-                SpawnConfig::new("Pusher")
+                SpawnConfig::new("Pusher").with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(0, 0))
                     .with_action(push_state)
                     .with_command_direction(CommandDirection::Right),
@@ -26995,6 +27176,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
         engine.objects[pusher_idx]
             .set_fixed_velocity(FixedVec2::new(C4Fixed::from_raw(98304), C4Fixed::ZERO));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[pusher_idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let pusher = snapshot
@@ -27127,7 +27310,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let target_id = engine
             .spawn_object(
-                SpawnConfig::new("Crate")
+                SpawnConfig::new("Crate").with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(0, 0))
                     .with_vertices(vertices.clone()),
             )
@@ -27142,7 +27325,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let puller_id = engine
             .spawn_object(
-                SpawnConfig::new("Puller")
+                SpawnConfig::new("Puller").with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(20, 0))
                     .with_vertices(vertices)
                     .with_action(pull_state)
@@ -27152,6 +27335,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let puller_idx = engine.find_object_index(puller_id).expect("puller exists");
         engine.objects[puller_idx]
             .set_fixed_velocity(FixedVec2::new(C4Fixed::from_raw(98304), C4Fixed::ZERO));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[puller_idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let puller = snapshot
@@ -27293,7 +27478,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let opponent_id = engine
             .spawn_object(
-                SpawnConfig::new("Opponent")
+                SpawnConfig::new("Opponent").with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(12, 0))
                     .with_vertices(vertices.clone())
                     .with_action(ActionState::new("Fight")),
@@ -27304,7 +27489,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         fight_state.target = Some(opponent_id);
         let fighter_id = engine
             .spawn_object(
-                SpawnConfig::new("Fighter")
+                SpawnConfig::new("Fighter").with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(0, 0))
                     .with_vertices(vertices.clone())
                     .with_action(fight_state),
@@ -27315,6 +27500,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("fighter exists");
         engine.objects[fighter_idx]
             .set_fixed_velocity(FixedVec2::new(C4Fixed::from_raw(98304), C4Fixed::ZERO));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[fighter_idx].state.mobile = true;
 
         engine
             .apply_object_update(
@@ -30440,6 +30627,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             C4Fixed::from_raw(300),
             C4Fixed::from_raw(70000),
         ));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.snapshot();
 
@@ -30475,6 +30664,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             C4Fixed::from_raw(300),
             C4Fixed::from_raw(70000),
         ));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         let json = engine
             .capture_state()
@@ -30510,6 +30701,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         let idx = engine.find_object_index(id).expect("object exists");
         // 1.0 deg/frame angular velocity, mid-rotation with a sub-degree fix_r.
         engine.objects[idx].rotation_velocity = itofix(1);
+        // SetRDir mobilizes (C4Script.cpp:718)
+        engine.objects[idx].state.mobile = true;
         engine.objects[idx].fixed_rotation = C4Fixed::from_raw(327680 + 300);
 
         let json = engine
@@ -31661,11 +31854,16 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let id = engine
             .spawn_object(
-                SpawnConfig::new("Test")
+                SpawnConfig::new("Test").with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(0, 0))
                     .with_velocity(Vector2::new(0, 0)),
             )
             .expect("spawn succeeds");
+        // Arm Mobile like a prior SetXDir(0) would (C4Script.cpp:705): the
+        // golden pins the mobile-object integration math, not the Tick10
+        // mobilization pulse.
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
@@ -31696,11 +31894,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Test").with_position(Vector2::new(0, 0)))
+            .spawn_object(SpawnConfig::new("Test").with_category(CATEGORY_OBJECT).with_position(Vector2::new(0, 0)))
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         engine.objects[idx]
             .set_fixed_velocity(FixedVec2::new(C4Fixed::from_raw(300), C4Fixed::ZERO));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         for _ in 0..109 {
             let snapshot = engine.tick().expect("tick succeeds");
@@ -31727,8 +31927,12 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.set_environment(EnvironmentSettings::new(0));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Test").with_position(Vector2::new(0, 0)))
+            .spawn_object(SpawnConfig::new("Test").with_category(CATEGORY_OBJECT).with_position(Vector2::new(0, 0)))
             .expect("spawn succeeds");
+        // Arm Mobile like a prior SetXDir(0) would (C4Script.cpp:705): the
+        // golden pins the mobile-object gravity math, not the Tick10 pulse.
+        let idx = engine.find_object_index(id).expect("object exists");
+        engine.objects[idx].state.mobile = true;
         let expected_ydir = [13107, 26214, 39321, 52428, 65535];
 
         for raw_ydir in expected_ydir {
@@ -31800,6 +32004,8 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             C4Fixed::from_raw(300),
             C4Fixed::from_raw(70000),
         ));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         engine.apply_landscape_at_index(idx);
 
@@ -31821,10 +32027,12 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.set_landscape(Landscape::new(12, surface).expect("landscape constructs"));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(4, 10)))
+            .spawn_object(SpawnConfig::new("Crate").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 10)))
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(4), C4Fixed::ZERO));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
@@ -32066,10 +32274,12 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(5, 8)))
+            .spawn_object(SpawnConfig::new("Crate").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 8)))
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(4)));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
@@ -32114,10 +32324,12 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Crate").with_position(Vector2::new(4, 10)))
+            .spawn_object(SpawnConfig::new("Crate").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 10)))
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(4), C4Fixed::ZERO));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
@@ -32158,10 +32370,16 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Probe").with_position(Vector2::new(0, 5)))
+            .spawn_object(
+                SpawnConfig::new("Probe")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(0, 5)),
+            )
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(-itofix(1), C4Fixed::ZERO));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
@@ -32192,10 +32410,12 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Bounded").with_position(Vector2::new(8, 5)))
+            .spawn_object(SpawnConfig::new("Bounded").with_category(CATEGORY_OBJECT).with_position(Vector2::new(8, 5)))
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(5), C4Fixed::ZERO));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
@@ -32240,17 +32460,19 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("mover definition registers");
 
         let layer_id = engine
-            .spawn_object(SpawnConfig::new("Layer").with_position(Vector2::new(20, 10)))
+            .spawn_object(SpawnConfig::new("Layer").with_category(CATEGORY_OBJECT).with_position(Vector2::new(20, 10)))
             .expect("layer spawns");
         let mover_id = engine
             .spawn_object(
-                SpawnConfig::new("Mover")
+                SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(28, 10))
                     .with_layer(layer_id),
             )
             .expect("mover spawns");
         let idx = engine.find_object_index(mover_id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(5), C4Fixed::ZERO));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(mover_id).expect("object present");
@@ -32298,13 +32520,15 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("mover definition registers");
 
         let mover_id = engine
-            .spawn_object(SpawnConfig::new("Mover").with_position(Vector2::new(4, 5)))
+            .spawn_object(SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 5)))
             .expect("mover spawns");
         engine
-            .spawn_object(SpawnConfig::new("Blocker").with_position(Vector2::new(5, 5)))
+            .spawn_object(SpawnConfig::new("Blocker").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 5)))
             .expect("blocker spawns");
         let idx = engine.find_object_index(mover_id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(mover_id).expect("object present");
@@ -32363,10 +32587,12 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.register_definition(mover_definition)?;
 
         let mover_id =
-            engine.spawn_object(SpawnConfig::new("Mover").with_position(Vector2::new(4, 5)))?;
-        engine.spawn_object(SpawnConfig::new("BLCK").with_position(Vector2::new(5, 5)))?;
+            engine.spawn_object(SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 5)))?;
+        engine.spawn_object(SpawnConfig::new("BLCK").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 5)))?;
         let idx = engine.find_object_index(mover_id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.tick()?;
         let object = snapshot.object(mover_id).expect("object present");
@@ -32431,13 +32657,15 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("mover definition registers");
 
         let mover_id = engine
-            .spawn_object(SpawnConfig::new("Mover").with_position(Vector2::new(4, 5)))
+            .spawn_object(SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 5)))
             .expect("mover spawns");
         engine
-            .spawn_object(SpawnConfig::new("Blocker").with_position(Vector2::new(5, 5)))
+            .spawn_object(SpawnConfig::new("Blocker").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 5)))
             .expect("blocker spawns");
         let idx = engine.find_object_index(mover_id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(mover_id).expect("object present");
@@ -32520,16 +32748,18 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let mover_id = engine
             .spawn_object(
-                SpawnConfig::new("Mover")
+                SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(4, 5))
                     .with_energy(1000000),
             )
             .expect("mover spawns");
         engine
-            .spawn_object(SpawnConfig::new("Blocker").with_position(Vector2::new(5, 5)))
+            .spawn_object(SpawnConfig::new("Blocker").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 5)))
             .expect("blocker spawns");
         let idx = engine.find_object_index(mover_id).expect("object exists");
         engine.objects[idx].set_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(mover_id).expect("object present");
@@ -32678,16 +32908,20 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let top_id = engine
-            .spawn_object(SpawnConfig::new("Bounded").with_position(Vector2::new(5, 2)))
+            .spawn_object(SpawnConfig::new("Bounded").with_category(CATEGORY_OBJECT).with_position(Vector2::new(5, 2)))
             .expect("spawn succeeds");
         let top_idx = engine.find_object_index(top_id).expect("object exists");
         engine.objects[top_idx].set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, -itofix(5)));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[top_idx].state.mobile = true;
 
         let bottom_id = engine
-            .spawn_object(SpawnConfig::new("Bounded").with_position(Vector2::new(6, 18)))
+            .spawn_object(SpawnConfig::new("Bounded").with_category(CATEGORY_OBJECT).with_position(Vector2::new(6, 18)))
             .expect("spawn succeeds");
         let bottom_idx = engine.find_object_index(bottom_id).expect("object exists");
         engine.objects[bottom_idx].set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(5)));
+        // dir writes mobilize (FnSetXDir/FnSetYDir, C4Script.cpp:705,732)
+        engine.objects[bottom_idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let top = snapshot.object(top_id).expect("top object present");
@@ -32752,7 +32986,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let id = engine
             .spawn_object(
-                SpawnConfig::new("Climber")
+                SpawnConfig::new("Climber").with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(5, 5))
                     .with_action(ActionState::new("Slide")),
             )
@@ -32847,10 +33081,12 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("definition registers");
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Wheel").with_position(Vector2::new(4, 10)))
+            .spawn_object(SpawnConfig::new("Wheel").with_category(CATEGORY_OBJECT).with_position(Vector2::new(4, 10)))
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         engine.objects[idx].rotation_velocity = itofix(1);
+        // SetRDir mobilizes (C4Script.cpp:718)
+        engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
@@ -32883,7 +33119,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Mover").with_position(Vector2::new(0, 0)))
+            .spawn_object(SpawnConfig::new("Mover").with_category(CATEGORY_OBJECT).with_position(Vector2::new(0, 0)))
             .expect("spawn succeeds");
 
         // Initialize ran at spawn: the live object holds true sub-pixel velocity.
@@ -32924,7 +33160,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Spinner").with_position(Vector2::new(0, 0)))
+            .spawn_object(SpawnConfig::new("Spinner").with_category(CATEGORY_OBJECT).with_position(Vector2::new(0, 0)))
             .expect("spawn succeeds");
 
         // Initialize ran at spawn: rdir = itofix(10, 10) = 1.0 deg/frame (raw 65536).
@@ -32955,7 +33191,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Fixed").with_position(Vector2::new(0, 0)))
+            .spawn_object(SpawnConfig::new("Fixed").with_category(CATEGORY_OBJECT).with_position(Vector2::new(0, 0)))
             .expect("spawn succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         assert_eq!(engine.objects[idx].rotation_velocity.val(), 65536);
@@ -32986,7 +33222,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         engine.set_physics(PhysicsSettings::new(0, 0, 0));
 
         let id = engine
-            .spawn_object(SpawnConfig::new("Limited").with_position(Vector2::new(0, 0)))
+            .spawn_object(SpawnConfig::new("Limited").with_category(CATEGORY_OBJECT).with_position(Vector2::new(0, 0)))
             .expect("spawn succeeds");
 
         let snapshot = engine.tick().expect("tick succeeds");
@@ -33126,7 +33362,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
 
         let id = engine
             .spawn_object(
-                SpawnConfig::new("Actor")
+                SpawnConfig::new("Actor").with_category(CATEGORY_OBJECT)
                     .with_position(Vector2::new(0, 0))
                     .with_velocity(Vector2::new(0, 0)),
             )
@@ -33724,6 +33960,66 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             "loaded objects keep the serialized default false (C4Object.cpp:2772)"
         );
     }
+
+    // Mirrors C4Movement.cpp:566-587 + C4Object.cpp:4708-4712: a resting
+    // (non-Mobile) object is fully frozen — no idle gravity, no movement —
+    // until the Tick10 gravity mobilization re-mobilizes it with zeroed
+    // dirs (the global tick counters advance BEFORE objects execute,
+    // C4Game.cpp:1888, so the pulse fires on frames 10, 20, ...). Gravity
+    // then applies from the NEXT frame's ExecAction because mobilization
+    // runs in ExecMovement after that frame's ExecAction already saw
+    // Mobile == false.
+    #[test]
+    fn resting_object_freezes_until_tick10_mobilization_like_cpp() {
+        let mut engine = Engine::with_seed(42);
+        engine
+            .register_definition(simple_definition("Test"))
+            .expect("definition registers");
+        engine.set_physics(PhysicsSettings::new(100, 200, -200));
+        engine.set_environment(EnvironmentSettings::new(0));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("Test")
+                    .with_position(Vector2::new(0, 0))
+                    .with_category(CATEGORY_OBJECT),
+            )
+            .expect("spawn succeeds");
+
+        for frame in 1..=9 {
+            engine.tick().expect("tick succeeds");
+            let idx = engine.find_object_index(id).expect("object exists");
+            let object = &engine.objects[idx];
+            assert_eq!(
+                object.fixed_velocity.y.val(),
+                0,
+                "no idle gravity while immobile (frame {frame}, C4Object.cpp:4710)"
+            );
+            assert!(
+                !object.state.mobile,
+                "iTick10 != 0 keeps the object demobilized (frame {frame})"
+            );
+            assert_eq!(object.state.position, Vector2::new(0, 0));
+        }
+
+        // Frame 10: the pulse mobilizes with zeroed dirs
+        // (C4Movement.cpp:581-586); this frame's ExecAction already ran
+        // without Mobile, so ydir is still zero.
+        engine.tick().expect("tick succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert!(
+            engine.objects[idx].state.mobile,
+            "Tick10 re-mobilizes resting objects (C4Movement.cpp:586)"
+        );
+        assert_eq!(engine.objects[idx].fixed_velocity.y.val(), 0);
+
+        // Frame 11: first gravity probe (ydir += GravAccel, raw 13107 for
+        // Gravity=100 — parity/golden/parity_golden.json movement[0]).
+        engine.tick().expect("tick succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_eq!(engine.objects[idx].fixed_velocity.y.val(), 13107);
+    }
+
 
     #[test]
     fn spawn_assigns_container_relationships() {

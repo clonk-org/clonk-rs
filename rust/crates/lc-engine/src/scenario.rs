@@ -7850,7 +7850,21 @@ global func Step(state, frame, random)
             "InLiquid() reads the stale loaded flag on dry land too"
         );
 
-        engine.tick().expect("tick succeeds");
+        // Loaded placements rest with Mobile=false (C4Object.cpp:2772), so
+        // DoMovement — and with it the InLiquid update — never runs until
+        // the Tick10 gravity mobilization (C4Movement.cpp:576-587): frames
+        // 1-9 keep the stale flags, frame 10 re-mobilizes with zeroed dirs,
+        // and frame 11 runs the first DoMovement that refreshes the flag.
+        for _ in 0..9 {
+            engine.tick().expect("tick succeeds");
+        }
+        assert!(
+            !flag(&engine, 80),
+            "immobile objects keep the stale flag (C4Movement.cpp:567)"
+        );
+        assert!(flag(&engine, 81), "stale flag survives while demobilized");
+        engine.tick().expect("mobilization tick succeeds");
+        engine.tick().expect("first movement tick succeeds");
         assert!(
             flag(&engine, 80),
             "movement sets the flag in liquid (C4Movement.cpp:443-460)"

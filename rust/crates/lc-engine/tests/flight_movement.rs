@@ -1,6 +1,6 @@
 use lc_engine::{
     ActionSpec, ActionState, CommandDirection, Definition, Engine, MovementProfile, SpawnConfig,
-    Vector2,
+    Vector2, CATEGORY_OBJECT,
 };
 use std::collections::HashMap;
 
@@ -25,6 +25,9 @@ fn flight_procedure_applies_gravity() -> Result<(), Box<dyn std::error::Error>> 
 
     let object_id = engine.spawn_object(
         SpawnConfig::new("Flyer")
+            // C4D_Object: StaticBack categories skip gravity and movement
+            // (C4Object.cpp:4662, C4Movement.cpp:564).
+            .with_category(CATEGORY_OBJECT)
             .with_action(ActionState::new("Jump"))
             .with_velocity(Vector2::new(0, -5))
             .with_command_direction(CommandDirection::Stop),

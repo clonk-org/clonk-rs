@@ -355,6 +355,19 @@ impl ActionLibrary {
         self.specs.get(action).map(|spec| spec.attach).unwrap_or(0)
     }
 
+    /// True for the auto-inserted BARE default "Idle" spec — the C++
+    /// `Action.Act <= ActIdle` state (C4Object.cpp:4708). A REAL phased
+    /// ActMap action named "Idle" (fixture libraries may define one) is
+    /// an active action, not idle.
+    pub fn is_idle_action(&self, action: &str) -> bool {
+        action == "Idle"
+            && self
+                .specs
+                .get("Idle")
+                .map(|spec| *spec == ActionSpec::default())
+                .unwrap_or(true)
+    }
+
     fn advance_with_spec(
         state: &mut ActionState,
         spec: &ActionSpec,
@@ -565,13 +578,7 @@ impl ActionState {
         // the load-time Phase restore (C4Object.cpp:2840-2849) only
         // applies to real ActMap actions. (Fixture libraries may define a
         // REAL phased "Idle" stays untouched; the auto-inserted BARE default spec marks true idle.)
-        if self.name == "Idle"
-            && library
-                .specs()
-                .get("Idle")
-                .map(|spec| *spec == ActionSpec::default())
-                .unwrap_or(true)
-        {
+        if library.is_idle_action(&self.name) {
             self.phase = 0;
             self.ticks = 0;
         }
