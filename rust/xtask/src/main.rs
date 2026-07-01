@@ -520,7 +520,13 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
                 }
             }
             Err(error) => {
-                tracing::error!(frame, %error, "tick failed");
+                let chain: Vec<String> = std::iter::successors(
+                    Some(&error as &dyn std::error::Error),
+                    |err| err.source(),
+                )
+                .map(|err| err.to_string())
+                .collect();
+                tracing::error!(frame, error = chain.join(" <- "), "tick failed");
                 break;
             }
         }
