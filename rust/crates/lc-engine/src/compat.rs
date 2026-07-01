@@ -3405,6 +3405,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetActionData", get_action_data);
     script.register_host_function("GetAction", get_action);
     script.register_host_function("GetCommand", get_command);
+    script.register_host_function("ShiftContents", shift_contents);
     script.register_host_function("GetActTime", get_act_time);
     script.register_host_function("GetPhase", get_phase);
     script.register_host_function("SetPhase", set_phase);
@@ -7593,6 +7594,120 @@ fn set_action_targets(args: &[Value]) -> Result<Value, RuntimeError> {
             object.set_action_target(1, target2);
         }
 
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnShiftContents (C4Script.cpp:1784-1797): rotate the contents list so a
+/// different item comes first (C4Object::ShiftContents,
+/// C4Object.cpp:5728-5752) or bring the first idTarget content to the
+/// front (DirectComContents, :5754-5775). The rotation itself is the C++
+/// cyclic relink (C4ObjectList.cpp:815-833), applied via
+/// ObjectUpdate.contents_front. Documented gaps: CanConcatPictureWith
+/// (id/color/graphics/name/overlay stack check, C4Object.cpp) is
+/// approximated by DEFINITION ID equality; the fDoCalls path
+/// (~ControlContents veto, ~Selection, the Grab sound) is not dispatched;
+/// foreign pObj targets are not dispatchable through the scope seam and
+/// report false; contents read the frame-start world view (mid-call
+/// CreateContents spawns are not visible — the FindContents staleness
+/// seam).
+fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target_object = match args.first() {
+        None | Some(Value::Nil | Value::Int(0)) => None,
+        Some(value @ (Value::Object(_) | Value::Proplist(_))) => {
+            parse_object_reference_argument(value, "ShiftContents", "target")?
+        }
+        // C++ par conversion nils a non-object slot -> local call.
+        Some(_) => None,
+    };
+    let shift_back = args
+        .get(1)
+        .map(|value| value_to_bool(value, "ShiftContents", "shift back"))
+        .transpose()?
+        .unwrap_or(false);
+    let id_target = parse_definition_argument(args.get(2), "ShiftContents")?;
+    let do_calls = args
+        .get(3)
+        .map(|value| value_to_bool(value, "ShiftContents", "do calls"))
+        .transpose()?
+        .unwrap_or(false);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(self_id) = context.object_context().map(|object| object.id()) else {
+            return Ok(Value::Bool(false));
+        };
+        if let Some(target) = target_object {
+            if target != self_id {
+                tracing::warn!(
+                    ?target,
+                    "ShiftContents on a FOREIGN object is not dispatchable yet; ignoring"
+                );
+                return Ok(Value::Bool(false));
+            }
+        }
+        let contents: Vec<(ObjectId, String)> = match context.get_world_object(self_id) {
+            Some(container) => container
+                .contents()
+                .iter()
+                .filter_map(|child_id| {
+                    context
+                        .get_world_object(*child_id)
+                        .filter(|child| child.is_present())
+                        .map(|child| (*child_id, child.definition_id().to_string()))
+                })
+                .collect(),
+            None => return Ok(Value::Bool(false)),
+        };
+        let Some((front_id, front_definition)) = contents.first().cloned() else {
+            return Ok(Value::Bool(false));
+        };
+        let new_front = if let Some(id_target) = id_target {
+            // Check if the ID is present within the container
+            // (C4Script.cpp:1790-1793).
+            let Some((found, _)) = contents
+                .iter()
+                .find(|(_, definition)| *definition == id_target)
+            else {
+                return Ok(Value::Bool(false));
+            };
+            // Desired object already at front? (DirectComContents :5759.)
+            if *found == front_id {
+                return Ok(Value::Bool(true));
+            }
+            *found
+        } else {
+            // Walk next (or prev from the back with fShiftBack) for the
+            // first DIFFERENT item (C4Object.cpp:5734-5750).
+            let candidate = if shift_back {
+                contents
+                    .iter()
+                    .skip(1)
+                    .rev()
+                    .find(|(_, definition)| *definition != front_definition)
+            } else {
+                contents
+                    .iter()
+                    .skip(1)
+                    .find(|(_, definition)| *definition != front_definition)
+            };
+            match candidate {
+                Some((id, _)) => *id,
+                None => return Ok(Value::Bool(false)),
+            }
+        };
+        if do_calls {
+            tracing::warn!(
+                "ShiftContents: ~ControlContents/~Selection dispatch is not modeled yet"
+            );
+        }
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        object.shift_contents_front(new_front);
         Ok(Value::Bool(true))
     })
 }
@@ -15176,6 +15291,12 @@ impl ObjectScopeContext {
         self.pending_update.rotation_velocity = Some(rotation_velocity);
     }
 
+    /// Queue a cyclic contents rotation so `new_front` becomes the first
+    /// content (C4ObjectList::ShiftContents, C4ObjectList.cpp:815-833).
+    fn shift_contents_front(&mut self, new_front: ObjectId) {
+        self.pending_update.contents_front = Some(new_front);
+    }
+
     fn effective_position(&self) -> Vector2 {
         self.pending_update
             .position
@@ -15513,6 +15634,7 @@ mod tests {
         "SetXDir",
         "SetYDir",
         "ShakeFree",
+        "ShiftContents",
         "Sin",
         "Smoke",
         "Sound",

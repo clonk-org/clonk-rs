@@ -2106,6 +2106,14 @@ impl ObjectState {
         if let Some(vertices) = &delta.vertices {
             self.vertices = vertices.clone();
         }
+        // C4ObjectList::ShiftContents (C4ObjectList.cpp:815-833): cyclic
+        // rotation so the target becomes First — relative order preserved.
+        // An id not (or no longer) in the list is a no-op.
+        if let Some(new_front) = delta.contents_front {
+            if let Some(index) = self.contents.iter().position(|id| *id == new_front) {
+                self.contents.rotate_left(index);
+            }
+        }
         if let Some(overlays) = &delta.graphics_overlays {
             self.graphics_overlays = overlays.clone();
         }
@@ -2200,6 +2208,9 @@ struct ObjectDelta {
     components: Option<HashMap<DefinitionId, u32>>,
     local_vars: Option<HashMap<String, Value>>,
     physicals: Option<PhysicalsUpdate>,
+    /// Rotate `contents` cyclically so this id becomes the front —
+    /// C4ObjectList::ShiftContents (C4ObjectList.cpp:815-833).
+    contents_front: Option<ObjectId>,
 }
 
 impl ObjectDelta {
@@ -2279,6 +2290,9 @@ impl ObjectDelta {
         if let Some(physicals) = update.physicals {
             self.physicals = Some(physicals);
         }
+        if let Some(contents_front) = update.contents_front {
+            self.contents_front = Some(contents_front);
+        }
         if let Some(action) = update.action {
             match &mut self.action {
                 Some(existing) => existing.merge(action),
@@ -2318,6 +2332,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             components: update.components,
             local_vars: update.local_vars,
             physicals: update.physicals,
+            contents_front: update.contents_front,
         }
     }
 }
@@ -2390,6 +2405,11 @@ pub struct ObjectUpdate {
     /// SetShape (C4Script.cpp:5182-5196).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape_override: Option<DefinitionRect>,
+    /// Rotate the contents list cyclically so this id becomes the front —
+    /// C4ObjectList::ShiftContents (C4ObjectList.cpp:815-833), the
+    /// FnShiftContents/DirectComContents write path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contents_front: Option<ObjectId>,
 }
 
 /// The complete per-object physical state as left by a script callback —
@@ -2408,6 +2428,11 @@ impl ObjectUpdate {
 
     pub fn with_position(mut self, position: Vector2) -> Self {
         self.position = Some(position);
+        self
+    }
+
+    pub fn with_contents_front(mut self, contents_front: ObjectId) -> Self {
+        self.contents_front = Some(contents_front);
         self
     }
 
@@ -2554,6 +2579,7 @@ impl ObjectUpdate {
             && self.base_graphics.is_none()
             && self.components.is_none()
             && self.physicals.is_none()
+            && self.contents_front.is_none()
     }
 }
 
@@ -31491,6 +31517,141 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(start_calls, 1);
         assert!(timer_calls >= 1);
         assert_eq!(stop_calls, 1);
+    }
+
+    // FnShiftContents (C4Script.cpp:1784-1797): the regular shift rotates
+    // the contents CYCLICALLY to the next different item
+    // (C4Object::ShiftContents C4Object.cpp:5728-5752,
+    // C4ObjectList::ShiftContents C4ObjectList.cpp:815-833 — relative
+    // order preserved); the idTarget form brings the first matching
+    // content to the front (DirectComContents :5754-5775); a uniform
+    // stack has nothing different to shift to and reports false.
+    #[test]
+    fn shift_contents_rotates_to_next_different_item_like_cpp() {
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        global func Cycle() { return ShiftContents(); }
+        global func Pick() { return ShiftContents(0, 0, SWRD); }
+        "#;
+        let mut engine = Engine::with_seed(3);
+        engine
+            .register_definition(
+                Definition::from_script("Ches", "Ches", script).expect("script compiles"),
+            )
+            .expect("chest registers");
+        engine
+            .register_definition(simple_definition("SWRD"))
+            .expect("sword registers");
+        engine
+            .register_definition(simple_definition("REVR"))
+            .expect("revolver registers");
+
+        let chest = engine
+            .spawn_object(SpawnConfig::new("Ches").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let sword = engine
+            .spawn_object(
+                SpawnConfig::new("SWRD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("sword spawns");
+        let revolver_a = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver a spawns");
+        let revolver_b = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver b spawns");
+
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![sword, revolver_a, revolver_b]
+        );
+
+        // Regular shift: the next DIFFERENT item after the sword is
+        // revolver_a; the rotation keeps relative order.
+        let result = engine
+            .call_object_function(chest_idx, "Cycle", Vec::new())
+            .expect("cycle runs");
+        assert_eq!(result, Value::Bool(true));
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![revolver_a, revolver_b, sword],
+            "cyclic rotation to the next different item (C4ObjectList.cpp:815-833)"
+        );
+
+        // idTarget form: bring the sword back to the front.
+        let result = engine
+            .call_object_function(chest_idx, "Pick", Vec::new())
+            .expect("pick runs");
+        assert_eq!(result, Value::Bool(true));
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![sword, revolver_a, revolver_b],
+            "DirectComContents rotates the target to the front (C4Object.cpp:5765)"
+        );
+    }
+
+    // A container whose contents all picture-concat (same definition here)
+    // has nothing different to shift to (C4Object.cpp:5741-5745).
+    #[test]
+    fn shift_contents_uniform_stack_reports_false_like_cpp() {
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        global func Cycle() { return ShiftContents(); }
+        "#;
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(
+                Definition::from_script("Ches", "Ches", script).expect("script compiles"),
+            )
+            .expect("chest registers");
+        engine
+            .register_definition(simple_definition("REVR"))
+            .expect("revolver registers");
+
+        let chest = engine
+            .spawn_object(SpawnConfig::new("Ches").with_category(CATEGORY_OBJECT))
+            .expect("chest spawns");
+        let revolver_a = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver a spawns");
+        let revolver_b = engine
+            .spawn_object(
+                SpawnConfig::new("REVR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(chest),
+            )
+            .expect("revolver b spawns");
+
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        let result = engine
+            .call_object_function(chest_idx, "Cycle", Vec::new())
+            .expect("cycle runs");
+        assert_eq!(result, Value::Bool(false));
+        let chest_idx = engine.find_object_index(chest).expect("chest exists");
+        assert_eq!(
+            engine.objects[chest_idx].state.contents,
+            vec![revolver_a, revolver_b],
+            "a uniform stack keeps its order"
+        );
     }
 
     // FnGetCommand (C4Script.cpp:918-945): element 0 returns the C++
