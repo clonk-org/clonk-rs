@@ -12796,7 +12796,9 @@ impl Engine {
             let exec_movement_contained = self.objects[idx].state.container.is_some();
             let exec_movement_static_back =
                 self.objects[idx].state.category & CATEGORY_STATIC_BACK != 0;
-            if !exec_movement_contained && !exec_movement_static_back {
+            if exec_movement_contained {
+                self.copy_motion_from_container(idx);
+            } else if !exec_movement_static_back {
                 if self.objects[idx].state.mobile {
                     if !self.exec_object_movement(
                         idx,
@@ -15134,6 +15136,36 @@ impl Engine {
                     player.set_status(PlayerStatus::Eliminated);
                 }
             }
+        }
+    }
+
+    /// C4Object::CopyMotion (C4Movement.cpp:518-529), run for contained
+    /// objects by ExecMovement (:556-561): copy the container's integer
+    /// position (resorting sectors on change), snap fix_x/fix_y to
+    /// itofix(x/y) and copy the container's dirs.
+    fn copy_motion_from_container(&mut self, idx: usize) {
+        let Some(container_idx) = self.objects[idx]
+            .state
+            .container
+            .and_then(|container_id| self.find_object_index(container_id))
+        else {
+            return;
+        };
+        let (position, fixed_velocity) = {
+            let container = &self.objects[container_idx];
+            (container.state.position, container.fixed_velocity)
+        };
+        let moved = {
+            let object = &mut self.objects[idx];
+            let moved = object.state.position != position;
+            object.state.position = position;
+            object.fixed_position = FixedVec2::new(itofix(position.x), itofix(position.y));
+            object.fixed_velocity = fixed_velocity;
+            object.state.velocity = object.velocity_pixels();
+            moved
+        };
+        if moved {
+            self.update_sector_for_index(idx);
         }
     }
 
@@ -34020,6 +34052,63 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(engine.objects[idx].fixed_velocity.y.val(), 13107);
     }
 
+    // Mirrors C4Object::CopyMotion via ExecMovement's containment gate
+    // (C4Movement.cpp:518-529,556-561): contained objects follow the
+    // container's integer position each frame, snap fix_x/fix_y to
+    // itofix(x/y) and copy the container's dirs — their own velocity
+    // never integrates. The container executes first (spawn order = the
+    // C++ tail-first walk for same-frame creations), so the content sees
+    // this frame's container position.
+    #[test]
+    fn contained_object_copies_container_motion_like_cpp() {
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(simple_definition("Wagon"))
+            .expect("wagon registers");
+        engine
+            .register_definition(simple_definition("Gem"))
+            .expect("gem registers");
+
+        let wagon = engine
+            .spawn_object(
+                SpawnConfig::new("Wagon")
+                    .with_category(CATEGORY_VEHICLE)
+                    .with_position(Vector2::new(10, 10))
+                    .with_velocity(Vector2::new(2, 0)),
+            )
+            .expect("wagon spawns");
+        let gem = engine
+            .spawn_object(
+                SpawnConfig::new("Gem")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(0, 0))
+                    .with_container(wagon),
+            )
+            .expect("gem spawns");
+
+        engine.tick().expect("tick succeeds");
+        let wagon_idx = engine.find_object_index(wagon).expect("wagon exists");
+        let gem_idx = engine.find_object_index(gem).expect("gem exists");
+        let wagon_position = engine.objects[wagon_idx].state.position;
+        assert_ne!(
+            wagon_position,
+            Vector2::new(10, 10),
+            "the mobile wagon moves"
+        );
+        assert_eq!(
+            engine.objects[gem_idx].state.position, wagon_position,
+            "content follows the container (C4Movement.cpp:556-561)"
+        );
+        assert_eq!(
+            engine.objects[gem_idx].fixed_velocity, engine.objects[wagon_idx].fixed_velocity,
+            "dirs copied from the container (C4Movement.cpp:528)"
+        );
+        assert_eq!(
+            engine.objects[gem_idx].fixed_position.x.val(),
+            itofix(wagon_position.x).val(),
+            "fix snapped to itofix(x), not the container's sub-pixel fix (C4Movement.cpp:527)"
+        );
+    }
 
     #[test]
     fn spawn_assigns_container_relationships() {
