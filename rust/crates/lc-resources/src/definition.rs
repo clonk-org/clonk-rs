@@ -207,6 +207,8 @@ pub struct DefCore {
     pub rotateable: i32,
     pub border_bound: i32,
     pub upright_attach: u32,
+    /// NoStabilize (C4Def.cpp:402): opts out of the Stabilize upright snap.
+    pub no_stabilize: bool,
     pub components: Vec<DefComponent>,
     pub line_connect: u32,
     /// `CanBeBase` (C4Def.cpp DefCore): marks structures usable as the
@@ -450,6 +452,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut rotateable: i32 = 0;
     let mut border_bound: i32 = 0;
     let mut upright_attach: u32 = 0;
+    // NoStabilize (C4Def.cpp:402, default 0): opts out of C4Object::Stabilize.
+    let mut no_stabilize = false;
     let mut components: Vec<DefComponent> = Vec::new();
     let mut line_connect: u32 = 0;
 
@@ -609,6 +613,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "uprightattach" => {
                 upright_attach = parse_i32(value).unwrap_or(0).max(0) as u32;
             }
+            "nostabilize" => {
+                no_stabilize = parse_bool(value);
+            }
             "components" => {
                 components = parse_components(value);
             }
@@ -667,6 +674,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         rotateable,
         border_bound,
         upright_attach,
+        no_stabilize,
         components,
         line_connect,
         can_be_base,

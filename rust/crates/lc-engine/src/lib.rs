@@ -4793,6 +4793,9 @@ pub struct Definition {
     rotateable: i32,
     border_bound: i32,
     upright_attach: u32,
+    /// NoStabilize=1 opts out of the small-tilt upright snap
+    /// (C4Object::Stabilize, C4Movement.cpp:491).
+    no_stabilize: bool,
     components: Vec<DefinitionComponent>,
     line_connect: u32,
     /// ContactIncinerate=N: 1-in-N contact-fire chance (0 = not inflammable).
@@ -4920,6 +4923,7 @@ impl Definition {
             rotateable: 0,
             border_bound: 0,
             upright_attach: 0,
+            no_stabilize: false,
             components: Vec::new(),
             line_connect: 0,
             contact_incinerate: 0,
@@ -5067,6 +5071,7 @@ impl Definition {
         definition.set_rotateable(resource.core.rotateable);
         definition.set_border_bound(resource.core.border_bound);
         definition.set_upright_attach(resource.core.upright_attach);
+        definition.set_no_stabilize(resource.core.no_stabilize);
         if !resource.core.components.is_empty() {
             let components = resource
                 .core
@@ -5468,6 +5473,14 @@ impl Definition {
 
     pub fn upright_attach(&self) -> u32 {
         self.upright_attach
+    }
+
+    pub fn no_stabilize(&self) -> bool {
+        self.no_stabilize
+    }
+
+    pub fn set_no_stabilize(&mut self, no_stabilize: bool) {
+        self.no_stabilize = no_stabilize;
     }
 
     pub fn set_upright_attach(&mut self, upright_attach: u32) {
@@ -12818,18 +12831,27 @@ impl Engine {
                     {
                         object.state.mobile = false;
                     }
-                } else if frame % 10 == 0 {
-                    // Gravity mobilization (C4Movement.cpp:581-586).
-                    let object = &mut self.objects[idx];
-                    object.fixed_velocity = FixedVec2::ZERO;
-                    object.state.velocity = Vector2::ZERO;
-                    object.rotation_velocity = C4Fixed::ZERO;
-                    object.fixed_position = FixedVec2::new(
-                        itofix(object.state.position.x),
-                        itofix(object.state.position.y),
-                    );
-                    object.fixed_rotation = itofix(object.state.rotation);
-                    object.state.mobile = true;
+                    // Stabilize while not rotating (C4Movement.cpp:574).
+                    if !self.objects[idx].rotation_velocity.is_nonzero() {
+                        self.stabilize_object(idx, &solid_mask_indices);
+                    }
+                } else {
+                    // Static objects stabilize every frame
+                    // (C4Movement.cpp:579).
+                    self.stabilize_object(idx, &solid_mask_indices);
+                    if frame % 10 == 0 {
+                        // Gravity mobilization (C4Movement.cpp:581-586).
+                        let object = &mut self.objects[idx];
+                        object.fixed_velocity = FixedVec2::ZERO;
+                        object.state.velocity = Vector2::ZERO;
+                        object.rotation_velocity = C4Fixed::ZERO;
+                        object.fixed_position = FixedVec2::new(
+                            itofix(object.state.position.x),
+                            itofix(object.state.position.y),
+                        );
+                        object.fixed_rotation = itofix(object.state.rotation);
+                        object.state.mobile = true;
+                    }
                 }
             }
 
@@ -15136,6 +15158,52 @@ impl Engine {
                     player.set_status(PlayerStatus::Eliminated);
                 }
             }
+        }
+    }
+
+    /// C4Object::Stabilize (C4Movement.cpp:488-516): a tilt within
+    /// ±StableRange (±10, C4Physics.h:23, normalized to ±180) snaps
+    /// upright when the rotation-0 shape stands contact-free at the
+    /// current position; any contact keeps the tilt. NoStabilize defs opt
+    /// out (:491). The C++ probe is a full ContactCheck — its Contact*
+    /// script dispatch for ContactCalls=1 defs is not modeled here.
+    fn stabilize_object(&mut self, idx: usize, solid_mask_indices: &[usize]) {
+        let rotation = self.objects[idx].state.rotation;
+        let signed = if rotation > 180 { rotation - 360 } else { rotation };
+        if signed == 0 || !(-math::STABLE_RANGE..=math::STABLE_RANGE).contains(&signed) {
+            return;
+        }
+        let (no_stabilize, contact_density) = self
+            .definitions
+            .get(&self.objects[idx].definition_id)
+            .map(|definition| (definition.no_stabilize(), definition.contact_density()))
+            .unwrap_or((false, CONTACT_DENSITY_SOLID));
+        if no_stabilize {
+            return;
+        }
+        let upright_vertices = self.objects[idx].unrotated_shape_vertices();
+        let contact_free = self
+            .landscape
+            .as_ref()
+            .map(|landscape| {
+                let solid_masks = self.solid_masks_for_movement(solid_mask_indices);
+                !shape_contact_check(
+                    &upright_vertices,
+                    self.objects[idx].state.position,
+                    landscape,
+                    &self.materials,
+                    &solid_masks,
+                    None,
+                    contact_density,
+                )
+                .is_contact()
+            })
+            .unwrap_or(true);
+        if contact_free {
+            let object = &mut self.objects[idx];
+            object.state.rotation = 0;
+            object.fixed_rotation = C4Fixed::ZERO;
+            object.state.vertices = upright_vertices;
         }
     }
 
@@ -33248,6 +33316,11 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         )
         .expect("script compiles");
         definition.set_rotateable(4);
+        // Without NoStabilize the same frame's Stabilize would upright the
+        // freshly clamped 4° tilt in free air (rdir just hit 0 and 4 is
+        // within ±StableRange, C4Movement.cpp:574,495) — opt out so the
+        // clamp itself stays observable.
+        definition.set_no_stabilize(true);
         engine
             .register_definition(definition)
             .expect("definition registers");
@@ -34107,6 +34180,118 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             engine.objects[gem_idx].fixed_position.x.val(),
             itofix(wagon_position.x).val(),
             "fix snapped to itofix(x), not the container's sub-pixel fix (C4Movement.cpp:527)"
+        );
+    }
+
+    // Mirrors C4Object::Stabilize (C4Movement.cpp:488-516) at the
+    // ExecMovement static branch (:579): a resting object tilted within
+    // ±StableRange (±10, C4Physics.h:23, after ±180 normalization) snaps
+    // upright when the rotation-0 shape stands contact-free at the current
+    // position; contact at rotation 0 keeps the tilt; larger tilts and
+    // NoStabilize defs are untouched.
+    #[test]
+    fn stabilize_snaps_small_tilts_upright_like_cpp() {
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            Friction=50
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+
+        let mut definition = simple_definition("Tilt");
+        definition.set_shape_vertices(vec![ObjectVertex::new(0, 6).with_friction(100)]);
+        definition.set_contact_density(50);
+        definition.set_rotateable(1);
+
+        let mut stiff = simple_definition("Stiff");
+        stiff.set_shape_vertices(vec![ObjectVertex::new(0, 6).with_friction(100)]);
+        stiff.set_contact_density(50);
+        stiff.set_rotateable(1);
+        stiff.set_no_stabilize(true);
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(60, 12, Some(earth)));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        engine.register_definition(stiff).expect("stiff registers");
+
+        // Rotation-0 vertex lands at y=9 (air): free, snaps upright.
+        let free = engine
+            .spawn_object(
+                SpawnConfig::new("Tilt")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 3))
+                    .with_rotation(356),
+            )
+            .expect("free spawns");
+        // Rotation-0 vertex lands at y=13 (solid): contact, tilt kept.
+        let blocked = engine
+            .spawn_object(
+                SpawnConfig::new("Tilt")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(20, 7))
+                    .with_rotation(356),
+            )
+            .expect("blocked spawns");
+        // Tilt outside ±StableRange: untouched.
+        let leaning = engine
+            .spawn_object(
+                SpawnConfig::new("Tilt")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(35, 3))
+                    .with_rotation(340),
+            )
+            .expect("leaning spawns");
+        // NoStabilize def: untouched (C4Movement.cpp:491).
+        let stiff_id = engine
+            .spawn_object(
+                SpawnConfig::new("Stiff")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(50, 3))
+                    .with_rotation(356),
+            )
+            .expect("stiff spawns");
+
+        engine.tick().expect("tick succeeds");
+        let rotation_of = |engine: &Engine, id| {
+            engine
+                .find_object_index(id)
+                .map(|idx| engine.objects[idx].state.rotation)
+                .expect("object exists")
+        };
+        assert_eq!(
+            rotation_of(&engine, free),
+            0,
+            "small tilt snaps upright when rotation 0 is contact-free (C4Movement.cpp:509-514)"
+        );
+        let free_idx = engine.find_object_index(free).expect("free exists");
+        assert_eq!(
+            engine.objects[free_idx].fixed_rotation.val(),
+            0,
+            "fix_r follows the stabilization (C4Movement.cpp:512)"
+        );
+        assert_eq!(
+            rotation_of(&engine, blocked),
+            356,
+            "contact at rotation 0 keeps the tilt (C4Movement.cpp:503-508)"
+        );
+        assert_eq!(
+            rotation_of(&engine, leaning),
+            340,
+            "tilts beyond ±StableRange stay (C4Movement.cpp:495)"
+        );
+        assert_eq!(
+            rotation_of(&engine, stiff_id),
+            356,
+            "NoStabilize opts out (C4Movement.cpp:491)"
         );
     }
 
