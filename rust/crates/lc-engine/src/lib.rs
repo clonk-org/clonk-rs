@@ -2760,6 +2760,11 @@ struct Object {
     /// frame (`C4Movement.cpp:376`).
     rotation_velocity: C4Fixed,
     destroyed: bool,
+    /// This frame's UprightAttach bits (C4Object.cpp:4698-4705): the
+    /// per-frame `Action.t_attach |= Def->UprightAttach` OR that feeds the
+    /// movement config. Transient — recomputed at every ExecAction, never
+    /// serialized.
+    upright_t_attach: u32,
     /// Last energy-loss causing player (C4Object::LastEnergyLossCausePlayer,
     /// read by AssignDeath for kill attribution).
     last_energy_loss_cause: i32,
@@ -2856,6 +2861,7 @@ impl Object {
             rotation_velocity: C4Fixed::ZERO,
             destroyed: matches!(state.status, ObjectStatus::Deleted),
             state,
+            upright_t_attach: 0,
             last_energy_loss_cause: OWNER_NONE,
             command_queue: VecDeque::new(),
             commands: CommandStack::new(),
@@ -15296,7 +15302,9 @@ impl Engine {
             contact_function_calls,
             border_bound,
             shape_rect,
-            attach,
+            // Action.t_attach = ActMap Attach | the ExecAction upright-attach
+            // OR (C4Object.cpp:4703).
+            attach: attach | self.objects[idx].upright_t_attach,
             rotateable,
             action_procedure,
             layer_bounds,
@@ -15551,6 +15559,32 @@ impl Engine {
                 (procedure, MovementProfile::default(), gravity, true, 0)
             }
         };
+
+        // Upright attachment check (C4Object.cpp:4698-4705): the FIRST
+        // thing ExecAction does — a resting (non-Mobile) object standing
+        // within ±StableRange re-arms Mobile and ORs Def->UprightAttach
+        // into this frame's Action.t_attach (fed to the movement config).
+        {
+            let upright_attach = self
+                .definitions
+                .get(&definition_id)
+                .map(|definition| definition.upright_attach())
+                .unwrap_or(0);
+            let object = &mut self.objects[idx];
+            object.upright_t_attach = 0;
+            if !object.state.mobile && upright_attach != 0 {
+                let rotation = object.state.rotation;
+                let signed = if rotation > 180 {
+                    rotation - 360
+                } else {
+                    rotation
+                };
+                if (-math::STABLE_RANGE..=math::STABLE_RANGE).contains(&signed) {
+                    object.upright_t_attach = upright_attach;
+                    object.state.mobile = true;
+                }
+            }
+        }
 
         if matches!(procedure, ActionProcedure::Dig) {
             self.apply_dig_procedure(idx, &definition_id);
@@ -34292,6 +34326,56 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             rotation_of(&engine, stiff_id),
             356,
             "NoStabilize opts out (C4Movement.cpp:491)"
+        );
+    }
+
+    // Mirrors the ExecAction upright-attachment check
+    // (C4Object.cpp:4698-4705): a resting (non-Mobile) object whose def
+    // sets UprightAttach re-arms Mobile every frame while standing within
+    // ±StableRange; tilts beyond the range stay demobilized until the
+    // Tick10 pulse.
+    #[test]
+    fn upright_attach_rearms_mobile_every_frame_like_cpp() {
+        let mut definition = simple_definition("Barrel");
+        definition.set_upright_attach(CNAT_BOTTOM);
+        definition.set_rotateable(1);
+        let mut engine = Engine::with_seed(0);
+        engine.set_physics(PhysicsSettings::new(100, 200, -200));
+        engine.set_environment(EnvironmentSettings::new(0));
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let upright = engine
+            .spawn_object(
+                SpawnConfig::new("Barrel")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(5, 5)),
+            )
+            .expect("upright spawns");
+        let tilted = engine
+            .spawn_object(
+                SpawnConfig::new("Barrel")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(20, 5))
+                    .with_rotation(340),
+            )
+            .expect("tilted spawns");
+
+        engine.tick().expect("tick succeeds");
+        let mobile_of = |engine: &Engine, id| {
+            engine
+                .find_object_index(id)
+                .map(|idx| engine.objects[idx].state.mobile)
+                .expect("object exists")
+        };
+        assert!(
+            mobile_of(&engine, upright),
+            "UprightAttach re-arms a standing object at frame 1 (C4Object.cpp:4704)"
+        );
+        assert!(
+            !mobile_of(&engine, tilted),
+            "a 340-degree tilt is outside ±StableRange (C4Object.cpp:4701)"
         );
     }
 
