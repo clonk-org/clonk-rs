@@ -6204,6 +6204,22 @@ impl CommandStackSnapshot {
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
+
+    /// C++ CommandName strings for the persisted stack, top first
+    /// (FnGetCommand walks `Command->Next`, C4Script.cpp:918-945).
+    pub fn command_names(&self) -> Vec<String> {
+        self.commands
+            .iter()
+            .map(|command| {
+                command
+                    .state
+                    .id()
+                    .map(CommandId::to_name)
+                    .unwrap_or("None")
+                    .to_string()
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -6220,6 +6236,22 @@ impl CommandStack {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// C++ CommandName strings for the active stack, top first
+    /// (FnGetCommand walks `Command->Next`, C4Script.cpp:918-945).
+    pub fn command_names(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .state
+                    .id()
+                    .map(CommandId::to_name)
+                    .unwrap_or("None")
+                    .to_string()
+            })
+            .collect()
     }
 
     #[allow(dead_code)]

@@ -10608,6 +10608,7 @@ impl Engine {
                 .with_alive(object.state.alive)
                 .with_in_liquid(object.state.in_liquid)
                 .with_ocf(ocf)
+                .with_command_names(object.commands.command_names())
                 .with_full_state(Rc::new(object.state.clone()))
             }),
             landscape,
@@ -14696,54 +14697,65 @@ impl Engine {
                 .unwrap_or(definition);
             let mut timer_kill = false;
             let mut start_denied = false;
-            let (outcome, audio_state, new_rng) = match event.kind {
-                EffectEventKind::Started => {
-                    let (outcome, audio_state, new_rng, start_result) = dispatch_definition
-                        .call_effect_start(
-                            &snapshot_for_call,
-                            object_id,
-                            &event.effect,
-                            rng,
-                            &global_view,
-                            current_physics,
-                            current_environment,
-                            frame,
-                            world.clone(),
-                            game_over_triggered,
-                            current_audio,
-                        )?;
-                    // C4Fx_Start_Deny (-1, C4Effects.h:43): the effect is
-                    // marked dead before validating (C4Effect.cpp:128-131)
-                    // and deleted without a Stop callback.
-                    start_denied = matches!(start_result, Some(Value::Int(-1)));
-                    (outcome, audio_state, new_rng)
-                }
-                EffectEventKind::Timer => {
-                    let (outcome, audio_state, new_rng, timer_result) = dispatch_definition
-                        .call_effect_timer(
-                            &snapshot_for_call,
-                            object_id,
-                            &event.effect,
-                            frame,
-                            rng,
-                            &global_view,
-                            current_physics,
-                            current_environment,
-                            world.clone(),
-                            game_over_triggered,
-                            current_audio,
-                        )?;
-                    // C4Effect::Execute (C4Effect.cpp:342-357): FxTimer
-                    // returning C4Fx_Execute_Kill (-1, C4Effects.h:40) kills
-                    // the effect; so does an elapsed interval with NO timer
-                    // function.
-                    timer_kill = if dispatch_definition.has_effect_callback(&event.effect.name, "Timer") {
-                        matches!(timer_result, Some(Value::Int(-1)))
-                    } else {
-                        true
-                    };
-                    (outcome, audio_state, new_rng)
-                }
+            // C++ runs Fx* callbacks with fPassErrors=false: a script
+            // error logs and the game continues (the erroring callback
+            // yields nil). RNG/audio are restored from the pre-call
+            // backups on the error path — the callback's partial outcome,
+            // including its RNG draws, is dropped (documented seam: C++
+            // keeps mutations made before the error).
+            let rng_backup = rng.clone();
+            let audio_backup = current_audio.clone();
+            let call_result = match event.kind {
+                EffectEventKind::Started => dispatch_definition
+                    .call_effect_start(
+                        &snapshot_for_call,
+                        object_id,
+                        &event.effect,
+                        rng,
+                        &global_view,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, start_result)| {
+                        // C4Fx_Start_Deny (-1, C4Effects.h:43): the effect
+                        // is marked dead before validating
+                        // (C4Effect.cpp:128-131) and deleted without a
+                        // Stop callback.
+                        start_denied = matches!(start_result, Some(Value::Int(-1)));
+                        (outcome, audio_state, new_rng)
+                    }),
+                EffectEventKind::Timer => dispatch_definition
+                    .call_effect_timer(
+                        &snapshot_for_call,
+                        object_id,
+                        &event.effect,
+                        frame,
+                        rng,
+                        &global_view,
+                        current_physics,
+                        current_environment,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, timer_result)| {
+                        // C4Effect::Execute (C4Effect.cpp:342-357): FxTimer
+                        // returning C4Fx_Execute_Kill (-1, C4Effects.h:40)
+                        // kills the effect; so does an elapsed interval
+                        // with NO timer function.
+                        timer_kill = if dispatch_definition
+                            .has_effect_callback(&event.effect.name, "Timer")
+                        {
+                            matches!(timer_result, Some(Value::Int(-1)))
+                        } else {
+                            true
+                        };
+                        (outcome, audio_state, new_rng)
+                    }),
                 EffectEventKind::Stopped(reason) => dispatch_definition.call_effect_stop(
                     &snapshot_for_call,
                     object_id,
@@ -14757,34 +14769,53 @@ impl Engine {
                     world.clone(),
                     game_over_triggered,
                     current_audio,
-                )?,
-                EffectEventKind::Check { ref pending } => {
-                    let (outcome, audio_state, new_rng, check_result) = dispatch_definition
-                        .call_effect_effect(
-                            &snapshot_for_call,
-                            object_id,
-                            &event.effect,
-                            pending,
-                            rng,
-                            &global_view,
-                            current_physics,
-                            current_environment,
-                            frame,
-                            world.clone(),
-                            game_over_triggered,
-                            current_audio,
-                        )?;
-                    // C4Fx_Effect_Deny (-1, C4Effects.h:36) blocks the new
-                    // effect entirely. Annul/AnnulCalls (-2/-3) — the
-                    // add-to-other-effect FxAdd path — are still open and
-                    // currently let the effect proceed.
-                    if matches!(check_result, Some(Value::Int(-1))) {
-                        denied_started.insert(pending.clone());
-                        object.remove_effect(pending);
-                        state_snapshot.effects = object.state.effects.clone();
-                    }
-                    (outcome, audio_state, new_rng)
+                ),
+                EffectEventKind::Check { ref pending } => dispatch_definition
+                    .call_effect_effect(
+                        &snapshot_for_call,
+                        object_id,
+                        &event.effect,
+                        pending,
+                        rng,
+                        &global_view,
+                        current_physics,
+                        current_environment,
+                        frame,
+                        world.clone(),
+                        game_over_triggered,
+                        current_audio,
+                    )
+                    .map(|(outcome, audio_state, new_rng, check_result)| {
+                        // C4Fx_Effect_Deny (-1, C4Effects.h:36) blocks the
+                        // new effect entirely. Annul/AnnulCalls (-2/-3) —
+                        // the add-to-other-effect FxAdd path — are still
+                        // open and currently let the effect proceed.
+                        if matches!(check_result, Some(Value::Int(-1))) {
+                            denied_started.insert(pending.clone());
+                            object.remove_effect(pending);
+                            state_snapshot.effects = object.state.effects.clone();
+                        }
+                        (outcome, audio_state, new_rng)
+                    }),
+            };
+            let (outcome, audio_state, new_rng) = match call_result {
+                Ok(value) => value,
+                Err(EngineError::Script {
+                    definition,
+                    function,
+                    source,
+                }) => {
+                    tracing::warn!(
+                        %definition,
+                        function,
+                        error = %source,
+                        "script error in effect callback; continuing like the C++ fail-safe exec"
+                    );
+                    rng = rng_backup;
+                    current_audio = audio_backup;
+                    continue;
                 }
+                Err(other) => return Err(other),
             };
             rng = new_rng;
             current_audio = audio_state;
@@ -21270,6 +21301,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.container,
                 object.draw_transform,
             )
+            .with_command_names(object.command_stack.command_names())
             // Nested calls (obj->Method, foreign RemoveObject) need a full
             // scope for WORLD objects too — GoldRush re-runs the placed
             // cannon's Initialize from InitializePlayer
@@ -31448,6 +31480,94 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(start_calls, 1);
         assert!(timer_calls >= 1);
         assert_eq!(stop_calls, 1);
+    }
+
+    // FnGetCommand (C4Script.cpp:918-945): element 0 returns the C++
+    // CommandName string of the requested stack entry; without commands
+    // the call yields nil (never an error).
+    #[test]
+    fn get_command_returns_command_name_like_cpp() {
+        let script = r#"
+        global func Initialize(state, random) { return nil; }
+        global func Step(state, frame, random) { return nil; }
+        global func Arm() { SetCommand(this(), "Wait", 0, 0, 0, 0, 50); return 1; }
+        global func Ask() { return GetCommand(); }
+        "#;
+        let mut engine = Engine::with_seed(9);
+        engine
+            .register_definition(
+                Definition::from_script("Actor", "Actor", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+        let idx = engine.find_object_index(id).expect("object exists");
+
+        let before = engine
+            .call_object_function(idx, "Ask", Vec::new())
+            .expect("ask runs");
+        assert_eq!(before, Value::Nil, "no command -> nil (C4Script.cpp:926)");
+
+        engine
+            .call_object_function(idx, "Arm", Vec::new())
+            .expect("arm runs");
+        let idx = engine.find_object_index(id).expect("object exists");
+        let after = engine
+            .call_object_function(idx, "Ask", Vec::new())
+            .expect("ask runs");
+        assert_eq!(
+            after,
+            Value::String("Wait".to_string()),
+            "element 0 is the CommandName string (C4Script.cpp:931)"
+        );
+    }
+
+    // C++ runs Fx* callbacks with fPassErrors=false: a script error in an
+    // effect timer logs and the game continues — it must not kill the
+    // simulation tick (the GoldRush bandit AI errored every FxTimer before
+    // GetCommand existed and C++ kept running).
+    #[test]
+    fn effect_callback_script_error_is_fail_safe_like_cpp() {
+        let script = r#"
+        global func Initialize(state, random) {
+            return { effects = [ { op = "add", name = "Broken", interval = 1 } ] };
+        }
+
+        global func FxBrokenTimer(state, effect, timer) {
+            return ThisHostFunctionDoesNotExist();
+        }
+
+        global func Step(state, frame, random) {
+            return nil;
+        }
+        "#;
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(
+                Definition::from_script("Actor", "Actor", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor"))
+            .expect("spawn succeeds");
+
+        for frame in 1..=3 {
+            engine
+                .tick()
+                .unwrap_or_else(|err| panic!("tick {frame} must survive the Fx error: {err}"));
+        }
+        // The erroring callback yields nil each interval — the effect is
+        // NOT killed (C++ gets 0 back, not C4Fx_Execute_Kill).
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert!(
+            engine.objects[idx]
+                .state
+                .effects
+                .iter()
+                .any(|effect| effect.name == "Broken"),
+            "the erroring effect stays installed"
+        );
     }
 
     #[test]

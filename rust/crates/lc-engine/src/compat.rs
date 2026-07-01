@@ -95,6 +95,10 @@ pub(crate) struct HostWorldObject {
     contents: Vec<ObjectId>,
     #[allow(dead_code)]
     pub draw_transform: Option<DrawTransform>,
+    /// C++ CommandName strings of the object's command stack, top first
+    /// (FnGetCommand, C4Script.cpp:918-945). A frame-start snapshot —
+    /// mid-frame command changes are not re-read (C++ reads live).
+    pub command_names: Vec<String>,
     /// Full object-state snapshot for nested script calls (Find_Func,
     /// GameCall): lets host functions build a complete object scope for
     /// another object mid-VM-call. `None` in legacy fixture contexts.
@@ -251,8 +255,14 @@ impl HostWorldObject {
             container,
             contents: Vec::new(),
             draw_transform,
+            command_names: Vec::new(),
             state: None,
         }
+    }
+
+    pub(crate) fn with_command_names(mut self, command_names: Vec<String>) -> Self {
+        self.command_names = command_names;
+        self
     }
 
     pub(crate) fn with_alive(mut self, alive: bool) -> Self {
@@ -3394,6 +3404,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetActionData", set_action_data);
     script.register_host_function("GetActionData", get_action_data);
     script.register_host_function("GetAction", get_action);
+    script.register_host_function("GetCommand", get_command);
     script.register_host_function("GetActTime", get_act_time);
     script.register_host_function("GetPhase", get_phase);
     script.register_host_function("SetPhase", set_phase);
@@ -7586,6 +7597,70 @@ fn set_action_targets(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnGetCommand (C4Script.cpp:918-945): walk the command stack to entry
+/// iCommandNum and return the requested element. Element 0 (the C++
+/// CommandName string) is served from the world context's frame-start
+/// command-name snapshot; elements 1-5 (Target/Tx/Ty/Target2/Data) are
+/// not yet threaded through the host contexts and yield nil with a
+/// warning (documented gap).
+fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut index = 0;
+    let mut target_id: Option<ObjectId> = None;
+    if let Some(arg) = args.get(index) {
+        if matches!(
+            arg,
+            Value::Object(_) | Value::Proplist(_) | Value::Nil | Value::Int(0)
+        ) {
+            target_id = parse_object_reference_argument(arg, "GetCommand", "target")?;
+            index += 1;
+        }
+    }
+    let element = args
+        .get(index)
+        .map(|value| value_to_i32(value, "GetCommand", "element"))
+        .transpose()?
+        .unwrap_or(0);
+    index += 1;
+    let command_num = args
+        .get(index)
+        .map(|value| value_to_i32(value, "GetCommand", "command number"))
+        .transpose()?
+        .unwrap_or(0);
+
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let resolved = target_id.or_else(|| context.object_context().map(|object| object.id()));
+        let Some(resolved) = resolved else {
+            return Ok(Value::Nil);
+        };
+        let Some(world_object) = context.get_world_object(resolved) else {
+            return Ok(Value::Nil);
+        };
+        // `while (Command && iCommandNum--)` (C4Script.cpp:924): a negative
+        // count walks off the list end -> nil.
+        if command_num < 0 {
+            return Ok(Value::Nil);
+        }
+        let Some(name) = world_object.command_names.get(command_num as usize) else {
+            return Ok(Value::Nil);
+        };
+        match element {
+            0 => Ok(Value::String(name.clone())),
+            1..=5 => {
+                tracing::warn!(
+                    element,
+                    "GetCommand: Target/Tx/Ty/Target2/Data elements are not exposed yet; returning nil"
+                );
+                Ok(Value::Nil)
+            }
+            _ => Ok(Value::Nil),
+        }
+    })
+}
+
 fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let target_id =
@@ -9888,6 +9963,27 @@ fn get_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
+    // C++ FnSetCommand leads with the object slot (pObj, szCommand, ...);
+    // 0/nil means the calling object. The name-first form stays for the
+    // command-DSL fixtures. Only the SELF form is dispatchable today —
+    // foreign command stacks live on the engine side of the seam, so a
+    // foreign target warns and reports false (documented gap).
+    let mut args = args;
+    let mut leading_target: Option<ObjectId> = None;
+    let leads_with_object_slot = matches!(
+        (args.first(), args.get(1)),
+        (
+            Some(Value::Object(_) | Value::Proplist(_)),
+            _
+        ) | (
+            Some(Value::Nil | Value::Int(0)),
+            Some(Value::String(_))
+        )
+    );
+    if leads_with_object_slot {
+        leading_target = parse_object_reference_argument(&args[0], "SetCommand", "target")?;
+        args = &args[1..];
+    }
     if args.is_empty() {
         return Err(RuntimeError::new(
             "SetCommand expects at least 1 argument: command name",
@@ -9903,6 +9999,15 @@ fn set_command(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
         };
+        if let Some(target) = leading_target {
+            if target != object.id() {
+                tracing::warn!(
+                    ?target,
+                    "SetCommand on a FOREIGN object is not dispatchable yet; ignoring"
+                );
+                return Ok(Value::Bool(false));
+            }
+        }
 
         let command_name = match &args[0] {
             Value::String(name) if !name.is_empty() => name.clone(),
@@ -15287,6 +15392,7 @@ mod tests {
         "GetCategory",
         "GetClimate",
         "GetComDir",
+        "GetCommand",
         "GetComponent",
         "GetCon",
         "GetContact",
