@@ -277,6 +277,7 @@ mod tests {
             base_buy_enabled: true,
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         }
     }
 
@@ -424,6 +425,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = FollowState::from_request(
@@ -469,6 +471,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = FollowState::from_request(
@@ -521,6 +524,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let result0 = state.step(&ctx0);
@@ -545,6 +549,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let result1 = state.step(&ctx1);
@@ -563,6 +568,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let result2 = state.step(&ctx2);
@@ -606,6 +612,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = GetState::from_request(
@@ -669,6 +676,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = GetState::from_request(
@@ -736,6 +744,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = GetState::from_request(
@@ -789,6 +798,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = GetState::from_request(
@@ -841,6 +851,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = PutState::from_request(
@@ -904,6 +915,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = PutState::from_request(
@@ -959,6 +971,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = PutState::from_request(
@@ -1010,6 +1023,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
@@ -1059,6 +1073,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = DropState::from_request(
@@ -1119,6 +1134,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
@@ -1173,6 +1189,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
@@ -1220,6 +1237,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let result = state.step(&ctx);
@@ -1263,6 +1281,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let result = state.step(&ctx);
@@ -1308,6 +1327,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let result = state.step(&ctx);
@@ -1354,6 +1374,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let result = state.step(&ctx);
@@ -1394,6 +1415,7 @@ mod tests {
 
                 base_sell_enabled: true,
                 transfer_zones: &EMPTY_TRANSFER_ZONES,
+                rng: None,
             };
             let result = stack.step(&ctx).expect("running result");
             assert_eq!(result.status, CommandStatus::Running);
@@ -1413,6 +1435,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
         let result = stack.step(&ctx).expect("completion result");
         assert_eq!(result.status, CommandStatus::Completed);
@@ -1452,6 +1475,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = EnterState::from_request(
@@ -1502,6 +1526,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = EnterState::from_request(
@@ -1560,6 +1585,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = GrabState::from_request(
@@ -1619,6 +1645,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = GrabState::from_request(
@@ -1667,6 +1694,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = GrabState::from_request(
@@ -1717,6 +1745,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = GrabState::from_request(
@@ -1773,6 +1802,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = PushToState::from_request(
@@ -1821,6 +1851,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = PushToState::from_request(
@@ -1900,6 +1931,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ConstructState::from_request(
@@ -1965,6 +1997,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let second = state.step(&ctx_after_spawn);
@@ -2030,6 +2063,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ConstructState::from_request(
@@ -2084,6 +2118,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = PushToState::from_request(
@@ -2140,6 +2175,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = PushToState::from_request(
@@ -2194,6 +2230,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = PushToState::from_request(
@@ -2251,6 +2288,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = PushToState::from_request(
@@ -2308,6 +2346,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = UnGrabState::from_request(&CommandRequest::new(CommandId::UnGrab));
@@ -2347,6 +2386,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = UnGrabState::from_request(&CommandRequest::new(CommandId::UnGrab));
@@ -2382,6 +2422,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = JumpState::from_request(
@@ -2430,6 +2471,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = JumpState::from_request(
@@ -2462,6 +2504,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
         let mut state = JumpState::from_request(
             &CommandRequest::new(CommandId::Jump).with_tx(Some(small.position.x + 10)),
@@ -2498,6 +2541,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = JumpState::from_request(
@@ -2546,6 +2590,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ThrowState::from_request(
@@ -2605,6 +2650,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ThrowState::from_request(
@@ -2663,6 +2709,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ThrowState::from_request(
@@ -2724,6 +2771,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ThrowState::from_request(
@@ -2778,6 +2826,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state =
@@ -2824,6 +2873,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state =
@@ -2869,6 +2919,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state =
@@ -2901,6 +2952,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state =
@@ -2949,6 +3001,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state =
@@ -2994,6 +3047,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state =
@@ -3039,6 +3093,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state =
@@ -3081,6 +3136,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = AttackState::from_request(
@@ -3123,6 +3179,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = AttackState::from_request(
@@ -3182,6 +3239,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = CallState::from_request(
@@ -3262,6 +3320,7 @@ mod tests {
             base_buy_enabled: true,
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ContextState::from_request(
@@ -3328,6 +3387,7 @@ mod tests {
             base_buy_enabled: true,
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ContextState::from_request(
@@ -3367,6 +3427,7 @@ mod tests {
             base_buy_enabled: true,
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state =
@@ -3420,6 +3481,7 @@ mod tests {
             base_buy_enabled: true,
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state =
@@ -3470,6 +3532,7 @@ mod tests {
             base_buy_enabled: true,
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state =
@@ -3547,6 +3610,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &transfer_zones,
+            rng: None,
         };
 
         let mut state = TransferState::from_request(
@@ -3619,6 +3683,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &transfer_zones,
+            rng: None,
         };
 
         let result = state.step(&ctx);
@@ -3666,6 +3731,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &transfer_zones,
+            rng: None,
         };
 
         let follow_up = state.step(&ctx_next);
@@ -3704,6 +3770,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = TransferState::from_request(
@@ -3747,6 +3814,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = BuildState::from_request(
@@ -3795,6 +3863,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ActivateState::from_request(
@@ -3848,6 +3917,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ActivateState::from_request(
@@ -3910,6 +3980,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ActivateState::from_request(
@@ -3962,6 +4033,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = BuildState::from_request(
@@ -4018,6 +4090,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = AcquireState::from_request(
@@ -4066,6 +4139,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = AcquireState::from_request(
@@ -4143,6 +4217,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = AcquireState::from_request(
@@ -4218,6 +4293,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = AcquireState::from_request(
@@ -4268,6 +4344,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = AcquireState::from_request(
@@ -4301,6 +4378,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let _ = state.step(&later_ctx);
@@ -4340,6 +4418,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let _ = state.step(&initial_ctx);
@@ -4365,6 +4444,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let _ = state.step(&mid_ctx);
@@ -4389,6 +4469,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let _ = state.step(&retry_ctx);
@@ -4462,6 +4543,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut stack = CommandStack::new();
@@ -4493,6 +4575,7 @@ mod tests {
                 base_buy_enabled: ctx.base_buy_enabled,
                 base_sell_enabled: ctx.base_sell_enabled,
                 transfer_zones: ctx.transfer_zones,
+                rng: None,
             };
             let step_result = stack.step(&step_ctx).expect("acquire evaluation");
             assert_eq!(step_result.status, CommandStatus::Running);
@@ -4560,6 +4643,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut stack = CommandStack::new();
@@ -4591,6 +4675,7 @@ mod tests {
                 base_buy_enabled: ctx.base_buy_enabled,
                 base_sell_enabled: ctx.base_sell_enabled,
                 transfer_zones: ctx.transfer_zones,
+                rng: None,
             };
             let step_result = stack.step(&step_ctx).expect("acquire evaluation");
             assert_eq!(step_result.status, CommandStatus::Running);
@@ -4656,6 +4741,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut stack = CommandStack::new();
@@ -4687,6 +4773,7 @@ mod tests {
                 base_buy_enabled: ctx.base_buy_enabled,
                 base_sell_enabled: ctx.base_sell_enabled,
                 transfer_zones: ctx.transfer_zones,
+                rng: None,
             };
             let step_result = stack.step(&step_ctx).expect("acquire evaluation");
             assert_eq!(step_result.status, CommandStatus::Running);
@@ -4747,6 +4834,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = AcquireState::from_request(
@@ -4792,6 +4880,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = AcquireState::from_request(
@@ -4831,6 +4920,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = AcquireState::from_request(
@@ -4889,6 +4979,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let script_step = stack.step(&ctx_initial).expect("script step evaluates");
@@ -4967,6 +5058,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let original_second = stack.step(&ctx_followup).expect("second step evaluates");
@@ -5034,6 +5126,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut stack = CommandStack::new();
@@ -5143,6 +5236,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let result = stack.step(&ctx).expect("put evaluates");
@@ -5225,6 +5319,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = BuyState::from_request(
@@ -5347,6 +5442,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = BuyState::from_request(
@@ -5440,6 +5536,7 @@ mod tests {
             base_buy_enabled: true,
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = SellState::from_request(
@@ -5530,6 +5627,7 @@ mod tests {
             base_buy_enabled: true,
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = SellState::from_request(
@@ -5628,6 +5726,7 @@ mod tests {
             base_buy_enabled: true,
             base_sell_enabled: false,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = SellState::from_request(
@@ -5707,6 +5806,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = BuyState::from_request(
@@ -5791,6 +5891,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = BuyState::from_request(
@@ -5871,6 +5972,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ChopState::from_request(
@@ -5933,6 +6035,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ChopState::from_request(
@@ -5994,6 +6097,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ChopState::from_request(
@@ -6053,6 +6157,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ChopState::from_request(
@@ -6107,6 +6212,7 @@ mod tests {
 
             base_sell_enabled: true,
             transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
         };
 
         let mut state = ChopState::from_request(
@@ -6388,6 +6494,10 @@ fn command_data_to_definition_id(data: &CommandData) -> Option<DefinitionId> {
 
 #[derive(Clone)]
 pub struct CommandRuntimeContext<'a> {
+    /// The synced game RNG (C4Random) — command AI draws (Get's
+    /// Random(15)/Random(2), C4Command.cpp:1272-1290) advance the
+    /// lockstep ledger. None in unit fixtures that don't pin draws.
+    pub rng: Option<&'a std::cell::RefCell<crate::LcgRng>>,
     pub frame: u64,
     pub position: Vector2,
     /// Landscape probes for the walking controls (GBackSolid/PathFree in

@@ -12829,6 +12829,10 @@ impl Engine {
             .map(|(index, _)| index)
             .collect();
 
+        // The synced RNG rides along for command-AI draws (C4Command Get's
+        // Random calls); swapped in only around step_command_stack so the
+        // effect-callback paths below keep using self.rng directly.
+        let command_rng = std::cell::RefCell::new(LcgRng::default());
         for idx in 0..self.objects.len() {
             // UpdateOCF runs first in C4Object::Execute (C4Object.cpp:1058).
             self.refresh_object_ocf(idx);
@@ -12858,7 +12862,9 @@ impl Engine {
                 let builder_snapshot = command_snapshots
                     .get(&object_id)
                     .expect("command snapshot exists");
+                command_rng.replace(std::mem::take(&mut self.rng));
                 let command_context = CommandRuntimeContext {
+                    rng: Some(&command_rng),
                     frame: self.frame,
                     position: current_position,
                     landscape: landscape_slot.as_ref(),
@@ -12871,7 +12877,9 @@ impl Engine {
                     base_sell_enabled: self.base_sell_enabled,
                     transfer_zones: &self.transfer_zones,
                 };
-                if let Some(result) = object.step_command_stack(command_context) {
+                let step_result = object.step_command_stack(command_context);
+                self.rng = command_rng.take();
+                if let Some(result) = step_result {
                     if result.update.is_some() || !result.events.is_empty() {
                         let update = result.update.unwrap_or_default();
                         let mut queued = QueuedCommand::immediate(update);
@@ -13502,6 +13510,7 @@ impl Engine {
             );
             spawn_requests.extend(spawns.into_iter());
         }
+
 
         // C4GameObjects::CrossCheck runs once per frame after object        // execution (C4Game.cpp ExecObjects → Objects.CrossCheck()).
         self.cross_check(frame)?;
