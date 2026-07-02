@@ -14778,6 +14778,12 @@ impl Engine {
             // via their Fx<Name>Effect callback — except for priority-1
             // effects, which are out of the priority call chain (:170).
             if matches!(event.kind, EffectEventKind::Started) {
+                // Fx*Start already ran synchronously inside FnAddEffect
+                // (priority-1 effects, C4Effect.cpp:96-152) — do not
+                // dispatch it again.
+                if event.effect.start_dispatched {
+                    continue;
+                }
                 if denied_started.remove(&event.effect.name) {
                     continue;
                 }
@@ -31677,6 +31683,59 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(object.effects[0].name, "Boost");
         assert_eq!(object.effects[0].priority, 50);
         assert_eq!(object.effects[0].timer, 2);
+    }
+
+    // C4Effect's constructor runs Fx*Start SYNCHRONOUSLY inside
+    // FnAddEffect (C4Effect.cpp:96-152: insert, check chain, then
+    // pFnStart->Exec before the ctor returns) — so objects the Start
+    // callback creates get their numbers AT THE AddEffect INSTANT.
+    // GoldRush oracle: each bandit's SetAI equip (2xAMBO+WINC from
+    // FxAIBanditNoMoveStart) interleaves between the CreateObject(BNDT)
+    // calls in DoInitialize; deferring the callback shifted 12 ids.
+    #[test]
+    fn add_effect_runs_start_callback_at_call_position_like_cpp() {
+        let script = r#"#strict
+func Trigger() {
+    var first = CreateObject(MARK, 0, 0, -1);
+    AddEffect("Equip", this(), 1, 0, this());
+    var last = CreateObject(MARK, 0, 0, -1);
+    return(1);
+}
+
+func FxEquipStart(pTarget, iNumber, iTemp) {
+    CreateObject(MARK, 10, 0, -1);
+    return(1);
+}
+"#;
+
+        let mut engine = Engine::with_seed(0);
+        let actor = Definition::from_script("Actor", "Actor", script).expect("script compiles");
+        engine.register_definition(actor).expect("actor registers");
+        engine
+            .register_definition(simple_definition("MARK"))
+            .expect("marker registers");
+
+        let id = engine
+            .spawn_object(SpawnConfig::new("Actor").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let idx = engine.find_object_index(id).expect("actor exists");
+        engine
+            .call_object_function(idx, "Trigger", Vec::new())
+            .expect("trigger runs");
+
+        let mut marks: Vec<(u64, i32)> = engine
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "MARK")
+            .map(|object| (object.id.as_u64(), object.state.position.x))
+            .collect();
+        marks.sort();
+        assert_eq!(marks.len(), 3, "three markers created");
+        assert_eq!(
+            marks[1].1, 10,
+            "the Start-callback marker (x=10) allocates BETWEEN the two \
+             direct CreateObject calls (C4Effect.cpp:131-135)"
+        );
     }
 
     #[test]

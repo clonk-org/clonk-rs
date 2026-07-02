@@ -5512,6 +5512,19 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         idx += 1;
     }
 
+    // C4Effect's ctor runs Fx*Start synchronously inside FnAddEffect
+    // (C4Effect.cpp:96-152). Priority-1 effects skip the check chain
+    // entirely (:170), so their Start can run right here through the
+    // nested-call seam; other priorities keep the deferred event path
+    // (their check chain still runs there first).
+    let synchronous_start = priority == 1 && command_target.is_some();
+    let effect_name = name.clone();
+    let call_vars: Vec<Value> = vars.iter().take(4).map(effect_var_to_value).collect();
+    let for_object = match args.get(1) {
+        Some(value @ Value::Object(_)) => value.clone(),
+        _ => Value::Nil,
+    };
+
     let identifier = with_context_mut(scope, move |ctx| {
         let mut effect = EffectState::new(name)
             .with_priority(priority)
@@ -5524,8 +5537,35 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         if !vars.is_empty() {
             effect = effect.with_vars(vars);
         }
+        effect.start_dispatched = synchronous_start;
         ctx.add_effect(effect)
     })?;
+
+    if synchronous_start && identifier > 0 {
+        if let Some(target) = command_target {
+            let callback = format!("Fx{effect_name}Start");
+            let mut call_args = vec![for_object, Value::Int(identifier), Value::Int(0)];
+            call_args.extend(call_vars);
+            call_args.resize(7, Value::Nil);
+            if let Some(result) = call_world_object_script_function(
+                ObjectId::new(target as u64),
+                &callback,
+                &call_args,
+            ) {
+                // fPassErrors=true (C4Script.cpp:5451): errors abort the
+                // calling script like C++.
+                let outcome = result?;
+                if matches!(outcome, Value::Int(-1)) {
+                    // C4Fx_Start_Deny: the effect dies without a Stop
+                    // callback (C4Effect.cpp:128-131).
+                    with_context_mut(scope, |ctx| {
+                        ctx.remove_effect(None, identifier as usize, true);
+                        0
+                    })?;
+                }
+            }
+        }
+    }
 
     Ok(Value::Int(identifier))
 }
@@ -13770,6 +13810,7 @@ fn call_world_object_function_with(
         local_vars,
         origin,
     } = prep;
+    let entry_locals = local_vars.clone();
     // The HOST_CONTEXT borrow is released here: the nested VM's host
     // functions re-borrow it against the swapped-in scope.
     let call = script.call_with_locals_and_this(
@@ -13789,7 +13830,40 @@ fn call_world_object_function_with(
     if let Some(origin) = origin {
         HOST_CONTEXT.with(|cell| {
             if let Some(context) = cell.borrow_mut().as_mut() {
+                // Writes made by DEEPER same-scope calls (e.g. a
+                // synchronous Fx*Start fired from inside this call) sit in
+                // the foreign cells; they win over entries THIS call left
+                // untouched — C++ mutates the one live object, so the
+                // deepest write is simply the latest.
+                let mut stored_locals = stored_locals;
+                for ((object, name), slot) in &context.foreign_local_cells {
+                    if *object != target {
+                        continue;
+                    }
+                    // Unset locals read as nil (C4Value default) — a local
+                    // the outer call never touched may be absent from its
+                    // entry snapshot but nil-present in the VM result.
+                    let outer_unchanged = entry_locals.get(name).unwrap_or(&Value::Nil)
+                        == stored_locals.get(name).unwrap_or(&Value::Nil);
+                    if outer_unchanged {
+                        stored_locals.insert(name.clone(), slot.borrow().clone());
+                    }
+                }
                 context.finish_nested_call(target, origin, stored_locals);
+            }
+        });
+    } else {
+        // Same-scope call (the target IS the in-flight active scope): the
+        // outer VM owns the live locals, so fold this call's writes
+        // through the foreign-cell channel — later nested calls overlay
+        // them and the outcome fold persists them (C++ mutates the live
+        // object directly).
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                for (name, value) in &stored_locals {
+                    let slot = context.foreign_local_cell(target, name);
+                    *slot.borrow_mut() = value.clone();
+                }
             }
         });
     }

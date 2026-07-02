@@ -25,6 +25,11 @@ pub struct EffectState {
     pub command_id: Option<String>,
     #[serde(default)]
     pub vars: Vec<EffectVarValue>,
+    /// True when Fx*Start already ran synchronously inside FnAddEffect
+    /// (C4Effect ctor semantics, C4Effect.cpp:96-152) — the deferred
+    /// Started event must not dispatch it again.
+    #[serde(default)]
+    pub start_dispatched: bool,
 }
 
 impl EffectState {
@@ -37,6 +42,7 @@ impl EffectState {
             command_target: None,
             command_id: None,
             vars: Vec::new(),
+            start_dispatched: false,
         }
     }
 
