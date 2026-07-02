@@ -1932,6 +1932,11 @@ pub struct ObjectState {
     /// `Random(GetPortraitCount())` draw is gated on it (synced ledger).
     #[serde(default)]
     pub portrait_source: Option<String>,
+    /// Per-object SolidMask rect (C4Object::SolidMask; SetSolidMask,
+    /// C4Script.cpp:271-278). None = the definition's mask; a zero-area
+    /// rect = mask OFF (opened gates save SolidMask=0,0,0,0,0,0).
+    #[serde(default)]
+    pub solid_mask_override: Option<DefinitionTargetRect>,
     /// The Def TimerCall counter (C4Object::Timer, C4Object.cpp:1085-1091):
     /// ++ every Execute, fires Def->TimerCall and resets at Def->Timer.
     /// Saved mid-cycle in Objects.txt (default 0, C4Object.cpp:2738).
@@ -2055,6 +2060,7 @@ pub(crate) fn preview_spawn_state(
         in_liquid: false,
         mobile: false,
         portrait_source: None,
+        solid_mask_override: None,
         timer: 0,
         own_mass: 0,
         on_fire: false,
@@ -2156,6 +2162,9 @@ impl ObjectState {
         if let Some(portrait_source) = &delta.portrait_source {
             self.portrait_source = Some(portrait_source.clone());
         }
+        if let Some(rect) = delta.solid_mask_override {
+            self.solid_mask_override = Some(rect);
+        }
         if let Some(alive) = delta.alive {
             self.alive = alive;
         }
@@ -2198,6 +2207,7 @@ impl ObjectState {
 #[derive(Debug, Default, Clone, PartialEq)]
 struct ObjectDelta {
     portrait_source: Option<String>,
+    solid_mask_override: Option<DefinitionTargetRect>,
     position: Option<Vector2>,
     velocity: Option<Vector2>,
     /// Sub-pixel velocity in 16.16 fixed-point. When present, this takes
@@ -2289,6 +2299,9 @@ impl ObjectDelta {
         if let Some(portrait_source) = update.portrait_source {
             self.portrait_source = Some(portrait_source);
         }
+        if let Some(rect) = update.solid_mask_override {
+            self.solid_mask_override = Some(rect);
+        }
         if let Some(alive) = update.alive {
             self.alive = Some(alive);
         }
@@ -2350,6 +2363,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             category: update.category,
             crew_member: update.crew_member,
             portrait_source: update.portrait_source,
+            solid_mask_override: update.solid_mask_override,
             alive: update.alive,
             container: update.container,
             vertices: update.vertices,
@@ -2369,6 +2383,9 @@ pub struct ObjectUpdate {
     /// SetPortrait's source-definition update (Some = set).
     #[serde(default)]
     pub portrait_source: Option<String>,
+    /// SetSolidMask's rect update (Some = set; zero-area = mask OFF).
+    #[serde(default)]
+    pub solid_mask_override: Option<DefinitionTargetRect>,
     pub position: Option<Vector2>,
     pub velocity: Option<Vector2>,
     /// Sub-pixel velocity in 16.16 fixed-point, set by precision-aware script
@@ -4140,6 +4157,10 @@ pub struct SpawnConfig {
     /// (C4Object::Init).
     #[serde(default)]
     pub loaded: bool,
+    /// Saved per-object SolidMask rect (Objects.txt SolidMask=; default
+    /// keeps the definition mask, C4Object.cpp:2770).
+    #[serde(default)]
+    pub solid_mask: Option<DefinitionTargetRect>,
 }
 
 impl SpawnConfig {
@@ -4173,6 +4194,7 @@ impl SpawnConfig {
             timer: None,
             local_vars: HashMap::new(),
             loaded: false,
+            solid_mask: None,
         }
     }
 
@@ -4208,6 +4230,11 @@ impl SpawnConfig {
 
     pub fn with_local_vars(mut self, local_vars: HashMap<String, Value>) -> Self {
         self.local_vars = local_vars;
+        self
+    }
+
+    pub fn with_solid_mask(mut self, rect: DefinitionTargetRect) -> Self {
+        self.solid_mask = Some(rect);
         self
     }
 
@@ -4712,7 +4739,7 @@ impl DefinitionRect {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefinitionTargetRect {
     pub x: i32,
     pub y: i32,
@@ -13456,6 +13483,7 @@ impl Engine {
             owner,
             crew_member,
             portrait_source,
+            solid_mask_override: update_solid_mask,
             alive,
             container,
             vertices,
@@ -13558,6 +13586,9 @@ impl Engine {
             }
             if let Some(portrait_source) = portrait_source {
                 object.state.portrait_source = Some(portrait_source);
+            }
+            if let Some(rect) = update_solid_mask {
+                object.state.solid_mask_override = Some(rect);
             }
             if let Some(alive) = alive {
                 object.state.alive = alive;
@@ -14683,6 +14714,7 @@ impl Engine {
                     in_liquid: snapshot.in_liquid,
                     mobile: snapshot.mobile,
                     portrait_source: None,
+                    solid_mask_override: None,
                     timer: snapshot.timer,
                     own_mass: snapshot.own_mass,
                     on_fire: snapshot.on_fire,
@@ -18935,6 +18967,30 @@ impl Engine {
             .unwrap_or(false)
     }
 
+    /// Debug/test helper: ids of objects whose solid mask is active for
+    /// movement.
+    pub fn debug_solid_mask_ids(&self) -> Vec<u64> {
+        let indices: Vec<usize> = (0..self.objects.len()).collect();
+        self.solid_masks_for_movement(&indices)
+            .iter()
+            .map(|mask| mask.object_id.as_u64())
+            .collect()
+    }
+
+    /// Debug/test helper: the per-object SolidMask override of `id`
+    /// (outer None = object missing; inner None = definition default).
+    pub fn debug_solid_mask_override(&self, id: u64) -> Option<Option<(i32, i32, i32, i32)>> {
+        self.objects
+            .iter()
+            .find(|object| object.id.as_u64() == id)
+            .map(|object| {
+                object
+                    .state
+                    .solid_mask_override
+                    .map(|rect| (rect.x, rect.y, rect.width, rect.height))
+            })
+    }
+
     /// Debug/test helper: a clone of the synced RNG for ledger-position
     /// assertions.
     pub fn debug_rng_clone(&self) -> crate::rng::LcgRng {
@@ -19013,8 +19069,16 @@ impl Engine {
             let Some(definition) = self.definitions.get(&object.definition_id) else {
                 continue;
             };
-            let Some(mask) = definition.solid_mask() else {
-                continue;
+            // The per-object SolidMask override wins (C4Object::SolidMask;
+            // Objects.txt SolidMask= / FnSetSolidMask): a zero-area rect
+            // means the mask is OFF (opened gates).
+            let mask = match object.state.solid_mask_override {
+                Some(rect) if rect.width <= 0 || rect.height <= 0 => continue,
+                Some(rect) => rect,
+                None => match definition.solid_mask() {
+                    Some(mask) => mask,
+                    None => continue,
+                },
             };
             let mask_pixels = match &definition.solid_mask_pixels {
                 SolidMaskPixels::OutOfBounds => continue,
@@ -20831,6 +20895,7 @@ impl Engine {
             timer,
             local_vars,
             loaded,
+            solid_mask,
         } = config;
 
         let (
@@ -20989,6 +21054,7 @@ impl Engine {
                 in_liquid: in_liquid.unwrap_or(false),
                 mobile: false,
                 portrait_source: None,
+                solid_mask_override: solid_mask,
                 timer: timer.unwrap_or(0),
                 own_mass: 0,
                 on_fire: false,
@@ -21689,6 +21755,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         in_liquid: snapshot.in_liquid,
         mobile: snapshot.mobile,
         portrait_source: None,
+        solid_mask_override: None,
         timer: snapshot.timer,
         own_mass: snapshot.own_mass,
         on_fire: snapshot.on_fire,

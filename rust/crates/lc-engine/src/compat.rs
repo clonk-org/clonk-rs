@@ -1766,6 +1766,48 @@ fn set_plr_view_range(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(true))
 }
 
+/// FnSetSolidMask (C4Script.cpp:271-278): sets the object's SolidMask
+/// rect (x,y,wdt,hgt,tx,ty); a zero-area rect disables the mask (gates
+/// open/close through this from UpdateTransferZone handlers).
+fn set_solid_mask(args: &[Value]) -> Result<Value, RuntimeError> {
+    let mut values = [0i32; 6];
+    for (i, slot) in values.iter_mut().enumerate() {
+        *slot = parse_optional_i32(args.get(i), "SetSolidMask", "rect")?.unwrap_or(0);
+    }
+    let target = parse_object_reference_argument(
+        args.get(6).unwrap_or(&Value::Nil),
+        "SetSolidMask",
+        "obj",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let active = context.object_context().map(|object| object.id());
+        let Some(target) = target.or(active) else {
+            return Ok(Value::Bool(false));
+        };
+        let rect = crate::DefinitionTargetRect::new(
+            values[0], values[1], values[2], values[3], values[4], values[5],
+        );
+        if Some(target) == active {
+            if let Some(object) = context.object_context_mut() {
+                object.set_solid_mask_rect(rect);
+            }
+        } else if let Some(state) = context.nested_objects.get_mut(&target) {
+            state.scope.set_solid_mask_rect(rect);
+        } else {
+            tracing::debug!(
+                target = target.as_u64(),
+                "SetSolidMask: target outside active/nested scopes; skipped"
+            );
+            return Ok(Value::Bool(false));
+        }
+        Ok(Value::Bool(true))
+    })
+}
+
 /// FnSetVisibility (C4Script.cpp:3860-3869): a draw gate
 /// (pObj->Visibility), not modeled in the simulation yet — acknowledged
 /// (PORT_STATUS).
@@ -3487,6 +3529,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetPortrait", get_portrait);
     script.register_host_function("SetVisibility", set_visibility);
     script.register_host_function("SetPlrViewRange", set_plr_view_range);
+    script.register_host_function("SetSolidMask", set_solid_mask);
     script.register_host_function("SetClrModulation", set_clr_modulation);
     script.register_host_function("GetCrewCount", get_crew_count);
     script.register_host_function("GetCursor", get_cursor_host);
@@ -15244,6 +15287,11 @@ impl ObjectScopeContext {
         self.pending_update.portrait_source.as_ref()
     }
 
+    /// FnSetSolidMask bookkeeping (C4Script.cpp:271-278).
+    fn set_solid_mask_rect(&mut self, rect: crate::DefinitionTargetRect) {
+        self.pending_update.solid_mask_override = Some(rect);
+    }
+
     fn alive(&self) -> bool {
         self.pending_update.alive.unwrap_or(self.current_alive)
     }
@@ -15968,6 +16016,7 @@ mod tests {
         "SetR",
         "SetRDir",
         "SetShape",
+        "SetSolidMask",
         "SetTemperature",
         "SetTransferZone",
         "SetVertex",

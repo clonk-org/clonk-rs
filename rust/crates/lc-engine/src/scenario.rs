@@ -3164,6 +3164,7 @@ struct LegacyObjectRecord {
     rdir: Option<crate::math::C4Fixed>,
     /// C4Object::Mobile, serialized with default false (C4Object.cpp:2772).
     mobile: Option<bool>,
+    solid_mask: Option<Vec<i32>>,
     /// Whole-degree rotation (`Rotation=`, C4Object.cpp:2744).
     rotation: Option<i32>,
     /// Mid-cycle Def TimerCall counter (`Timer=`, default 0,
@@ -3325,6 +3326,12 @@ impl LegacyObjectRecord {
                     ))
                 })?;
                 self.mobile = Some(mobile);
+            }
+            "solidmask" => {
+                // C4Object::CompileFunc SolidMask (default Def->SolidMask,
+                // C4Object.cpp:2770): six ints; 0,0,0,0,0,0 = mask OFF.
+                self.solid_mask =
+                    Some(parse_i32_list(trimmed_value, self.line, "SolidMask")?);
             }
             "rotation" => {
                 self.rotation = Some(parse_i32(trimmed_value).map_err(|err| {
@@ -3568,6 +3575,7 @@ impl LegacyObjectRecord {
             fix_r,
             rdir,
             mobile,
+            solid_mask,
             rotation,
             timer,
             local_named,
@@ -3723,6 +3731,18 @@ impl LegacyObjectRecord {
             if status != ObjectStatus::Normal {
                 config = config.with_status(status);
             }
+        }
+        if let Some(values) = solid_mask {
+            let mut it = values.into_iter().chain(std::iter::repeat(0));
+            let rect = crate::DefinitionTargetRect::new(
+                it.next().unwrap_or(0),
+                it.next().unwrap_or(0),
+                it.next().unwrap_or(0),
+                it.next().unwrap_or(0),
+                it.next().unwrap_or(0),
+                it.next().unwrap_or(0),
+            );
+            config = config.with_solid_mask(rect);
         }
         if let Some(direction) = direction {
             config = config.with_direction(direction);
@@ -9353,6 +9373,44 @@ mod game_start_sync {
             "unresolvable saved action (CCAN Stand) falls to Idle, not a def default"
         );
         assert_eq!(phase, 0, "Idle carries no phase");
+    }
+
+    // C4Object::CompileFunc reads SolidMask= with DEFAULT Def->SolidMask
+    // (C4Object.cpp:2770): a saved 0,0,0,0,0,0 means the object's solid
+    // mask is OFF (opened gates/doors save that way); the def's mask must
+    // not resurrect it. FnSetSolidMask (C4Script.cpp:271-278) drives the
+    // same per-object rect at runtime.
+    #[test]
+    fn objects_txt_solid_mask_overrides_the_definition_mask() {
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        let gate = defs.join("Gate.c4d");
+        std::fs::create_dir_all(&gate).expect("gate dir");
+        std::fs::write(
+            gate.join("DefCore.txt"),
+            "[DefCore]\nid=GATE\nName=Gate\nCategory=2\nWidth=10\nHeight=40\nOffset=-5,-20\nSolidMask=0,0,10,40,0,0\n",
+        )
+        .expect("defcore");
+        write_scenario(
+            dir.path(),
+            "[Object]\nid=GATE\nNumber=7\nCategory=2\nX=50\nY=50\nSolidMask=0,0,0,0,0,0\n\n\
+             [Object]\nid=GATE\nNumber=8\nCategory=2\nX=90\nY=50\n",
+        );
+        let (engine, _) = load(dir.path());
+
+        // (The fixture def has no Graphics.png, so like C++ the def-level
+        // mask never activates for movement; the loader state is the pin.)
+        let overrides = engine.debug_solid_mask_override(7);
+        assert_eq!(
+            overrides,
+            Some(Some((0, 0, 0, 0))),
+            "saved SolidMask=0,0,0,0,0,0 turns the mask OFF (C4Object.cpp:2770)"
+        );
+        assert_eq!(
+            engine.debug_solid_mask_override(8),
+            Some(None),
+            "no saved key keeps the definition default"
+        );
     }
 
     // C4Game::Synchronize's tail broadcasts ~UpdateTransferZone to EVERY
