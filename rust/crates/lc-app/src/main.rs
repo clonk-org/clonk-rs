@@ -10317,7 +10317,7 @@ mod tests {
         // 1345-1361); only the offending call fails, the game keeps running.
         let script_error = EngineError::Script {
             definition: "CLNK".into(),
-            function: "Control",
+            function: "Control".to_string(),
             source: ScriptError::parse("boom", 1, 1),
         };
         let status = control_script_error_to_status(script_error)
