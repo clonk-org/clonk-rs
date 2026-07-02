@@ -13093,7 +13093,24 @@ impl Engine {
 
             let advance_outcome = {
                 let object = &mut self.objects[idx];
-                object.state.action.advance_with_library(&action_library)
+                // iPhaseAdvance: WALK animates at fixtoi(|xdir| * 10),
+                // SCALE at fixtoi(|ydir| * 14), everything else 1
+                // (C4Object.cpp:4696,4787-4789,4830-4832).
+                let phase_advance = match action_library
+                    .procedure_for_action(&object.state.action.name)
+                {
+                    ActionProcedure::Walk => {
+                        math::fixtoi(object.fixed_velocity.x.abs() * 10)
+                    }
+                    ActionProcedure::Scale => {
+                        math::fixtoi(object.fixed_velocity.y.abs() * 14)
+                    }
+                    _ => 1,
+                };
+                object
+                    .state
+                    .action
+                    .advance_with_library_by(&action_library, phase_advance)
             };
 
             if self.objects[idx].state.action.name != previous_action_state.name {

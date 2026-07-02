@@ -321,8 +321,20 @@ impl ActionLibrary {
     }
 
     pub fn advance_state(&self, state: &mut ActionState) -> ActionAdvanceOutcome {
+        self.advance_state_by(state, 1)
+    }
+
+    /// Phase advance with the C++ `iPhaseAdvance` weight — WALK scales by
+    /// fixtoi(|xdir| * 10), SCALE by fixtoi(|ydir| * 14), everything else
+    /// is 1 (C4Object.cpp:4696,4787-4789,4830-4832); 0 freezes the
+    /// animation (a standing walker).
+    pub fn advance_state_by(
+        &self,
+        state: &mut ActionState,
+        phase_advance: i32,
+    ) -> ActionAdvanceOutcome {
         if let Some(spec) = self.specs.get(&state.name) {
-            Self::advance_with_spec(state, spec, self)
+            Self::advance_with_spec(state, spec, self, phase_advance)
         } else {
             state.advance();
             ActionAdvanceOutcome::default()
@@ -368,6 +380,7 @@ impl ActionLibrary {
         state: &mut ActionState,
         spec: &ActionSpec,
         library: &ActionLibrary,
+        phase_advance: i32,
     ) -> ActionAdvanceOutcome {
         let mut outcome = ActionAdvanceOutcome::default();
 
@@ -382,9 +395,10 @@ impl ActionLibrary {
             return outcome;
         };
 
-        // PhaseDelay += 1; the phase moves when it reaches Delay and the
-        // counter restarts (C4Object.cpp:5443-5447).
-        state.ticks = state.ticks.saturating_add(1);
+        // PhaseDelay += iPhaseAdvance; the phase moves when it reaches
+        // Delay and the counter restarts (C4Object.cpp:5443-5447) — a zero
+        // advance (standing walker) freezes the animation.
+        state.ticks = state.ticks.saturating_add(phase_advance.max(0) as u32);
         if state.ticks < delay {
             return outcome;
         }
@@ -510,6 +524,14 @@ impl ActionState {
 
     pub fn advance_with_library(&mut self, library: &ActionLibrary) -> ActionAdvanceOutcome {
         library.advance_state(self)
+    }
+
+    pub fn advance_with_library_by(
+        &mut self,
+        library: &ActionLibrary,
+        phase_advance: i32,
+    ) -> ActionAdvanceOutcome {
+        library.advance_state_by(self, phase_advance)
     }
 
     pub fn reset_phase(&mut self) {
@@ -765,6 +787,32 @@ mod tests {
             .map(|(name, spec)| (name.to_string(), spec))
             .collect();
         ActionLibrary::new(None, map)
+    }
+
+    // C4Object::ExecAction scales the WALK phase advance by speed
+    // (C4Object.cpp:4787-4789): PhaseDelay += fixtoi(|xdir| * 10) — a
+    // walker at xdir 1.5 crosses Delay=10 every frame, a standing walker
+    // (xdir 0) never animates.
+    #[test]
+    fn walk_phase_advance_scales_with_xdir_like_cpp() {
+        let library = ActionLibrary::new(
+            None,
+            HashMap::from([(
+                "Walk".to_string(),
+                ActionSpec::default()
+                    .with_procedure("WALK")
+                    .with_delay(10)
+                    .with_length(8),
+            )]),
+        );
+        let mut state = ActionState::new("Walk");
+
+        state.advance_with_library_by(&library, 15);
+        assert_eq!(state.phase, 1, "advance 15 crosses Delay=10 in one frame");
+
+        let phase = state.phase;
+        state.advance_with_library_by(&library, 0);
+        assert_eq!(state.phase, phase, "standing walker never animates");
     }
 
     // C4Object::ExecAction phase advance (C4Object.cpp:5441): "zero delay
