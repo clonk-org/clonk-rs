@@ -455,6 +455,39 @@ full-scenario shadow-diff (see Parity harnesses).
   parity (numbers at the C++ instant), (2) ActMap/action fidelity,
   (3) LocalNamed ingestion.
 
+- **2026-07-02 second wave — comparator orientation CORRECTED + four more
+  epics landed (commits 58b9a208..18a5edda):** the shadow comparator's
+  'expected/got' wording was MIRRORED ('expected' = the RUST runtime,
+  'got' = C++): every 2026-07-01-late class reading was inverted; the
+  messages now print rust/cpp labels. TRUE C++ join order (creation-order
+  forensics: LC_XTASK_SPAWN_DUMP=1419 scenario-errors headless,
+  LC_RUST_ENGINE_LOG=info SPAWNDUMP live — both Rust paths now agree
+  with each other): C++ creates the CCAN crosshair GC4V FIRST at 1420
+  (pre-crew; trigger still OPEN — the cannon Check/UpdateCrosshair
+  Ready-gate reads as blocked for the loaded Action=Stand cannon), then
+  crew, TRPR plus a TEMP object at 1426 that dies (TRPR Recruitment's
+  GrabObjectInfo cowboy-info hack — Rust errors on the missing host fn,
+  so no temp object, -1 skew), bandits with SYNCHRONOUS per-bandit equip
+  (C++ Fx*Start CreateContents at the AddEffect instant; Rust defers
+  effect-Start spawns to the effect-event loop end — ids 1489+ instead
+  of interleaved). Landed: **Def TimerCall** (DefCore Timer=/TimerCall=
+  default 35, per-object counter ++ every Execute, fail-safe call,
+  Objects.txt Timer= mid-cycle restore — C4Object.cpp:1085-1091);
+  **three-counter action machinery** (ActionState.time = Action.Time,
+  ticks = PhaseDelay; Delay=0 means NO phase advance, C4Object.cpp:5441;
+  NextAction=Hold clamps Length-1; absent/unresolved NextAction ends to
+  the literal Idle, C4Def.h:154; loader ActionTime=→time, PhaseDelay=→
+  ticks; ABI action_ticks = Action.Time per RustEngineBridge.cpp:397);
+  **LocalNamed ingestion** (C4ValueMap encoding A/i/b/O/a[size;...];
+  I/S/m read nil+warn); **weather-init ledger draws** (C4Weather.cpp:
+  36-70 evaluates on the synced LCG at apply — Season/YearSpeed/Climate/
+  Wind(=TargetWind, the tree GetWind driver)/rain block (NoInitialize-
+  gated; LaunchCloud objects unmodeled)/Lightning/Disasters; skipping
+  them had the ENTIRE ledger offset from frame 0). Wall progression at
+  the first diverging frame: 391 → 337 → 272 objects. REMAINING skew
+  work: synchronous effect-Start spawn materialization, GrabObjectInfo
+  (C4ObjectInfo model), the GC4V trigger hunt; then re-measure.
+
 ## Gates
 
 - **`cargo test --workspace`: GREEN** (~1240 pass, cargo exit 0). The old
