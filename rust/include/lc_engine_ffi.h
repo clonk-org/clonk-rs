@@ -53,6 +53,9 @@ typedef struct LcEngineObjectSnapshot {
     int32_t fixed_velocity_x;
     int32_t fixed_velocity_y;
     int32_t fixed_rotation;
+    bool mobile;
+    bool in_liquid;
+    int32_t object_timer;
     int32_t rotation_velocity;
     int32_t energy;
     int32_t construction;
@@ -244,6 +247,9 @@ typedef struct LcEngineRuntimeObjectState {
     int32_t fixed_velocity_x;
     int32_t fixed_velocity_y;
     int32_t fixed_rotation;
+    bool mobile;
+    bool in_liquid;
+    int32_t object_timer;
     int32_t rotation_velocity;
     int32_t energy;
     int32_t construction;

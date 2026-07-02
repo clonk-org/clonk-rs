@@ -69,6 +69,9 @@ pub struct LcEngineObjectSnapshot {
     pub fixed_velocity_x: i32,
     pub fixed_velocity_y: i32,
     pub fixed_rotation: i32,
+    pub mobile: bool,
+    pub in_liquid: bool,
+    pub object_timer: i32,
     pub rotation_velocity: i32,
     pub energy: i32,
     pub construction: i32,
@@ -250,6 +253,9 @@ pub struct LcEngineRuntimeObjectState {
     pub fixed_velocity_x: i32,
     pub fixed_velocity_y: i32,
     pub fixed_rotation: i32,
+    pub mobile: bool,
+    pub in_liquid: bool,
+    pub object_timer: i32,
     pub rotation_velocity: i32,
     pub energy: i32,
     pub construction: i32,
@@ -781,6 +787,9 @@ impl LcEngineRuntimeObjectStateArray {
                 fixed_velocity_x: fixed_velocity.x.val(),
                 fixed_velocity_y: fixed_velocity.y.val(),
                 fixed_rotation: fixed_rotation.val(),
+                mobile: object.mobile,
+                in_liquid: object.in_liquid,
+                object_timer: object.timer,
                 rotation_velocity: rotation_velocity.val(),
                 energy: object.energy,
                 construction: object.construction,
@@ -1038,15 +1047,12 @@ unsafe fn make_snapshot(
             command_queue: Vec::new(),
             command_stack: CommandStackSnapshot::default(),
             local_vars: HashMap::new(),
-            // Not carried by the C ABI snapshot yet — extend
-            // LcEngineObjectSnapshot + the bridge's CollectSnapshotBuffer
-            // before the shadow-diff compares these fields (task #22).
-            in_liquid: false,
-            mobile: false,
+            in_liquid: entry.in_liquid,
+            mobile: entry.mobile,
             // The C++ side recomputes OCF continuously; the compare does not
             // cover it — import as stored.
             ocf: 0,
-            timer: 0,
+            timer: entry.object_timer.max(0),
             own_mass: 0,
             on_fire: false,
             fire_phase: 0,
@@ -1445,6 +1451,18 @@ fn runtime_snapshot_mismatch(
                         expected_fix.y.val(),
                         actual_fix.x.val(),
                         actual_fix.y.val()
+                    ));
+                }
+                if expected_object.mobile != actual_object.mobile {
+                    problems.push(format!(
+                        "object {} mobile rust {}, cpp {}",
+                        id, expected_object.mobile, actual_object.mobile
+                    ));
+                }
+                if expected_object.timer != actual_object.timer {
+                    problems.push(format!(
+                        "object {} def-timer rust {}, cpp {}",
+                        id, expected_object.timer, actual_object.timer
                     ));
                 }
                 let expected_fixv = expected_object.fixed_velocity.unwrap_or_else(|| {

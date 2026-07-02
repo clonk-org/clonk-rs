@@ -1155,6 +1155,9 @@ SnapshotBuffer CollectSnapshotBuffer(C4Game &game, bool capture_surface_hash) {
         entry.snapshot.fixed_velocity_x = object->xdir.val;
         entry.snapshot.fixed_velocity_y = object->ydir.val;
         entry.snapshot.fixed_rotation = object->fix_r.val;
+        entry.snapshot.mobile = !!object->Mobile;
+        entry.snapshot.in_liquid = !!object->InLiquid;
+        entry.snapshot.object_timer = object->Timer;
         entry.snapshot.rotation_velocity = object->rdir.val;
         entry.snapshot.energy = object->Energy;
         entry.snapshot.damage = object->Damage;
