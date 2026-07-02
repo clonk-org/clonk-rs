@@ -3113,6 +3113,9 @@ struct LegacyObjectRecord {
     /// Mid-cycle Def TimerCall counter (`Timer=`, default 0,
     /// C4Object.cpp:2738).
     timer: Option<i32>,
+    /// Per-object script locals (`LocalNamed=`, C4Object.cpp:2788;
+    /// C4ValueMapData::CompileFunc, C4ValueMap.cpp:236-295).
+    local_named: Option<Vec<(String, lc_script::Value)>>,
     /// The CURRENT shape's vertices, serialized by C4Shape::CompileFunc
     /// into the [Object] section (C4Shape.cpp:495-515): the effective
     /// post-Con/rotation shape, loaded verbatim.
@@ -3282,6 +3285,9 @@ impl LegacyObjectRecord {
                         self.line, trimmed_value, err
                     ))
                 })?);
+            }
+            "localnamed" => {
+                self.local_named = Some(parse_local_named(trimmed_value, self.line)?);
             }
             "vertices" => {
                 self.vertex_count = Some(parse_i32(trimmed_value).map_err(|err| {
@@ -3508,6 +3514,7 @@ impl LegacyObjectRecord {
             mobile,
             rotation,
             timer,
+            local_named,
             vertex_count,
             vertex_x,
             vertex_y,
@@ -3606,6 +3613,12 @@ impl LegacyObjectRecord {
         config = config.with_mobile(mobile.unwrap_or(false));
         if let Some(timer) = timer {
             config = config.with_timer(timer);
+        }
+        if let Some(local_named) = local_named {
+            // Loaded objects keep their script locals verbatim (the tree
+            // MotionThreshold, bandit AI state); C++ denumerates object
+            // refs after load — Value::Object carries the number directly.
+            config = config.with_local_vars(local_named.into_iter().collect());
         }
         // The saved shape's vertices (C4Shape::CompileFunc into [Object],
         // C4Shape.cpp:495-515): the CURRENT effective shape, loaded
@@ -3815,6 +3828,131 @@ fn parse_i32(value: &str) -> Result<i32, String> {
 /// means the raw fixed-point value. GoldRush's hanging stalactites carry
 /// `YDir=f1067030938` = 1.2 px/frame — misread as a raw int it becomes a
 /// shattering hit speed.
+/// Objects.txt `LocalNamed=` (C4ValueMapData::CompileFunc,
+/// C4ValueMap.cpp:236-295): `<count>;name=<value>,name=<value>,...` where
+/// each value uses the C4Value type-char encoding (GetC4VID,
+/// C4Value.cpp:368-394). A zero count writes no separator and no entries.
+fn parse_local_named(
+    value: &str,
+    line: usize,
+) -> Result<Vec<(String, lc_script::Value)>, ScenarioError> {
+    let trimmed = value.trim();
+    let Some((_count, rest)) = trimmed.split_once(';') else {
+        return Ok(Vec::new());
+    };
+    let mut entries = Vec::new();
+    for part in split_outside_brackets(rest) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some((name, encoded)) = part.split_once('=') else {
+            return Err(ScenarioError::LegacyObjectsParse(format!(
+                "Objects.txt line {}: LocalNamed entry `{}` missing `=`",
+                line, part
+            )));
+        };
+        entries.push((
+            name.trim().to_string(),
+            parse_serialized_c4value(encoded.trim(), line)?,
+        ));
+    }
+    Ok(entries)
+}
+
+/// Split on commas outside `[...]` (array payloads carry their own commas).
+fn split_outside_brackets(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&text[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
+/// One serialized C4Value (C4Value::CompileFunc, C4Value.cpp:717-800 +
+/// GetC4VID :368-394): `A`=any (zero data reads back nil, nonzero guesses
+/// int), `i`=int, `b`=bool, `O`=enumerated object number (0 = no object),
+/// `a[size;elems]`=array with trailing nils omitted on write. `I` (C4ID),
+/// `S` (string-table id) and `m` (map) are not modeled yet — they read as
+/// nil with a warning.
+fn parse_serialized_c4value(
+    encoded: &str,
+    line: usize,
+) -> Result<lc_script::Value, ScenarioError> {
+    use lc_script::Value;
+    let parse_error = |detail: String| {
+        ScenarioError::LegacyObjectsParse(format!("Objects.txt line {}: {}", line, detail))
+    };
+    let mut chars = encoded.chars();
+    let Some(type_char) = chars.next() else {
+        return Ok(Value::Nil);
+    };
+    let payload = &encoded[type_char.len_utf8()..];
+    let int_payload = || {
+        parse_i32(payload.trim())
+            .map_err(|err| parse_error(format!("invalid C4Value payload `{}` ({})", encoded, err)))
+    };
+    match type_char {
+        'A' => Ok(match int_payload()? {
+            0 => Value::Nil,
+            other => Value::Int(other),
+        }),
+        'i' => Ok(Value::Int(int_payload()?)),
+        'b' => Ok(Value::Bool(int_payload()? != 0)),
+        'O' => Ok(match int_payload()? {
+            number if number > 0 => Value::Object(number as u64),
+            _ => Value::Nil,
+        }),
+        'a' => {
+            let inner = payload
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+                .ok_or_else(|| {
+                    parse_error(format!("invalid C4Value array `{}` (expected a[...])", encoded))
+                })?;
+            let (size_text, elements_text) = inner.split_once(';').unwrap_or((inner, ""));
+            let size = parse_i32(size_text.trim())
+                .map_err(|err| {
+                    parse_error(format!("invalid array size in `{}` ({})", encoded, err))
+                })?
+                .clamp(0, 100_000) as usize;
+            let mut elements: Vec<Value> = split_outside_brackets(elements_text)
+                .into_iter()
+                .map(str::trim)
+                .filter(|element| !element.is_empty())
+                .map(|element| parse_serialized_c4value(element, line))
+                .collect::<Result<_, _>>()?;
+            // Trailing nils are omitted on write; restore the full size.
+            if elements.len() < size {
+                elements.resize(size, Value::Nil);
+            }
+            Ok(Value::Array(elements))
+        }
+        'I' | 'S' | 'm' => {
+            tracing::warn!(
+                value = encoded,
+                "LocalNamed C4Value type not modeled yet; reading as nil"
+            );
+            Ok(Value::Nil)
+        }
+        other => Err(parse_error(format!(
+            "unknown C4Value type char `{}` in `{}`",
+            other, encoded
+        ))),
+    }
+}
+
 /// Comma-separated int array (StdCompiler mkArrayAdapt serialization,
 /// e.g. `VertexX=2,-14,14`).
 fn parse_i32_list(value: &str, line: usize, key: &str) -> Result<Vec<i32>, ScenarioError> {
@@ -8077,6 +8215,76 @@ global func Step(state, frame, random)
         assert!(
             !flag(&engine, 81),
             "movement clears the stale flag on dry land"
+        );
+    }
+
+    // Objects.txt `LocalNamed=` (C4Object.cpp:2788; C4ValueMapData::
+    // CompileFunc, C4ValueMap.cpp:236-295): per-object script locals load
+    // verbatim with the C4Value type-char encoding (GetC4VID,
+    // C4Value.cpp:368-394) — A=any (zero data reads back nil), i=int,
+    // b=bool, O=enumerated object number, a[size;elems]=array with
+    // trailing nils omitted. GoldRush trees carry MotionThreshold this
+    // way; bandit AI state (iOwner) too.
+    #[test]
+    fn objects_txt_restores_named_locals_like_cpp() {
+        let dir = tempdir().expect("tempdir");
+
+        let defs_root = dir.path().join("Defs.c4d");
+        let good = defs_root.join("Good.c4d");
+        std::fs::create_dir_all(&good).expect("definition dir");
+        std::fs::write(
+            good.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=16\n",
+        )
+        .expect("write defcore");
+
+        let scenario_dir = dir.path().join("Locals.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Locals\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=GOOD\nNumber=95\nStatus=1\nX=5\nY=5\n\
+             LocalNamed=5;iNum=i17,fFlag=b1,pRef=O80,junk=A0,aList=a[4;i1,i2]\n",
+        )
+        .expect("write objects");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+
+        let idx = engine
+            .find_object_index(ObjectId::new(95))
+            .expect("object exists");
+        let locals = &engine.objects[idx].state.local_vars;
+        assert_eq!(locals.get("iNum"), Some(&lc_script::Value::Int(17)));
+        assert_eq!(locals.get("fFlag"), Some(&lc_script::Value::Bool(true)));
+        assert_eq!(
+            locals.get("pRef"),
+            Some(&lc_script::Value::Object(80)),
+            "O-typed refs carry the enumerated Number (denumerated at use)"
+        );
+        assert_eq!(
+            locals.get("junk"),
+            Some(&lc_script::Value::Nil),
+            "C4V_Any with zero data reads back nil"
+        );
+        assert_eq!(
+            locals.get("aList"),
+            Some(&lc_script::Value::Array(vec![
+                lc_script::Value::Int(1),
+                lc_script::Value::Int(2),
+                lc_script::Value::Nil,
+                lc_script::Value::Nil,
+            ])),
+            "arrays restore the declared size; trailing nils are omitted on write"
         );
     }
 

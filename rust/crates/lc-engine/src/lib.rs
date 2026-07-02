@@ -4019,7 +4019,7 @@ pub enum EngineStateIoError {
     Json(#[from] serde_json::Error),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpawnConfig {
     #[serde(default)]
     pub id: Option<ObjectId>,
@@ -4082,6 +4082,10 @@ pub struct SpawnConfig {
     /// C4Object.cpp:2738).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timer: Option<i32>,
+    /// Per-object script locals (Objects.txt `LocalNamed=`,
+    /// C4Object.cpp:2788) — loaded verbatim into ObjectState.local_vars.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub local_vars: HashMap<String, Value>,
     /// The object is LOADED (Objects.txt / savegame), not created:
     /// C4GameObjects::Load (C4GameObjects.cpp:535-618) only compiles and
     /// denumerates — Construction/Initialize fire for new objects only
@@ -4119,6 +4123,7 @@ impl SpawnConfig {
             rotation_velocity: None,
             mobile: None,
             timer: None,
+            local_vars: HashMap::new(),
             loaded: false,
         }
     }
@@ -4150,6 +4155,11 @@ impl SpawnConfig {
 
     pub fn with_timer(mut self, timer: i32) -> Self {
         self.timer = Some(timer);
+        self
+    }
+
+    pub fn with_local_vars(mut self, local_vars: HashMap<String, Value>) -> Self {
+        self.local_vars = local_vars;
         self
     }
 
@@ -20530,6 +20540,7 @@ impl Engine {
             rotation_velocity,
             mobile,
             timer,
+            local_vars,
             loaded,
         } = config;
 
@@ -20647,7 +20658,7 @@ impl Engine {
                 base_graphics: None,
                 graphics_overlays: Vec::new(),
                 draw_transform: None,
-                local_vars: HashMap::new(),
+                local_vars,
                 in_liquid: in_liquid.unwrap_or(false),
                 mobile: false,
                 timer: timer.unwrap_or(0),
