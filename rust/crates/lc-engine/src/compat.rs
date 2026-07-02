@@ -3666,6 +3666,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Stuck", stuck);
     script.register_host_function("Inside", inside);
     script.register_host_function("GetVisibility", get_visibility);
+    script.register_host_function("Fling", fling);
     script.register_host_function("Jump", jump);
     script.register_host_function("EnergyCheck", energy_check);
     script.register_host_function("GetContact", get_contact);
@@ -8706,6 +8707,88 @@ fn get_visibility(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|arg| parse_object_reference_argument(arg, "GetVisibility", "obj"))
         .transpose()?;
     Ok(Value::Int(0))
+}
+
+/// FnFling (C4Script.cpp:347-356) -> C4Object::Fling
+/// (C4Object.cpp:1612-1624): optional half-speed add, then the Tumble
+/// action if the ActMap has one, else the Jump action (after the
+/// OnActionJump script hook), else raw velocity; the action-callback
+/// bottom attach is cleared either way.
+fn fling(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target = args
+        .first()
+        .map(|arg| parse_object_reference_argument(arg, "Fling", "obj"))
+        .transpose()?
+        .flatten();
+    let xdir = parse_optional_i32(args.get(1), "Fling", "xdir")?.unwrap_or(0);
+    let ydir = parse_optional_i32(args.get(2), "Fling", "ydir")?.unwrap_or(0);
+    let prec = parse_optional_i32(args.get(3), "Fling", "precision")?
+        .filter(|&prec| prec != 0)
+        .unwrap_or(1);
+    let add_speed = matches!(args.get(4), Some(Value::Bool(true)) | Some(Value::Int(1)));
+    let active = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(|object| object.id()))
+    });
+    if let Some(target) = target {
+        if Some(target) != active {
+            let mut forwarded = vec![
+                Value::Nil,
+                Value::Int(xdir),
+                Value::Int(ydir),
+                Value::Int(prec),
+                Value::Bool(add_speed),
+            ];
+            forwarded[0] = Value::Int(0);
+            return match call_world_object_function(target, "Fling", &forwarded) {
+                Some(result) => result,
+                None => Ok(Value::Bool(false)),
+            };
+        }
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(object) = context.object_context_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let mut txdir = itofix_prec(xdir, prec);
+        let mut tydir = itofix_prec(ydir, prec);
+        if add_speed {
+            let velocity = object.fixed_velocity();
+            txdir = txdir + velocity.x / 2;
+            tydir = tydir + velocity.y / 2;
+        }
+        let tumble = object.action_library.contains("Tumble");
+        let jump = object.action_library.contains("Jump");
+        if tumble {
+            object.pending_update.direction = Some(if txdir < C4Fixed::ZERO {
+                Direction::Left
+            } else {
+                Direction::Right
+            });
+            object.pending_update.action = Some(
+                ActionUpdate::default()
+                    .with_name("Tumble")
+                    .with_phase(0)
+                    .with_ticks(0)
+                    .with_force(true),
+            );
+        } else if jump {
+            object.pending_update.action = Some(
+                ActionUpdate::default()
+                    .with_name("Jump")
+                    .with_phase(0)
+                    .with_ticks(0)
+                    .with_force(true),
+            );
+        }
+        object.set_fixed_velocity(FixedVec2 { x: txdir, y: tydir });
+        Ok(Value::Bool(true))
+    })
 }
 
 /// FnJump (C4Script.cpp:358-363): ObjectComJump — routed as a
@@ -16242,6 +16325,7 @@ mod tests {
         "FindObjectOwner",
         "FindObjects",
         "FindOtherContents",
+        "Fling",
         "Format",
         "FrameCounter",
         "FreeRect",
