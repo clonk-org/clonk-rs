@@ -3131,9 +3131,10 @@ impl Object {
         let outcome = self.state.apply_delta(delta, action_library);
         if let Some(position) = delta.position {
             self.fixed_position = FixedVec2::from_ints(position.x, position.y);
-        } else {
-            self.state.position = self.position_pixels();
         }
+        // No reprojection from the fixed coords otherwise: C++ x/y only
+        // change via explicit assignment or movement — DoCon's initial
+        // adjust legitimately leaves y and fixtoi(fix_y) split.
         if let Some(fixed_velocity) = delta.fixed_velocity {
             // Sub-pixel velocity is authoritative; derive the whole-pixel mirror
             // from it (matches C++ where xdir/ydir as C4Fixed are the source of
@@ -21538,6 +21539,10 @@ impl Engine {
         // the final center is y - (Shape.Hgt + Shape.y) at the spawn
         // construction (C4Object.cpp:1401-1470). Loaded objects keep
         // their saved center (C4GameObjects::Load never re-cons).
+        // DoCon's initial bottom adjust moves the INT y only — C++ never
+        // touches fix_y here, leaving y and fixtoi(fix_y) split until a
+        // movement re-syncs them (rule objects keep the split forever).
+        let given_position = position;
         let position = if loaded || position_adjusted {
             position
         } else {
@@ -21552,6 +21557,9 @@ impl Engine {
                 ),
             )
         };
+        let docon_split_fixed = (!loaded && !position_adjusted
+            && position.y != given_position.y)
+            .then(|| FixedVec2::from_ints(given_position.x, given_position.y));
         // Objects.txt vertices are the CURRENT effective shape serialized
         // by C4Shape::CompileFunc (C4Shape.cpp:495-515) — already Con/
         // rotation-transformed, loaded VERBATIM. Future UpdateShape
@@ -21650,7 +21658,7 @@ impl Engine {
         // Saved sub-pixel position/rotation (FixX/FixY/FixR,
         // C4Object.cpp:2762-2764) override the itofix seeds; C++ keeps the
         // integer X/Y/Rotation independent — no back-projection.
-        if let Some(fixed) = fixed_position {
+        if let Some(fixed) = fixed_position.or(docon_split_fixed) {
             object.fixed_position = fixed;
         }
         if let Some(fixed) = fixed_rotation {
@@ -34926,12 +34934,12 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(mover_id).expect("object present");
-        assert_eq!(object.position, Vector2::new(4, 5));
+        assert_eq!(object.position, Vector2::new(5, 5));
 
         let idx = engine.find_object_index(mover_id).expect("object exists");
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(4));
-        assert_eq!(engine.objects[idx].fixed_velocity.x, fixed100(50));
-        assert_eq!(engine.objects[idx].fixed_velocity.y, -fixed100(50));
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
+        assert_eq!(engine.objects[idx].fixed_velocity.x, itofix(1));
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
     }
 
     #[test]
@@ -35067,16 +35075,16 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(mover_id).expect("object present");
-        assert_eq!(object.position, Vector2::new(4, 5));
-        assert_eq!(object.energy, 30827);
+        assert_eq!(object.position, Vector2::new(5, 5));
+        assert_eq!(object.energy, 22513);
 
         let idx = engine.find_object_index(mover_id).expect("object exists");
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(4));
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(5));
         assert_eq!(
             engine.objects[idx].fixed_velocity.x,
-            itofix(4) - fixed100(50)
+            itofix(1)
         );
-        assert_eq!(engine.objects[idx].fixed_velocity.y, -fixed100(50));
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
     }
 
     #[test]
@@ -35163,16 +35171,16 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(mover_id).expect("object present");
-        assert_eq!(object.position, Vector2::new(4, 5));
-        assert_eq!(object.energy, 36758);
+        assert_eq!(object.position, Vector2::new(6, 5));
+        assert_eq!(object.energy, 36328);
 
         let idx = engine.find_object_index(mover_id).expect("object exists");
-        assert_eq!(engine.objects[idx].fixed_position.x, itofix(4));
+        assert_eq!(engine.objects[idx].fixed_position.x, itofix(6));
         assert_eq!(
             engine.objects[idx].fixed_velocity.x,
-            itofix(2) - fixed100(50)
+            itofix(2)
         );
-        assert_eq!(engine.objects[idx].fixed_velocity.y, -fixed100(50));
+        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
     }
 
     #[test]
@@ -35247,7 +35255,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
 
         let object = restored.object_snapshot(id).expect("object present");
         assert_eq!(object.construction, FULL_CON / 2);
-        assert_eq!(object.position, Vector2::new(3, 6));
+        assert_eq!(object.position, Vector2::new(3, 10));
         assert_eq!(object.vertices[0].y, 4);
         assert_eq!(object.vertices[0].cnat, CNAT_BOTTOM);
         Ok(())
@@ -36520,10 +36528,13 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
             Vector2::new(100, 550),
             "created objects: y - (Hgt + Shape.y) = 560 - (20 - 10) (C4Object.cpp:1467)"
         );
+        // DoCon's initial adjust moves the INT y only — C++ leaves fix_y
+        // at the GIVEN center until a SetAction or the Tick10 rearm
+        // resyncs it (C4Object.cpp:4144, C4Movement.cpp:581-586).
         assert_eq!(
             engine.objects[idx].fixed_position.y.val(),
-            itofix(550).val(),
-            "fix follows the adjusted center"
+            itofix(560).val(),
+            "fix keeps the given center (the DoCon y/fix split)"
         );
 
         let loaded = engine

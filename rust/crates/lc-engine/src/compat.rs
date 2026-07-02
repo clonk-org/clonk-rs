@@ -11819,6 +11819,14 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         // must not repeat Initialize (C4Game.cpp:1117-1127).
         spawn.initialized = true;
         spawn.position_adjusted = true;
+        // The DoCon initial adjust moves the INT y only (C++ leaves fix_y
+        // at the given center) — carry the raw fixed alongside.
+        if position.y != raw_position.y {
+            spawn.fixed_position = Some(FixedVec2::from_ints(
+                raw_position.x,
+                raw_position.y,
+            ));
+        }
 
         let preview_ocf = ocf::compute(
             metadata.ocf_base,
