@@ -42,13 +42,15 @@ fn swim_procedure_handles_direction_and_drift() -> Result<(), Box<dyn std::error
         .expect("object must exist after swimming up-right");
     assert_eq!(object.velocity.x, 2);
     assert_eq!(object.velocity.y, -2);
+    // DFA_SWIM steers with SwimAccel only — no GravAccel component
+    // (C4Object.cpp:4920-4985): the velocity is the pure accumulated
+    // acceleration.
     assert_eq!(
         object
             .fixed_velocity
-            .expect("swim gravity remains sub-pixel")
-            .y
-            .val(),
-        -131006
+            .map(|velocity| velocity.y.val())
+            .unwrap_or(object.velocity.y << 16),
+        -131072
     );
 
     engine.apply_object_update(
@@ -62,13 +64,14 @@ fn swim_procedure_handles_direction_and_drift() -> Result<(), Box<dyn std::error
         .expect("object must exist after drifting in water");
     assert_eq!(object.velocity.x, 0);
     assert_eq!(object.velocity.y, 0);
+    // With no gravity component on DFA_SWIM the Stop deceleration comes
+    // to a full rest (C4Object.cpp:4941-4947).
     assert_eq!(
         object
             .fixed_velocity
-            .expect("swim drift keeps fixed gravity")
-            .y
-            .val(),
-        66
+            .map(|velocity| velocity.y.val())
+            .unwrap_or(0),
+        0
     );
 
     Ok(())

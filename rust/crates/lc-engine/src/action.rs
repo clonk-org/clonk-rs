@@ -203,37 +203,18 @@ impl ActionProcedure {
         }
     }
 
+    /// The C4Object::ExecAction gravity map (C4Object.cpp:4690-5437):
+    /// only ActIdle-with-Mobile, DFA_FLIGHT (:4885), DFA_LIFT (:5265) and
+    /// the no-Attach default case (:5437) run DoGravity — WALK/SCALE/
+    /// HANGLE/SWIM/FLOAT/DIG/THROW/BRIDGE/... never add GravAccel (they
+    /// steer with their own accelerations and pin ydir themselves).
     pub fn gravity_component_fixed(self, base_gravity: C4Fixed) -> C4Fixed {
         match self {
-            ActionProcedure::Float | ActionProcedure::Swim => {
-                let raw = i64::from(base_gravity.val());
-                let mut magnitude = raw.abs();
-                if magnitude > 0 {
-                    magnitude = (magnitude + 1) / 2;
-                    if magnitude == 0 {
-                        magnitude = 1;
-                    }
-                }
-                C4Fixed::from_raw((if raw < 0 { -magnitude } else { magnitude }) as i32)
-            }
-            ActionProcedure::Hang | ActionProcedure::Attach | ActionProcedure::Scale => {
-                C4Fixed::ZERO
-            }
-            ActionProcedure::Dig => C4Fixed::ZERO,
             ActionProcedure::Undefined
             | ActionProcedure::Flight
-            | ActionProcedure::Walk
-            | ActionProcedure::Kneel
-            | ActionProcedure::Throw
-            | ActionProcedure::Bridge
-            | ActionProcedure::Build
-            | ActionProcedure::Push
-            | ActionProcedure::Chop
             | ActionProcedure::Lift
-            | ActionProcedure::Fight
-            | ActionProcedure::Connect
-            | ActionProcedure::Pull
             | ActionProcedure::Other => base_gravity,
+            _ => C4Fixed::ZERO,
         }
     }
 

@@ -26794,12 +26794,14 @@ global func MenuCommand(state, kind, selection)
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity.y, 0);
+        // DFA_FLOAT never runs DoGravity (C4Object.cpp:5268-5290): a
+        // floater with no ComDir input holds its velocity exactly.
         assert_eq!(
-            object                .fixed_velocity
-                .expect("float gravity should remain sub-pixel")
-                .y
-                .val(),
-            393
+            object
+                .fixed_velocity
+                .map(|velocity| velocity.y.val())
+                .unwrap_or(0),
+            0
         );
     }
 
@@ -26836,12 +26838,14 @@ global func MenuCommand(state, kind, selection)
         let snapshot = engine.tick().expect("tick succeeds");
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity, Vector2::new(2, -2));
+        // No gravity rides on DFA_FLOAT (C4Object.cpp:5268-5290): the
+        // velocity is exactly the accumulated float acceleration.
         assert_eq!(
-            object                .fixed_velocity
-                .expect("float gravity should remain sub-pixel")
-                .y
-                .val(),
-            -131006
+            object
+                .fixed_velocity
+                .map(|velocity| velocity.y.val())
+                .unwrap_or(object.velocity.y << 16),
+            -131072
         );
     }
 
@@ -26877,12 +26881,14 @@ global func MenuCommand(state, kind, selection)
         let object = snapshot.object(id).expect("object present");
         assert_eq!(object.velocity.y, 0);
         assert_eq!(object.velocity.x, 0);
+        // DFA_SWIM steers with SwimAccel only — no GravAccel component
+        // (C4Object.cpp:4920-4985).
         assert_eq!(
-            object                .fixed_velocity
-                .expect("swim gravity should remain sub-pixel")
-                .y
-                .val(),
-            393
+            object
+                .fixed_velocity
+                .map(|velocity| velocity.y.val())
+                .unwrap_or(0),
+            0
         );
     }
 
