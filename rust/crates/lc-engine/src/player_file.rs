@@ -127,6 +127,9 @@ impl PlayerFile {
 fn collect_crew(group: &Group, crew: &mut Vec<CrewInfo>) -> Result<(), ScenarioError> {
     let mut subgroups = Vec::new();
     for entry in group.entries()? {
+        if std::env::var("LC_C4P_DEBUG").is_ok() {
+            eprintln!("C4P entry: {entry:?}");
+        }
         let name = entry.relative_path.to_string_lossy().to_string();
         let is_info = name.to_ascii_lowercase().ends_with(".c4i");
         let Ok(child) = group.open_child(&entry.relative_path) else {

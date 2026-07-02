@@ -465,7 +465,6 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         objects = engine.snapshot().objects.len(),
         "scenario-errors: applied"
     );
-    log_watched(&engine, "applied");
     if let Ok(raw) = std::env::var("LC_XTASK_OBJ_DUMP") {
         for id in raw.split(',').filter_map(|s| s.trim().parse::<u64>().ok()) {
             println!("OBJDUMP applied {id} {:?}", engine.debug_object_by_id(id));
@@ -492,6 +491,14 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         },
         false => ("Tester".to_string(), 0xff0000, 0, 0, Vec::new()),
     };
+    if std::env::var("LC_XTASK_CREW_DUMP").is_ok() {
+        for info in &crew {
+            println!(
+                "CREWDUMP id={} name={} rank={} exp={}",
+                info.id, info.name, info.rank, info.experience
+            );
+        }
+    }
     let joined = engine
         .join_player(lc_engine::JoinPlayerConfig {
             name,

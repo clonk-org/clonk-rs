@@ -3042,14 +3042,10 @@ impl FindObjectParams {
     }
 }
 
+/// FnGetEnergy: `100 * Energy / C4MaxPhysical` — scripts always read
+/// percent of the raw physical scale (C4Script.cpp FnGetEnergy).
 fn energy_to_script_value(energy: i32) -> i32 {
-    if energy <= DEFAULT_MAX_ENERGY {
-        energy
-    } else {
-        let numerator = (energy as i64) * 100;
-        let denominator = LEGACY_MAX_PHYSICAL as i64;
-        (numerator / denominator) as i32
-    }
+    ((energy as i64) * 100 / (LEGACY_MAX_PHYSICAL as i64)) as i32
 }
 
 fn construction_to_script_value(construction: i32) -> i32 {
@@ -14921,7 +14917,6 @@ struct ObjectScopeContext {
     current_alive: bool,
     current_in_liquid: bool,
     current_own_mass: i32,
-    max_energy: i32,
     current_owner: i32,
     current_category: i32,
     ocf_base: u32,
@@ -14985,7 +14980,6 @@ impl ObjectScopeContext {
         definition_physical: PhysicalInfo,
     ) -> Self {
         let blocks_other_actions = action_library.blocks_other_actions(&action_name);
-        let max_energy = energy.max(DEFAULT_MAX_ENERGY);
         let clamped_damage = damage.max(0);
         let clamped_construction = construction.clamp(0, FULL_CON);
         Self {
@@ -15013,7 +15007,6 @@ impl ObjectScopeContext {
             current_alive: alive,
             current_in_liquid: in_liquid,
             current_own_mass: own_mass,
-            max_energy,
             current_owner: owner,
             current_category: category,
             ocf_base,
@@ -15509,9 +15502,6 @@ impl ObjectScopeContext {
 
     fn set_energy(&mut self, energy: i32) {
         self.current_energy = energy;
-        if energy > self.max_energy {
-            self.max_energy = energy;
-        }
         self.pending_update.energy = Some(energy);
     }
 
@@ -15764,13 +15754,21 @@ impl ObjectScopeContext {
         }
     }
 
-    fn adjust_energy(&mut self, delta: i32, _exact: bool) -> i32 {
-        let mut next = self.energy().saturating_add(delta);
-        if next < 0 {
-            next = 0;
-        }
-        if next > self.max_energy {
-            next = self.max_energy;
+    /// `C4Object::DoEnergy` (C4Object.cpp:1345-1364): percent scale unless
+    /// fExact (`iChange *= C4MaxPhysical/100`), clamped to
+    /// 0..GetPhysical()->Energy. Physical-less fixture defs (energy 0)
+    /// keep the raw value unclamped — real content always carries a
+    /// [Physical] Energy.
+    fn adjust_energy(&mut self, delta: i32, exact: bool) -> i32 {
+        let delta = if exact {
+            delta
+        } else {
+            delta.saturating_mul(LEGACY_MAX_PHYSICAL / 100)
+        };
+        let mut next = self.energy().saturating_add(delta).max(0);
+        let max_energy = self.resolved_physical(false).energy;
+        if max_energy > 0 {
+            next = next.min(max_energy);
         }
         self.set_energy(next);
         next
@@ -20833,17 +20831,21 @@ mod tests {
 
     #[test]
     fn do_energy_applies_delta_and_clamps() {
+        // The harness object carries 100 raw energy and NO physical:
+        // DoEnergy(-25) = -25% = -25000 raw (C4Object.cpp:1347), floored
+        // at 0; the upper clamp needs GetPhysical()->Energy (the
+        // physical-less fixture keeps raw growth unclamped, documented).
         let (result, outcome) = with_object_host_context(|| do_energy(&[Value::Int(-25)]));
         let value = result.expect("DoEnergy returns bool");
         assert_eq!(value, Value::Bool(true));
         let update = outcome.object_update.expect("energy update recorded");
-        assert_eq!(update.energy, Some(75));
+        assert_eq!(update.energy, Some(0));
 
         let (result, outcome) = with_object_host_context(|| do_energy(&[Value::Int(50)]));
         let value = result.expect("DoEnergy returns bool");
         assert_eq!(value, Value::Bool(true));
         let update = outcome.object_update.expect("energy update recorded");
-        assert_eq!(update.energy, Some(100));
+        assert_eq!(update.energy, Some(50_100));
     }
 
     #[test]
@@ -20903,7 +20905,9 @@ mod tests {
                 ObjectId::new(1),
                 None,
                 ObjectStatus::Normal,
-                75,
+                // 75% of C4MaxPhysical - GetEnergy reads percent
+                // (C4Script.cpp FnGetEnergy).
+                75_000,
                 OWNER_NONE,
                 Vector2::ZERO,
                 Vector2::ZERO,
@@ -20987,7 +20991,7 @@ mod tests {
             None,
             None,
             OWNER_NONE,
-            33,
+            33_000,
             crate::FULL_CON,
             Vector2::ZERO,
             Vector2::ZERO,
@@ -23384,15 +23388,16 @@ mod tests {
         }
     }
 
+    // C4Object::DoEnergy model (C4Object.cpp:1345-1364): percent deltas
+    // scale by C4MaxPhysical/100; the harness object has no physical, so
+    // only the zero floor applies (real content always clamps to
+    // GetPhysical()->Energy).
     fn expected_energy_after_sequence(start: i32, deltas: &[i32]) -> i32 {
         let mut energy = start;
         for &delta in deltas {
-            energy = energy.saturating_add(delta);
-            if energy < 0 {
-                energy = 0;
-            } else if energy > DEFAULT_MAX_ENERGY {
-                energy = DEFAULT_MAX_ENERGY;
-            }
+            energy = energy
+                .saturating_add(delta.saturating_mul(LEGACY_MAX_PHYSICAL / 100))
+                .max(0);
         }
         energy
     }

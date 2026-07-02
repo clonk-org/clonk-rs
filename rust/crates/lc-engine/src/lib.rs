@@ -2008,6 +2008,9 @@ impl ActionChange {
 struct ApplyDeltaOutcome {
     container_change: Option<(Option<ObjectId>, Option<ObjectId>)>,
     action_change: Option<ActionChange>,
+    /// A nonzero energy reached 0 while alive — the caller runs
+    /// AssignDeath (C4Object::DoEnergy, C4Object.cpp:1363).
+    energy_died: bool,
 }
 
 /// The state a pending mid-call spawn would have once created — C++
@@ -2082,7 +2085,9 @@ impl ObjectState {
         if let Some(rotation) = delta.rotation {
             self.rotation = rotation.rem_euclid(360);
         }
+        let mut energy_died = false;
         if let Some(energy) = delta.energy {
+            energy_died = self.alive && self.energy != 0 && energy == 0;
             self.energy = energy;
         }
         if let Some(damage) = delta.damage {
@@ -2177,6 +2182,7 @@ impl ObjectState {
 
         self.action.reconcile_with_library(library);
         ApplyDeltaOutcome {
+            energy_died,
             container_change,
             action_change: action_change.and_then(|change| {
                 if change.should_record(&self.action) {
@@ -3974,6 +3980,28 @@ impl Object {
 /// no-op. C++ runs lifecycle/game calls with `fPassErrors=false`: the error
 /// shows in the log, the call yields nil, and the game continues
 /// (C4AulExec.cpp:1318-1342). Non-script engine errors stay fatal.
+/// The LegacyClonk default config runs FAIR CREW (Config.General.FairCrew
+/// with DefCrewStrength=1000): crew physicals come from the def promoted
+/// to RankByExperience(strength), ignoring the info rank
+/// (C4Object::GetPhysical, C4Object.cpp:2118-2133; C4Def.cpp:860-874).
+/// Live-oracle probe: UseFairCrew=1, crew Energy 55000.
+const USE_FAIR_CREW: bool = true;
+const FAIR_CREW_STRENGTH: i32 = 1000;
+
+/// `C4RankSystem::RankByExperience` with the default curve
+/// Experience(rank) = rank^1.5 * RankBase(=1000) (C4RankSystem.cpp:226-237).
+fn fair_crew_rank(experience: i32) -> i32 {
+    let mut rank = 0;
+    loop {
+        let next = ((rank + 1) as f64).powf(1.5) * 1000.0;
+        if next as i32 <= experience {
+            rank += 1;
+        } else {
+            return rank;
+        }
+    }
+}
+
 fn tolerate_script_error<T>(result: Result<T, EngineError>) -> Result<Option<T>, EngineError> {
     match result {
         Ok(value) => Ok(Some(value)),
@@ -4051,7 +4079,9 @@ pub struct SpawnConfig {
     pub fixed_velocity: Option<FixedVec2>,
     #[serde(default)]
     pub rotation: i32,
-    pub energy: i32,
+    /// None = the C4Object::Init rule (alive -> GetPhysical()->Energy,
+    /// else 0; C4Object.cpp:191-192). Some = explicit raw value (loader).
+    pub energy: Option<i32>,
     #[serde(default = "default_construction")]
     pub construction: i32,
     pub action: Option<ActionState>,
@@ -4121,7 +4151,7 @@ impl SpawnConfig {
             velocity: Vector2::ZERO,
             fixed_velocity: None,
             rotation: 0,
-            energy: 0,
+            energy: None,
             construction: FULL_CON,
             action: None,
             direction: Direction::default(),
@@ -4207,7 +4237,7 @@ impl SpawnConfig {
     }
 
     pub fn with_energy(mut self, energy: i32) -> Self {
-        self.energy = energy;
+        self.energy = Some(energy);
         self
     }
 
@@ -9923,6 +9953,40 @@ impl Engine {
             },
         );
 
+        // C4Object::Init receives the crew pInfo: GetPhysical() resolves
+        // the INFO physicals (C4Object.cpp:2118-2133). With fair crew ON
+        // (the LegacyClonk default config: FairCrew enabled, strength
+        // 1000 — live-oracle probe read UseFairCrew=1) the def's
+        // fair-crew physicals apply instead, promoted to
+        // RankByExperience(strength) (C4Def.cpp:860-874); otherwise the
+        // info physicals promote by the info rank. Both share
+        // C4PhysicalInfo::PromotionUpdate: Energy = max(def, (50 + 5 *
+        // BoundBy(rank,0,10)) * C4MaxPhysical/100 (C4InfoCore.cpp:
+        // 207-213, 420-423). Only Energy is modeled; the Can*/training
+        // physicals have no Rust counterpart yet.
+        let rank = if USE_FAIR_CREW {
+            fair_crew_rank(FAIR_CREW_STRENGTH)
+        } else {
+            info.rank
+        };
+        let mut promoted = self
+            .definitions
+            .get(&definition_id)
+            .map(|definition| *definition.physical())
+            .unwrap_or_default();
+        promoted.energy = promoted
+            .energy
+            .max((50 + 5 * rank.clamp(0, 10)) * (C4_MAX_PHYSICAL / 100));
+        if let Some(index) = self.find_object_index(id) {
+            self.objects[index].state.info_physical = Some(promoted);
+            // Init: `if (Alive) Energy = GetPhysical()->Energy`
+            // (C4Object.cpp:192) — the spawn used the def physical before
+            // the info attached.
+            if self.objects[index].state.alive {
+                self.objects[index].state.energy = promoted.energy;
+            }
+        }
+
         // Fail-safe Recruitment callback (PSF_OnJoinCrew = "~Recruitment",
         // C4Script.h:107; C4Player.cpp:520-524/565-568).
         let has_recruitment = self
@@ -13414,6 +13478,7 @@ impl Engine {
             definition.action_library().clone()
         };
 
+        let mut energy_died = false;
         let (object_id, previous_owner, new_owner, new_crew, container_change) = {
             let object = &mut self.objects[index];
             let previous_owner = object.state.owner;
@@ -13450,6 +13515,10 @@ impl Engine {
                 object.rotation_velocity = rotation_velocity;
             }
             if let Some(energy) = energy {
+                // AssignDeath below when a nonzero energy reaches 0
+                // (C4Object::DoEnergy, C4Object.cpp:1363) — host DoEnergy
+                // folds arrive here.
+                energy_died = object.state.alive && object.state.energy != 0 && energy == 0;
                 object.state.energy = energy;
             }
             if let Some(damage) = damage {
@@ -13546,6 +13615,9 @@ impl Engine {
         };
 
         self.update_sector_for_index(index);
+        if energy_died {
+            self.assign_death(index, false)?;
+        }
         self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
         if let Some((previous_container, new_container)) = container_change {
             self.apply_container_change(object_id, previous_container, new_container)?;
@@ -13787,6 +13859,7 @@ impl Engine {
         }
 
         let mut effect_events = Vec::new();
+        let mut energy_died = false;
         let mut container_changes = Vec::new();
 
         let mut command_operations = command_operations;
@@ -13809,6 +13882,7 @@ impl Engine {
             if let Some(update) = object_update {
                 let delta: ObjectDelta = update.into();
                 let outcome = object.apply_delta(&delta, action_library);
+                energy_died = outcome.energy_died;
                 if let Some(change) = outcome.action_change {
                     object.record_action_event(change.previous, ActionTransitionKind::Forced);
                 }
@@ -13842,6 +13916,12 @@ impl Engine {
             }
         }
         self.update_sector_for_index(index);
+
+        if energy_died {
+            // C4Object::DoEnergy kills synchronously when a nonzero
+            // energy reaches 0 (C4Object.cpp:1363).
+            self.assign_death(index, false)?;
+        }
 
         let (new_owner, new_crew_member) = {
             let object = &self.objects[index];
@@ -18479,7 +18559,13 @@ impl Engine {
     /// object's energy first reaches zero (C4Object.cpp:1363). Zero-physical
     /// definitions keep the unclamped legacy ceiling so physical-less
     /// fixtures behave as before.
+    /// Engine-side `C4Object::DoEnergy` with fExact=false — every engine
+    /// caller passes percent (fire/hit/asphyxiation/corrosion,
+    /// C4Object.cpp:782/904/928, C4GameObjects.cpp:174): the change scales
+    /// by C4MaxPhysical/100 BEFORE the effect DoDamage hook
+    /// (C4Object.cpp:1347 precedes :1355).
     fn change_object_energy(&mut self, idx: usize, change: i32, cause: i32, caused_by: i32) {
+        let change = change.saturating_mul(C4_MAX_PHYSICAL / 100);
         // Mark the damage-causing player first (C4Object.cpp:1351-1353).
         if change < 0 || cause == C4FX_CALL_ENG_OBJ_HIT {
             self.objects[idx].last_energy_loss_cause = caused_by;
@@ -18496,7 +18582,7 @@ impl Engine {
         } else {
             change
         };
-        let max_energy = self.object_physical(idx).energy / (C4_MAX_PHYSICAL / 100);
+        let max_energy = self.object_physical(idx).energy;
         let was_zero = {
             let object = &mut self.objects[idx];
             let was_zero = object.state.energy == 0;
@@ -18752,10 +18838,11 @@ impl Engine {
 
     /// Debug/test helper: (definition, action name, phase, position, fix)
     /// for one object id.
+    #[allow(clippy::type_complexity)]
     pub fn debug_object_by_id(
         &self,
         id: u64,
-    ) -> Option<(String, String, i32, Vector2, i32, i32)> {
+    ) -> Option<(String, String, i32, Vector2, i32, i32, i32)> {
         self.objects
             .iter()
             .find(|object| object.id.as_u64() == id)
@@ -18767,6 +18854,7 @@ impl Engine {
                     object.state.position,
                     crate::math::fixtoi(object.fixed_position.y),
                     object.state.owner,
+                    object.state.energy,
                 )
             })
     }
@@ -20777,6 +20865,7 @@ impl Engine {
         initial_action.reconcile_with_library(&action_library);
         let initial_crew_member = crew_member.unwrap_or(default_crew_member);
 
+
         let id = match explicit_id {
             Some(explicit) => {
                 if self.objects.iter().any(|object| object.id == explicit) {
@@ -20793,6 +20882,12 @@ impl Engine {
         let initial_category = category
             .map(|value| normalize_category(value, definition_category))
             .unwrap_or(definition_category);
+        let initial_alive = alive.unwrap_or(!loaded && initial_category & CATEGORY_LIVING != 0);
+        let definition_physical_energy = self
+            .definitions
+            .get(&definition_id)
+            .map(|definition| definition.physical().energy)
+            .unwrap_or(0);
 
         let owns_vertices = !vertices.is_empty();
         let shape_template = ObjectShapeTemplate::new(
@@ -20857,7 +20952,15 @@ impl Engine {
                 position,
                 velocity,
                 rotation: rotation.rem_euclid(360),
-                energy,
+                // C4Object::Init: `if (Alive) Energy = GetPhysical()->Energy`
+                // (C4Object.cpp:192, raw C4MaxPhysical scale); at creation
+                // no info/temporary physical exists yet, so the def's
+                // physical applies. Loaded objects compile Energy= verbatim.
+                energy: energy.unwrap_or(if initial_alive {
+                    definition_physical_energy
+                } else {
+                    0
+                }),
                 damage: 0,
                 magic_energy: 0,
                 magic_capacity: 0,
@@ -20878,8 +20981,7 @@ impl Engine {
                 // C4Object::Init sets Alive only for C4D_Living categories
                 // (C4Object.cpp:191); loaded objects compile it with default
                 // false (C4Object.cpp:2756).
-                alive: alive
-                    .unwrap_or(!loaded && initial_category & CATEGORY_LIVING != 0),
+                alive: initial_alive,
                 base_graphics: None,
                 graphics_overlays: Vec::new(),
                 draw_transform: None,
@@ -23260,7 +23362,7 @@ mod tests {
             SpawnConfig::new("Clonk")
                 .with_position(Vector2::new(50, 50))
                 .with_alive(true)
-                .with_energy(100),
+                .with_energy(100_000),
         )?;
         let _rock = engine.spawn_object(
             SpawnConfig::new("Rock")
@@ -23273,11 +23375,12 @@ mod tests {
         engine.cross_check(1)?;
 
         // dX = itofix(5): hit energy = fixtoi(itofix(25)*50/5) = 250,
-        // reduced: max(250/3, 1) = 83, energy change = -(83/5) = -16.
+        // reduced: max(250/3, 1) = 83, energy change = -(83/5) = -16% =
+        // -16000 raw (DoEnergy fExact=false, C4Object.cpp:1347).
         let victim_idx = engine.find_object_index(victim).expect("victim exists");
         assert_eq!(
             engine.objects[victim_idx].state.energy,
-            energy_before - 16,
+            energy_before - 16_000,
             "hit energy applied"
         );
         // fling: xdir = itofix(5)*50/100 = itofix(2.5), ydir = 0; no
@@ -23321,7 +23424,7 @@ mod tests {
             SpawnConfig::new("Clonk")
                 .with_position(Vector2::new(50, 50))
                 .with_alive(true)
-                .with_energy(5),
+                .with_energy(5_000),
         )?;
         let gem = engine.spawn_object(
             SpawnConfig::new("Gem")
@@ -23331,7 +23434,7 @@ mod tests {
 
         let idx = engine.find_object_index(clonk).expect("clonk exists");
         engine.change_object_energy(idx, -3, C4FX_CALL_ENG_SCRIPT, 7);
-        assert!(engine.objects[idx].state.alive, "energy 2 left");
+        assert!(engine.objects[idx].state.alive, "energy 2000 raw left");
         engine.change_object_energy(idx, -2, C4FX_CALL_ENG_SCRIPT, 7);
         let idx = engine.find_object_index(clonk).expect("clonk exists");
         assert!(!engine.objects[idx].state.alive, "dead at zero energy");
@@ -23595,7 +23698,7 @@ mod tests {
         let hut = engine.spawn_object(
             SpawnConfig::new("Hut")
                 .with_position(Vector2::new(10, 10))
-                .with_energy(50),
+                .with_energy(50_000),
         )?;
         let idx = engine.find_object_index(hut).expect("hut exists");
         assert!(engine.incinerate_object(idx, 1, false, None)?);
@@ -23610,17 +23713,17 @@ mod tests {
             (phase_after_start + 1) % 15
         );
         assert_eq!(engine.objects[idx].state.construction, con_before - 100);
-        assert_eq!(engine.objects[idx].state.energy, 50);
+        assert_eq!(engine.objects[idx].state.energy, 50_000);
         assert_eq!(engine.objects[idx].state.damage, 0);
         assert_eq!(engine.rng, mirror, "no draws in open air off-tick");
 
         // frame 5: Tick5 → energy -1 (air: no background draw)
         engine.exec_object_fire(idx, 5);
-        assert_eq!(engine.objects[idx].state.energy, 49);
+        assert_eq!(engine.objects[idx].state.energy, 49_000);
         // frame 10: Tick10 + Tick5 → damage +2, energy -1
         engine.exec_object_fire(idx, 10);
         assert_eq!(engine.objects[idx].state.damage, 2);
-        assert_eq!(engine.objects[idx].state.energy, 48);
+        assert_eq!(engine.objects[idx].state.energy, 48_000);
         assert_eq!(engine.rng, mirror, "still no draws in open air");
 
         // Buried in earth (below the flat surface at y = 30): Tick5 draws
@@ -29430,21 +29533,21 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .register_definition(definition)
             .expect("definition registers");
         let id = engine
-            .spawn_object(SpawnConfig::new("Actor").with_alive(true).with_energy(50))
+            .spawn_object(SpawnConfig::new("Actor").with_alive(true).with_energy(50_000))
             .expect("spawn succeeds");
         engine.tick().expect("tick succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
 
         // List order is ascending priority: Ward (100) runs before Armor
         // (200). A script-cause hit of -10 passes Ward untouched and is
-        // halved by Armor: 50 - 5 = 45.
+        // -10% = -10000 raw (C4Object.cpp:1347), halved by Armor: -5000.
         engine.change_object_energy(idx, -10, C4FX_CALL_ENG_SCRIPT, 3);
-        assert_eq!(engine.objects[idx].state.energy, 45);
+        assert_eq!(engine.objects[idx].state.energy, 45_000);
 
         // A fire-cause hit is zeroed by Ward; the zero aborts the walk AND
         // DoEnergy (C4Object.cpp:1358) — Armor never halves, energy keeps.
         engine.change_object_energy(idx, -10, C4FX_CALL_ENG_FIRE, 3);
-        assert_eq!(engine.objects[idx].state.energy, 45);
+        assert_eq!(engine.objects[idx].state.energy, 45_000);
     }
 
     #[test]
@@ -29477,13 +29580,13 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("legacy definition registers");
 
         let clonk_id = engine
-            .spawn_object(SpawnConfig::new("Clonk").with_energy(40))
+            .spawn_object(SpawnConfig::new("Clonk").with_energy(40_000))
             .expect("clonk spawns");
         let clonk_idx = engine.find_object_index(clonk_id).expect("clonk exists");
         engine.change_object_energy(clonk_idx, 30, C4FX_CALL_ENG_SCRIPT, -1);
         assert_eq!(
-            engine.objects[clonk_idx].state.energy, 50,
-            "gain clamps to the physical Energy ceiling"
+            engine.objects[clonk_idx].state.energy, 50_000,
+            "gain (+30% = +30000 raw) clamps to GetPhysical()->Energy"
         );
 
         // Documented deviation: zero-physical fixture definitions keep the
@@ -29493,7 +29596,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             .expect("crate spawns");
         let crate_idx = engine.find_object_index(crate_id).expect("crate exists");
         engine.change_object_energy(crate_idx, 30, C4FX_CALL_ENG_SCRIPT, -1);
-        assert_eq!(engine.objects[crate_idx].state.energy, 70);
+        assert_eq!(engine.objects[crate_idx].state.energy, 30_040);
     }
 
     #[test]
@@ -30290,7 +30393,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
                     .with_alive(true)
                     .with_position(Vector2::new(2, 26))
                     .with_vertices(vertices)
-                    .with_energy(50),
+                    .with_energy(50_000),
             )
             .expect("diver spawns");
         let idx = engine.find_object_index(id).expect("diver exists");
@@ -30310,7 +30413,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             engine.objects[idx].state.breath,
             50_000 - 2 * C4_MAX_PHYSICAL / 100
         );
-        assert_eq!(engine.objects[idx].state.energy, 50, "breath before energy");
+        assert_eq!(engine.objects[idx].state.energy, 50_000, "breath before energy");
         let _ = mirror.random(5); // the BubbleOut x argument (C4Object.cpp:905)
         let _ = mirror.random(i32::MAX); // the per-object Step draw
         assert_eq!(engine.rng, mirror, "exactly one extra synced draw");
@@ -30322,7 +30425,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         for _ in 0..5 {
             engine.tick().expect("tick succeeds");
         }
-        assert_eq!(engine.objects[idx].state.energy, 49);
+        assert_eq!(engine.objects[idx].state.energy, 49_000);
         assert_eq!(engine.objects[idx].last_energy_loss_cause, 7);
     }
 
@@ -31795,6 +31898,156 @@ protected func HudCount() { return(ObjectCount(GetID(),0,0,0,0,0,0,0,0,GetOwner(
         assert_eq!(count, 2, "one spawn yields the pair, no more (AmmoHud.c4d:17)");
     }
 
+    // C4Object::Init: `if (Category & C4D_Living) Alive = 1; if (Alive)
+    // Energy = GetPhysical()->Energy` (C4Object.cpp:191-192) — energy is
+    // the RAW physical scale (C4MaxPhysical = 100000), not a percent.
+    // GoldRush oracle: bandits read 25000 (SetPhysical temporary), crew
+    // 55000 (rank-1 PromotionUpdate), DefCore [Physical] Energy=50000.
+    #[test]
+    fn alive_spawns_start_at_the_physical_energy_like_cpp() {
+        let mut engine = Engine::with_seed(0);
+        let mut living = simple_definition("CLNK");
+        living.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+        engine.register_definition(living).expect("living registers");
+        engine
+            .register_definition(simple_definition("ROCK"))
+            .expect("rock registers");
+
+        let clonk = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK").with_category(CATEGORY_OBJECT | CATEGORY_LIVING),
+            )
+            .expect("clonk spawns");
+        let idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(
+            engine.objects[idx].state.energy, 50_000,
+            "alive spawn: Energy = GetPhysical()->Energy (C4Object.cpp:192)"
+        );
+
+        let rock = engine
+            .spawn_object(SpawnConfig::new("ROCK").with_category(CATEGORY_OBJECT))
+            .expect("rock spawns");
+        let idx = engine.find_object_index(rock).expect("rock exists");
+        assert_eq!(engine.objects[idx].state.energy, 0, "non-living: Energy stays 0");
+
+        // Loaded objects compile Energy= verbatim (C4Object.cpp:2754).
+        let loaded = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                    .with_energy(23_456)
+                    .with_loaded(true),
+            )
+            .expect("loaded spawns");
+        let idx = engine.find_object_index(loaded).expect("loaded exists");
+        assert_eq!(engine.objects[idx].state.energy, 23_456);
+    }
+
+    // FnDoEnergy: `if (!fExact) iChange *= C4MaxPhysical/100` (=1000,
+    // C4Object.cpp:1347) and clamps 0..GetPhysical()->Energy; FnGetEnergy
+    // reads back `100 * Energy / C4MaxPhysical` — scripts always see
+    // percent while the object stores the raw physical scale
+    // (C4Script.cpp FnGetEnergy).
+    #[test]
+    fn do_energy_and_get_energy_use_the_cpp_scales() {
+        let script = r#"#strict
+local iRead;
+func Hurt() {
+    DoEnergy(-3);
+    iRead = GetEnergy();
+    return(1);
+}
+func HurtExact() {
+    DoEnergy(-500, 0, 1);
+    return(1);
+}
+func Overheal() {
+    DoEnergy(100);
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut living = Definition::from_script("CLNK", "Clonk", script).expect("compiles");
+        living.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+        engine.register_definition(living).expect("registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK").with_category(CATEGORY_OBJECT | CATEGORY_LIVING),
+            )
+            .expect("spawns");
+        let idx = engine.find_object_index(id).expect("exists");
+
+        engine
+            .call_object_function(idx, "Hurt", Vec::new())
+            .expect("hurt runs");
+        let idx = engine.find_object_index(id).expect("exists");
+        assert_eq!(
+            engine.objects[idx].state.energy, 47_000,
+            "DoEnergy(-3) removes 3% = 3000 raw (C4Object.cpp:1347)"
+        );
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iRead"),
+            Some(&Value::Int(47)),
+            "GetEnergy returns 100*E/C4MaxPhysical"
+        );
+
+        engine
+            .call_object_function(idx, "HurtExact", Vec::new())
+            .expect("exact runs");
+        let idx = engine.find_object_index(id).expect("exists");
+        assert_eq!(
+            engine.objects[idx].state.energy, 46_500,
+            "fExact skips the percent conversion"
+        );
+
+        engine
+            .call_object_function(idx, "Overheal", Vec::new())
+            .expect("overheal runs");
+        let idx = engine.find_object_index(id).expect("exists");
+        assert_eq!(
+            engine.objects[idx].state.energy, 50_000,
+            "clamped to GetPhysical()->Energy (C4Object.cpp:1361)"
+        );
+    }
+
+    // DoEnergy to zero kills: AssignDeath fires when a nonzero energy
+    // reaches 0 (C4Object.cpp:1363) — including through the HOST DoEnergy
+    // fold, not just engine damage paths.
+    #[test]
+    fn host_do_energy_to_zero_assigns_death_like_cpp() {
+        let script = r#"#strict
+func Slay() { DoEnergy(-100); return(1); }
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut living = Definition::from_script("CLNK", "Clonk", script).expect("compiles");
+        living.set_physical(PhysicalInfo {
+            energy: 50_000,
+            ..PhysicalInfo::default()
+        });
+        engine.register_definition(living).expect("registers");
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK").with_category(CATEGORY_OBJECT | CATEGORY_LIVING),
+            )
+            .expect("spawns");
+        let idx = engine.find_object_index(id).expect("exists");
+        engine
+            .call_object_function(idx, "Slay", Vec::new())
+            .expect("slay runs");
+        let idx = engine.find_object_index(id).expect("exists");
+        assert_eq!(engine.objects[idx].state.energy, 0);
+        assert!(
+            !engine.objects[idx].state.alive,
+            "energy zero from nonzero -> AssignDeath (C4Object.cpp:1363)"
+        );
+    }
+
     // FnObjectCount passes cthr->Obj as pExclude - LOCAL CALLS EXCLUDE
     // THE CALLER (C4Script.cpp FnObjectCount -> Game.ObjectCount, same as
     // FindObjectOwner). The AmmoHud pair depends on it: AHUD#1's
@@ -32492,7 +32745,7 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
         engine.register_definition(host).expect("host registers");
         engine.register_definition(spell).expect("spell registers");
         let id = engine
-            .spawn_object(SpawnConfig::new("HOST").with_energy(50))
+            .spawn_object(SpawnConfig::new("HOST").with_energy(50_000))
             .expect("spawn succeeds");
 
         for _ in 0..4 {
@@ -32506,8 +32759,9 @@ func FxEquipStart(pTarget, iNumber, iTemp) {
              kill it as timerless)"
         );
         assert_eq!(
-            engine.objects[idx].state.energy, 40,
-            "FxBuffTimer ran in the spell def's script at iTime 2 and 4"
+            engine.objects[idx].state.energy, 40_000,
+            "FxBuffTimer (DoEnergy(-5) = -5000 raw, C4Object.cpp:1347) ran \
+             in the spell def's script at iTime 2 and 4"
         );
     }
 

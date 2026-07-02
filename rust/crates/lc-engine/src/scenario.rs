@@ -6387,6 +6387,62 @@ global func Step(state, frame, random)
             .collect()
     }
 
+    // Fair crew (the LegacyClonk default config; live-oracle probe read
+    // UseFairCrew=1, strength 1000): crew physicals come from the def
+    // promoted to RankByExperience(1000)=1 (C4Def.cpp:860-874,
+    // C4RankSystem.cpp:226-237) — Energy = max(def, 55 * C4MaxPhysical/
+    // 100) = 55000 (PromotionUpdate, C4InfoCore.cpp:207-213). GoldRush
+    // live oracle: crew read 55000; bandits keep script-set temporary
+    // physicals (25000).
+    #[test]
+    fn crew_infos_promote_physicals_by_rank_like_cpp() {
+        let mut engine = Engine::with_seed(3);
+        let mut clonk =
+            Definition::from_script("CLNK", "Clonk", "#strict\n").expect("clonk compiles");
+        clonk.set_crew_member(true);
+        clonk.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
+        clonk.set_physical(crate::PhysicalInfo {
+            energy: 50_000,
+            ..crate::PhysicalInfo::default()
+        });
+        engine.register_definition(clonk).expect("clonk registers");
+
+        engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Tester".to_string(),
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![crate::player_file::CrewInfo {
+                    id: "CLNK".to_string(),
+                    name: "Henry".to_string(),
+                    rank: 1,
+                    experience: 120,
+                    participation: 1,
+                    in_action: false,
+                    has_died: false,
+                }],
+                startup_player_count: 1,
+            })
+            .expect("join succeeds");
+
+        let crew = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "CLNK")
+            .expect("crew spawned");
+        assert_eq!(
+            crew.state.energy, 55_000,
+            "rank-1 promotion: max(50000, 55*1000) (C4InfoCore.cpp:212)"
+        );
+        assert_eq!(
+            crew.state.info_physical.map(|physical| physical.energy),
+            Some(55_000),
+            "the info physical carries the promoted value"
+        );
+    }
+
     #[test]
     fn join_player_runs_scenario_init_with_the_cpp_draw_ledger() {
         // C4Player::ScenarioInit (C4Player.cpp:670-777) consumes the synced
@@ -7909,7 +7965,7 @@ global func Step(state, frame, random)
         assert_eq!(second.config.definition_id, "GEM1");
         assert_eq!(second.config.position, Vector2::new(30, 40));
         assert_eq!(second.config.velocity, Vector2::new(-5, 3));
-        assert_eq!(second.config.energy, 77);
+        assert_eq!(second.config.energy, Some(77));
         assert_eq!(second.config.alive, Some(false));
         assert_eq!(second.config.category, Some(0));
         assert_eq!(second.config.direction, Direction::Right);
@@ -9277,7 +9333,7 @@ mod game_start_sync {
         );
         let (engine, _) = load(dir.path());
 
-        let (_, action, _phase, position, fix_y, _) =
+        let (_, action, _phase, position, fix_y, ..) =
             engine.debug_object_by_id(3).expect("tree exists");
         assert_eq!(action, crate::action::DEFAULT_ACTION_NAME, "no Action= -> ActIdle");
         assert_eq!(position, Vector2::new(204, 258), "saved center kept");
