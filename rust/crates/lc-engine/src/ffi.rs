@@ -1040,6 +1040,9 @@ unsafe fn make_snapshot(
             // before the shadow-diff compares these fields (task #22).
             in_liquid: false,
             mobile: false,
+            // The C++ side recomputes OCF continuously; the compare does not
+            // cover it — import as stored.
+            ocf: 0,
             timer: 0,
             own_mass: 0,
             on_fire: false,

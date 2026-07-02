@@ -3728,6 +3728,7 @@ impl Object {
             local_vars: self.state.local_vars.clone(),
             in_liquid: self.state.in_liquid,
             mobile: self.state.mobile,
+            ocf: self.state.ocf,
             timer: self.state.timer,
             own_mass: self.state.own_mass,
             on_fire: self.state.on_fire,
@@ -4416,6 +4417,10 @@ pub struct ObjectSnapshot {
     /// C4Object.cpp:2772).
     #[serde(default)]
     pub mobile: bool,
+    /// The object's current OCF bits (C4Object::OCF) — broadcast world
+    /// feeds need them for OCF-filtered searches.
+    #[serde(default)]
+    pub ocf: u32,
     /// The Def TimerCall counter (persisted like the savegame `Timer`
     /// field, C4Object.cpp:2738).
     #[serde(default)]
@@ -10896,6 +10901,39 @@ impl Engine {
         };
         self.game_over_triggered = false;
         self.scenario_script = Some(script);
+        // The scenario script's `global func`s are engine-global like any
+        // other script's (C4AulScriptEngine owns AA_GLOBAL functions from
+        // EVERY linked script): GoldRush's FxStayThere*/DoInitialize live
+        // there and must resolve from def scripts and effect callbacks.
+        {
+            let mut functions: HashMap<String, lc_script::Function> = self
+                .global_script_functions
+                .as_deref()
+                .cloned()
+                .unwrap_or_default();
+            let mut changed = false;
+            if let Some(scenario) = self.scenario_script.as_ref() {
+                for (name, function) in scenario.script.global_access_functions() {
+                    let mut function = function.clone();
+                    if let Some(previous) = functions.remove(name) {
+                        function.push_overload(previous);
+                    }
+                    functions.insert(name.clone(), function);
+                    changed = true;
+                }
+            }
+            if changed {
+                let table = Some(Arc::new(functions));
+                self.global_script_functions = table.clone();
+                for definition in self.definitions.values_mut() {
+                    definition.set_global_functions(table.clone());
+                }
+                if let Some(script) = self.scenario_script.as_mut() {
+                    script.set_global_functions(table.clone());
+                }
+                self.definition_metadata_cache.borrow_mut().take();
+            }
+        }
         Ok(created)
     }
 
@@ -21866,6 +21904,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.draw_transform,
             )
             .with_command_names(object.command_stack.command_names())
+            .with_ocf(object.ocf)
             // Nested calls (obj->Method, foreign RemoveObject) need a full
             // scope for WORLD objects too — GoldRush re-runs the placed
             // cannon's Initialize from InitializePlayer
@@ -32144,6 +32183,62 @@ func Slay() { DoEnergy(-100); return(1); }
             !engine.objects[idx].state.alive,
             "energy zero from nonzero -> AssignDeath (C4Object.cpp:1363)"
         );
+    }
+
+    // GoldRush DoInitialize pins NPCs in place: `while(pObj =
+    // FindObjectOwner(0,-1,0,0,0,0,OCF_CrewMember,0,0,pObj))
+    // AddEffect("StayThere",...)` (Goldrush.c4s/Script.c:34-35) - the
+    // owner filter is NO_OWNER, the OCF filter needs the crew bit on
+    // ALIVE unowned NPCs, and pFindNext drives the iteration.
+    #[test]
+    fn find_object_owner_iterates_unowned_crew_like_cpp() {
+        let script = r#"#strict
+func Sweep() {
+    var i, pObj;
+    while(pObj = FindObjectOwner(0,-1,0,0,0,0,OCF_CrewMember,0,0,pObj)) {
+        AddEffect("StayThere", pObj, 1, 35, pObj);
+        ++i;
+    }
+    return(i);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut npc = Definition::from_script("NPCX", "Npc", "#strict\n").expect("npc compiles");
+        npc.set_crew_member(true);
+        engine.register_definition(npc).expect("npc registers");
+        let caller =
+            Definition::from_script("CALL", "Caller", script).expect("caller compiles");
+        engine.register_definition(caller).expect("caller registers");
+
+        for x in [10, 40] {
+            engine
+                .spawn_object(
+                    SpawnConfig::new("NPCX")
+                        .with_category(CATEGORY_OBJECT)
+                        .with_position(Vector2::new(x, 10))
+                        .with_owner(-1)
+                        .with_crew_member(true)
+                        .with_alive(true),
+                )
+                .expect("npc spawns");
+        }
+        let id = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let idx = engine.find_object_index(id).expect("caller exists");
+        let swept = engine
+            .call_object_function(idx, "Sweep", Vec::new())
+            .expect("sweep runs");
+        assert_eq!(swept, Value::Int(2), "both unowned crew NPCs iterated");
+        let pinned = engine
+            .objects
+            .iter()
+            .filter(|object| {
+                object.definition_id == "NPCX"
+                    && object.state.effects.iter().any(|e| e.name == "StayThere")
+            })
+            .count();
+        assert_eq!(pinned, 2, "StayThere lands on every NPC");
     }
 
     // FnObjectCount passes cthr->Obj as pExclude - LOCAL CALLS EXCLUDE

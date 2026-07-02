@@ -9419,7 +9419,6 @@ mod game_start_sync {
     // The Fx handlers are scenario GLOBALS (Script.c:553-564) — resolved
     // through GetFuncRecursive in C++ (C4Effect.cpp:31-40).
     #[test]
-    #[ignore = "RED until host_world_context_from_snapshot carries OCF (task #14)"]
     fn scenario_script_pins_unowned_crew_with_stay_there_like_cpp() {
         let dir = tempdir().expect("tempdir");
         let defs = dir.path().join("Defs.c4d");

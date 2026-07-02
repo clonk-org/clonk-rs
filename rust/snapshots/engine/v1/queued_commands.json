@@ -53,6 +53,8 @@
           {
             "delay": 0,
             "update": {
+              "portrait_source": null,
+              "solid_mask_override": null,
               "position": null,
               "velocity": {
                 "x": 3,
@@ -105,7 +107,8 @@
                 "category": 16,
                 "in_liquid": null,
                 "mobile": null,
-                "loaded": false
+                "loaded": false,
+                "solid_mask": null
               }
             ],
             "landscape": [],
@@ -135,6 +138,8 @@
           {
             "delay": 3,
             "update": {
+              "portrait_source": null,
+              "solid_mask_override": null,
               "position": null,
               "velocity": null,
               "rotation": null,
@@ -175,6 +180,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": true,
+        "ocf": 136319073,
         "timer": 1,
         "own_mass": 0,
         "on_fire": false,
@@ -1068,6 +1074,8 @@
           {
             "delay": 2,
             "update": {
+              "portrait_source": null,
+              "solid_mask_override": null,
               "position": null,
               "velocity": null,
               "rotation": null,
@@ -1108,6 +1116,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": true,
+        "ocf": 136319073,
         "timer": 2,
         "own_mass": 0,
         "on_fire": false,
@@ -1171,6 +1180,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": true,
+        "ocf": 136314945,
         "timer": 0,
         "own_mass": 0,
         "on_fire": false,
@@ -2056,6 +2066,8 @@
           {
             "delay": 1,
             "update": {
+              "portrait_source": null,
+              "solid_mask_override": null,
               "position": null,
               "velocity": null,
               "rotation": null,
@@ -2096,6 +2108,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": true,
+        "ocf": 136319073,
         "timer": 3,
         "own_mass": 0,
         "on_fire": false,
@@ -2159,6 +2172,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": true,
+        "ocf": 136314945,
         "timer": 1,
         "own_mass": 0,
         "on_fire": false,
@@ -3052,6 +3066,8 @@
           {
             "delay": 0,
             "update": {
+              "portrait_source": null,
+              "solid_mask_override": null,
               "position": null,
               "velocity": null,
               "rotation": null,
@@ -3092,6 +3108,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": true,
+        "ocf": 136319073,
         "timer": 4,
         "own_mass": 0,
         "on_fire": false,
@@ -3155,6 +3172,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": true,
+        "ocf": 136314945,
         "timer": 2,
         "own_mass": 0,
         "on_fire": false,
@@ -3987,8 +4005,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Helper": 1,
-      "Commander": 1
+      "Commander": 1,
+      "Helper": 1
     },
     "transfer_zones": [],
     "menu_requests": [],
@@ -4051,6 +4069,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": true,
+        "ocf": 136314945,
         "timer": 3,
         "own_mass": 0,
         "on_fire": false,
@@ -4947,6 +4966,7 @@
         "local_vars": {},
         "in_liquid": false,
         "mobile": true,
+        "ocf": 136314945,
         "timer": 4,
         "own_mass": 0,
         "on_fire": false,
@@ -5779,8 +5799,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Helper": 1,
-      "Commander": 1
+      "Commander": 1,
+      "Helper": 1
     },
     "transfer_zones": [],
     "menu_requests": [],

@@ -1704,14 +1704,20 @@ impl<'a> Vm<'a> {
     ) -> Result<(), RuntimeError> {
         match target {
             AssignmentTarget::EffectSlot(args) => {
-                // Evaluate all arguments to create the slot identifier
                 let mut arg_values = Vec::new();
                 for arg in args {
                     arg_values.push(self.evaluate(arg, env, 0)?);
                 }
-                // Store in environment with special naming scheme
-                // Format: __effect_{index}_{target_id}_{effect_num}
-                // For simplicity, join all args with underscores
+                // `EffectVar(i, obj, num) = v`: FnEffectVar returns a
+                // REFERENCE into the effect's variables (C4Script.cpp) —
+                // write through the host's set path (4th argument).
+                if let Some(host) = self.host_functions.get("EffectVar") {
+                    arg_values.push(value);
+                    return self
+                        .invoke_host_function("EffectVar", host, &arg_values)
+                        .map(|_| ());
+                }
+                // Host-less fixture VMs keep the legacy env-slot shim.
                 let slot_name = format!(
                     "__effect_{}",
                     arg_values
