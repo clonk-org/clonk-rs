@@ -375,64 +375,74 @@ impl ActionLibrary {
     ) -> ActionAdvanceOutcome {
         let mut outcome = ActionAdvanceOutcome::default();
 
-        if let Some(length) = spec.length {
-            if length == 0 {
-                Self::transition(state, spec, library);
-                return outcome;
-            }
-        }
+        // Action.Time++ (C4Object.cpp:4745): counts every ExecAction of a
+        // real action, independent of the phase machinery below.
+        state.time = state.time.saturating_add(1);
 
-        let delay = spec.delay.unwrap_or(1).max(1);
-        if delay > 1 {
-            state.ticks = state.ticks.saturating_add(1);
-            if state.ticks < delay {
-                return outcome;
-            }
+        // Phase advance is gated on a nonzero Delay — "zero delay means no
+        // phase advance" (C4Object.cpp:5441; the ActMap default is 0,
+        // C4Def.h:151).
+        let Some(delay) = spec.delay.filter(|delay| *delay > 0) else {
+            return outcome;
+        };
+
+        // PhaseDelay += 1; the phase moves when it reaches Delay and the
+        // counter restarts (C4Object.cpp:5443-5447).
+        state.ticks = state.ticks.saturating_add(1);
+        if state.ticks < delay {
+            return outcome;
         }
         state.ticks = 0;
 
         let step = normalize_step(spec.step);
         let current_action = state.name.clone();
-
-        if let Some(length) = spec.length {
-            let length = i32::try_from(length).unwrap_or(i32::MAX);
-            let next_phase = state.phase.saturating_add(step);
-            if spec.phase_call.is_some() {
-                outcome.phase_event = Some(ActionPhaseEvent {
-                    action: current_action.clone(),
-                    phase: next_phase,
-                });
-            }
-
-            if next_phase >= length {
-                state.phase = next_phase;
-                Self::transition(state, spec, library);
-            } else {
-                state.phase = next_phase;
-            }
-        } else {
-            state.phase = state.phase.saturating_add(step);
-            if spec.phase_call.is_some() {
-                outcome.phase_event = Some(ActionPhaseEvent {
-                    action: current_action,
-                    phase: state.phase,
-                });
-            }
+        // Phase += Step, then the PhaseCall, then the length check
+        // (C4Object.cpp:5448-5464).
+        state.phase = state.phase.saturating_add(step);
+        if spec.phase_call.is_some() {
+            outcome.phase_event = Some(ActionPhaseEvent {
+                action: current_action,
+                phase: state.phase,
+            });
+        }
+        // Length defaults to 1 (C4Def.h:150).
+        let length = spec
+            .length
+            .map(|length| i32::try_from(length).unwrap_or(i32::MAX))
+            .unwrap_or(1);
+        if state.phase >= length {
+            Self::transition(state, spec, library, length);
         }
 
         outcome
     }
 
-    fn transition(state: &mut ActionState, spec: &ActionSpec, library: &ActionLibrary) {
-        let next_name = spec.next.as_deref().unwrap_or(&state.name);
-        let resolved = if library.contains(next_name) {
-            next_name
-        } else {
-            library.default_action()
-        };
+    fn transition(state: &mut ActionState, spec: &ActionSpec, library: &ActionLibrary, length: i32) {
+        // NextAction=Hold clamps at the last phase and keeps the action
+        // (ActHold, C4Def.cpp:786-787; C4Object.cpp:5457-5459).
+        if spec
+            .next
+            .as_deref()
+            .is_some_and(|next| next.eq_ignore_ascii_case("Hold"))
+        {
+            state.phase = (length - 1).max(0);
+            return;
+        }
+        // An absent NextAction is ActIdle (C4Def.h:154), and an unresolved
+        // NextActionName stays ActIdle too (the C4Def::Load mapping loop,
+        // C4Def.cpp:784-792) — both go to the literal Idle state, NOT the
+        // library's default SPAWN action.
+        let resolved = spec
+            .next
+            .as_deref()
+            .filter(|next| library.contains(next))
+            .unwrap_or(DEFAULT_ACTION_NAME);
 
         if resolved != state.name {
             state.name = resolved.to_string();
+            // Action.Time resets on the action CHANGE only
+            // (C4Object.cpp:4106-4108); a self-chain keeps counting.
+            state.time = 0;
         }
         state.phase = 0;
         state.ticks = 0;
@@ -467,8 +477,15 @@ fn normalize_step(step: Option<u32>) -> i32 {
 pub struct ActionState {
     pub name: String,
     pub phase: i32,
+    /// `Action.PhaseDelay` (C4Object.cpp:5443-5447): the intra-phase
+    /// counter, restarting every phase advance.
     #[serde(default)]
     pub ticks: u32,
+    /// `Action.Time` (C4Object.cpp:4745): total frames in the current
+    /// action, reset only when the action CHANGES (C4Object.cpp:4106-4108).
+    /// GetActTime reads this (C4Script.cpp).
+    #[serde(default)]
+    pub time: u32,
     #[serde(default)]
     pub data: i32,
     #[serde(default)]
@@ -483,6 +500,7 @@ impl ActionState {
             name: name.into(),
             phase: 0,
             ticks: 0,
+            time: 0,
             data: 0,
             target: None,
             target2: None,
@@ -509,6 +527,9 @@ impl ActionState {
                 self.name = name.clone();
                 self.phase = 0;
                 self.ticks = 0;
+                // Action.Time resets on the action change
+                // (C4Object.cpp:4106-4108).
+                self.time = 0;
             }
         }
         if let Some(phase) = update.phase {
@@ -740,5 +761,93 @@ mod tests {
         state.reconcile_with_library(&library);
         assert_eq!(state.phase, 0, "idle has no phase");
         assert_eq!(state.ticks, 0, "idle has no action time");
+    }
+
+    fn library_with(specs: Vec<(&str, ActionSpec)>) -> ActionLibrary {
+        let map: std::collections::HashMap<String, ActionSpec> = specs
+            .into_iter()
+            .map(|(name, spec)| (name.to_string(), spec))
+            .collect();
+        ActionLibrary::new(None, map)
+    }
+
+    // C4Object::ExecAction phase advance (C4Object.cpp:5441): "zero delay
+    // means no phase advance" — the whole block is gated on pAction->Delay,
+    // so a Delay=0 action never moves its phase and never chains.
+    #[test]
+    fn zero_delay_action_never_advances_like_cpp() {
+        let library = library_with(vec![(
+            "Still",
+            ActionSpec::default()
+                .with_length(2)
+                .with_delay(0)
+                .with_next("Gone"),
+        )]);
+        let mut state = ActionState::new("Still");
+        for _ in 0..10 {
+            library.advance_state(&mut state);
+        }
+        assert_eq!(state.name, "Still", "Delay=0 freezes the action");
+        assert_eq!(state.phase, 0, "Delay=0 freezes the phase");
+    }
+
+    // NextAction=Hold (ActHold, C4Def.cpp:786-787): the phase clamps to
+    // Length-1 and the action STAYS (C4Object.cpp:5457-5459).
+    #[test]
+    fn next_action_hold_clamps_last_phase_like_cpp() {
+        let library = library_with(vec![(
+            "Open",
+            ActionSpec::default()
+                .with_length(3)
+                .with_delay(1)
+                .with_next("Hold"),
+        )]);
+        let mut state = ActionState::new("Open");
+        for _ in 0..10 {
+            library.advance_state(&mut state);
+        }
+        assert_eq!(state.name, "Open", "Hold keeps the action");
+        assert_eq!(state.phase, 2, "Hold clamps at Length-1");
+    }
+
+    // An empty NextAction maps to ActIdle (C4ActionDef default,
+    // C4Def.h:154 / C4Def.cpp:784-792): the action ENDS to Idle when the
+    // phase chain elapses — it does not loop.
+    #[test]
+    fn missing_next_action_ends_to_idle_like_cpp() {
+        let library = library_with(vec![(
+            "Flash",
+            ActionSpec::default().with_length(2).with_delay(1),
+        )]);
+        let mut state = ActionState::new("Flash");
+        library.advance_state(&mut state);
+        assert_eq!(state.name, "Flash");
+        library.advance_state(&mut state);
+        assert_eq!(
+            state.name, "Idle",
+            "phase end without NextAction goes ActIdle (C4Def.h:154)"
+        );
+    }
+
+    // Action.Time (C4Object.cpp:4745) counts EVERY ExecAction of a real
+    // action — independent of Delay and never reset by phase advances —
+    // while PhaseDelay (state.ticks) resets each phase
+    // (C4Object.cpp:5443-5447).
+    #[test]
+    fn action_time_counts_independently_of_the_phase_delay_like_cpp() {
+        let library = library_with(vec![(
+            "Spin",
+            ActionSpec::default()
+                .with_length(100)
+                .with_delay(3)
+                .with_next("Hold"),
+        )]);
+        let mut state = ActionState::new("Spin");
+        for _ in 0..7 {
+            library.advance_state(&mut state);
+        }
+        assert_eq!(state.time, 7, "Action.Time counts every frame");
+        assert_eq!(state.phase, 2, "two full 3-frame delays elapsed");
+        assert_eq!(state.ticks, 1, "PhaseDelay restarts after each advance");
     }
 }

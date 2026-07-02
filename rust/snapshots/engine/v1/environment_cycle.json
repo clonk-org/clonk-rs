@@ -30,6 +30,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 1,
           "data": 0,
           "target": null,
           "target2": null
@@ -1160,6 +1161,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 2,
           "data": 0,
           "target": null,
           "target2": null
@@ -2290,6 +2292,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 3,
           "data": 0,
           "target": null,
           "target2": null
@@ -3420,6 +3423,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 4,
           "data": 0,
           "target": null,
           "target2": null
@@ -4550,6 +4554,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 5,
           "data": 0,
           "target": null,
           "target2": null
@@ -5680,6 +5685,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 6,
           "data": 0,
           "target": null,
           "target2": null
@@ -6810,6 +6816,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 7,
           "data": 0,
           "target": null,
           "target2": null
@@ -7940,6 +7947,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 8,
           "data": 0,
           "target": null,
           "target2": null

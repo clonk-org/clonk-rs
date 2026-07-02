@@ -3130,7 +3130,10 @@ struct LegacyObjectRecord {
     command_direction: Option<CommandDirection>,
     action_name: Option<String>,
     action_phase: Option<i32>,
+    /// Action.Time (`ActionTime=`, C4Object.cpp:2745 area).
     action_ticks: Option<u32>,
+    /// Action.PhaseDelay (`PhaseDelay=`), the intra-phase counter.
+    action_phase_delay: Option<u32>,
     action_data: Option<i32>,
     action_target: Option<u64>,
     action_target2: Option<u64>,
@@ -3408,6 +3411,15 @@ impl LegacyObjectRecord {
                 }
                 self.action_ticks = Some(ticks as u32);
             }
+            "phasedelay" => {
+                let value = parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid PhaseDelay `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?;
+                self.action_phase_delay = Some(value.max(0) as u32);
+            }
             "actiondata" => {
                 self.action_data = Some(parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
@@ -3511,6 +3523,7 @@ impl LegacyObjectRecord {
             action_name,
             action_phase,
             action_ticks,
+            action_phase_delay,
             action_data,
             action_target,
             action_target2,
@@ -3652,6 +3665,7 @@ impl LegacyObjectRecord {
             action_name,
             action_phase,
             action_ticks,
+            action_phase_delay,
             action_data,
             action_target,
             action_target2,
@@ -3670,7 +3684,8 @@ impl LegacyObjectRecord {
 fn build_action_state(
     name: Option<String>,
     phase: Option<i32>,
-    ticks: Option<u32>,
+    time: Option<u32>,
+    phase_delay: Option<u32>,
     data: Option<i32>,
     target: Option<u64>,
     target2: Option<u64>,
@@ -3680,7 +3695,12 @@ fn build_action_state(
     if let Some(value) = phase {
         state.phase = value;
     }
-    if let Some(value) = ticks {
+    // ActionTime= is Action.Time; PhaseDelay= is the intra-phase counter
+    // (C4Object.cpp:2840-2849 restores Time/Phase/PhaseDelay verbatim).
+    if let Some(value) = time {
+        state.time = value;
+    }
+    if let Some(value) = phase_delay {
         state.ticks = value;
     }
     if let Some(value) = data {
@@ -5237,7 +5257,7 @@ Objects=STNE=1;TREE=1
                     "script": "scripts/mover.aul",
                     "default_action": "Walk",
                     "actions": {
-                        "Walk": { "length": 2, "next": "Idle" },
+                        "Walk": { "length": 2, "delay": 1, "next": "Idle" },
                         "Idle": { "length": 1 }
                     }
                 }
@@ -7700,7 +7720,10 @@ global func Step(state, frame, random)
         assert_eq!(second.config.command_direction, CommandDirection::Right);
         let action = second.config.action.as_ref().expect("action state present");
         assert_eq!(action.name, "Idle");
-        assert_eq!(action.ticks, 6);
+        // ActionTime= is Action.Time (C4Object.cpp:2745), not the
+        // intra-phase PhaseDelay counter.
+        assert_eq!(action.time, 6);
+        assert_eq!(action.ticks, 0);
         assert_eq!(action.phase, 2);
         assert_eq!(action.data, 5);
         assert_eq!(action.target, Some(ObjectId::new(100)));

@@ -5781,7 +5781,7 @@ impl Definition {
                     state.rotation,
                     &state.effects,
                     state.action.name.clone(),
-                    state.action.ticks,
+                    state.action.time,
                     state.action.data,
                     state.action.phase,
                     self.action_library.clone(),
@@ -5952,7 +5952,7 @@ impl Definition {
                     state.rotation,
                     &state.effects,
                     state.action.name.clone(),
-                    state.action.ticks,
+                    state.action.time,
                     state.action.data,
                     state.action.phase,
                     self.action_library.clone(),
@@ -6115,7 +6115,7 @@ impl Definition {
                     state.rotation,
                     &state.effects,
                     state.action.name.clone(),
-                    state.action.ticks,
+                    state.action.time,
                     state.action.data,
                     state.action.phase,
                     self.action_library.clone(),
@@ -6302,7 +6302,7 @@ impl Definition {
                     state.rotation,
                     &state.effects,
                     state.action.name.clone(),
-                    state.action.ticks,
+                    state.action.time,
                     state.action.data,
                     state.action.phase,
                     self.action_library.clone(),
@@ -6420,7 +6420,7 @@ impl Definition {
             state.rotation,
             &state.effects,
             state.action.name.clone(),
-            state.action.ticks,
+            state.action.time,
             state.action.data,
             state.action.phase,
             self.action_library.clone(),
@@ -6553,7 +6553,7 @@ impl Definition {
             state.rotation,
             &state.effects,
             state.action.name.clone(),
-            state.action.ticks,
+            state.action.time,
             state.action.data,
             state.action.phase,
             self.action_library.clone(),
@@ -6677,7 +6677,7 @@ impl Definition {
             state.rotation,
             &state.effects,
             state.action.name.clone(),
-            state.action.ticks,
+            state.action.time,
             state.action.data,
             state.action.phase,
             self.action_library.clone(),
@@ -6806,7 +6806,7 @@ impl Definition {
             state.rotation,
             &state.effects,
             state.action.name.clone(),
-            state.action.ticks,
+            state.action.time,
             state.action.data,
             state.action.phase,
             self.action_library.clone(),
@@ -6932,7 +6932,7 @@ impl Definition {
             state.rotation,
             &state.effects,
             state.action.name.clone(),
-            state.action.ticks,
+            state.action.time,
             state.action.data,
             state.action.phase,
             self.action_library.clone(),
@@ -7400,7 +7400,7 @@ impl Definition {
                     state.rotation,
                     &state.effects,
                     state.action.name.clone(),
-                    state.action.ticks,
+                    state.action.time,
                     state.action.data,
                     state.action.phase,
                     self.action_library.clone(),
@@ -10672,7 +10672,7 @@ impl Engine {
                     object.state.rotation,
                     object.state.vertices.clone(),
                     object.state.action.data,
-                    object.state.action.ticks,
+                    object.state.action.time,
                     object.state.action.phase,
                     object.state.container,
                     object.state.draw_transform,
@@ -21416,7 +21416,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 object.rotation,
                 object.vertices.clone(),
                 object.action.data,
-                object.action.ticks,
+                object.action.time,
                 object.action.phase,
                 object.container,
                 object.draw_transform,
@@ -25137,7 +25137,10 @@ global func MenuCommand(state, kind, selection)
         let mut actions = HashMap::new();
         actions.insert(
             "Walk".to_string(),
-            ActionSpec::default().with_length(2).with_next("Idle"),
+            ActionSpec::default()
+                .with_length(2)
+                .with_delay(1)
+                .with_next("Idle"),
         );
         actions.insert("Idle".to_string(), ActionSpec::default().with_length(1));
         definition.configure_actions(Some("Walk".to_string()), actions);
@@ -25286,6 +25289,7 @@ global func MenuCommand(state, kind, selection)
             "Idle".to_string(),
             ActionSpec::default()
                 .with_length(1)
+                .with_delay(1)
                 .with_next("Walk")
                 .with_start_call("OnIdleStart")
                 .with_end_call("OnIdleEnd"),
@@ -25599,6 +25603,7 @@ global func MenuCommand(state, kind, selection)
             "Idle".to_string(),
             ActionSpec::default()
                 .with_length(3)
+                .with_delay(1)
                 .with_next("Walk")
                 .with_phase_call("OnIdlePhase"),
         );
@@ -25671,6 +25676,7 @@ global func MenuCommand(state, kind, selection)
             "Pulse".to_string(),
             ActionSpec::default()
                 .with_length(5)
+                .with_delay(1)
                 .with_step(2)
                 .with_next("Pulse"),
         );
@@ -26409,7 +26415,10 @@ global func MenuCommand(state, kind, selection)
         actions.insert("Idle".to_string(), ActionSpec::default());
         actions.insert(
             "Bridge".to_string(),
-            ActionSpec::default().with_procedure("bridge"),
+            ActionSpec::default()
+                .with_procedure("bridge")
+                .with_length(10)
+                .with_delay(1),
         );
         definition.configure_actions(Some("Idle".to_string()), actions);
 
@@ -31296,7 +31305,10 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
             Definition::from_script("Actor", "Actor", source).expect("script compiles");
         let mut actions = HashMap::new();
         actions.insert("Walk".to_string(), ActionSpec::default());
-        actions.insert("Jump".to_string(), ActionSpec::default());
+        actions.insert(
+            "Jump".to_string(),
+            ActionSpec::default().with_length(10).with_delay(1),
+        );
         definition.configure_actions(Some("Walk".to_string()), actions);
         engine
             .register_definition(definition)

@@ -708,7 +708,8 @@ impl LcEngineRuntimeObjectStateArray {
             buffer.definition_ids.push(definition_id);
             buffer.action_names.push(action_name);
 
-            let action_ticks = i32::try_from(object.action.ticks).unwrap_or_else(|_| i32::MAX);
+            // The ABI field is Action.Time (RustEngineBridge.cpp:397,1173).
+            let action_ticks = i32::try_from(object.action.time).unwrap_or_else(|_| i32::MAX);
 
             let has_container = object.container.is_some();
             let container_id = object.container.map(|id| id.as_u64()).unwrap_or_default();
@@ -891,7 +892,7 @@ unsafe fn make_snapshot(
         let mut action = ActionState::new(action_name);
         action.phase = entry.action_phase;
         if entry.action_ticks >= 0 {
-            action.ticks = entry.action_ticks as u32;
+            action.time = entry.action_ticks as u32;
         } else {
             action.ticks = 0;
         }

@@ -30,6 +30,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 1,
           "data": 0,
           "target": null,
           "target2": null
@@ -1006,8 +1007,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
     "transfer_zones": [],
     "menu_requests": [],
@@ -1044,6 +1045,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 2,
           "data": 0,
           "target": null,
           "target2": null
@@ -1143,6 +1145,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 0,
           "data": 0,
           "target": null,
           "target2": null
@@ -1992,8 +1995,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
     "transfer_zones": [],
     "menu_requests": [],
@@ -2030,6 +2033,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 3,
           "data": 0,
           "target": null,
           "target2": null
@@ -2129,6 +2133,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 1,
           "data": 0,
           "target": null,
           "target2": null
@@ -3024,6 +3029,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 4,
           "data": 0,
           "target": null,
           "target2": null
@@ -3123,6 +3129,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 2,
           "data": 0,
           "target": null,
           "target2": null
@@ -4018,6 +4025,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 3,
           "data": 0,
           "target": null,
           "target2": null
@@ -4875,8 +4883,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Helper": 1,
-      "Commander": 1
+      "Commander": 1,
+      "Helper": 1
     },
     "transfer_zones": [],
     "menu_requests": [],
@@ -4913,6 +4921,7 @@
           "name": "Idle",
           "phase": 0,
           "ticks": 0,
+          "time": 4,
           "data": 0,
           "target": null,
           "target2": null
@@ -5770,8 +5779,8 @@
     "controls": [],
     "network_packets": [],
     "definition_categories": {
-      "Commander": 1,
-      "Helper": 1
+      "Helper": 1,
+      "Commander": 1
     },
     "transfer_zones": [],
     "menu_requests": [],
