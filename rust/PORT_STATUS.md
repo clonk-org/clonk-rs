@@ -605,6 +605,20 @@ full-scenario shadow-diff (see Parity harnesses).
   contained-contents class, the NOPC-like adjust misses, then the
   walker fix half-steps.
 
+- **2026-07-02 eighth wave — wall 16 (393 -> 16, 96%):** the SetAction
+  fix-resync (C4Object.cpp:4144) landed at every action-apply seam - it
+  pins the wagon (and everything with a creation SetAction) at the
+  DoCon-adjusted center and collapsed the walker fix half-steps too;
+  the snapshot integer position is the sim-state x/y (was reprojected
+  from fixed, masking the split). REMAINING 16 at frame 1: the
+  ride/wagon-train variants (rider Ride-vs-RideStill + x-offset via the
+  ATTACH vertex slot, horse Turn, crosshair 1420 tracking), crew ydir
+  0.2 at join (C++ crew falls a frame - enter/exit timing), 702's
+  ground (solid-mask coverage at the tower), tree 402 Breeze/Still
+  (wind threshold), 1x1-helper subpix tails, vertices 3 (CHBM line
+  vertex spans - DFA_CONNECT vertex tracking unimplemented), owner
+  1428, effects 597 NoDmg singleton.
+
 ## Gates
 
 - **`cargo test --workspace`: GREEN** (~1240 pass, cargo exit 0). The old
