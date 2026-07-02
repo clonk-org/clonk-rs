@@ -12672,6 +12672,21 @@ impl Engine {
                     id: object.id,
                     definition_id: object.definition_id.clone(),
                     position: object.state.position,
+                    // t_contact equivalent: live vertex probe (CNAT bits);
+                    // shape top from the current (con-scaled) rect
+                    // (C4Command JumpControl, C4Command.cpp:1857-1920).
+                    contact: {
+                        let landscape = self.landscape.as_ref();
+                        object.state.vertices.iter().fold(0u32, |bits, vertex| {
+                            bits | compat::compute_vertex_contact(
+                                landscape,
+                                object.state.position,
+                                vertex,
+                                0,
+                            )
+                        })
+                    },
+                    shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
                     status: object.state.status,
                     destroyed: object.destroyed,
                     category: object.state.category,
@@ -12792,6 +12807,7 @@ impl Engine {
                 let command_context = CommandRuntimeContext {
                     frame: self.frame,
                     position: current_position,
+                    landscape: landscape_slot.as_ref(),
                     object: builder_snapshot,
                     objects: &command_snapshots,
                     players: &player_snapshots,
@@ -13395,6 +13411,21 @@ impl Engine {
                     id: object_id,
                     definition_id: self.objects[idx].definition_id.clone(),
                     position: self.objects[idx].state.position,
+                    contact: {
+                        let landscape = self.landscape.as_ref();
+                        self.objects[idx].state.vertices.iter().fold(0u32, |bits, vertex| {
+                            bits | compat::compute_vertex_contact(
+                                landscape,
+                                self.objects[idx].state.position,
+                                vertex,
+                                0,
+                            )
+                        })
+                    },
+                    shape_top: self.objects[idx]
+                        .current_shape_rect()
+                        .map(|rect| rect.y)
+                        .unwrap_or(0),
                     status: self.objects[idx].state.status,
                     destroyed: self.objects[idx].destroyed,
                     category: self.objects[idx].state.category,

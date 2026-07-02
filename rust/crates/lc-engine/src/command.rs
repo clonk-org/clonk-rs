@@ -47,6 +47,11 @@ pub struct CommandObjectSnapshot {
     pub line_connect: u32,
     pub ocf: u32,
     pub collectible: bool,
+    /// Live vertex-contact bits (C4Object::t_contact equivalent; CNAT_*).
+    pub contact: u32,
+    /// Current shape top (C4Object Shape.y) for the top-free scans
+    /// (C4Command.cpp:1867).
+    pub shape_top: i32,
 }
 
 impl CommandObjectSnapshot {
@@ -217,6 +222,8 @@ mod tests {
 
     fn snapshot_with_id(id: u64) -> CommandObjectSnapshot {
         CommandObjectSnapshot {
+            contact: 0,
+            shape_top: 0,
             id: ObjectId::new(id),
             definition_id: format!("DEF{id}"),
             position: Vector2::ZERO,
@@ -241,6 +248,149 @@ mod tests {
         }
     }
 
+    fn walking_jumper(position: Vector2) -> CommandObjectSnapshot {
+        let mut walker = snapshot_with_id(1);
+        walker.position = position;
+        walker.action_procedure = ActionProcedure::Walk;
+        walker.crew_member = true;
+        walker.ocf |= ocf::CREW_MEMBER;
+        walker.shape_top = -10;
+        walker
+    }
+
+    fn jump_ctx<'a>(
+        walker: &'a CommandObjectSnapshot,
+        objects: &'a HashMap<ObjectId, CommandObjectSnapshot>,
+        players: &'a HashMap<i32, CommandPlayerSnapshot>,
+        definitions: &'a HashMap<DefinitionId, CommandDefinitionSnapshot>,
+        landscape: &'a crate::Landscape,
+    ) -> CommandRuntimeContext<'a> {
+        CommandRuntimeContext {
+            landscape: Some(landscape),
+            frame: 0,
+            position: walker.position,
+            object: walker,
+            objects,
+            players,
+            definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+        }
+    }
+
+    // C4Command::JumpControl trigger 1 (C4Command.cpp:1861-1872): target
+    // in the ±(35±10)° diagonal, path free, farther than 30, 15px head
+    // room -> a C4CMD_Jump goes on TOP of the MoveTo.
+    #[test]
+    fn move_to_diagonal_free_jump_like_cpp() {
+        let landscape = crate::Landscape::flat(300, 110);
+        let walker = walking_jumper(Vector2::new(100, 100));
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
+
+        // Angle(100,100 -> 140,43) = 90 - trunc(atan2(57,40)) = 36 — inside
+        // 35±10; distance 70 > 30; sky above.
+        let mut state = MoveToState::from_request(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(140))
+                .with_ty(Some(43)),
+        );
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(result.operations.len(), 1, "one jump op");
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => {
+                assert_eq!(request.id, CommandId::Jump);
+                assert_eq!((request.tx, request.ty), (Some(140), Some(43)));
+            }
+            other => panic!("expected jump, got {other:?}"),
+        }
+    }
+
+    // Trigger 3 (C4Command.cpp:1896-1908): CNAT_RIGHT wall contact with
+    // the target up the wall (angle ≈ ±80°) jumps without a path check.
+    #[test]
+    fn move_to_low_side_contact_jump_like_cpp() {
+        let landscape = crate::Landscape::flat(300, 110);
+        let mut walker = walking_jumper(Vector2::new(100, 100));
+        walker.contact = crate::CNAT_RIGHT;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
+
+        // Angle(100,100 -> 140,93) = 90 - trunc(atan2(7,40)) = 81; 81-80=1
+        // inside ±50.
+        let mut state = MoveToState::from_request(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(140))
+                .with_ty(Some(93)),
+        );
+        let result = state.step(&ctx);
+        assert_eq!(
+            result.operations.len(),
+            1,
+            "right-contact jump fires (left mirror uses angle+80)"
+        );
+        match &result.operations[0] {
+            CommandOperation::PushFront(request) => assert_eq!(request.id, CommandId::Jump),
+            other => panic!("expected jump, got {other:?}"),
+        }
+    }
+
+    // Trigger 2 (C4Command.cpp:1874-1893): target overhead on a ledge —
+    // side-move first (pushed on top), then the jump.
+    #[test]
+    fn move_to_high_angle_side_move_jump_like_cpp() {
+        // Ledge: surface 110 everywhere except a plateau (top 75) right of
+        // the target.
+        let mut surface = vec![110i32; 300];
+        for column in surface.iter_mut().take(190).skip(150) {
+            *column = 75;
+        }
+        let landscape =
+            crate::Landscape::with_default_material(300, surface, None).expect("landscape");
+        let walker = walking_jumper(Vector2::new(140, 100));
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
+
+        // Target on the plateau edge: (148,72): angle = trunc(atan2(28,8))
+        // = 74 -> 90-74 = 16?? — angle must sit within ±30 of straight up.
+        // (148,72): dx 8, dy -28 -> angle 90-74=16 NOT <= 30? inside(16,-30,30) yes.
+        // cy - ty = 28 inside 10..40. SolidOnWhichSide(148,72): plateau
+        // solid at x>=150 -> +1 -> side point x = 140 - 23 = 117 (clear
+        // ground), adjust drops it to the 110 surface (|dy|<=20 from 100
+        // fails?) — pick ty=75 edge instead for a shallower drop.
+        let mut state = MoveToState::from_request(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(148))
+                .with_ty(Some(72)),
+        );
+        let result = state.step(&ctx);
+        assert_eq!(
+            result.operations.len(),
+            2,
+            "side-move lands on top of the jump (AddCommand pushes front twice)"
+        );
+        match (&result.operations[0], &result.operations[1]) {
+            (
+                CommandOperation::PushFront(jump),
+                CommandOperation::PushFront(side_move),
+            ) => {
+                assert_eq!(jump.id, CommandId::Jump);
+                assert_eq!(side_move.id, CommandId::MoveTo);
+                assert_eq!(side_move.update_interval, 50);
+            }
+            other => panic!("expected jump + side move, got {other:?}"),
+        }
+    }
+
     #[test]
     fn follow_completes_for_unselected_crew() {
         let follower_id = ObjectId::new(1);
@@ -262,6 +412,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: follower.position,
             object: objects.get(&follower_id).expect("follower present"),
@@ -306,6 +457,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: follower.position,
             object: objects.get(&follower_id).expect("follower present"),
@@ -357,6 +509,7 @@ mod tests {
         let mut state = WaitState::from_request(&request);
 
         let ctx0 = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -380,6 +533,7 @@ mod tests {
         assert_eq!(action_update.name.as_deref(), Some("Idle"));
 
         let ctx1 = CommandRuntimeContext {
+            landscape: None,
             frame: 1,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -397,6 +551,7 @@ mod tests {
         assert_eq!(result1.status, CommandStatus::Running);
 
         let ctx2 = CommandRuntimeContext {
+            landscape: None,
             frame: 2,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -439,6 +594,7 @@ mod tests {
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor_snapshot.position,
             object: actor_snapshot,
@@ -501,6 +657,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor_snapshot.position,
             object: actor_snapshot,
@@ -567,6 +724,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor_snapshot.position,
             object: actor_snapshot,
@@ -619,6 +777,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor_snapshot.position,
             object: actor_snapshot,
@@ -670,6 +829,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor_snapshot.position,
             object: actor_snapshot,
@@ -732,6 +892,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor_snapshot.position,
             object: actor_snapshot,
@@ -786,6 +947,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor_snapshot.position,
             object: actor_snapshot,
@@ -836,6 +998,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor_snapshot.position,
             object: actor_snapshot,
@@ -884,6 +1047,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor_snapshot.position,
             object: actor_snapshot,
@@ -943,6 +1107,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor_snapshot.position,
             object: actor_snapshot,
@@ -996,6 +1161,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor_snapshot.position,
             object: actor_snapshot,
@@ -1042,6 +1208,7 @@ mod tests {
         let mut state = DigState::from_request(&request).expect("state created");
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1084,6 +1251,7 @@ mod tests {
         let mut state = DigState::from_request(&request).expect("state created");
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1128,6 +1296,7 @@ mod tests {
         let mut state = DigState::from_request(&request).expect("state created");
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1173,6 +1342,7 @@ mod tests {
         let mut state = DigState::from_request(&request).expect("state created");
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1212,6 +1382,7 @@ mod tests {
 
         for frame in 0..2 {
             let ctx = CommandRuntimeContext {
+            landscape: None,
                 frame,
                 position: actor.position,
                 object: objects.get(&actor_id).expect("actor present"),
@@ -1230,6 +1401,7 @@ mod tests {
         }
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 2,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1268,6 +1440,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1317,6 +1490,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 5,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1374,6 +1548,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1432,6 +1607,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 1,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1479,6 +1655,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 2,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1528,6 +1705,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 3,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1583,6 +1761,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1630,6 +1809,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1708,6 +1888,7 @@ mod tests {
         );
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -1772,6 +1953,7 @@ mod tests {
         objects.insert(builder_id, updated_builder);
 
         let ctx_after_spawn = CommandRuntimeContext {
+            landscape: None,
             frame: 1,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -1836,6 +2018,7 @@ mod tests {
         );
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -1889,6 +2072,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1944,6 +2128,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 5,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -1997,6 +2182,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 8,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2053,6 +2239,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 12,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2109,6 +2296,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 4,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2147,6 +2335,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 5,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2181,6 +2370,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 6,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2228,6 +2418,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 6,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2259,6 +2450,7 @@ mod tests {
         let mut objects = HashMap::new();
         objects.insert(small.id, small.clone());
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 6,
             position: small.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2294,6 +2486,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 7,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2341,6 +2534,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 32,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2399,6 +2593,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 48,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2456,6 +2651,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 52,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2516,6 +2712,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 60,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2569,6 +2766,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -2614,6 +2812,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -2658,6 +2857,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -2689,6 +2889,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2736,6 +2937,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 10,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2780,6 +2982,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 20,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2824,6 +3027,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 30,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -2865,6 +3069,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: attacker.position,
             object: objects.get(&attacker_id).expect("attacker present"),
@@ -2906,6 +3111,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: attacker.position,
             object: objects.get(&attacker_id).expect("attacker present"),
@@ -2964,6 +3170,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -3044,6 +3251,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: crew.position,
             object: objects.get(&crew_id).expect("crew present"),
@@ -3109,6 +3317,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: crew.position,
             object: objects.get(&crew_id).expect("crew present"),
@@ -3147,6 +3356,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: crew.position,
             object: objects.get(&crew_id).expect("crew present"),
@@ -3199,6 +3409,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: crew.position,
             object: objects.get(&crew_id).expect("crew present"),
@@ -3248,6 +3459,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: crew.position,
             object: objects.get(&crew_id).expect("crew present"),
@@ -3323,6 +3535,7 @@ mod tests {
         );
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -3394,6 +3607,7 @@ mod tests {
         .expect("state created");
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 5,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -3440,6 +3654,7 @@ mod tests {
         }
 
         let ctx_next = CommandRuntimeContext {
+            landscape: None,
             frame: 6,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -3477,6 +3692,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -3519,6 +3735,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: &builder,
@@ -3566,6 +3783,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: &actor,
@@ -3618,6 +3836,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: &actor,
@@ -3679,6 +3898,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: &actor,
@@ -3730,6 +3950,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: &builder,
@@ -3785,6 +4006,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder_snapshot.position,
             object: builder_snapshot,
@@ -3832,6 +4054,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder_snapshot.position,
             object: builder_snapshot,
@@ -3908,6 +4131,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 42,
             position: builder_snapshot.position,
             object: builder_snapshot,
@@ -3982,6 +4206,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 100,
             position: builder_snapshot.position,
             object: builder_snapshot,
@@ -4031,6 +4256,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: &builder,
@@ -4063,6 +4289,7 @@ mod tests {
         }
 
         let later_ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 10,
             position: builder.position,
             object: &builder,
@@ -4101,6 +4328,7 @@ mod tests {
         .expect("state created");
 
         let initial_ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: &builder,
@@ -4125,6 +4353,7 @@ mod tests {
         }
 
         let mid_ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 60,
             position: builder.position,
             object: &builder,
@@ -4148,6 +4377,7 @@ mod tests {
         );
 
         let retry_ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 150,
             position: builder.position,
             object: &builder,
@@ -4220,6 +4450,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder_snapshot.position,
             object: builder_snapshot,
@@ -4251,6 +4482,7 @@ mod tests {
         let initial_len = stack.len();
         loop {
             let step_ctx = CommandRuntimeContext {
+            landscape: None,
                 frame,
                 position: ctx.position,
                 object: ctx.object,
@@ -4316,6 +4548,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder_snapshot.position,
             object: builder_snapshot,
@@ -4347,6 +4580,7 @@ mod tests {
         let initial_len = stack.len();
         loop {
             let step_ctx = CommandRuntimeContext {
+            landscape: None,
                 frame,
                 position: ctx.position,
                 object: ctx.object,
@@ -4410,6 +4644,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: &builder,
@@ -4441,6 +4676,7 @@ mod tests {
         let mut frame = ctx.frame + 1;
         loop {
             let step_ctx = CommandRuntimeContext {
+            landscape: None,
                 frame,
                 position: ctx.position,
                 object: ctx.object,
@@ -4499,6 +4735,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: &builder,
@@ -4543,6 +4780,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: &builder,
@@ -4581,6 +4819,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: &builder,
@@ -4638,6 +4877,7 @@ mod tests {
             .expect("command enqueued");
 
         let ctx_initial = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder_snapshot.position,
             object: builder_snapshot,
@@ -4715,6 +4955,7 @@ mod tests {
         assert_eq!(snapshot.commands[0].failures, 0);
 
         let ctx_followup = CommandRuntimeContext {
+            landscape: None,
             frame: 25,
             position: builder_snapshot.position,
             object: builder_snapshot,
@@ -4781,6 +5022,7 @@ mod tests {
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor.position,
             object: &actor,
@@ -4889,6 +5131,7 @@ mod tests {
 
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: actor_snapshot.position,
             object: actor_snapshot,
@@ -4970,6 +5213,7 @@ mod tests {
         );
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -5091,6 +5335,7 @@ mod tests {
         );
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -5184,6 +5429,7 @@ mod tests {
         );
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -5273,6 +5519,7 @@ mod tests {
         );
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -5370,6 +5617,7 @@ mod tests {
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -5447,6 +5695,7 @@ mod tests {
         );
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -5530,6 +5779,7 @@ mod tests {
         );
 
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 10,
             position: builder.position,
             object: objects.get(&builder_id).expect("builder present"),
@@ -5609,6 +5859,7 @@ mod tests {
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder_entry.position,
             object: builder_entry,
@@ -5670,6 +5921,7 @@ mod tests {
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder_entry.position,
             object: builder_entry,
@@ -5730,6 +5982,7 @@ mod tests {
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder_entry.position,
             object: builder_entry,
@@ -5788,6 +6041,7 @@ mod tests {
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder_entry.position,
             object: builder_entry,
@@ -5841,6 +6095,7 @@ mod tests {
 
         let builder_entry = objects.get(&builder_id).expect("builder present");
         let ctx = CommandRuntimeContext {
+            landscape: None,
             frame: 0,
             position: builder_entry.position,
             object: builder_entry,
@@ -6135,6 +6390,9 @@ fn command_data_to_definition_id(data: &CommandData) -> Option<DefinitionId> {
 pub struct CommandRuntimeContext<'a> {
     pub frame: u64,
     pub position: Vector2,
+    /// Landscape probes for the walking controls (GBackSolid/PathFree in
+    /// C4Command JumpControl/FlightControl, C4Command.cpp:1816-1920).
+    pub landscape: Option<&'a crate::Landscape>,
     pub object: &'a CommandObjectSnapshot,
     pub objects: &'a HashMap<ObjectId, CommandObjectSnapshot>,
     pub players: &'a HashMap<i32, CommandPlayerSnapshot>,
@@ -6367,6 +6625,103 @@ impl CommandStack {
     }
 }
 
+// C4Command.cpp:34-35 movement-control constants.
+const JUMP_ANGLE: i32 = 35;
+const JUMP_LOW_ANGLE: i32 = 80;
+const JUMP_ANGLE_RANGE: i32 = 10;
+const JUMP_HIGH_ANGLE: i32 = 0;
+const FLIGHT_ANGLE_RANGE: i32 = 60;
+
+fn inside(value: i32, lo: i32, hi: i32) -> bool {
+    value >= lo && value <= hi
+}
+
+/// `Angle` (C4Math.cpp:33-45): 0 = up, 90 = right, clockwise; float
+/// atan2 truncated like the C++ `static_cast<int>`.
+fn c4_angle(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
+    let dy = (y1 - y2).abs() as f32;
+    let dx = (x1 - x2).abs() as f32;
+    let angle = (180.0 * dy.atan2(dx) * std::f32::consts::FRAC_1_PI) as i32;
+    if x2 > x1 {
+        if y2 < y1 {
+            90 - angle
+        } else {
+            90 + angle
+        }
+    } else if y2 < y1 {
+        270 + angle
+    } else {
+        270 - angle
+    }
+}
+
+/// `Distance` (C4Math.cpp:22-31): integer sqrt with the double-step
+/// correction.
+fn c4_distance(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
+    let dx = i64::from(x1) - i64::from(x2);
+    let dy = i64::from(y1) - i64::from(y2);
+    let d2 = dx * dx + dy * dy;
+    let mut dist = (d2 as f64).sqrt() as i64;
+    if dist * dist < d2 {
+        dist += 1;
+    }
+    if dist * dist > d2 {
+        dist -= 1;
+    }
+    dist as i32
+}
+
+/// `SolidOnWhichSide` (C4Command.cpp:147-156).
+fn solid_on_which_side(landscape: &crate::Landscape, x: i32, y: i32) -> i32 {
+    for cx in 1..10 {
+        for cy in 0..10 {
+            if landscape.is_solid_at(x - cx, y - cy) || landscape.is_solid_at(x - cx, y + cy) {
+                return -1;
+            }
+            if landscape.is_solid_at(x + cx, y - cy) || landscape.is_solid_at(x + cx, y + cy) {
+                return 1;
+            }
+        }
+    }
+    0
+}
+
+/// `AdjustMoveToTarget` (C4Command.cpp:94-114): raise above solid, then
+/// (walking) drop to the bottom of free space and lift half a shape
+/// above near-ground solid.
+fn adjust_move_to_target(
+    landscape: &crate::Landscape,
+    x: &mut i32,
+    y: &mut i32,
+    free_move: bool,
+    shape_height: i32,
+) {
+    let mut iy = *y;
+    while iy >= 0 && landscape.is_solid_at(*x, iy) {
+        iy -= 1;
+    }
+    if iy >= 0 {
+        *y = iy;
+    }
+    if !free_move {
+        if !landscape.is_semi_solid_at(*x, *y) {
+            let back_hgt = landscape.estimated_height();
+            let mut iy = *y;
+            while iy < back_hgt && !landscape.is_semi_solid_at(*x, iy + 1) {
+                iy += 1;
+            }
+            if iy < back_hgt {
+                *y = iy;
+            }
+        }
+        if (landscape.is_solid_at(*x, *y + 1) || landscape.is_solid_at(*x, *y + 5))
+            && !landscape.is_semi_solid_at(*x, *y - shape_height / 2)
+        {
+            *y -= shape_height / 2;
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct MoveToState {
     target: Option<ObjectId>,
@@ -6446,13 +6801,180 @@ impl MoveToState {
             CommandDirection::Stop
         };
 
-        if direction == self.last_direction {
-            return CommandStepResult::running(None);
+        // DFA_WALK movement controls, after the ComDir steering
+        // (C4Command::Execute MoveTo, C4Command.cpp:316-326):
+        // FlightControl never short-circuits (it returns false even after
+        // taking off, :1816-1849); JumpControl returning true ends the
+        // Execute for this tick.
+        let mut fly_update: Option<ActionUpdate> = None;
+        let mut jump_operations: Option<Vec<CommandOperation>> = None;
+        if ctx.object.action_procedure == ActionProcedure::Walk {
+            fly_update = self.flight_control(ctx, target);
+            jump_operations = self.jump_control(ctx, target);
         }
 
-        self.last_direction = direction;
-        let update = ObjectUpdate::new().with_command_direction(direction);
-        CommandStepResult::running(Some(update))
+        let steer = if direction != self.last_direction {
+            self.last_direction = direction;
+            Some(direction)
+        } else {
+            None
+        };
+
+        if fly_update.is_some() || jump_operations.is_some() {
+            let mut update = ObjectUpdate::new();
+            if let Some(direction) = steer {
+                update = update.with_command_direction(direction);
+            }
+            if let Some(action) = fly_update {
+                update = update.with_action_update(action);
+            }
+            let mut result = CommandStepResult::running(Some(update));
+            if let Some(operations) = jump_operations {
+                result = result.with_operations(operations);
+            }
+            return result;
+        }
+
+        match steer {
+            None => CommandStepResult::running(None),
+            Some(direction) => {
+                let update = ObjectUpdate::new().with_command_direction(direction);
+                CommandStepResult::running(Some(update))
+            }
+        }
+    }
+
+    /// `C4Command::FlightControl` (C4Command.cpp:1816-1849): CanFly crew
+    /// walking toward a distant target within ±60° of straight up takes
+    /// off (SetActionByName("Fly")); C++ always returns false, so the
+    /// jump control still runs. The ActMap Disabled check (:1824-1828)
+    /// is unmodeled (no Disabled flag in the snapshot).
+    fn flight_control(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        target: Vector2,
+    ) -> Option<ActionUpdate> {
+        if ctx.object.physical.can_fly == 0 {
+            return None;
+        }
+        if ctx.object.ocf & crate::ocf::CREW_MEMBER == 0 {
+            return None;
+        }
+        let landscape = ctx.landscape?;
+        let (cx, cy) = (ctx.position.x, ctx.position.y);
+        let mut angle = c4_angle(cx, cy, target.x, target.y);
+        while angle > 180 {
+            angle -= 360;
+        }
+        if !inside(angle, -FLIGHT_ANGLE_RANGE, FLIGHT_ANGLE_RANGE) {
+            return None;
+        }
+        if c4_distance(cx, cy, target.x, target.y) <= 30 {
+            return None;
+        }
+        let mut top_free = 0;
+        while top_free < 50 && !landscape.is_solid_at(cx, cy + ctx.object.shape_top - top_free) {
+            top_free += 1;
+        }
+        if top_free < 15 {
+            return None;
+        }
+        Some(ActionUpdate::default().with_name("Fly"))
+    }
+
+    /// `C4Command::JumpControl` (C4Command.cpp:1851-1920): the three
+    /// walking-jump triggers. Gate: OCF_CrewMember (Def->Pathfinder has
+    /// no DefCore parse yet — documented gap).
+    fn jump_control(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        target: Vector2,
+    ) -> Option<Vec<CommandOperation>> {
+        if ctx.object.ocf & crate::ocf::CREW_MEMBER == 0 {
+            return None;
+        }
+        let landscape = ctx.landscape?;
+        let (cx, cy) = (ctx.position.x, ctx.position.y);
+        let (tx, ty) = (target.x, target.y);
+        let mut angle = c4_angle(cx, cy, tx, ty);
+        while angle > 180 {
+            angle -= 360;
+        }
+
+        let jump_request = || {
+            CommandOperation::PushFront(
+                CommandRequest::new(CommandId::Jump)
+                    .with_tx(Some(tx))
+                    .with_ty(Some(ty)),
+            )
+        };
+
+        // Diagonal free jump (:1861-1872).
+        if (inside(angle - JUMP_ANGLE, -JUMP_ANGLE_RANGE, JUMP_ANGLE_RANGE)
+            || inside(angle + JUMP_ANGLE, -JUMP_ANGLE_RANGE, JUMP_ANGLE_RANGE))
+            && landscape.path_is_clear(Vector2::new(cx, cy), Vector2::new(tx, ty))
+            && c4_distance(cx, cy, tx, ty) > 30
+        {
+            let mut top_free = 0;
+            while top_free < 50
+                && !landscape.is_solid_at(cx, cy + ctx.object.shape_top - top_free)
+            {
+                top_free += 1;
+            }
+            if top_free >= 15 {
+                return Some(vec![jump_request()]);
+            }
+        }
+
+        // High-angle side move + jump (:1874-1893).
+        if inside(
+            angle - JUMP_HIGH_ANGLE,
+            -3 * JUMP_ANGLE_RANGE,
+            3 * JUMP_ANGLE_RANGE,
+        ) && inside(cy - ty, 10, 40)
+        {
+            let side = solid_on_which_side(landscape, tx, ty);
+            let dist = 5 * (cy - ty).abs() / 6;
+            let mut side_x = cx - dist * side;
+            let mut side_y = cy;
+            adjust_move_to_target(landscape, &mut side_x, &mut side_y, false, 0);
+            if inside(side_y - cy, -20, 20)
+                && landscape.path_is_clear(Vector2::new(side_x, side_y), Vector2::new(tx, ty))
+            {
+                return Some(vec![
+                    jump_request(),
+                    CommandOperation::PushFront(
+                        CommandRequest::new(CommandId::MoveTo)
+                            .with_tx(Some(side_x))
+                            .with_ty(Some(side_y))
+                            .with_update_interval(50),
+                    ),
+                ]);
+            }
+        }
+
+        // Low side contact jump (:1896-1908).
+        let low_range = 5;
+        if ctx.object.contact & crate::CNAT_RIGHT != 0
+            && inside(
+                angle - JUMP_LOW_ANGLE,
+                -low_range * JUMP_ANGLE_RANGE,
+                low_range * JUMP_ANGLE_RANGE,
+            )
+        {
+            return Some(vec![jump_request()]);
+        }
+        if ctx.object.contact & crate::CNAT_LEFT != 0
+            && inside(
+                angle + JUMP_LOW_ANGLE,
+                -low_range * JUMP_ANGLE_RANGE,
+                low_range * JUMP_ANGLE_RANGE,
+            )
+        {
+            return Some(vec![jump_request()]);
+        }
+
+        None
     }
 }
 
