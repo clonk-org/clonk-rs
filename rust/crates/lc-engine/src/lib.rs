@@ -2892,6 +2892,10 @@ struct ObjectShapeTemplate {
     rect: Option<DefinitionRect>,
     stretch_growth: bool,
     rotateable: i32,
+    /// DefCore Line type: Line objects skip every shape/vertex refresh
+    /// (C4Object::UpdateShape early return, C4Object.cpp:322-324) — the
+    /// CONNECT exec owns their vertices.
+    line: i32,
 }
 
 impl ObjectShapeTemplate {
@@ -2906,7 +2910,13 @@ impl ObjectShapeTemplate {
             rect,
             stretch_growth,
             rotateable,
+            line: 0,
         }
+    }
+
+    fn with_line(mut self, line: i32) -> Self {
+        self.line = line;
+        self
     }
 }
 
@@ -3048,6 +3058,10 @@ impl Object {
         previous_rect: Option<DefinitionRect>,
         preserve_bottom: bool,
     ) {
+        if self.shape_template.line != 0 {
+            // Line shape independent (C4Object.cpp:322-324).
+            return;
+        }
         self.state.vertices = transformed_shape_vertices(
             self.shape_base_vertices(),
             self.state.construction,
@@ -3633,7 +3647,9 @@ impl Object {
             let previous_position = self.state.position;
 
             self.state.rotation += sign_i32(target_rotation - self.state.rotation);
-            self.state.vertices = rotated_vertices(base_vertices, self.state.rotation);
+            if self.shape_template.line == 0 {
+                self.state.vertices = rotated_vertices(base_vertices, self.state.rotation);
+            }
 
             let mut candidate_position = self.state.position;
             if movement.attach != 0 && !no_attach {
@@ -13365,6 +13381,12 @@ impl Engine {
                 }
             }
 
+            // DFA_CONNECT line tracking (C4Object.cpp:5341-5420) runs in
+            // ExecAction; broken targets fire LineBreak and remove the
+            // line, skipping the rest of this object's exec.
+            if !self.exec_connect_line(idx)? {
+                continue;
+            }
             self.apply_physics_at_index(idx);
             // C4Object::ExecMovement (C4Movement.cpp:553-616): contained
             // objects copy the container's motion (:556-561), C4D_StaticBack
@@ -17188,6 +17210,127 @@ impl Engine {
 
     fn reset_lift_action(&mut self, idx: usize, definition_id: &DefinitionId) {
         self.reset_action_to_default(idx, definition_id, true);
+    }
+
+    /// DFA_CONNECT (C4Object.cpp:5341-5420): a Line object's first
+    /// vertex tracks Action.Target and its last vertex Action.Target2 —
+    /// C4D_Line_Vertex (8) connects to the target's own vertex (index
+    /// from the numbered Local[2]/Local[3], both 0 for CHBM), any other
+    /// line type to the target's bottom center (x, y + Shape.Hgt/4).
+    /// LineIntersect=1 assigns the ABSOLUTE point directly; a missing or
+    /// incomplete target fires LineBreak(true) and removes the line.
+    /// Returns false when the object removed itself.
+    fn exec_connect_line(&mut self, idx: usize) -> Result<bool, EngineError> {
+        let definition_id = self.objects[idx].definition_id.clone();
+        let Some(definition) = self.definitions.get(&definition_id) else {
+            return Ok(true);
+        };
+        if definition.line() == 0 {
+            return Ok(true);
+        }
+        let action_name = self.objects[idx].state.action.name.clone();
+        if definition.action_library().procedure_for_action(&action_name)
+            != ActionProcedure::Connect
+        {
+            return Ok(true);
+        }
+        let line_vertex = definition.line() == 8; // C4D_Line_Vertex
+        let line_intersect = definition.line_intersect();
+
+        let mut broke = false;
+        let mut points = [None, None];
+        for (slot, target_id) in [
+            (0usize, self.objects[idx].state.action.target),
+            (1usize, self.objects[idx].state.action.target2),
+        ] {
+            let resolved = target_id
+                .and_then(|id| self.find_object_index(id))
+                .filter(|&target_idx| {
+                    let target = &self.objects[target_idx];
+                    !target.destroyed
+                        && target.state.status.is_active()
+                        && target.state.construction >= FULL_CON
+                });
+            match resolved {
+                None => broke = true,
+                Some(target_idx) => {
+                    let target = &self.objects[target_idx];
+                    let point = if line_vertex {
+                        // Local[2]/Local[3] vertex indices are numbered
+                        // script locals; content (CHBM) leaves them 0.
+                        let vertex = target.state.vertices.first().copied().unwrap_or(
+                            ObjectVertex { x: 0, y: 0, cnat: 0, friction: 0 },
+                        );
+                        Vector2::new(
+                            target.state.position.x + vertex.x,
+                            target.state.position.y + vertex.y,
+                        )
+                    } else {
+                        let height = target
+                            .current_shape_rect()
+                            .map(|rect| rect.height)
+                            .unwrap_or(0);
+                        Vector2::new(
+                            target.state.position.x,
+                            target.state.position.y + height / 4,
+                        )
+                    };
+                    points[slot] = Some(point);
+                }
+            }
+        }
+
+        if broke {
+            // Call(PSF_LineBreak, {true}) then AssignRemoval
+            // (C4Object.cpp:5349-5353); the call is fail-safe like every
+            // engine callback.
+            if self
+                .definitions
+                .get(&definition_id)
+                .map(|definition| definition.has_function("LineBreak"))
+                .unwrap_or(false)
+            {
+                tolerate_script_error(self.call_object_function(
+                    idx,
+                    "LineBreak",
+                    vec![Value::Bool(true)],
+                ))?;
+            }
+            if idx < self.objects.len() && !self.objects[idx].destroyed {
+                // Connect beams carry no effects in content; drop the
+                // stop events like the simple destroy paths.
+                let _ = self.objects[idx].mark_destroyed();
+            }
+            return Ok(false);
+        }
+
+        let object = &mut self.objects[idx];
+        if object.state.vertices.is_empty() {
+            return Ok(true);
+        }
+        let last = object.state.vertices.len() - 1;
+        if line_intersect == 1 {
+            if let Some(point) = points[0] {
+                object.state.vertices[0].x = point.x;
+                object.state.vertices[0].y = point.y;
+            }
+            if let Some(point) = points[1] {
+                object.state.vertices[last].x = point.x;
+                object.state.vertices[last].y = point.y;
+            }
+        } else {
+            // The wrapping LineConnect walker (C4Shape.cpp) is not ported;
+            // direct assignment keeps the endpoints correct (PORT_STATUS).
+            if let Some(point) = points[0] {
+                object.state.vertices[0].x = point.x;
+                object.state.vertices[0].y = point.y;
+            }
+            if let Some(point) = points[1] {
+                object.state.vertices[last].x = point.x;
+                object.state.vertices[last].y = point.y;
+            }
+        }
+        Ok(true)
     }
 
     fn apply_no_attach_action(&mut self, idx: usize, library: &ActionLibrary) {
@@ -21588,6 +21731,7 @@ impl Engine {
             definition_stretch_growth,
             definition_rotateable,
         );
+        let shape_template = shape_template.with_line(definition_line);
         // C4Game::NewObject runs DoCon(iCon, fInitial=true) on every
         // freshly CREATED object; the straight-con bottom y-adjust keeps
         // the con-0 bottom — the given y — fixed while the shape grows:
@@ -32978,6 +33122,104 @@ func Trigger() {
             object.state.vertices.first().map(|v| v.friction),
             Some(77),
             "shape/vertices rebuilt from the NEW def (UpdateFace)"
+        );
+    }
+
+    // DFA_CONNECT (C4Object.cpp:5341-5420): a Line object's first vertex
+    // tracks Action.Target and its last vertex tracks Action.Target2 —
+    // C4D_Line_Vertex connects to the target's vertex (index from the
+    // numbered Local[2]/Local[3], default 0), LineIntersect=1 assigns the
+    // ABSOLUTE point directly. Broken targets fire LineBreak + removal.
+    #[test]
+    fn connect_lines_track_their_targets_like_cpp() {
+        let mut engine = Engine::with_seed(0);
+        let mut beam = Definition::from_script("BEAM", "Beam", "#strict\n").expect("compiles");
+        beam.set_line(8); // C4D_Line_Vertex
+        beam.set_line_intersect(1);
+        beam.set_shape_vertices(vec![
+            ObjectVertex { x: 0, y: 0, cnat: 0, friction: 0 },
+            ObjectVertex { x: 0, y: 0, cnat: 0, friction: 0 },
+        ]);
+        beam.configure_actions(
+            None,
+            HashMap::from([(
+                "Connect".to_string(),
+                ActionSpec::default()
+                    .with_procedure("CONNECT")
+                    .with_delay(10)
+                    .with_length(1)
+                    .with_next("Connect"),
+            )]),
+        );
+        engine.register_definition(beam).expect("registers");
+        let mut anchor_def =
+            Definition::from_script("ANCR", "Anchor", "#strict\n").expect("compiles");
+        anchor_def.set_shape_vertices(vec![ObjectVertex { x: -3, y: -5, cnat: 0, friction: 50 }]);
+        engine.register_definition(anchor_def).expect("registers");
+
+        let horse = engine
+            .spawn_object(
+                SpawnConfig::new("ANCR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(77, 250)),
+            )
+            .expect("spawns");
+        let wagon = engine
+            .spawn_object(
+                SpawnConfig::new("ANCR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(28, 250)),
+            )
+            .expect("spawns");
+        let beam_id = engine
+            .spawn_object(
+                SpawnConfig::new("BEAM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(28, 250))
+                    .with_action(ActionState::new("Connect")),
+            )
+            .expect("beam spawns");
+
+        // SetAction("Connect", horse, wagon) like CHBM::Connect.
+        engine
+            .apply_object_update(
+                beam_id,
+                ObjectUpdate {
+                    action: Some(
+                        ActionUpdate::default()
+                            .with_name("Connect")
+                            .with_force(true)
+                            .with_target(Some(horse))
+                            .with_target2(Some(wagon)),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .expect("action set");
+
+        engine.tick().expect("tick");
+        let idx = engine.find_object_index(beam_id).expect("beam exists");
+        let vertices = &engine.objects[idx].state.vertices;
+        assert_eq!(
+            (vertices[0].x, vertices[0].y),
+            (74, 245),
+            "first vertex = Target position + its vertex 0 (C4Object.cpp:5361-5363)"
+        );
+        assert_eq!(
+            (vertices[1].x, vertices[1].y),
+            (25, 245),
+            "last vertex = Target2 position + its vertex 0 (C4Object.cpp:5389-5391)"
+        );
+
+        // Removing a target breaks the line on the next exec.
+        {
+            let horse_idx = engine.find_object_index(horse).expect("horse exists");
+            engine.objects[horse_idx].mark_destroyed();
+        }
+        engine.tick().expect("tick");
+        assert!(
+            engine.find_object_index(beam_id).is_none(),
+            "broken line fires LineBreak and removes itself (C4Object.cpp:5347-5354)"
         );
     }
 
