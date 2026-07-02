@@ -1926,6 +1926,12 @@ pub struct ObjectState {
     /// (default false, C4Object.cpp:2772).
     #[serde(default)]
     pub mobile: bool,
+    /// The crew-info portrait's source definition (FnGetPortrait with
+    /// fGetID; C4Script.cpp:5352). None = the object's own definition.
+    /// Presentation-wise unmodeled; tracked because AdjustPortrait's
+    /// `Random(GetPortraitCount())` draw is gated on it (synced ledger).
+    #[serde(default)]
+    pub portrait_source: Option<String>,
     /// The Def TimerCall counter (C4Object::Timer, C4Object.cpp:1085-1091):
     /// ++ every Execute, fires Def->TimerCall and resets at Def->Timer.
     /// Saved mid-cycle in Objects.txt (default 0, C4Object.cpp:2738).
@@ -2045,6 +2051,7 @@ pub(crate) fn preview_spawn_state(
         local_vars: HashMap::new(),
         in_liquid: false,
         mobile: false,
+        portrait_source: None,
         timer: 0,
         own_mass: 0,
         on_fire: false,
@@ -2141,6 +2148,9 @@ impl ObjectState {
         if let Some(crew_member) = delta.crew_member {
             self.crew_member = crew_member;
         }
+        if let Some(portrait_source) = &delta.portrait_source {
+            self.portrait_source = Some(portrait_source.clone());
+        }
         if let Some(alive) = delta.alive {
             self.alive = alive;
         }
@@ -2181,6 +2191,7 @@ impl ObjectState {
 
 #[derive(Debug, Default, Clone, PartialEq)]
 struct ObjectDelta {
+    portrait_source: Option<String>,
     position: Option<Vector2>,
     velocity: Option<Vector2>,
     /// Sub-pixel velocity in 16.16 fixed-point. When present, this takes
@@ -2269,6 +2280,9 @@ impl ObjectDelta {
         if let Some(crew_member) = update.crew_member {
             self.crew_member = Some(crew_member);
         }
+        if let Some(portrait_source) = update.portrait_source {
+            self.portrait_source = Some(portrait_source);
+        }
         if let Some(alive) = update.alive {
             self.alive = Some(alive);
         }
@@ -2329,6 +2343,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             owner: update.owner,
             category: update.category,
             crew_member: update.crew_member,
+            portrait_source: update.portrait_source,
             alive: update.alive,
             container: update.container,
             vertices: update.vertices,
@@ -2345,6 +2360,9 @@ impl From<ObjectUpdate> for ObjectDelta {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ObjectUpdate {
+    /// SetPortrait's source-definition update (Some = set).
+    #[serde(default)]
+    pub portrait_source: Option<String>,
     pub position: Option<Vector2>,
     pub velocity: Option<Vector2>,
     /// Sub-pixel velocity in 16.16 fixed-point, set by precision-aware script
@@ -13373,6 +13391,7 @@ impl Engine {
             status,
             owner,
             crew_member,
+            portrait_source,
             alive,
             container,
             vertices,
@@ -13467,6 +13486,9 @@ impl Engine {
             }
             if let Some(crew_member) = crew_member {
                 object.state.crew_member = crew_member;
+            }
+            if let Some(portrait_source) = portrait_source {
+                object.state.portrait_source = Some(portrait_source);
             }
             if let Some(alive) = alive {
                 object.state.alive = alive;
@@ -14580,6 +14602,7 @@ impl Engine {
                     local_vars: snapshot.local_vars.clone(),
                     in_liquid: snapshot.in_liquid,
                     mobile: snapshot.mobile,
+                    portrait_source: None,
                     timer: snapshot.timer,
                     own_mass: snapshot.own_mass,
                     on_fire: snapshot.on_fire,
@@ -18729,7 +18752,10 @@ impl Engine {
 
     /// Debug/test helper: (definition, action name, phase, position, fix)
     /// for one object id.
-    pub fn debug_object_by_id(&self, id: u64) -> Option<(String, String, i32, Vector2, i32)> {
+    pub fn debug_object_by_id(
+        &self,
+        id: u64,
+    ) -> Option<(String, String, i32, Vector2, i32, i32)> {
         self.objects
             .iter()
             .find(|object| object.id.as_u64() == id)
@@ -18740,6 +18766,7 @@ impl Engine {
                     object.state.action.phase,
                     object.state.position,
                     crate::math::fixtoi(object.fixed_position.y),
+                    object.state.owner,
                 )
             })
     }
@@ -18776,6 +18803,21 @@ impl Engine {
             object.upright_t_attach = 0;
         }
         self.rng = LcgRng::seed_from_u64(self.random_seed);
+    }
+
+    /// Debug helper: does a definition's compiled script define `name`?
+    pub fn debug_definition_has_function(&self, id: &str, name: &str) -> Option<bool> {
+        self.definitions
+            .get(&DefinitionId::from(id))
+            .map(|definition| definition.has_function(name))
+    }
+
+    /// Debug helper: is `name` a global script function?
+    pub fn debug_global_has_function(&self, name: &str) -> bool {
+        self.global_script_functions
+            .as_ref()
+            .map(|functions| functions.contains_key(name))
+            .unwrap_or(false)
     }
 
     /// Debug/test helper: a clone of the synced RNG for ledger-position
@@ -20817,6 +20859,7 @@ impl Engine {
                 local_vars,
                 in_liquid: in_liquid.unwrap_or(false),
                 mobile: false,
+                portrait_source: None,
                 timer: timer.unwrap_or(0),
                 own_mass: 0,
                 on_fire: false,
@@ -21516,6 +21559,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         local_vars: snapshot.local_vars.clone(),
         in_liquid: snapshot.in_liquid,
         mobile: snapshot.mobile,
+        portrait_source: None,
         timer: snapshot.timer,
         own_mass: snapshot.own_mass,
         on_fire: snapshot.on_fire,
@@ -31683,6 +31727,143 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert_eq!(object.effects[0].name, "Boost");
         assert_eq!(object.effects[0].priority, 50);
         assert_eq!(object.effects[0].timer, 2);
+    }
+
+    // Cowboy.c4d Recruitment creates the AHUD with the recruit's owner
+    // (`CreateObject(AHUD,0,0,GetOwner())`, Cowboy.c4d/Script.c:13) — the
+    // GoldRush AHUD must belong to player 0 or FindObjectOwner misses it
+    // and every later recruit spawns another one (id skew).
+    #[test]
+    fn recruitment_created_objects_inherit_the_get_owner_argument() {
+        let script = r#"#strict
+#include BASE
+func Recruitment(iPlr) {
+    if(!FindObjectOwner(CHLD, GetOwner())) CreateObject(CHLD, 0, 0, GetOwner());
+    return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let base = Definition::from_script(
+            "BASE",
+            "Base",
+            "#strict\nfunc IsBase() { return(1); }\n",
+        )
+        .expect("base compiles");
+        engine.register_definition(base).expect("base registers");
+        let mut crew = Definition::from_script("CREW", "Crew", script).expect("compiles");
+        crew.set_crew_member(true);
+        engine.register_definition(crew).expect("crew registers");
+        engine.resolve_includes().expect("includes resolve");
+        engine
+            .register_definition(simple_definition("CHLD"))
+            .expect("child registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("CREW")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(5)
+                    .with_crew_member(true),
+            )
+            .expect("crew spawns");
+        let idx = engine.find_object_index(id).expect("crew exists");
+        engine
+            .call_object_function(idx, "Recruitment", vec![Value::Int(5)])
+            .expect("recruitment runs");
+
+        let child = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "CHLD")
+            .expect("child created");
+        assert_eq!(
+            child.state.owner, 5,
+            "CreateObject's owner argument (GetOwner()) sticks"
+        );
+    }
+
+    // FnGrabObjectInfo (C4Script.cpp:2170-2176) -> C4Object::GrabInfo
+    // (C4Object.cpp:5696-5726): `this` takes pFrom's info section; the
+    // GoldRush TRPR Recruitment creates a temp COWB, grabs its info and
+    // removes it (Trapper.c4d/Script.c:19-25) — the temp consumes an
+    // object number (C++ hole at 1426). An unknown host fn aborted the
+    // whole Recruitment, so the temp never existed in Rust.
+    #[test]
+    fn grab_object_info_supports_the_trapper_recruitment_hack() {
+        let script = r#"#strict
+local iGrabbed;
+local iDrew;
+func Recruit() {
+    var cb = CreateObject(HAND, 0, 10, GetOwner());
+    MakeCrewMember(cb, GetOwner());
+    iGrabbed = GrabObjectInfo(cb);
+    RemoveObject(cb);
+    // AdjustPortrait's gate + synced draw (Cowboy.c4d/Script.c:552-564):
+    // the grabbed info carries the donor's portrait source.
+    if (GetPortrait(this(), true) != GetID()) iDrew = Random(3) + 1;
+    SetPortrait(Format("%d", iDrew), this(), GetID());
+    return(1);
+}
+"#;
+
+        let mut engine = Engine::with_seed(0);
+        let mut trapper = Definition::from_script("TRAP", "Trapper", script)
+            .expect("script compiles");
+        trapper.set_crew_member(true);
+        engine.register_definition(trapper).expect("trapper registers");
+        let mut hand = simple_definition("HAND");
+        hand.set_crew_member(true);
+        engine.register_definition(hand).expect("hand registers");
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("TRAP")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_owner(0)
+                    .with_crew_member(true),
+            )
+            .expect("trapper spawns");
+        let before_next = engine.next_object_id;
+        let idx = engine.find_object_index(id).expect("trapper exists");
+        engine
+            .call_object_function(idx, "Recruit", Vec::new())
+            .expect("recruitment runs");
+
+        let idx = engine.find_object_index(id).expect("trapper still exists");
+        assert_eq!(
+            engine.objects[idx].state.local_vars.get("iGrabbed"),
+            Some(&Value::Bool(true)),
+            "GrabObjectInfo succeeds for a crew donor (C4Object.cpp:5703)"
+        );
+        assert!(
+            engine.objects[idx].state.crew_member,
+            "the grabber stays crew (MakeCrewMember, C4Object.cpp:5722)"
+        );
+        assert!(
+            engine
+                .objects
+                .iter()
+                .all(|object| object.definition_id != "HAND"),
+            "the temp cowboy is removed"
+        );
+        assert_eq!(
+            engine.next_object_id,
+            before_next + 1,
+            "the temp consumed exactly one object number (the C++ 1426 hole)"
+        );
+        assert!(
+            matches!(
+                engine.objects[idx].state.local_vars.get("iDrew"),
+                Some(&Value::Int(n)) if n >= 1
+            ),
+            "the donor's portrait source (HAND != TRAP) gated the synced \
+             Random draw like C++ AdjustPortrait"
+        );
+        assert_eq!(
+            engine.objects[idx].state.portrait_source.as_deref(),
+            Some("TRAP"),
+            "SetPortrait(..., GetID()) re-sources the portrait to the own def"
+        );
     }
 
     // C4Effect's constructor runs Fx*Start SYNCHRONOUSLY inside

@@ -597,6 +597,7 @@ impl<'a> Vm<'a> {
             object_state,
         )?;
         env.inherited_target = function.overloaded.clone();
+        env.function_name = function.name.clone();
 
         // Script-level `local` declarations are object-local storage. Nested
         // calls share the same object state, matching C++ pObj->Local/LocalNamed.
@@ -1073,6 +1074,27 @@ impl<'a> Vm<'a> {
                             // `_inherited` spelling yields nil when there is
                             // none (C4AulParse.cpp:2775-2798).
                             let Some(target) = env.inherited_target.clone() else {
+                                // Script functions overload same-name ENGINE
+                                // functions: inherited() chains to the host
+                                // fn (C4Aul OwnerOverloaded includes engine
+                                // funcs — GoldRush AI.c4d's global
+                                // GetOwner/Hostile overrides rely on it).
+                                if let Some(host) =
+                                    self.host_functions.get(&env.function_name)
+                                {
+                                    let mut evaluated_args =
+                                        self.build_call_args(None, args, env, depth + 1)?;
+                                    if *forward_rest {
+                                        Self::append_forwarded_args(&mut evaluated_args, env);
+                                    }
+                                    let values = self.call_args_to_values(&evaluated_args)?;
+                                    return self
+                                        .invoke_host_function(
+                                            &env.function_name.clone(),
+                                            host,
+                                            &values,
+                                        );
+                                }
                                 return if name == "_inherited" {
                                     Ok(Value::Nil)
                                 } else {
@@ -2108,6 +2130,11 @@ struct Environment {
     /// `_inherited(...)` target (C++ Fn->OwnerOverloaded,
     /// C4AulParse.cpp:2775-2798).
     inherited_target: Option<std::sync::Arc<Function>>,
+    /// The executing function's name — the `inherited` fallback to the
+    /// same-name ENGINE function when no script overload exists
+    /// (C4Aul: script functions overload engine functions; OwnerOverloaded
+    /// chains to the C4AulFunc base).
+    function_name: String,
 }
 
 impl Environment {
@@ -2142,6 +2169,7 @@ impl Environment {
             call_args: Rc::new(call_args),
             named_param_count: params.len(),
             inherited_target: None,
+            function_name: String::new(),
         })
     }
 

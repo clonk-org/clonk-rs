@@ -9277,7 +9277,7 @@ mod game_start_sync {
         );
         let (engine, _) = load(dir.path());
 
-        let (_, action, phase, position, fix_y) =
+        let (_, action, _phase, position, fix_y, _) =
             engine.debug_object_by_id(3).expect("tree exists");
         assert_eq!(action, crate::action::DEFAULT_ACTION_NAME, "no Action= -> ActIdle");
         assert_eq!(position, Vector2::new(204, 258), "saved center kept");

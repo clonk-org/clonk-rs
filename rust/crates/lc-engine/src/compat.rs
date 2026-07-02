@@ -1659,14 +1659,110 @@ fn smoke(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnSetPortrait (C4Script.cpp:5333-5341): portraits are crew-info
-/// PRESENTATION data, no simulation state; validate like C++ and
-/// acknowledge (PORT_STATUS).
+/// FnSetPortrait (C4Script.cpp:5333-5341): the visual payload is
+/// presentation-only, but the SOURCE DEFINITION is tracked because
+/// AdjustPortrait gates a synced `Random(GetPortraitCount())` draw on
+/// `GetPortrait(obj, true) != GetID()` (Cowboy.c4d/Script.c:552-564).
 fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
     let name = parse_optional_string(args.first(), "SetPortrait", "portrait")?;
     if name.as_deref().map(str::is_empty).unwrap_or(true) {
         return Ok(Value::Bool(false));
     }
+    let target =
+        parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "SetPortrait", "obj")?;
+    let source = match args.get(2) {
+        Some(Value::String(id)) | Some(Value::C4Id(id)) if !id.is_empty() => Some(id.clone()),
+        _ => None,
+    };
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(true));
+        };
+        let active = context.object_context().map(|object| object.id());
+        let Some(target) = target.or(active) else {
+            return Ok(Value::Bool(false));
+        };
+        // idSourceDef 0 falls back to the target's own definition.
+        let source = source.or_else(|| {
+            context
+                .get_world_object(target)
+                .map(|object| object.definition_id().to_string())
+        });
+        let Some(source) = source else {
+            return Ok(Value::Bool(false));
+        };
+        if Some(target) == active {
+            if let Some(object) = context.object_context_mut() {
+                object.set_portrait_source(source);
+            }
+        } else if let Some(state) = context.nested_objects.get_mut(&target) {
+            state.scope.set_portrait_source(source);
+        } else {
+            tracing::debug!(
+                target = target.as_u64(),
+                "SetPortrait: target outside active/nested scopes; source not tracked"
+            );
+        }
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnGetPortrait with fGetID (C4Script.cpp:5352-5368): the portrait's
+/// source definition id; the object's own definition when never set.
+/// The filename variant (fGetID false) is unmodeled - nil.
+fn get_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target =
+        parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "GetPortrait", "obj")?;
+    let get_id = args.get(1).map(value_raw_truthy).unwrap_or(false);
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Nil);
+        };
+        let active = context.object_context().map(|object| object.id());
+        let Some(target) = target.or(active) else {
+            return Ok(Value::Nil);
+        };
+        if !get_id {
+            tracing::debug!("GetPortrait: filename variant unmodeled; returning nil");
+            return Ok(Value::Nil);
+        }
+        let overridden = if Some(target) == active {
+            context
+                .object_context()
+                .and_then(|object| object.portrait_source_override().cloned())
+        } else {
+            context
+                .nested_objects
+                .get(&target)
+                .and_then(|state| state.scope.portrait_source_override().cloned())
+        };
+        let source = overridden
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .and_then(|object| object.full_state().map(|state| state.portrait_source.clone()))
+                    .flatten()
+            })
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .map(|object| object.definition_id().to_string())
+            });
+        Ok(source.map(Value::C4Id).unwrap_or(Value::Nil))
+    })
+}
+
+/// FnSetPlrViewRange (C4Script.cpp:5286-5293): the object's FoW view
+/// range — presentation/FoW only (PlrViewRange serializes but the
+/// comparator does not cover it); acknowledged (PORT_STATUS).
+fn set_plr_view_range(args: &[Value]) -> Result<Value, RuntimeError> {
+    let _ = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetPlrViewRange",
+        "range",
+    )?;
     Ok(Value::Bool(true))
 }
 
@@ -3392,7 +3488,9 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("ObjectSetAction", object_set_action);
     script.register_host_function("Smoke", smoke);
     script.register_host_function("SetPortrait", set_portrait);
+    script.register_host_function("GetPortrait", get_portrait);
     script.register_host_function("SetVisibility", set_visibility);
+    script.register_host_function("SetPlrViewRange", set_plr_view_range);
     script.register_host_function("SetClrModulation", set_clr_modulation);
     script.register_host_function("GetCrewCount", get_crew_count);
     script.register_host_function("GetCursor", get_cursor_host);
@@ -3540,6 +3638,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Mod", modulo);
     script.register_host_function("GetMass", get_mass);
     script.register_host_function("SetMass", set_mass);
+    script.register_host_function("GrabObjectInfo", grab_object_info);
     script.register_host_function("MakeCrewMember", make_crew_member);
     script.register_host_function("C4Id", c4_id);
     script.register_host_function("Pow", pow_func);
@@ -6406,6 +6505,103 @@ fn get_mass(args: &[Value]) -> Result<Value, RuntimeError> {
 /// the crew-info GetIdle/New assignment (a ClonkNames RNG draw in C++),
 /// PlrViewRange, and Controller — the port keys crew off Owner, so the
 /// owner is set to the player instead.
+/// FnGrabObjectInfo (C4Script.cpp:2170-2176) -> C4Object::GrabInfo
+/// (C4Object.cpp:5696-5726): `pTo` (default: the caller) takes pFrom's
+/// info section, retires its own, and re-registers as crew. The port
+/// keys "has an info" off the crew flag; the name/rank payload of
+/// C4ObjectInfo is not modeled (documented gap) — the observable
+/// effects are the return value, the grabber's crew registration and
+/// the donor losing its crew slot (GoldRush TRPR Recruitment,
+/// Trapper.c4d/Script.c:19-25).
+fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
+    let from = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "GrabObjectInfo",
+        "from",
+    )?;
+    let Some(from) = from else {
+        return Ok(Value::Bool(false));
+    };
+    let to = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "GrabObjectInfo",
+        "to",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let active = context.object_context().map(|object| object.id());
+        let Some(to) = to.or(active) else {
+            return Ok(Value::Bool(false));
+        };
+        if from == to {
+            // own info: success (C4Object.cpp:5701)
+            return Ok(Value::Bool(true));
+        }
+        // only if the other object has an info (C4Object.cpp:5703)
+        let from_has_info = if Some(from) == active {
+            context
+                .object_context()
+                .map(|object| object.crew_member)
+                .unwrap_or(false)
+        } else if let Some(state) = context.nested_objects.get(&from) {
+            state.scope.crew_member
+        } else {
+            context
+                .get_world_object(from)
+                .and_then(|object| object.full_state().map(|state| state.crew_member))
+                .unwrap_or(false)
+        };
+        if !from_has_info {
+            return Ok(Value::Bool(false));
+        }
+        // the donor loses its info/crew slot (C4Object.cpp:5710-5714)
+        if Some(from) == active {
+            if let Some(object) = context.object_context_mut() {
+                object.set_crew_member(false);
+            }
+        } else if let Some(state) = context.nested_objects.get_mut(&from) {
+            state.scope.set_crew_member(false);
+        }
+        // the grabbed info carries the donor's portrait
+        // (C4Object.cpp:5715 Info transfer; portrait rides the info)
+        let donor_portrait = context
+            .get_world_object(from)
+            .and_then(|object| object.full_state().map(|state| state.portrait_source.clone()))
+            .flatten()
+            .or_else(|| {
+                context
+                    .get_world_object(from)
+                    .map(|object| object.definition_id().to_string())
+            });
+        // the grabber recruits into its owner's crew (C4Object.cpp:5720-5723)
+        if Some(to) == active {
+            if let Some(object) = context.object_context_mut() {
+                object.set_crew_member(true);
+                if let Some(portrait) = donor_portrait {
+                    object.set_portrait_source(portrait);
+                }
+            }
+            Ok(Value::Bool(true))
+        } else if let Some(state) = context.nested_objects.get_mut(&to) {
+            state.scope.set_crew_member(true);
+            if let Some(portrait) = donor_portrait {
+                state.scope.set_portrait_source(portrait);
+            }
+            Ok(Value::Bool(true))
+        } else {
+            tracing::warn!(
+                from = from.as_u64(),
+                to = to.as_u64(),
+                "GrabObjectInfo: target outside the active/nested scopes; info transfer skipped"
+            );
+            Ok(Value::Bool(false))
+        }
+    })
+}
+
 fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
     let target = parse_object_reference_argument(
         args.first().unwrap_or(&Value::Nil),
@@ -13203,10 +13399,21 @@ fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
     });
     if let Some(target) = target_id {
         if Some(target) != active {
-            return match call_world_object_function(target, "RemoveObject", &[]) {
-                Some(result) => result,
-                None => Ok(Value::Bool(false)),
-            };
+            if let Some(result) = call_world_object_function(target, "RemoveObject", &[]) {
+                return result;
+            }
+            // The nested seam cannot reach spawns of the SAME call (no
+            // full state yet) — cancel the pending spawn directly. Its
+            // number stays consumed, exactly like C++ where the object
+            // existed and died (the GoldRush TRPR Recruitment temp,
+            // Trapper.c4d/Script.c:19-25).
+            return HOST_CONTEXT.with(|cell| {
+                let mut borrow = cell.borrow_mut();
+                let Some(context) = borrow.as_mut() else {
+                    return Ok(Value::Bool(false));
+                };
+                Ok(Value::Bool(context.cancel_pending_spawn(target)))
+            });
         }
     }
 
@@ -14107,6 +14314,21 @@ impl EffectHostContext {
         Some(object)
     }
 
+    /// Drops a spawn queued in THIS call before it materializes. The id
+    /// stays allocated (C++ objects removed in the creating call still
+    /// consumed their Number).
+    fn cancel_pending_spawn(&mut self, target: ObjectId) -> bool {
+        let before = self.pending_spawns.len();
+        self.pending_spawns
+            .retain(|spawn| spawn.id != Some(target));
+        let removed = self.pending_spawns.len() != before;
+        if removed {
+            self.pending_order.retain(|id| *id != target);
+            self.pending_objects.remove(&target);
+        }
+        removed
+    }
+
     /// The live cell for a FOREIGN object's named local (cross-object
     /// LocalN). Seeded from the freshest known value: an accumulated
     /// nested-call state first, the world snapshot otherwise.
@@ -14489,6 +14711,20 @@ impl EffectHostContext {
             .global
             .map(EffectScopeContext::into_commands)
             .unwrap_or_default();
+
+        // Spawns of this call whose nested scope was destroyed before
+        // materializing (create -> RemoveObject within one call, the
+        // GoldRush TRPR temp) never reach the world; their ids stay
+        // consumed like C++.
+        let destroyed: std::collections::HashSet<ObjectId> = other_objects
+            .iter()
+            .filter(|outcome| outcome.destroy)
+            .map(|outcome| outcome.object_id)
+            .collect();
+        if !destroyed.is_empty() {
+            self.pending_spawns
+                .retain(|spawn| spawn.id.is_none_or(|id| !destroyed.contains(&id)));
+        }
 
         let audio_events = self.audio.take_events();
         let mut outcome = EffectContextOutcome::new(
@@ -14981,6 +15217,16 @@ impl ObjectScopeContext {
     fn set_crew_member(&mut self, crew_member: bool) {
         self.crew_member = crew_member;
         self.pending_update.crew_member = Some(crew_member);
+    }
+
+    /// SetPortrait's source-def bookkeeping (FnSetPortrait,
+    /// C4Script.cpp:5333); the visual payload is unmodeled.
+    fn set_portrait_source(&mut self, source: String) {
+        self.pending_update.portrait_source = Some(source);
+    }
+
+    fn portrait_source_override(&self) -> Option<&String> {
+        self.pending_update.portrait_source.as_ref()
     }
 
     fn alive(&self) -> bool {
@@ -15626,6 +15872,7 @@ mod tests {
         "GetPlrKnowledge",
         "GetPlrValue",
         "GetPlrValueGain",
+        "GetPortrait",
         "GetProcedure",
         "GetR",
         "GetRDir",
@@ -15644,6 +15891,7 @@ mod tests {
         "GetXDir",
         "GetY",
         "GetYDir",
+        "GrabObjectInfo",
         "InLiquid",
         "Log",
         "MakeCrewMember",
@@ -15694,6 +15942,7 @@ mod tests {
         "SetPhase",
         "SetPhysical",
         "SetPlrKnowledge",
+        "SetPlrViewRange",
         "SetPortrait",
         "SetPosition",
         "SetR",
