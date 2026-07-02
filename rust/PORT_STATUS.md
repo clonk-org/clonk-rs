@@ -422,6 +422,38 @@ full-scenario shadow-diff (see Parity harnesses).
   HORS action-start target-zero. NEXT: vertex friction 30-vs-50
   (Objects.txt VertexFriction/VertexX/Y overrides + material scaling),
   late-spawn numbering skew, live shadow re-measure vs the 393 wall.
+- **Live shadow RE-MEASURED (2026-07-01, after the Mobile gate +
+  Objects.txt ingestion + ShiftContents commits 9b1841bf/95114a96):**
+  the wall dropped **391 → 337 objects** at the first diverging frame —
+  velocity 128→29, position 227→155(161), vertices 98→66, action
+  264→262(268). The comparator now reports per-object DEFINITION
+  mismatches (ffi.rs), which decoded the late-spawn numbering skew:
+  a +1 SHIFT from number 1420 (the first post-load id; Objects.txt max
+  Number=1419) — Rust materializes the CANNON's nested-~Initialize GC4V
+  crosshair FIRST (1420) where C++ creates crew COWB/AHUD first and
+  GC4V near the END of DoInitialize; a second reorder interleaves each
+  BNDT's effect-Start equip (AMBO/AMBO/WINC) where C++ has consecutive
+  BNDTs. ROOT CAUSE: C++ assigns Numbers at the CreateObject INSTANT
+  inside VM calls (incl. nested-call scopes and Fx*Start callbacks);
+  the Rust batch/queue spawn model folds them in a different order —
+  the 71 definition mismatches (and most vertices/effects/energy/crew/
+  alive diffs, all on ids 1420-1490) are this one bug. Remaining
+  non-skew classes named: 41× position (0,-20) join-cascade spawns
+  20px HIGH in Rust; ±1 position/velocity residuals (~40); trees
+  Still→Breeze 28 (Objects.txt `LocalNamed=` per-object script locals
+  UNPARSED — MotionThreshold lost — plus GetWind init to verify,
+  scenario Wind=0,75); saved actions reset to Idle ~70 (ActMap
+  fidelity, task #15 bucket); Green2→Green1/0/3 phase drift ~20;
+  Walk→Jump 6 (attach loss). Rebuild loop pinned:
+  `CARGO_BUILD_TARGET=x86_64-apple-darwin cargo xtask ffi --release`
+  then `CARGO_BUILD_TARGET=x86_64-apple-darwin cmake --build build-x86
+  --target clonk` (the CMake rust_build target re-runs xtask ffi and
+  clobbers canonical libs with host-arch builds if the env is missing);
+  measurement via scratchpad shadow_measure.sh (45s GoldRush +
+  Tyler.c4p, parses the single first-mismatch error line whose payload
+  is the FULL per-object diff). NEXT epics by leverage: (1) spawn-order
+  parity (numbers at the C++ instant), (2) ActMap/action fidelity,
+  (3) LocalNamed ingestion.
 
 ## Gates
 
