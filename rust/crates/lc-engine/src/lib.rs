@@ -5584,6 +5584,11 @@ impl Definition {
         self.shape
     }
 
+    /// `Float` DefCore value (C4Def.cpp:379) — the buoyancy line.
+    pub fn set_float_line(&mut self, float_line: i32) {
+        self.float_line = float_line;
+    }
+
     pub fn set_shape_rect(&mut self, rect: Option<DefinitionRect>) {
         self.shape = rect;
     }
@@ -16085,7 +16090,49 @@ impl Engine {
             let gravity_gated_off = object.state.category & CATEGORY_STATIC_BACK != 0
                 || (is_idle && !object.state.mobile)
                 || default_case_attach;
-            if !physical_skips_gravity && !gravity_gated_off {
+            // DoGravity's float branch (C4Object.cpp:4644-4661): InLiquid
+            // objects with a Def->Float line RISE instead of falling —
+            // ydir -= FloatAccel clamped to FloatAccel*-10, xdir/rdir decay
+            // by FloatFriction, and a float-line probe out of liquid zeroes
+            // negative ydir (surface equilibrium). Free-fall is the ELSE.
+            let float_line = self
+                .definitions
+                .get(&definition_id)
+                .map(|definition| definition.float_line)
+                .unwrap_or(0);
+            let floats = object.state.in_liquid && float_line != 0;
+            if floats && !physical_skips_gravity && !gravity_gated_off {
+                object.fixed_velocity.y -= math::FLOAT_ACCEL;
+                let min_rise = C4Fixed::from_raw(-10 * math::FLOAT_ACCEL.val());
+                if object.fixed_velocity.y < min_rise {
+                    object.fixed_velocity.y = min_rise;
+                }
+                let friction = math::FLOAT_FRICTION;
+                if object.fixed_velocity.x < -friction {
+                    object.fixed_velocity.x += friction;
+                } else if object.fixed_velocity.x > friction {
+                    object.fixed_velocity.x -= friction;
+                }
+                if object.rotation_velocity < -friction {
+                    object.rotation_velocity += friction;
+                } else if object.rotation_velocity > friction {
+                    object.rotation_velocity -= friction;
+                }
+                let probe_y = object.state.position.y - 1
+                    + float_line
+                        .saturating_mul(object.state.construction)
+                        .checked_div(FULL_CON)
+                        .unwrap_or(0)
+                    - 1;
+                let surfaced = self
+                    .landscape
+                    .as_ref()
+                    .map(|landscape| !landscape.is_liquid_at(object.state.position.x, probe_y))
+                    .unwrap_or(true);
+                if surfaced && object.fixed_velocity.y < C4Fixed::ZERO {
+                    object.fixed_velocity.y = C4Fixed::ZERO;
+                }
+            } else if !physical_skips_gravity && !gravity_gated_off {
                 object.fixed_velocity.y += gravity_component;
             }
             if default_case_attach {
@@ -32239,6 +32286,62 @@ func Sweep() {
             })
             .count();
         assert_eq!(pinned, 2, "StayThere lands on every NPC");
+    }
+
+    // DoGravity's float branch (C4Object.cpp:4644-4661): objects with
+    // InLiquid && Def->Float RISE — ydir -= FloatAccel(0.10) clamped to
+    // -1.0 (FloatAccel*-10), xdir decays toward 0 by FloatFriction(0.02),
+    // and once the float line (y - 1 + Float*Con/FullCon - 1) leaves the
+    // liquid, negative ydir zeroes (equilibrium at the surface). Free-fall
+    // gravity is the ELSE branch — floats never sink under it.
+    #[test]
+    fn floating_objects_rise_to_the_float_line_like_cpp() {
+        let mut engine = Engine::with_seed(0);
+        let mut barrel = simple_definition("BARL");
+        barrel.set_shape_rect(Some(DefinitionRect::new(-3, -3, 6, 6)));
+        barrel.set_float_line(4);
+        engine.register_definition(barrel).expect("barrel registers");
+        let mut landscape = Landscape::flat(40, 60);
+        for x in 0..40 {
+            landscape.set_liquid_column(x, vec![LiquidSegment::new(20, 50)]);
+        }
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+
+        let id = engine
+            .spawn_object(
+                SpawnConfig::new("BARL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(20, 40)),
+            )
+            .expect("barrel spawns");
+        let idx = engine.find_object_index(id).expect("barrel exists");
+        engine.objects[idx].state.in_liquid = true;
+        engine.objects[idx].state.mobile = true;
+        engine.objects[idx].fixed_velocity.x = itofix(1);
+
+        engine.tick().expect("tick");
+        let idx = engine.find_object_index(id).expect("barrel exists");
+        assert_eq!(
+            engine.objects[idx].fixed_velocity.y.val(),
+            -math::FLOAT_ACCEL.val(),
+            "one FloatAccel step of rise (C4Object.cpp:4649)"
+        );
+        assert_eq!(
+            engine.objects[idx].fixed_velocity.x.val(),
+            itofix(1).val() - math::FLOAT_FRICTION.val(),
+            "xdir decays by FloatFriction toward zero (C4Object.cpp:4653)"
+        );
+
+        for _ in 0..15 {
+            engine.tick().expect("tick");
+        }
+        let idx = engine.find_object_index(id).expect("barrel exists");
+        assert!(
+            engine.objects[idx].fixed_velocity.y.val() >= -65536,
+            "rise clamps at FloatAccel*-10 = -1.0 (C4Object.cpp:4650), got {}",
+            engine.objects[idx].fixed_velocity.y.val()
+        );
     }
 
     // FnObjectCount passes cthr->Obj as pExclude - LOCAL CALLS EXCLUDE

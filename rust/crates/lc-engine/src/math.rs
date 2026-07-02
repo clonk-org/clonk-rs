@@ -297,6 +297,9 @@ pub fn itofix_prec(x: i32, prec: i32) -> C4Fixed {
 pub const WALK_ACCEL: C4Fixed = C4Fixed(50 * FPF / 100);
 pub const SWIM_ACCEL: C4Fixed = C4Fixed(20 * FPF / 100);
 pub const FLOAT_ACCEL: C4Fixed = C4Fixed(10 * FPF / 100);
+/// `FloatFriction = FIXED100(2)` (C4Movement.cpp:31): x/r decay while
+/// floating in liquid.
+pub const FLOAT_FRICTION: C4Fixed = C4Fixed(2 * FPF / 100);
 pub const ROTATE_ACCEL: C4Fixed = C4Fixed(20 * FPF / 100);
 
 /// `StableRange` (C4Physics.h:23): degrees within which an object counts
