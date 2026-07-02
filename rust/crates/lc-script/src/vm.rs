@@ -1573,7 +1573,18 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<Value, RuntimeError> {
-        let target = self.evaluate(base, env, depth + 1)?;
+        let mut target = self.evaluate(base, env, depth + 1)?;
+        // Effect-callback state maps carry the object id ("id" key): an
+        // arrow call on one targets THAT object, matching the host-fn
+        // object-reference convention (C++ pTarget is C4VObj —
+        // FxLifeStop's `pTarget->RemWarning(...)`).
+        if let Value::Proplist(map) = &target {
+            if let Some(Value::Int(id)) = map.get("id") {
+                if *id > 0 {
+                    target = Value::Object(*id);
+                }
+            }
+        }
         match &target {
             Value::Nil | Value::Int(0) | Value::Bool(false) => Err(RuntimeError::new(
                 "Object call: target is zero!".to_string(),
