@@ -8759,8 +8759,8 @@ fn fling(args: &[Value]) -> Result<Value, RuntimeError> {
         let mut tydir = itofix_prec(ydir, prec);
         if add_speed {
             let velocity = object.fixed_velocity();
-            txdir = txdir + velocity.x / 2;
-            tydir = tydir + velocity.y / 2;
+            txdir += velocity.x / 2;
+            tydir += velocity.y / 2;
         }
         let tumble = object.action_library.contains("Tumble");
         let jump = object.action_library.contains("Jump");
