@@ -9216,9 +9216,18 @@ mod game_start_sync {
         .expect("defcore");
         std::fs::write(
             palm.join("ActMap.txt"),
-            "[Action]\nName=Still\nDelay=4\nLength=1\nNextAction=Still\n\n[Action]\nName=Breeze\nDelay=2\nLength=20\nNextAction=Breeze\n",
+            "[Action]\nName=Still\nDelay=4\nLength=1\nNextAction=Still\nStartCall=Still\n\n\
+             [Action]\nName=Breeze\nDelay=2\nLength=20\nNextAction=Breeze\nStartCall=Breeze\n",
         )
         .expect("actmap");
+        // The real Palm1/Tree StartCalls flip Breeze<->Still by wind
+        // (Objects.c4d/Vegetation.c4d): if a loaded spawn fired StartCall,
+        // the saved Breeze would collapse to Still like the live bug.
+        std::fs::write(
+            palm.join("Script.c"),
+            "#strict\nfunc Still() { return(1); }\nfunc Breeze() { SetAction(\"Still\"); return(1); }\n",
+        )
+        .expect("script");
     }
 
     fn load(dir: &std::path::Path) -> (Engine, Scenario) {
@@ -9263,7 +9272,7 @@ mod game_start_sync {
         write_scenario(
             dir.path(),
             "[Object]\nid=PALM\nNumber=3\nCategory=1\nX=204\nY=258\nFixX=f1129054208\nFixY=f1133445120\n\n\
-             [Object]\nid=PALM\nNumber=42\nCategory=1\nX=981\nY=280\nAction=Breeze\nPhase=18\nActionTime=500\n\n\
+             [Object]\nid=PALM\nNumber=42\nCategory=1\nX=981\nY=280\nAction=Breeze\nDir=1\nActionTime=694\nPhase=18\nPhaseDelay=4\nYDir=f1149998051\n\n\
              [Object]\nid=PALM\nNumber=43\nCategory=1\nX=100\nY=100\nAction=Stand\nPhase=2\n",
         );
         let (engine, _) = load(dir.path());

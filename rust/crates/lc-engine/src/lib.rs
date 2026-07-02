@@ -21231,7 +21231,13 @@ impl Engine {
             self.objects[index].mark_destroyed();
         }
         self.refresh_object_ocf(index);
-        self.trigger_action_callbacks(index, None)?;
+        // Loaded objects restore their action WITHOUT callbacks: the
+        // load-time SetActionByName passes iCalls=false
+        // (C4Object.cpp:2844) — firing StartCall here let the vegetation
+        // Breeze/Still StartCalls rewrite saved actions by current wind.
+        if !loaded {
+            self.trigger_action_callbacks(index, None)?;
+        }
         self.update_sector_for_index(index);
         Ok((id, additional_spawns))
     }

@@ -466,6 +466,11 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         "scenario-errors: applied"
     );
     log_watched(&engine, "applied");
+    if let Ok(raw) = std::env::var("LC_XTASK_OBJ_DUMP") {
+        for id in raw.split(',').filter_map(|s| s.trim().parse::<u64>().ok()) {
+            println!("OBJDUMP applied {id} {:?}", engine.debug_object_by_id(id));
+        }
+    }
 
     // Join like the real game does (CID_JoinPlr -> C4Game::JoinPlayer ->
     // ScenarioInit): crew and player-owned objects arrive here, then
@@ -522,10 +527,27 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         }
     }
     log_watched(&engine, "joined");
+    // LC_XTASK_OBJ_DUMP=3,42: print per-object forensics after the join
+    // and every 5 frames.
+    let obj_dump: Vec<u64> = std::env::var("LC_XTASK_OBJ_DUMP")
+        .ok()
+        .map(|raw| raw.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    for id in &obj_dump {
+        println!("OBJDUMP joined {id} {:?}", engine.debug_object_by_id(*id));
+    }
     for frame in 0..ticks {
         let started = std::time::Instant::now();
         match engine.tick() {
             Ok(snapshot) => {
+                if !obj_dump.is_empty() && frame % 5 == 0 {
+                    for id in &obj_dump {
+                        println!(
+                            "OBJDUMP f{frame} {id} {:?}",
+                            engine.debug_object_by_id(*id)
+                        );
+                    }
+                }
                 if frame % 10 == 0 || started.elapsed().as_millis() > 500 {
                     tracing::info!(
                         frame,
